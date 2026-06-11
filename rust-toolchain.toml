@@ -1,0 +1,7 @@
+# Dev toolchain. We track the stable channel; the MSRV floor (>= 1.85) is enforced
+# separately by `rust-version` in every manifest, so cargo errors loudly if the
+# active toolchain ever drops below it. 1.85 is the effective floor because
+# tun-rs 2.8.x pulls an edition-2024 transitive dep and smoltcp 0.12 needs >= 1.80.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]

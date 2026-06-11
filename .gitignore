@@ -1,0 +1,5 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# Cargo.lock is intentionally tracked: this workspace ships binaries, not just a library.

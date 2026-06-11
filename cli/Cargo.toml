@@ -1,0 +1,13 @@
+[package]
+name = "spark-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "spark"
+path = "src/main.rs"
+
+[dependencies]
+spark-core = { path = "../core" }
