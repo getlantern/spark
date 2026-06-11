@@ -4,42 +4,42 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M3 — TCP tunnel transport in isolation (NO TUN) — DONE 2026-06-11** (M3a
-  codec + M3b relay stream/client, green + unit + integration tested). Next: **M4** (define
-  the `Transport` trait, make `TunnelClient` implement it, swap M2's direct dial).
-  Note: **M2's live curl gate is still pending a privileged run** (deferred, not abandoned).
-- Last gate passed: **M0** 2026-06-10; **M1** code+tests green 2026-06-10 (live ping gate
-  pending root); **M2 session 1** (bridge+forwarder) green+unit-tested 2026-06-10 (live curl
-  gate pending root); **M3a** (codec) + **M3b** (relay stream + client) green 2026-06-11 —
-  integration test tunnels a payload through an in-test relay to a loopback echo, both
-  directions, for IP and domain targets.
-- Tree status: **green** — `cargo clippy --all-targets -D warnings` / `fmt --check` clean;
-  `cargo test -p spark-core` = **15 unit + 2 integration passed**; `netstack_smoke` prints
-  `NETSTACK OK`; release `spark` **~1.03 MB** (unchanged — transport is lib-only, the binary
-  doesn't reference it until M4).
+- Milestone: **M4 — integrate tunnel transport + netstack. CODE DONE 2026-06-11** (Transport
+  trait + DirectTransport + TunnelClient impl, forwarder wired through it, CLI `--server`
+  flag). The full TCP data path (M2→M3→M4) is functionally complete and hermetically tested.
+  **Remaining for M4 and M2 is the same root-gated live verification** (curl through the TUN);
+  M4 additionally needs a real tunnel server. Next *implementable* milestone: **M5 (UDP)**.
+- Last gate passed: **M0** 2026-06-10; **M1**/**M2-s1** code green 2026-06-10 (live gates
+  pending root); **M3a**+**M3b** green 2026-06-11; **M4 code** green 2026-06-11 — forwarder
+  now dials via `Transport`; a hermetic test drives a netstack flow → forwarder →
+  `TunnelClient` → in-test relay → echo (the integrated path minus the TUN), and the M2
+  direct path is preserved via `DirectTransport`.
+- Tree status: **green** — `cargo clippy --workspace --all-targets -D warnings` / `fmt
+  --check` clean; `cargo test -p spark-core` = **16 unit + 2 integration passed**;
+  `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.05 MB** (transport now linked
+  into the binary).
 
 ## Next chunk (exactly what the next session should do)
-**M4 — integrate the tunnel transport + netstack.** Code is doable without root; the *live*
-gate needs root **and a running tunnel server**.
-1. `core/src/transport/mod.rs`: define the `Transport` trait (CLAUDE.md sketch:
-   `async fn dial(&self, target) -> io::Result<BoxedStream>`). Provide a `DirectTransport`
-   (M2 behavior: `TcpStream::connect`) and make `tcp_tunnel::client::TunnelClient` implement
-   it. Target type: reuse `tcp_tunnel::header::Address` (or `SocketAddr` + a `From`).
-2. `core/src/proxy/tcp.rs`: take a `Transport` and replace the direct `TcpStream::connect`
-   with `transport.dial(flow.original_dst.into())`. Keep a hermetic test wiring the forwarder
-   through `TunnelClient` → in-test relay → echo (extends the M2/M3b tests, no root).
-3. `cli/src/main.rs`: choose transport by flag — e.g. `--server <addr>` selects the tunnel,
-   absent selects direct. Don't echo secrets over any boundary (none yet).
-4. *Live gate (root + server):* `curl --interface tun0 ...` now flows through the tunnel
-   server; verify server-side it saw the connection. On macOS this is where the M2 loop
-   hazard disappears (the dial targets the server, not the route target).
+Two independent tracks — pick by whether a privileged box is available:
 
-**Still pending (human, needs root), do when a privileged window opens:**
-- **M2 live curl gate** — README "M2 plain-TCP-forwarder gate" (Linux: bring up `tun0`,
-  loosen `rp_filter`, `curl -v --interface tun0 https://1.1.1.1`; expect `tcp flow
-  completed`). Loop hazard: do NOT route the target into the tun (spark's own direct dial
-  would loop); `--interface` binds only the client. Record routing cmds + poll/latency, tick M2.
+**(A) Implementable now without root — M5 (UDP path), session 1.** PLAN §4 M5:
+1. `core/src/proxy/udp.rs`: drive the netstack UDP socket (extend the `Netstack` trait with
+   a UDP surface — it was deferred at M2; `StackBuilder::enable_udp(true)` yields the
+   `UdpSocket`). Per-datagram framing in the transport (length + target address — reuse the
+   `tcp_tunnel::header::Address` codec). NAT association table keyed by `(client_src,
+   original_dst)` with idle timeout. DNS strategy = proxy-through-tunnel (per Decisions log).
+2. Session-1 boundary: framing + association table compiling green + unit-tested. Session 2:
+   the live DNS/UDP-echo gate (needs root).
+
+**(B) Root-gated live verification (human), do when a privileged window opens:**
+- **M4 live gate** — stand up a tunnel server, run `spark --server <addr>` with a route into
+  the TUN, `curl --interface tun0 https://1.1.1.1`; verify server-side it saw the connection.
+  macOS works here (the dial targets the server, so no M2 loop hazard).
+- **M2 live curl gate** — `spark` (no `--server`), README "M2 plain-TCP-forwarder gate"
+  (Linux: bring up `tun0`, loosen `rp_filter`, `curl -v --interface tun0 https://1.1.1.1`).
+  Loop hazard: do NOT route the target into the tun; `--interface` binds only the client.
 - **M1 live ping gate** — see Blockers.
+- Record routing cmds + poll/latency in the Decisions log and tick M1/M2/M4 as they pass.
 
 ## Blockers / waiting on human
 - **M1 live gate (pending, needs root):** run and confirm `ping` replies, then mark M1
@@ -103,6 +103,10 @@ gate needs root **and a running tunnel server**.
   io::Result<BytesMut>>` + `Sink<BytesMut>`. We added only the `async` feature at M1.
 
 ## Baseline binary size
+- **M4:** `target/release/spark` = **1,073,584 bytes (~1.05 MB)**, stripped Mach-O arm64.
+  +~16 KB over M2 — the transport (Transport trait + TunnelClient + DirectTransport) is now
+  linked into the binary (M3's transport was lib-only, dead-code-eliminated until M4 wired
+  it in). Budget <3 MB — still comfortable.
 - **M2:** `target/release/spark` = **1,057,008 bytes (~1.03 MB)**, stripped Mach-O arm64.
   +~133 KB over M1 — adds the vendored netstack-smoltcp + smoltcp + async-trait. Budget:
   <3 MB stripped — still comfortable headroom.
@@ -110,6 +114,18 @@ gate needs root **and a running tunnel server**.
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-11 (M4): **`Transport` trait is the direct/tunnel seam; `dial` takes `SocketAddr`.**
+  `core/src/transport/mod.rs`: `#[async_trait] trait Transport: Send + Sync { async fn
+  dial(&self, target: SocketAddr) -> io::Result<BoxedStream> }`. `DirectTransport` (M2
+  behavior) and `TunnelClient` both impl it; the forwarder takes `Arc<dyn Transport>` and is
+  identical for both. `dial` takes `SocketAddr` (what the netstack surfaces), not the richer
+  `Address`, to decouple the trait from the tunnel header type — the tunnel impl wraps it as
+  `Address::Ip` internally. `TunnelClient` keeps an inherent `dial(Address)` (domain-capable,
+  used by M3b tests); the trait method delegates to it (the `Address` arg disambiguates the
+  overload). **Moved `AsyncReadWrite` + added `BoxedStream` alias to the crate root** (`lib.rs`)
+  so netstack flows and transport streams share one boxed type. CLI selects transport with
+  `--server <addr>` (tunnel) vs absent (direct). Live gate (curl through a real server) is
+  root+server-gated and deferred.
 - 2026-06-11 (M3b): **Header sent eagerly in `dial`; `TunnelStream` is a transparent
   pass-through.** `TunnelClient::dial(target)` opens TCP to the server, `write_all`s the
   encoded header, then returns `TunnelStream<TcpStream>` which just delegates
@@ -187,5 +203,6 @@ gate needs root **and a running tunnel server**.
 - [x] M0  [~] M1 (code+tests green; live ping gate pending root)
   [~] M2 (session 1: bridge+forwarder green+unit-tested; live curl gate pending root)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
-  [ ] M4 [ ] M5 [ ] M6
+  [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
+  [ ] M5 [ ] M6
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

@@ -1,26 +1,29 @@
 //! `spark` CLI driver.
 //!
-//! M2: bring up a TUN device, bridge it into the userspace netstack, and forward every
-//! accepted TCP flow to its original destination via a **direct** dial (no tunnel
-//! transport yet — that arrives at M3/M4). With a route installed pointing traffic at
-//! the device, `curl --interface <tun> https://1.1.1.1` flows end to end.
+//! Bring up a TUN device, bridge it into the userspace netstack, and forward every
+//! accepted TCP flow to its original destination. With `--server <addr>` the flows are
+//! routed through a tunnel server (M4); without it, they are dialed directly (the M2
+//! behavior). With a route installed pointing traffic at the device,
+//! `curl --interface <tun> https://1.1.1.1` flows end to end.
 //!
 //! Log hygiene (a product privacy property, see `docs/GOAL.md`): the default level logs
 //! only non-identifying facts (device, MTU, byte counts). Source/destination addresses
 //! are logged at `debug` only. Run with `RUST_LOG=debug` (or `--debug`) to see them.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
 use spark_core::netstack::SmoltcpNetstack;
 use spark_core::proxy;
+use spark_core::transport::tcp_tunnel::client::TunnelClient;
+use spark_core::transport::{DirectTransport, Transport};
 use spark_core::tun::{Tun, TunConfig};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-/// A from-scratch multi-protocol VPN/proxy tunnel (M2: plain TCP forwarder).
+/// A from-scratch multi-protocol VPN/proxy tunnel.
 #[derive(Parser, Debug)]
 #[command(name = "spark", version, about)]
 struct Cli {
@@ -39,6 +42,11 @@ struct Cli {
     /// MTU for the TUN interface (defaults to the device's own MTU when unset).
     #[arg(long)]
     mtu: Option<u16>,
+
+    /// Tunnel server address (`host:port`). When set, flows are tunneled through it;
+    /// when omitted, flows are dialed directly to their original destination.
+    #[arg(long)]
+    server: Option<SocketAddr>,
 
     /// Log source/destination addresses too (equivalent to `RUST_LOG=debug`). Off by
     /// default for log hygiene.
@@ -62,7 +70,17 @@ async fn main() -> anyhow::Result<()> {
 
     let name = tun.name().context("reading TUN device name")?;
     let mtu = tun.mtu();
-    info!(device = %name, mtu, addr = %cli.addr, "TUN up — forwarding TCP via netstack (direct dial); Ctrl-C to stop");
+
+    let transport: Arc<dyn Transport> = match cli.server {
+        Some(server) => {
+            info!(device = %name, mtu, addr = %cli.addr, %server, "TUN up — tunneling TCP through server; Ctrl-C to stop");
+            Arc::new(TunnelClient::new(server))
+        }
+        None => {
+            info!(device = %name, mtu, addr = %cli.addr, "TUN up — forwarding TCP directly (no tunnel); Ctrl-C to stop");
+            Arc::new(DirectTransport)
+        }
+    };
 
     let netstack = SmoltcpNetstack::new(Arc::clone(&tun)).context("starting the netstack")?;
 
@@ -70,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
         }
-        _ = proxy::tcp::run(netstack) => {
+        _ = proxy::tcp::run(netstack, transport) => {
             warn!("netstack accept loop exited unexpectedly");
         }
     }

@@ -17,17 +17,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use netstack_smoltcp::{StackBuilder, TcpListener};
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::tun::Tun;
-
-/// Marker for a bidirectional async byte stream. Blanket-implemented for every
-/// `AsyncRead + AsyncWrite`, so a surfaced flow can carry either a netstack `TcpStream`
-/// (M2, direct dial) or a tunnel-transport stream (M4) behind a single boxed type.
-pub trait AsyncReadWrite: AsyncRead + AsyncWrite {}
-impl<T: AsyncRead + AsyncWrite> AsyncReadWrite for T {}
+use crate::BoxedStream;
 
 /// A surfaced L4 TCP flow, independent of the netstack implementation.
 pub struct TcpFlow {
@@ -38,7 +32,7 @@ pub struct TcpFlow {
     pub src: SocketAddr,
     /// The flow's byte stream: reading yields app→upstream bytes, writing delivers
     /// upstream→app bytes.
-    pub stream: Box<dyn AsyncReadWrite + Unpin + Send>,
+    pub stream: BoxedStream,
 }
 
 /// The netstack surface our proxy depends on. `netstack-smoltcp` is one impl.
