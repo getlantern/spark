@@ -4,31 +4,35 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M3 — TCP tunnel transport in isolation (NO TUN).** **M3a (address codec +
-  header) done 2026-06-11, green + unit-tested.** Next: **M3b** (relay stream + integration).
-  Note: **M2's live curl gate is still pending a privileged run** (deferred, not abandoned —
-  M3 is built in isolation per the build-order, independent of M2).
-- Last gate passed: **M0** on 2026-06-10; **M1** code+tests green 2026-06-10 (live ping gate
+- Milestone: **M3 — TCP tunnel transport in isolation (NO TUN) — DONE 2026-06-11** (M3a
+  codec + M3b relay stream/client, green + unit + integration tested). Next: **M4** (define
+  the `Transport` trait, make `TunnelClient` implement it, swap M2's direct dial).
+  Note: **M2's live curl gate is still pending a privileged run** (deferred, not abandoned).
+- Last gate passed: **M0** 2026-06-10; **M1** code+tests green 2026-06-10 (live ping gate
   pending root); **M2 session 1** (bridge+forwarder) green+unit-tested 2026-06-10 (live curl
-  gate pending root); **M3a** green 2026-06-11 — SOCKS5-style `Address` codec
-  (`core/src/transport/tcp_tunnel/header.rs`), round-trip tests for IPv4/IPv6/domain pass.
+  gate pending root); **M3a** (codec) + **M3b** (relay stream + client) green 2026-06-11 —
+  integration test tunnels a payload through an in-test relay to a loopback echo, both
+  directions, for IP and domain targets.
 - Tree status: **green** — `cargo clippy --all-targets -D warnings` / `fmt --check` clean;
-  `cargo test -p spark-core` = **12 passed**; `netstack_smoke` prints `NETSTACK OK`; release
-  `spark` **~1.03 MB** (unchanged — the codec is lib-only, not yet referenced by the binary).
+  `cargo test -p spark-core` = **15 unit + 2 integration passed**; `netstack_smoke` prints
+  `NETSTACK OK`; release `spark` **~1.03 MB** (unchanged — transport is lib-only, the binary
+  doesn't reference it until M4).
 
 ## Next chunk (exactly what the next session should do)
-**M3b — relay stream + integration (NO TUN, NO root).** Build on `header.rs`:
-1. `core/src/transport/tcp_tunnel/stream.rs`: a `TunnelStream` (`AsyncRead + AsyncWrite`)
-   that, on first write/connect, sends the encoded target `Address` header, then relays
-   bytes transparently. Handle **partial-read buffering** on the inbound side
-   (`HeaderError::Incomplete` is the retry signal). `core/src/transport/tcp_tunnel/client.rs`:
-   `TunnelClient::dial(target) -> TunnelStream` (open TCP to the tunnel server, send header).
-2. Use the **in-test relay** (PLAN Appendix B option 1 — preferred, no external process): a
-   `tokio` listener in `tests/` that reads the header via `Address::parse`, dials the named
-   target, and `copy_bidirectional`s. *Gate:* integration test echoes a payload both
-   directions through the relay.
-3. TLS-wrapping the relay is OPTIONAL at M3b — if done, confirm the `rustls` client config
-   (verification + roots) first (CLAUDE.md verification discipline).
+**M4 — integrate the tunnel transport + netstack.** Code is doable without root; the *live*
+gate needs root **and a running tunnel server**.
+1. `core/src/transport/mod.rs`: define the `Transport` trait (CLAUDE.md sketch:
+   `async fn dial(&self, target) -> io::Result<BoxedStream>`). Provide a `DirectTransport`
+   (M2 behavior: `TcpStream::connect`) and make `tcp_tunnel::client::TunnelClient` implement
+   it. Target type: reuse `tcp_tunnel::header::Address` (or `SocketAddr` + a `From`).
+2. `core/src/proxy/tcp.rs`: take a `Transport` and replace the direct `TcpStream::connect`
+   with `transport.dial(flow.original_dst.into())`. Keep a hermetic test wiring the forwarder
+   through `TunnelClient` → in-test relay → echo (extends the M2/M3b tests, no root).
+3. `cli/src/main.rs`: choose transport by flag — e.g. `--server <addr>` selects the tunnel,
+   absent selects direct. Don't echo secrets over any boundary (none yet).
+4. *Live gate (root + server):* `curl --interface tun0 ...` now flows through the tunnel
+   server; verify server-side it saw the connection. On macOS this is where the M2 loop
+   hazard disappears (the dial targets the server, not the route target).
 
 **Still pending (human, needs root), do when a privileged window opens:**
 - **M2 live curl gate** — README "M2 plain-TCP-forwarder gate" (Linux: bring up `tun0`,
@@ -106,6 +110,17 @@
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-11 (M3b): **Header sent eagerly in `dial`; `TunnelStream` is a transparent
+  pass-through.** `TunnelClient::dial(target)` opens TCP to the server, `write_all`s the
+  encoded header, then returns `TunnelStream<TcpStream>` which just delegates
+  `AsyncRead`/`AsyncWrite` to the inner connection. (Lazily coalescing the header into the
+  first `poll_write` saves a syscall but adds partial-write state — deferred as an
+  optimization; the gate is a correctness echo.) Server-side header recovery lives in
+  `stream::read_header` (partial-read buffering: loop `Address::parse`, treat `Incomplete`
+  as read-more, map permanent errors → `InvalidData`, mid-header EOF → `UnexpectedEof`); it
+  returns `(Address, leftover_payload_bytes)` so a relay forwards bytes read past the header.
+  Integration test uses an in-test relay (Appendix B opt 1); the relay tries all resolved
+  candidate addresses (localhost → ::1 then 127.0.0.1) to stay order-independent. No TLS yet.
 - 2026-06-11 (M3a): **Tunnel header = SOCKS5 address grammar (RFC 1928 §4), no SOCKS
   framing.** `ATYP(1) | ADDR | PORT(2, big-endian)`, ATYP 1=IPv4 / 3=domain(len-prefixed) /
   4=IPv6. Chosen because it's compact, self-delimiting, and off-the-shelf relays already
@@ -171,5 +186,6 @@
 ## Milestone checklist
 - [x] M0  [~] M1 (code+tests green; live ping gate pending root)
   [~] M2 (session 1: bridge+forwarder green+unit-tested; live curl gate pending root)
-  [x] M3a (address codec + header — green, round-trip tested)  [ ] M3b [ ] M4 [ ] M5 [ ] M6
+  [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
+  [ ] M4 [ ] M5 [ ] M6
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
