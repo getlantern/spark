@@ -1,23 +1,26 @@
 //! `spark` CLI driver.
 //!
-//! M1: bring up a TUN device, read IP packets, log each one, and answer ICMP echo
-//! requests — the liveness proof that the TUN data path works end to end. Routing real
-//! traffic through the netstack arrives at M2.
+//! M2: bring up a TUN device, bridge it into the userspace netstack, and forward every
+//! accepted TCP flow to its original destination via a **direct** dial (no tunnel
+//! transport yet — that arrives at M3/M4). With a route installed pointing traffic at
+//! the device, `curl --interface <tun> https://1.1.1.1` flows end to end.
 //!
-//! Log hygiene (a product privacy property, see `docs/GOAL.md`): at the default level we
-//! log only the protocol and length. Source/destination addresses are logged at `debug`
-//! only. Run with `RUST_LOG=debug` (or `--debug`) to see them during the ping test.
+//! Log hygiene (a product privacy property, see `docs/GOAL.md`): the default level logs
+//! only non-identifying facts (device, MTU, byte counts). Source/destination addresses
+//! are logged at `debug` only. Run with `RUST_LOG=debug` (or `--debug`) to see them.
 
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use spark_core::packet::{icmp_echo_reply, protocol_name, IpPacket};
+use spark_core::netstack::SmoltcpNetstack;
+use spark_core::proxy;
 use spark_core::tun::{Tun, TunConfig};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-/// A from-scratch multi-protocol VPN/proxy tunnel (M1: TUN scaffold).
+/// A from-scratch multi-protocol VPN/proxy tunnel (M2: plain TCP forwarder).
 #[derive(Parser, Debug)]
 #[command(name = "spark", version, about)]
 struct Cli {
@@ -37,8 +40,8 @@ struct Cli {
     #[arg(long)]
     mtu: Option<u16>,
 
-    /// Log destination addresses too (equivalent to `RUST_LOG=debug`). Off by default
-    /// for log hygiene.
+    /// Log source/destination addresses too (equivalent to `RUST_LOG=debug`). Off by
+    /// default for log hygiene.
     #[arg(long)]
     debug: bool,
 }
@@ -48,52 +51,30 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.debug);
 
-    let tun = Tun::open(TunConfig {
-        name: cli.name.clone(),
-        ipv4: (cli.addr, cli.prefix),
-        mtu: cli.mtu,
-    })
-    .context("bringing up the TUN device")?;
+    let tun = Arc::new(
+        Tun::open(TunConfig {
+            name: cli.name.clone(),
+            ipv4: (cli.addr, cli.prefix),
+            mtu: cli.mtu,
+        })
+        .context("bringing up the TUN device")?,
+    );
 
     let name = tun.name().context("reading TUN device name")?;
     let mtu = tun.mtu();
-    info!(device = %name, mtu, addr = %cli.addr, "TUN up — replying to ICMP echo; Ctrl-C to stop");
+    info!(device = %name, mtu, addr = %cli.addr, "TUN up — forwarding TCP via netstack (direct dial); Ctrl-C to stop");
 
-    // One reusable read buffer sized to the MTU; no per-packet allocation on the hot path.
-    let mut buf = vec![0u8; mtu];
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("shutting down");
-                break;
-            }
-            result = tun.recv(&mut buf) => {
-                match result {
-                    Ok(n) => handle_packet(&buf[..n], &tun).await,
-                    Err(e) => warn!(error = %e, "TUN recv failed"),
-                }
-            }
+    let netstack = SmoltcpNetstack::new(Arc::clone(&tun)).context("starting the netstack")?;
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("shutting down");
+        }
+        _ = proxy::tcp::run(netstack) => {
+            warn!("netstack accept loop exited unexpectedly");
         }
     }
     Ok(())
-}
-
-/// Log a received packet (hygienically) and answer it if it's an ICMP echo request.
-async fn handle_packet(pkt: &[u8], tun: &Tun) {
-    let Some(ip) = IpPacket::parse(pkt) else {
-        debug!(len = pkt.len(), "rx: unparseable / non-IP packet");
-        return;
-    };
-
-    info!(proto = protocol_name(ip.protocol()), len = ip.len(), "rx");
-    debug!(src = %ip.src(), dst = %ip.dst(), "rx addresses");
-
-    if let Some(reply) = icmp_echo_reply(pkt) {
-        match tun.send(&reply).await {
-            Ok(_) => debug!("tx: ICMP echo reply"),
-            Err(e) => warn!(error = %e, "failed to send ICMP echo reply"),
-        }
-    }
 }
 
 /// Initialize tracing. `RUST_LOG` wins if set; otherwise `--debug` selects the `debug`

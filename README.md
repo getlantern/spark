@@ -71,3 +71,43 @@ ping 10.0.0.2
 Expected: `ping` reports replies, and the `spark` log shows `rx proto=icmp` lines (plus
 `rx addresses` lines at `RUST_LOG=debug`). Without `--debug`/`RUST_LOG=debug`, addresses
 are never logged — a deliberate privacy property (see `docs/GOAL.md`).
+
+### M2 plain-TCP-forwarder gate (requires root)
+
+At M2, `spark` no longer inspects packets itself: it bridges the TUN into a userspace
+TCP/IP stack (`netstack-smoltcp`), accepts each terminated TCP flow, and forwards it to
+the flow's original destination via a **direct** dial (no tunnel transport yet — that is
+M3/M4). The gate is a TCP request that traverses TUN → netstack → upstream → back.
+
+> ⚠️ **Loop hazard (intrinsic to M2's direct dial).** The upstream `spark` dials *is* the
+> original destination. So you must NOT add a routing-table entry that sends that
+> destination into the TUN — it would also catch `spark`'s own outbound dial and loop
+> forever. The clean M2 test forces only the *client's* socket into the TUN (per-socket
+> bind) while leaving `spark`'s dial on the default route. This awkwardness disappears at
+> M4, where `spark` dials a tunnel **server** at a different address, so routing the
+> destination into the TUN no longer captures the dial.
+
+**Linux (clean — per-socket `SO_BINDTODEVICE`, no routing-table change):**
+
+```bash
+sudo RUST_LOG=info ./target/release/spark --name tun0 --addr 10.0.0.1 --prefix 24
+# Return packets arrive on tun0 with a src the main route table reaches via eth0, so
+# loosen reverse-path filtering on the device (else the kernel silently drops them):
+sudo sysctl -w net.ipv4.conf.tun0.rp_filter=0 net.ipv4.conf.all.rp_filter=0
+# `--interface tun0` binds curl's socket to tun0 (SO_BINDTODEVICE), forcing the request
+# INTO the tun; spark's unbound upstream dial follows the default route out eth0:
+curl -v --interface tun0 https://1.1.1.1
+```
+
+**macOS:** there is no `SO_BINDTODEVICE`; `curl --interface utunN` only sets the source
+*address*, and egress is then chosen by the route table — so getting traffic into the tun
+requires a `route add -host <dst> -interface utunN`, which re-triggers the loop above.
+Run the M2 gate on Linux; defer the full macOS route test to M4 (no loop there).
+
+Expected: `curl` completes the TLS handshake and returns a response; the `spark` log shows
+a `tcp flow completed` line with `to_upstream`/`to_app` byte counts (addresses only at
+`RUST_LOG=debug`).
+
+> Status: the **bridge + accept loop + forwarder are implemented, compile green, and are
+> unit-tested** (hermetic loopback forward test). The *live* root-required curl gate above
+> is **pending a privileged run** — see `docs/STATE.md` Blockers.

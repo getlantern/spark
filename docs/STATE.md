@@ -4,30 +4,35 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M2 — plain TCP forwarder through the netstack** (not started)
-- Last gate passed: **M0** on 2026-06-10. **M1 (TUN scaffold) implemented + green +
-  unit-tested on 2026-06-10**; the *live* `ping`→ICMP gate is **pending a privileged run**
-  (no passwordless sudo on this box — see Blockers). Echo-reply logic itself is proven by
-  unit tests (valid IPv4+ICMP checksums, swapped addresses).
+- Milestone: **M2 — plain TCP forwarder through the netstack** (session 1 of 1–2 done:
+  bridge + accept loop + forwarder implemented, green, unit-tested. Live curl gate pending
+  root — session 2).
+- Last gate passed: **M0** on 2026-06-10. **M1 (TUN scaffold)** code+tests green
+  2026-06-10; live `ping`→ICMP gate still pending a privileged run. **M2 session 1** done
+  2026-06-10: TUN↔netstack bridge, accept loop, plain direct-dial TCP forwarder, all behind
+  the `Netstack`/`TcpFlow` trait. Forward data-path proven by a hermetic loopback unit test
+  (in-memory duplex flow → real echo server → bytes round-trip).
 - Tree status: **green** — `cargo check/clippy --all-targets -D warnings/fmt --check`
-  clean; `cargo test -p spark-core` = 4 passed; release `spark` ~902 KB.
+  clean; `cargo test -p spark-core` = **5 passed**; `netstack_smoke` prints `NETSTACK OK`;
+  release `spark` **~1.03 MB**.
 
 ## Next chunk (exactly what the next session should do)
-**First**, if not already done, run the M1 live gate to fully close M1 (one command, needs
-root — see Blockers). Then execute **M2 — plain TCP forwarder through the netstack**
-(PLAN.md §4), session 1 of 1–2:
-1. `core/src/netstack/`: write the `Netstack`/`TcpFlow` trait (per CLAUDE.md) + the
-   netstack-smoltcp impl. Bridge the TUN ↔ `Stack`: `stack.split()` → forward
-   `tun.recv` bytes into the `Sink` and `Stream` items back out via `tun.send`. **Add the
-   `tun-rs` `async_framed` feature now** and consider `DeviceFramed`/`BytesCodec` for the
-   bridge, OR keep the raw `recv`/`send` loop and convert `BytesMut`↔`Vec<u8>`
-   (`AnyIpPktFrame = Vec<u8>`; the `Stack` stream item is `io::Result<Vec<u8>>`).
-2. Spawn the netstack `Runner` (required); accept loop pulls `(TcpStream, local_addr=
-   original_dst, remote_addr)` from the `TcpListener`.
-3. `core/src/proxy/tcp.rs`: for each flow, `tokio::net::TcpStream::connect(original_dst)`
-   then `copy_bidirectional` (DIRECT dial — no tunnel transport yet; that's M3/M4).
-4. Session-1 boundary: bridge + accept loop compiling green. Session 2: routing docs +
-   the green `curl --interface <tun> https://1.1.1.1` gate (needs root + route setup).
+**M2 session 2 — live curl gate (needs root; this box has none, so a human must run it).**
+Session 1 (bridge + accept loop + forwarder) is done and green; the code path is in
+`core/src/netstack/mod.rs` + `core/src/proxy/tcp.rs`, wired through `cli/src/main.rs`.
+Remaining to close M2:
+1. Run the **Linux** gate from the README "M2 plain-TCP-forwarder gate" section: bring up
+   `tun0`, loosen `rp_filter` on the device, then `curl -v --interface tun0 https://1.1.1.1`.
+   Expect a successful response + a `tcp flow completed` log line.
+   - **Loop hazard (already documented):** do NOT add a routing-table entry for the target
+     — `spark`'s own direct dial to that same target would re-enter the tun and loop.
+     `curl --interface` (SO_BINDTODEVICE) forces only the client socket into the tun; spark's
+     unbound dial stays on the default route. macOS lacks SO_BINDTODEVICE → defer its full
+     route test to M4 (no loop once the dial targets a tunnel server at a different address).
+2. Record actual routing commands + observed poll-tick/latency in the Decisions log, tick
+   the M2 box, and (if a privileged window is open) finally close the M1 ping gate too.
+3. Then start **M3a** (address codec + request header) per PLAN §4 — built against the
+   Appendix B relay/echo server, NO TUN.
 
 ## Blockers / waiting on human
 - **M1 live gate (pending, needs root):** run and confirm `ping` replies, then mark M1
@@ -56,10 +61,18 @@ root — see Blockers). Then execute **M2 — plain TCP forwarder through the ne
   the bridge does `while let Some(Ok(pkt)) = stream.next().await`. `stack.split()` gives the
   two halves. `AnyIpPktFrame = Vec<u8>` (`src/packet.rs:5`).
 - `TcpListener: Stream<Item = (TcpStream, SocketAddr, SocketAddr)>` =
-  `(stream, local_addr, remote_addr)` (`src/tcp.rs:414`); **`local_addr` is the original
-  destination** (the tunnel target). `TcpStream: tokio AsyncRead + AsyncWrite` (`src/tcp.rs:464,501`)
-  and is `Unpin` (fields: 2×SocketAddr + 2 Arc-style shared handles) → `copy_bidirectional`
-  works directly (compiled in `core/examples/netstack_smoke.rs`).
+  `(stream, local_addr, remote_addr)` (`src/tcp.rs:414`). **CORRECTION (M2, verified
+  against the construction site `src/tcp.rs:118,132-133,165` where the socket `listen`s
+  on `dst_addr`):** netstack-smoltcp **inverts** the usual server-socket naming. The 2nd
+  tuple element (`local_addr` = `TcpStream::local_addr()` = the `src_addr` field) is the
+  **app's source** (`packet.src_addr`); the 3rd element (`remote_addr` = `dst_addr` field)
+  is the **original destination** (`packet.dst_addr`) — the upstream the app dialed.
+  **Dial the 3rd element.** The prior M0 note claimed `local_addr` was the original
+  destination — that was inferred from the never-fired smoke example and is WRONG; the
+  smoke example's variable name has been corrected. `TcpStream: tokio AsyncRead +
+  AsyncWrite` (`src/tcp.rs:464,501`) and is `Unpin` (fields: 2×SocketAddr + 2 Arc-style
+  shared handles) → `copy_bidirectional` works directly (`&mut *boxed` satisfies its
+  `?Sized` bound; compiled + unit-tested at M2).
 - `.mtu()` exists in 0.2.x but **not** 0.1.x — do not assume builder methods across versions.
 - Toolchain floor: `smoltcp 0.12` needs rustc ≥1.80; `tun-rs` 2.8.x pulls an edition-2024
   dep → effective MSRV **≥ 1.85**. Dev box ran rustc **1.93.1** (active `stable`); MSRV floor
@@ -82,12 +95,36 @@ root — see Blockers). Then execute **M2 — plain TCP forwarder through the ne
   `async_framed` feature; `DeviceFramed::new(dev, BytesCodec::new())` is a `Stream<Item=
   io::Result<BytesMut>>` + `Sink<BytesMut>`. We added only the `async` feature at M1.
 
-## Baseline binary size (M1)
-- `target/release/spark` = **923,344 bytes (~902 KB)**, stripped Mach-O arm64. Now
-  meaningful: links tun-rs + tokio(full) + clap + tracing-subscriber. (M0 was ~280 KB —
-  empty CLI.) Budget: <3 MB stripped — comfortable headroom.
+## Baseline binary size
+- **M2:** `target/release/spark` = **1,057,008 bytes (~1.03 MB)**, stripped Mach-O arm64.
+  +~133 KB over M1 — adds the vendored netstack-smoltcp + smoltcp + async-trait. Budget:
+  <3 MB stripped — still comfortable headroom.
+- **M1:** 923,344 bytes (~902 KB) — links tun-rs + tokio(full) + clap + tracing-subscriber.
+  (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-10 (M2): **Original-destination address fix.** netstack-smoltcp inverts the usual
+  server-socket naming: the `TcpListener` tuple's **3rd** element (`remote_addr`) is the
+  original destination to dial, not the 2nd. Verified at the construction site
+  (`vendor/.../src/tcp.rs:118,132-133,165`, socket `listen`s on `dst_addr`). Corrected the
+  STATE verified-facts line and the (never-fired, hence latently-wrong) smoke-example label.
+- 2026-06-10 (M2): **Bridge = raw `recv`/`send` loop, not `DeviceFramed`.** Kept the M1
+  `Tun::recv`/`send` surface (shared via `Arc<Tun>`, both take `&self`) over adding the
+  `tun-rs` `async_framed` feature — fewer moving parts and lower API risk. The stack `Sink`
+  item is owned `Vec<u8>` (`AnyIpPktFrame`), so the TUN→stack direction reads into a fresh
+  `vec![0u8; mtu]` and `truncate`s — one alloc, zero copy (the alloc is forced by the
+  vendored sink signature; eliminating it means patching the vendor to take `BytesMut`).
+- 2026-06-10 (M2): Stack built `enable_tcp(true).enable_udp(false).enable_icmp(true)`,
+  `.mtu(tun.mtu())`. ICMP rides the TCP interface for free and keeps the M1 ping sanity
+  check; UDP deferred to M5. `SmoltcpNetstack` owns the runner + both bridge tasks as
+  `JoinHandle`s and aborts them on `Drop` (no orphaned tasks).
+- 2026-06-10 (M2): Added `async-trait` (pre-approved in CLAUDE.md for trait objects) for the
+  `Netstack` trait. `TcpFlow.stream: Box<dyn AsyncReadWrite + Unpin + Send>`; forwarder
+  passes `&mut *stream` to `copy_bidirectional` (its `?Sized` bound accepts the trait object,
+  which auto-implements the `AsyncRead`/`AsyncWrite` supertraits).
+- 2026-06-10 (M2): **M2 macOS curl gate deferred to M4.** Direct dial + routing the target
+  into the tun loops on macOS (no `SO_BINDTODEVICE`); the loop vanishes at M4 when spark
+  dials a tunnel server at a different address. Linux gate (per-socket bind) is the M2 check.
 - 2026-06-10 (M0): Vendored `netstack-smoltcp` **0.2.2** by copying the published crates.io
   0.2.2 source (via `static.crates.io`) into `vendor/netstack-smoltcp/`, rewritten to a
   lib-only manifest (examples/tests/dev-deps dropped) with `smoltcp` pinned to `=0.12.0`.
@@ -120,5 +157,7 @@ root — see Blockers). Then execute **M2 — plain TCP forwarder through the ne
 - Config format: TOML (alternate import formats deferred).
 
 ## Milestone checklist
-- [x] M0  [~] M1 (code+tests green; live ping gate pending root)  [ ] M2  [ ] M3a [ ] M3b [ ] M4 [ ] M5 [ ] M6
+- [x] M0  [~] M1 (code+tests green; live ping gate pending root)
+  [~] M2 (session 1: bridge+forwarder green+unit-tested; live curl gate pending root)
+  [ ] M3a [ ] M3b [ ] M4 [ ] M5 [ ] M6
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

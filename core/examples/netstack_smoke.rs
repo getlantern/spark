@@ -75,10 +75,14 @@ async fn main() -> std::io::Result<()> {
         tokio::spawn(runner);
     }
 
-    // Accept loop: a stream of (stream, local_addr=original_dst, remote_addr=src).
+    // Accept loop: a stream of (stream, local_addr=src, remote_addr=original_dst).
+    // NOTE: netstack-smoltcp inverts the usual server-socket naming — `local_addr` is
+    // the app's source and `remote_addr` is the original destination (the socket
+    // `listen`s on the packet's dst_addr). Dial the THIRD element. See
+    // core/src/netstack/mod.rs::accept_tcp for the verified derivation.
     if let Some(mut listener) = tcp_listener {
         tokio::spawn(async move {
-            while let Some((stream, original_dst, _src)) = listener.next().await {
+            while let Some((stream, _src, original_dst)) = listener.next().await {
                 tokio::spawn(async move {
                     let _ = handle_conn(stream, original_dst).await;
                 });
