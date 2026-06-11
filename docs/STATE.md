@@ -4,32 +4,39 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M4 — integrate tunnel transport + netstack. CODE DONE 2026-06-11** (Transport
-  trait + DirectTransport + TunnelClient impl, forwarder wired through it, CLI `--server`
-  flag). The full TCP data path (M2→M3→M4) is functionally complete and hermetically tested.
-  **Remaining for M4 and M2 is the same root-gated live verification** (curl through the TUN);
-  M4 additionally needs a real tunnel server. Next *implementable* milestone: **M5 (UDP)**.
+- Milestone: **M5 — UDP path. SESSION 1 DONE 2026-06-11** (per-datagram framing codec +
+  NAT association table, both standalone and unit-tested). TCP path (M2→M4) is code-complete.
+  **Session 2 (needs root):** enable the netstack UDP socket, drive the read/reply
+  orchestration in `proxy/udp.rs`, pass the live DNS/echo gate.
 - Last gate passed: **M0** 2026-06-10; **M1**/**M2-s1** code green 2026-06-10 (live gates
-  pending root); **M3a**+**M3b** green 2026-06-11; **M4 code** green 2026-06-11 — forwarder
-  now dials via `Transport`; a hermetic test drives a netstack flow → forwarder →
-  `TunnelClient` → in-test relay → echo (the integrated path minus the TUN), and the M2
-  direct path is preserved via `DirectTransport`.
+  pending root); **M3a**+**M3b**+**M4 code** green 2026-06-11; **M5 session 1** green
+  2026-06-11 — `transport::tcp_tunnel::udp` datagram framing (round-trip IPv4/IPv6/domain,
+  empty payload, truncation, oversize) + `proxy::udp::NatTable` (create/reuse, idle eviction
+  with injected `now`, remove).
 - Tree status: **green** — `cargo clippy --workspace --all-targets -D warnings` / `fmt
-  --check` clean; `cargo test -p spark-core` = **16 unit + 2 integration passed**;
-  `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.05 MB** (transport now linked
-  into the binary).
+  --check` clean; `cargo test -p spark-core` = **25 unit + 2 integration passed**;
+  `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.05 MB** (unchanged — UDP code
+  is lib-only until session 2 wires it into the binary).
 
 ## Next chunk (exactly what the next session should do)
 Two independent tracks — pick by whether a privileged box is available:
 
-**(A) Implementable now without root — M5 (UDP path), session 1.** PLAN §4 M5:
-1. `core/src/proxy/udp.rs`: drive the netstack UDP socket (extend the `Netstack` trait with
-   a UDP surface — it was deferred at M2; `StackBuilder::enable_udp(true)` yields the
-   `UdpSocket`). Per-datagram framing in the transport (length + target address — reuse the
-   `tcp_tunnel::header::Address` codec). NAT association table keyed by `(client_src,
-   original_dst)` with idle timeout. DNS strategy = proxy-through-tunnel (per Decisions log).
-2. Session-1 boundary: framing + association table compiling green + unit-tested. Session 2:
-   the live DNS/UDP-echo gate (needs root).
+**(A) M5 session 2 — UDP orchestration + live gate (needs root).** Session 1 built the
+framing (`transport::tcp_tunnel::udp`) and the table (`proxy::udp::NatTable`). Remaining:
+1. Enable the netstack UDP socket: `SmoltcpNetstack` currently builds with
+   `enable_udp(false)`; flip to `true` and surface the `UdpSocket` (it `split()`s into a
+   `ReadHalf: Stream<Item=UdpMsg>` and `WriteHalf: Sink<UdpMsg>`). Extend the `Netstack`
+   trait with a UDP surface (deferred since M2). **Orientation (verified, vendored
+   src/udp.rs):** `UdpMsg = (payload, local, remote)` is INVERTED like TCP — `local` =
+   client source, `remote` = original destination. A reply is written as
+   `(reply_payload, original_dst, client_src)`.
+2. `proxy/udp.rs` read loop: per datagram, `NatTable::get_or_insert_with` an association
+   (dials the target via the `Transport` / a per-flow UDP socket to the server) and spawns a
+   reply pump writing back to the `WriteHalf`. Frame datagrams with `tcp_tunnel::udp`.
+   Periodically `evict_expired(Instant::now())` and drop the returned associations.
+3. *Gate:* a DNS query (UDP/53) and a UDP echo both round-trip through the tunnel; idle
+   associations are reclaimed. DNS strategy = proxy-through-tunnel; idle timeout = 60s
+   (`DEFAULT_IDLE_TIMEOUT`).
 
 **(B) Root-gated live verification (human), do when a privileged window opens:**
 - **M4 live gate** — stand up a tunnel server, run `spark --server <addr>` with a route into
@@ -114,6 +121,18 @@ Two independent tracks — pick by whether a privileged box is available:
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-11 (M5 s1): **UDP-over-tunnel framing + NAT table; DNS = proxy-through-tunnel;
+  idle timeout = 60s.** Datagram framing (`transport/tcp_tunnel/udp.rs`):
+  `[Address][LEN(u16,be)][payload]` — reuses the M3a `Address` codec, length-prefixed so it
+  survives a stream (TCP/TLS) that erases datagram boundaries; `parse` returns
+  `(Address, &payload, consumed)` and distinguishes `Incomplete` (truncated) from malformed,
+  like the TCP header. NAT table (`proxy/udp.rs`): generic `NatTable<V>` keyed by
+  `(client_src, original_dst)`, `now`-injected for deterministic eviction tests,
+  `evict_expired` returns reclaimed values so the orchestration can close per-flow sockets.
+  `DEFAULT_IDLE_TIMEOUT = 60s` (DNS is short-lived; covers a slow resolver without stranding
+  state). DNS strategy = **proxy-through-tunnel** (no special-casing :53 — it rides the UDP
+  path like any datagram), per the standing decision. Netstack UDP socket left disabled
+  until session 2 (enabling it without draining `ReadHalf` would back-pressure the stack).
 - 2026-06-11 (M4): **`Transport` trait is the direct/tunnel seam; `dial` takes `SocketAddr`.**
   `core/src/transport/mod.rs`: `#[async_trait] trait Transport: Send + Sync { async fn
   dial(&self, target: SocketAddr) -> io::Result<BoxedStream> }`. `DirectTransport` (M2
@@ -204,5 +223,6 @@ Two independent tracks — pick by whether a privileged box is available:
   [~] M2 (session 1: bridge+forwarder green+unit-tested; live curl gate pending root)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
-  [ ] M5 [ ] M6
+  [~] M5 (session 1: framing + NAT table green+unit-tested; UDP orchestration + live DNS gate pending root)
+  [ ] M6
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

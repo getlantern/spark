@@ -6,9 +6,10 @@
 //! connection layer (M3b, optional).
 //!
 //! M3a added the address codec ([`header`]). M3b adds the relay [`stream`] and the
-//! [`client`] that dials a tunnel server and sends the header. The `Transport` trait that
-//! abstracts over transports lands at M4.
+//! [`client`] that dials a tunnel server and sends the header. M4 makes the client a
+//! `Transport`. [`udp`] adds per-datagram framing for the UDP path (M5).
 
 pub mod client;
 pub mod header;
 pub mod stream;
+pub mod udp;
