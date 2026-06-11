@@ -4,35 +4,38 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M2 — plain TCP forwarder through the netstack** (session 1 of 1–2 done:
-  bridge + accept loop + forwarder implemented, green, unit-tested. Live curl gate pending
-  root — session 2).
-- Last gate passed: **M0** on 2026-06-10. **M1 (TUN scaffold)** code+tests green
-  2026-06-10; live `ping`→ICMP gate still pending a privileged run. **M2 session 1** done
-  2026-06-10: TUN↔netstack bridge, accept loop, plain direct-dial TCP forwarder, all behind
-  the `Netstack`/`TcpFlow` trait. Forward data-path proven by a hermetic loopback unit test
-  (in-memory duplex flow → real echo server → bytes round-trip).
-- Tree status: **green** — `cargo check/clippy --all-targets -D warnings/fmt --check`
-  clean; `cargo test -p spark-core` = **5 passed**; `netstack_smoke` prints `NETSTACK OK`;
-  release `spark` **~1.03 MB**.
+- Milestone: **M3 — TCP tunnel transport in isolation (NO TUN).** **M3a (address codec +
+  header) done 2026-06-11, green + unit-tested.** Next: **M3b** (relay stream + integration).
+  Note: **M2's live curl gate is still pending a privileged run** (deferred, not abandoned —
+  M3 is built in isolation per the build-order, independent of M2).
+- Last gate passed: **M0** on 2026-06-10; **M1** code+tests green 2026-06-10 (live ping gate
+  pending root); **M2 session 1** (bridge+forwarder) green+unit-tested 2026-06-10 (live curl
+  gate pending root); **M3a** green 2026-06-11 — SOCKS5-style `Address` codec
+  (`core/src/transport/tcp_tunnel/header.rs`), round-trip tests for IPv4/IPv6/domain pass.
+- Tree status: **green** — `cargo clippy --all-targets -D warnings` / `fmt --check` clean;
+  `cargo test -p spark-core` = **12 passed**; `netstack_smoke` prints `NETSTACK OK`; release
+  `spark` **~1.03 MB** (unchanged — the codec is lib-only, not yet referenced by the binary).
 
 ## Next chunk (exactly what the next session should do)
-**M2 session 2 — live curl gate (needs root; this box has none, so a human must run it).**
-Session 1 (bridge + accept loop + forwarder) is done and green; the code path is in
-`core/src/netstack/mod.rs` + `core/src/proxy/tcp.rs`, wired through `cli/src/main.rs`.
-Remaining to close M2:
-1. Run the **Linux** gate from the README "M2 plain-TCP-forwarder gate" section: bring up
-   `tun0`, loosen `rp_filter` on the device, then `curl -v --interface tun0 https://1.1.1.1`.
-   Expect a successful response + a `tcp flow completed` log line.
-   - **Loop hazard (already documented):** do NOT add a routing-table entry for the target
-     — `spark`'s own direct dial to that same target would re-enter the tun and loop.
-     `curl --interface` (SO_BINDTODEVICE) forces only the client socket into the tun; spark's
-     unbound dial stays on the default route. macOS lacks SO_BINDTODEVICE → defer its full
-     route test to M4 (no loop once the dial targets a tunnel server at a different address).
-2. Record actual routing commands + observed poll-tick/latency in the Decisions log, tick
-   the M2 box, and (if a privileged window is open) finally close the M1 ping gate too.
-3. Then start **M3a** (address codec + request header) per PLAN §4 — built against the
-   Appendix B relay/echo server, NO TUN.
+**M3b — relay stream + integration (NO TUN, NO root).** Build on `header.rs`:
+1. `core/src/transport/tcp_tunnel/stream.rs`: a `TunnelStream` (`AsyncRead + AsyncWrite`)
+   that, on first write/connect, sends the encoded target `Address` header, then relays
+   bytes transparently. Handle **partial-read buffering** on the inbound side
+   (`HeaderError::Incomplete` is the retry signal). `core/src/transport/tcp_tunnel/client.rs`:
+   `TunnelClient::dial(target) -> TunnelStream` (open TCP to the tunnel server, send header).
+2. Use the **in-test relay** (PLAN Appendix B option 1 — preferred, no external process): a
+   `tokio` listener in `tests/` that reads the header via `Address::parse`, dials the named
+   target, and `copy_bidirectional`s. *Gate:* integration test echoes a payload both
+   directions through the relay.
+3. TLS-wrapping the relay is OPTIONAL at M3b — if done, confirm the `rustls` client config
+   (verification + roots) first (CLAUDE.md verification discipline).
+
+**Still pending (human, needs root), do when a privileged window opens:**
+- **M2 live curl gate** — README "M2 plain-TCP-forwarder gate" (Linux: bring up `tun0`,
+  loosen `rp_filter`, `curl -v --interface tun0 https://1.1.1.1`; expect `tcp flow
+  completed`). Loop hazard: do NOT route the target into the tun (spark's own direct dial
+  would loop); `--interface` binds only the client. Record routing cmds + poll/latency, tick M2.
+- **M1 live ping gate** — see Blockers.
 
 ## Blockers / waiting on human
 - **M1 live gate (pending, needs root):** run and confirm `ping` replies, then mark M1
@@ -103,6 +106,15 @@ Remaining to close M2:
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-11 (M3a): **Tunnel header = SOCKS5 address grammar (RFC 1928 §4), no SOCKS
+  framing.** `ATYP(1) | ADDR | PORT(2, big-endian)`, ATYP 1=IPv4 / 3=domain(len-prefixed) /
+  4=IPv6. Chosen because it's compact, self-delimiting, and off-the-shelf relays already
+  speak it. `Address` enum = `Ip(SocketAddr)` (covers v4+v6) | `Domain{host,port}` (domain
+  validated non-empty + ≤255 at construction via `Address::domain`, so `encode` is
+  infallible). `parse` returns `(Address, consumed_len)` and distinguishes
+  `HeaderError::Incomplete` (truncated → caller reads more; M3b's buffering retry signal)
+  from permanent errors (`UnknownAtyp`/`EmptyDomain`/`InvalidDomain`). Lives in
+  `core/src/transport/tcp_tunnel/header.rs`; the `Transport` trait is deferred to M4.
 - 2026-06-10 (M2): **Original-destination address fix.** netstack-smoltcp inverts the usual
   server-socket naming: the `TcpListener` tuple's **3rd** element (`remote_addr`) is the
   original destination to dial, not the 2nd. Verified at the construction site
@@ -159,5 +171,5 @@ Remaining to close M2:
 ## Milestone checklist
 - [x] M0  [~] M1 (code+tests green; live ping gate pending root)
   [~] M2 (session 1: bridge+forwarder green+unit-tested; live curl gate pending root)
-  [ ] M3a [ ] M3b [ ] M4 [ ] M5 [ ] M6
+  [x] M3a (address codec + header — green, round-trip tested)  [ ] M3b [ ] M4 [ ] M5 [ ] M6
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

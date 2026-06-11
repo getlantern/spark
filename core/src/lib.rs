@@ -9,4 +9,5 @@
 pub mod netstack;
 pub mod packet;
 pub mod proxy;
+pub mod transport;
 pub mod tun;

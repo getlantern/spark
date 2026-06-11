@@ -212,13 +212,16 @@ With `netstack-smoltcp` you do **not** hand-manage smoltcp sockets or 5-tuples. 
 `TcpListener` surfaces each accepted flow as a stream item. The accept loop is:
 
 ```rust
-while let Some((stream, local_addr, _remote_addr)) = tcp_listener.next().await {
-    // local_addr == original destination the app dialed == tunnel target
-    tokio::spawn(handle_conn(stream, local_addr));
+while let Some((stream, _src, original_dst)) = tcp_listener.next().await {
+    // NOTE: netstack-smoltcp inverts the usual server-socket naming — the THIRD tuple
+    // element (`remote_addr`) is the original destination the app dialed (the socket
+    // listens on the packet's dst_addr); the 2nd (`local_addr`) is the app's source.
+    // Verified against vendor/netstack-smoltcp/src/tcp.rs:118,132-133,165.
+    tokio::spawn(handle_conn(stream, original_dst));
 }
 ```
 
-The original destination comes for free as `local_addr`; no SYN re-injection, no
+The original destination comes for free as the 3rd tuple element; no SYN re-injection, no
 socket lifecycle bookkeeping. (The manual approaches below are retained only as
 background for understanding what the crate does internally.)
 
