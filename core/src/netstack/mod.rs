@@ -17,11 +17,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use netstack_smoltcp::{StackBuilder, TcpListener};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::tun::Tun;
 use crate::BoxedStream;
+
+/// Channel depth for the netstack UDP surface (inbound datagrams and pending replies).
+const UDP_CHANNEL_DEPTH: usize = 1024;
 
 /// A surfaced L4 TCP flow, independent of the netstack implementation.
 pub struct TcpFlow {
@@ -34,6 +38,25 @@ pub struct TcpFlow {
     /// upstream→app bytes.
     pub stream: BoxedStream,
 }
+
+/// A UDP datagram crossing the netstack boundary, tagged with its flow identity.
+///
+/// For an inbound datagram (from the TUN) `payload` is what the app sent. For a reply the
+/// proxy hands back, `payload` is the upstream's response; the netstack writes it to the TUN
+/// as an IP packet `src = original_dst`, `dst = client_src` so the app sees a reply from the
+/// address it dialed.
+pub struct UdpDatagram {
+    /// The application's source address inside the tunnel.
+    pub client_src: SocketAddr,
+    /// The address the application originally dialed.
+    pub original_dst: SocketAddr,
+    /// The datagram payload.
+    pub payload: Vec<u8>,
+}
+
+/// The netstack's UDP surface: a receiver of inbound datagrams and a sender for replies.
+/// Obtained once from [`SmoltcpNetstack::take_udp`] and consumed by the UDP proxy loop.
+pub type UdpSurface = (mpsc::Receiver<UdpDatagram>, mpsc::Sender<UdpDatagram>);
 
 /// The netstack surface our proxy depends on. `netstack-smoltcp` is one impl.
 #[async_trait]
@@ -50,8 +73,11 @@ pub trait Netstack: Send {
 /// All three are aborted when the handle is dropped.
 pub struct SmoltcpNetstack {
     listener: TcpListener,
-    /// Runner + the two bridge directions. Held so they can be aborted on drop rather
-    /// than leaked (CLAUDE.md: store every spawned `JoinHandle` that isn't fire-and-forget).
+    /// The UDP surface (inbound receiver + reply sender), taken once via [`Self::take_udp`].
+    udp: Option<UdpSurface>,
+    /// Runner + the TUN↔stack bridge + the UDP drain tasks. Held so they can be aborted on
+    /// drop rather than leaked (CLAUDE.md: store every spawned `JoinHandle` that isn't
+    /// fire-and-forget).
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -65,19 +91,21 @@ impl SmoltcpNetstack {
     pub fn new(tun: Arc<Tun>) -> io::Result<Self> {
         let mtu = tun.mtu();
 
-        // UDP is disabled until M5. ICMP rides the TCP interface (smoltcp answers echo),
-        // which preserves the M1 `ping <tun>` sanity check at no extra cost.
-        let (stack, runner, _udp, listener) = StackBuilder::default()
+        // ICMP rides the TCP interface (smoltcp answers echo), preserving the M1 `ping <tun>`
+        // sanity check at no extra cost.
+        let (stack, runner, udp_socket, listener) = StackBuilder::default()
             .enable_tcp(true)
-            .enable_udp(false)
+            .enable_udp(true)
             .enable_icmp(true)
             .mtu(mtu)
             .build()?;
 
         let listener =
             listener.ok_or_else(|| io::Error::other("netstack built without a TCP listener"))?;
+        let udp_socket =
+            udp_socket.ok_or_else(|| io::Error::other("netstack built without a UDP socket"))?;
 
-        let mut tasks = Vec::with_capacity(3);
+        let mut tasks = Vec::with_capacity(5);
 
         // The runner drives smoltcp's poll loop; it must run for the stack to make
         // progress. Its `io::Result<()>` output is normalized to `()` so all tasks share
@@ -138,7 +166,56 @@ impl SmoltcpNetstack {
             debug!("TUN→stack bridge ended");
         }));
 
-        Ok(Self { listener, tasks })
+        // UDP surface. The netstack `UdpSocket` splits into a Stream of inbound datagrams
+        // and a Sink for replies. Rather than expose those (un-nameable) halves, move each
+        // into a drain task bridging it to an mpsc channel the proxy can hold.
+        let (mut udp_read, mut udp_write) = udp_socket.split();
+        let (in_tx, in_rx) = mpsc::channel::<UdpDatagram>(UDP_CHANNEL_DEPTH);
+        let (reply_tx, mut reply_rx) = mpsc::channel::<UdpDatagram>(UDP_CHANNEL_DEPTH);
+
+        // stack → proxy: each inbound `UdpMsg = (payload, local, remote)` is, like the TCP
+        // listener, inverted — `local` is the client source, `remote` the original dest.
+        tasks.push(tokio::spawn(async move {
+            while let Some((payload, client_src, original_dst)) = udp_read.next().await {
+                let datagram = UdpDatagram {
+                    client_src,
+                    original_dst,
+                    payload,
+                };
+                if in_tx.send(datagram).await.is_err() {
+                    break; // proxy dropped the receiver
+                }
+            }
+            debug!("UDP stack→proxy drain ended");
+        }));
+
+        // proxy → stack: a reply is written to the TUN as `src = original_dst`,
+        // `dst = client_src` so the app sees it coming from the address it dialed.
+        tasks.push(tokio::spawn(async move {
+            while let Some(reply) = reply_rx.recv().await {
+                if udp_write
+                    .send((reply.payload, reply.original_dst, reply.client_src))
+                    .await
+                    .is_err()
+                {
+                    warn!("netstack UDP sink closed; stopping proxy→stack UDP drain");
+                    break;
+                }
+            }
+            debug!("UDP proxy→stack drain ended");
+        }));
+
+        Ok(Self {
+            listener,
+            udp: Some((in_rx, reply_tx)),
+            tasks,
+        })
+    }
+
+    /// Take the UDP surface (inbound datagram receiver + reply sender). Returns `Some` only
+    /// the first time; subsequent calls return `None`.
+    pub fn take_udp(&mut self) -> Option<UdpSurface> {
+        self.udp.take()
     }
 }
 

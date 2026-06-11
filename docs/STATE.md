@@ -4,41 +4,35 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M5 — UDP path. SESSION 1 DONE 2026-06-11** (per-datagram framing codec +
-  NAT association table, both standalone and unit-tested). TCP path (M2→M4) is code-complete.
-  **Session 2 (needs root):** enable the netstack UDP socket, drive the read/reply
-  orchestration in `proxy/udp.rs`, pass the live DNS/echo gate.
+- Milestone: **M5 — UDP path. CODE COMPLETE 2026-06-11** (session 1 framing+NAT table +
+  session 2 orchestration/transports/netstack-UDP/CLI). TCP path (M2→M4) also code-complete.
+  **Only the live DNS/echo gate remains for M5 — needs root (a TUN).** Next *implementable*
+  milestone: **M6** (config/CLI/log-hygiene, no root).
 - Last gate passed: **M0** 2026-06-10; **M1**/**M2-s1** code green 2026-06-10 (live gates
-  pending root); **M3a**+**M3b**+**M4 code** green 2026-06-11; **M5 session 1** green
-  2026-06-11 — `transport::tcp_tunnel::udp` datagram framing (round-trip IPv4/IPv6/domain,
-  empty payload, truncation, oversize) + `proxy::udp::NatTable` (create/reuse, idle eviction
-  with injected `now`, remove).
+  pending root); **M3a**+**M3b**+**M4 code** green 2026-06-11; **M5 code** (s1+s2) green
+  2026-06-11 — `UdpTransport`/`PacketSink`/`PacketSource` traits, `DirectTransport` +
+  `TunnelClient` UDP impls, `proxy::udp::run_udp` orchestration, netstack UDP surface.
+  Hermetic tests: `run_udp` via `DirectTransport`+loopback echo; `TunnelClient::dial_udp`
+  via an in-test UDP tunnel relay (sentinel+target handshake + connect-mode framing).
 - Tree status: **green** — `cargo clippy --workspace --all-targets -D warnings` / `fmt
-  --check` clean; `cargo test -p spark-core` = **25 unit + 2 integration passed**;
-  `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.05 MB** (unchanged — UDP code
-  is lib-only until session 2 wires it into the binary).
+  --check` clean; `cargo test -p spark-core` = **26 unit + 3 integration passed**;
+  `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.06 MB**.
 
 ## Next chunk (exactly what the next session should do)
 Two independent tracks — pick by whether a privileged box is available:
 
-**(A) M5 session 2 — UDP orchestration + live gate (needs root).** Session 1 built the
-framing (`transport::tcp_tunnel::udp`) and the table (`proxy::udp::NatTable`). Remaining:
-1. Enable the netstack UDP socket: `SmoltcpNetstack` currently builds with
-   `enable_udp(false)`; flip to `true` and surface the `UdpSocket` (it `split()`s into a
-   `ReadHalf: Stream<Item=UdpMsg>` and `WriteHalf: Sink<UdpMsg>`). Extend the `Netstack`
-   trait with a UDP surface (deferred since M2). **Orientation (verified, vendored
-   src/udp.rs):** `UdpMsg = (payload, local, remote)` is INVERTED like TCP — `local` =
-   client source, `remote` = original destination. A reply is written as
-   `(reply_payload, original_dst, client_src)`.
-2. `proxy/udp.rs` read loop: per datagram, `NatTable::get_or_insert_with` an association
-   (dials the target via the `Transport` / a per-flow UDP socket to the server) and spawns a
-   reply pump writing back to the `WriteHalf`. Frame datagrams with `tcp_tunnel::udp`.
-   Periodically `evict_expired(Instant::now())` and drop the returned associations.
-3. *Gate:* a DNS query (UDP/53) and a UDP echo both round-trip through the tunnel; idle
-   associations are reclaimed. DNS strategy = proxy-through-tunnel; idle timeout = 60s
-   (`DEFAULT_IDLE_TIMEOUT`).
+**(A) Implementable now without root — M6 (config, CLI, log-hygiene hardening).** PLAN §4 M6:
+TOML config schema (`serde`), a `tracing` redaction layer (addresses suppressed unless
+`--debug`), graceful shutdown, structured module errors. *Gate:* a test asserts default-level
+logs contain no IPs/hostnames; config round-trips; SIGINT tears down cleanly. No root needed.
 
 **(B) Root-gated live verification (human), do when a privileged window opens:**
+- **M5 live UDP gate** — with the device up, a DNS query (UDP/53) and a UDP echo both
+  round-trip through the tunnel; idle associations are reclaimed after 60s
+  (`DEFAULT_IDLE_TIMEOUT`). DNS strategy = proxy-through-tunnel (no :53 special-casing).
+  Run `spark` (direct) or `spark --server <addr>` (tunneled, needs a server that speaks the
+  UDP-associate protocol: magic sentinel `udp-associate.spark.invalid` + target header, then
+  `[u16 len][payload]` datagrams).
 - **M4 live gate** — stand up a tunnel server, run `spark --server <addr>` with a route into
   the TUN, `curl --interface tun0 https://1.1.1.1`; verify server-side it saw the connection.
   macOS works here (the dial targets the server, so no M2 loop hazard).
@@ -110,6 +104,9 @@ framing (`transport::tcp_tunnel::udp`) and the table (`proxy::udp::NatTable`). R
   io::Result<BytesMut>>` + `Sink<BytesMut>`. We added only the `async` feature at M1.
 
 ## Baseline binary size
+- **M5:** `target/release/spark` = **1,107,152 bytes (~1.06 MB)**, stripped Mach-O arm64.
+  +~33 KB over M4 — the UDP transports + `run_udp` orchestration + netstack UDP surface are
+  now linked. Budget <3 MB — comfortable.
 - **M4:** `target/release/spark` = **1,073,584 bytes (~1.05 MB)**, stripped Mach-O arm64.
   +~16 KB over M2 — the transport (Transport trait + TunnelClient + DirectTransport) is now
   linked into the binary (M3's transport was lib-only, dead-code-eliminated until M4 wired
@@ -121,6 +118,21 @@ framing (`transport::tcp_tunnel::udp`) and the table (`proxy::udp::NatTable`). R
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-11 (M5 s2): **UDP transport surface = split `PacketSink`/`PacketSource` +
+  `UdpTransport::dial_udp`; own framing, connect-mode, magic-sentinel dispatch; netstack
+  reply via mpsc drain.** Researched prior art (sing-box UoT `common/uot`, sing-quic
+  hysteria, Leaf) — see the `udp-transport-design-proposal` memory. Decided with Adam:
+  (1) separate traits, not folded into `Transport`; (2) own framing in `tcp_tunnel` (NOT
+  UoT-byte-compat — framing is per-transport so a future SS/sing-box transport can speak UoT
+  without touching the core); (3) **split halves, not `&self`** (a stream-backed conn can't
+  do `&self` writes without locking across `.await`); (4) **connect-mode** — announce the
+  target once, then `[u16 len][payload]` datagrams; (5) **UDP-associate dispatch = magic
+  sentinel address** (`udp-associate.spark.invalid`, `.invalid` per RFC 2606), leaving the
+  M3 TCP header unchanged; (6) **netstack reply = mpsc drain task** owning the smoltcp UDP
+  `WriteHalf` (reply pumps clone the `Sender`), avoiding shared-Sink locking. `DirectTransport`
+  and `TunnelClient` both impl `UdpTransport`. `SmoltcpNetstack` now `enable_udp(true)` +
+  `take_udp()`. Verified orientation: `UdpMsg = (payload, local=client_src, remote=original_dst)`,
+  inverted like TCP; reply sent to the stack as `(payload, original_dst, client_src)`.
 - 2026-06-11 (M5 s1): **UDP-over-tunnel framing + NAT table; DNS = proxy-through-tunnel;
   idle timeout = 60s.** Datagram framing (`transport/tcp_tunnel/udp.rs`):
   `[Address][LEN(u16,be)][payload]` — reuses the M3a `Address` codec, length-prefixed so it
@@ -223,6 +235,6 @@ framing (`transport::tcp_tunnel::udp`) and the table (`proxy::udp::NatTable`). R
   [~] M2 (session 1: bridge+forwarder green+unit-tested; live curl gate pending root)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
-  [~] M5 (session 1: framing + NAT table green+unit-tested; UDP orchestration + live DNS gate pending root)
+  [~] M5 (code complete: framing + NAT table + transports + orchestration + netstack UDP, green; live DNS gate pending root)
   [ ] M6
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

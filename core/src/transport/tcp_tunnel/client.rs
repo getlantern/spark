@@ -10,7 +10,8 @@ use tokio::net::TcpStream;
 
 use super::header::Address;
 use super::stream::TunnelStream;
-use crate::transport::Transport;
+use super::udp::{udp_associate_sentinel, TunnelUdpSink, TunnelUdpSource};
+use crate::transport::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
 use crate::BoxedStream;
 
 /// A client for the plain TCP tunnel. Holds the tunnel server address; each dial opens a
@@ -49,5 +50,28 @@ impl Transport for TunnelClient {
         // it from this trait method) and box the relay stream.
         let stream = TunnelClient::dial(self, Address::Ip(target)).await?;
         Ok(Box::new(stream))
+    }
+}
+
+#[async_trait]
+impl UdpTransport for TunnelClient {
+    async fn dial_udp(
+        &self,
+        target: SocketAddr,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        // UDP-associate handshake: send the magic sentinel (so the server switches to UDP
+        // relay mode without changing the TCP header format), then the real target once
+        // (connect-mode). After that the stream carries `[u16 len][payload]` datagrams.
+        let mut conn = TcpStream::connect(self.server).await?;
+        let mut header = BytesMut::new();
+        udp_associate_sentinel().encode(&mut header);
+        Address::Ip(target).encode(&mut header);
+        conn.write_all(&header).await?;
+
+        let (read, write) = conn.into_split();
+        Ok((
+            Box::new(TunnelUdpSink::new(write)),
+            Box::new(TunnelUdpSource::new(read)),
+        ))
     }
 }

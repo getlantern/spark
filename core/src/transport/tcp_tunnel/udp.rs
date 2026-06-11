@@ -13,9 +13,32 @@
 //! ([`UdpFrameError::Incomplete`]) from a malformed frame, so a stream reader can buffer
 //! partial datagrams.
 
+use std::io;
+
+use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::header::{Address, HeaderError};
+use crate::transport::{PacketSink, PacketSource};
+
+/// FQDN sentinel a `tcp_tunnel` client sends as its first header to signal "this stream is a
+/// UDP association; the real target follows" — analogous to sing-box UoT's magic address,
+/// but our own. `.invalid` is reserved (RFC 2606), so it can never collide with a real
+/// target. Keeping this dispatch in a sentinel address leaves the TCP request header
+/// (`[Address]`, M3a) unchanged.
+pub const UDP_ASSOCIATE_SENTINEL: &str = "udp-associate.spark.invalid";
+
+/// The UDP-associate sentinel as an [`Address`] (port 0, unused). Built directly because the
+/// literal satisfies the domain invariants (non-empty, ≤255 bytes), avoiding a fallible
+/// constructor on a known-good constant.
+pub fn udp_associate_sentinel() -> Address {
+    Address::Domain {
+        host: UDP_ASSOCIATE_SENTINEL.to_owned(),
+        port: 0,
+    }
+}
 
 /// Encode a framed datagram (`target` address, then `u16` length, then `payload`) onto
 /// `dst`. Fails if `payload` exceeds [`u16::MAX`] (a UDP payload never legitimately does,
@@ -67,6 +90,61 @@ pub enum UdpFrameError {
     /// The payload is larger than the 2-byte length field can express.
     #[error("UDP payload too long: {0} bytes (max 65535)")]
     PayloadTooLong(usize),
+}
+
+/// Connect-mode send half over a tunnel stream: each datagram is `[u16 BE len][payload]`
+/// (the target was announced once at association open, so no per-frame address).
+pub struct TunnelUdpSink {
+    write: OwnedWriteHalf,
+}
+
+impl TunnelUdpSink {
+    pub(crate) fn new(write: OwnedWriteHalf) -> Self {
+        Self { write }
+    }
+}
+
+#[async_trait]
+impl PacketSink for TunnelUdpSink {
+    async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
+        if payload.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "UDP payload exceeds the 2-byte length field",
+            ));
+        }
+        let mut frame = BytesMut::with_capacity(2 + payload.len());
+        frame.put_u16(payload.len() as u16);
+        frame.put_slice(payload);
+        self.write.write_all(&frame).await
+    }
+}
+
+/// Connect-mode receive half: read `[u16 BE len]` then `len` payload bytes.
+pub struct TunnelUdpSource {
+    read: OwnedReadHalf,
+}
+
+impl TunnelUdpSource {
+    pub(crate) fn new(read: OwnedReadHalf) -> Self {
+        Self { read }
+    }
+}
+
+#[async_trait]
+impl PacketSource for TunnelUdpSource {
+    async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut len_buf = [0u8; 2];
+        self.read.read_exact(&mut len_buf).await?;
+        let len = u16::from_be_bytes(len_buf) as usize;
+        // Always consume the full datagram from the stream to stay frame-aligned, even if
+        // `buf` is smaller (UDP truncation semantics).
+        let mut datagram = vec![0u8; len];
+        self.read.read_exact(&mut datagram).await?;
+        let n = len.min(buf.len());
+        buf[..n].copy_from_slice(&datagram[..n]);
+        Ok(n)
+    }
 }
 
 #[cfg(test)]

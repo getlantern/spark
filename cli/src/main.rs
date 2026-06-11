@@ -18,7 +18,7 @@ use clap::Parser;
 use spark_core::netstack::SmoltcpNetstack;
 use spark_core::proxy;
 use spark_core::transport::tcp_tunnel::client::TunnelClient;
-use spark_core::transport::{DirectTransport, Transport};
+use spark_core::transport::{DirectTransport, Transport, UdpTransport};
 use spark_core::tun::{Tun, TunConfig};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -71,24 +71,44 @@ async fn main() -> anyhow::Result<()> {
     let name = tun.name().context("reading TUN device name")?;
     let mtu = tun.mtu();
 
-    let transport: Arc<dyn Transport> = match cli.server {
+    // One underlying transport serves both the TCP and UDP forwarders.
+    let (tcp_transport, udp_transport): (Arc<dyn Transport>, Arc<dyn UdpTransport>) = match cli
+        .server
+    {
         Some(server) => {
-            info!(device = %name, mtu, addr = %cli.addr, %server, "TUN up — tunneling TCP through server; Ctrl-C to stop");
-            Arc::new(TunnelClient::new(server))
+            info!(device = %name, mtu, addr = %cli.addr, %server, "TUN up — tunneling TCP+UDP through server; Ctrl-C to stop");
+            let client = Arc::new(TunnelClient::new(server));
+            let tcp: Arc<dyn Transport> = client.clone();
+            let udp: Arc<dyn UdpTransport> = client;
+            (tcp, udp)
         }
         None => {
-            info!(device = %name, mtu, addr = %cli.addr, "TUN up — forwarding TCP directly (no tunnel); Ctrl-C to stop");
-            Arc::new(DirectTransport)
+            info!(device = %name, mtu, addr = %cli.addr, "TUN up — forwarding TCP+UDP directly (no tunnel); Ctrl-C to stop");
+            let direct = Arc::new(DirectTransport);
+            let tcp: Arc<dyn Transport> = direct.clone();
+            let udp: Arc<dyn UdpTransport> = direct;
+            (tcp, udp)
         }
     };
 
-    let netstack = SmoltcpNetstack::new(Arc::clone(&tun)).context("starting the netstack")?;
+    let mut netstack = SmoltcpNetstack::new(Arc::clone(&tun)).context("starting the netstack")?;
+
+    // Drive the UDP path on the netstack's UDP surface (taken before the netstack moves into
+    // the TCP accept loop).
+    if let Some((udp_inbound, udp_reply)) = netstack.take_udp() {
+        tokio::spawn(proxy::udp::run_udp(
+            udp_inbound,
+            udp_reply,
+            udp_transport,
+            proxy::udp::DEFAULT_IDLE_TIMEOUT,
+        ));
+    }
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
         }
-        _ = proxy::tcp::run(netstack, transport) => {
+        _ = proxy::tcp::run(netstack, tcp_transport) => {
             warn!("netstack accept loop exited unexpectedly");
         }
     }
