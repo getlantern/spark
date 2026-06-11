@@ -1,10 +1,10 @@
-# Design: TUN → Shadowsocks Pipeline
+# Design: TUN → Proxy Tunnel Pipeline
 
 ## The Problem
 
-`tun-rs` produces raw IP packets. Shadowsocks expects:
-- A target `(host, port)` to proxy to
-- A stream of application bytes to encrypt and forward
+`tun-rs` produces raw IP packets. A proxy tunnel transport expects:
+- A target `(host, port)` to relay to
+- A stream of application bytes to forward
 
 These don't compose directly. We need a **userspace TCP/IP stack** to terminate connections locally and surface them as streams.
 
@@ -25,7 +25,7 @@ with smoltcp as the backend. Rationale:
   (over FFI) identically.
 
 Rejected alternatives: `ipstack` (async-native but explicitly unstable — would mean
-co-maintaining a netstack while also writing crypto and platform shims); `lwIP`
+co-maintaining a netstack while also writing the transports and platform shims); `lwIP`
 bindings (proven/fast but reintroduce a C dependency and cross-compilation friction
 that undercut the whole thesis).
 
@@ -44,7 +44,7 @@ that undercut the whole thesis).
 - **`TcpStream` implements tokio `AsyncRead + AsyncWrite`** → `copy_bidirectional`
   to an upstream works directly. This was the load-bearing assumption; it is confirmed.
 - `local_addr` on the accepted connection is the **original destination** the app
-  dialed — i.e. the address you pass to the Shadowsocks client as its target.
+  dialed — i.e. the address you pass to the tunnel transport as its target.
 - `UdpSocket` splits into read/write halves implementing the futures `Stream`/`Sink`
   traits.
 
@@ -87,16 +87,16 @@ need to implement it**; `netstack-smoltcp` does it for you.
 ## High-Level Data Flow
 
 ```
-┌─────────┐  IP packets   ┌──────────┐  TCP/UDP    ┌─────────────┐  AEAD frames  ┌──────────┐
-│   App   │ ◄──────────►  │  TUN     │ ◄────────► │   smoltcp   │ ◄────────►   │  SS      │
+┌─────────┐  IP packets   ┌──────────┐  TCP/UDP    ┌─────────────┐  framed bytes ┌──────────┐
+│   App   │ ◄──────────►  │  TUN     │ ◄────────► │   smoltcp   │ ◄────────►   │  tunnel  │
 │         │               │  device  │             │  netstack   │               │  client  │
 └─────────┘               └──────────┘             └─────────────┘               └────┬─────┘
                                                           │                            │
-                                                  surfaces accepted                    │ encrypted TCP
+                                                  surfaces accepted                    │ relayed TCP
                                                   TcpSocket with                       │
                                                   original dest                        ▼
                                                                                   ┌──────────┐
-                                                                                  │ SS       │
+                                                                                  │ tunnel   │
                                                                                   │ server   │
                                                                                   └────┬─────┘
                                                                                        │
@@ -104,7 +104,7 @@ need to implement it**; `netstack-smoltcp` does it for you.
                                                                                   real destination
 ```
 
-The OS is configured to route some destination prefix through the TUN. The app's `connect(1.2.3.4:443)` produces a TCP SYN that comes out of the TUN. We hand that to smoltcp, which speaks TCP back to the app (synthesizing SYN-ACK packets) and gives us a `TcpSocket` whose payload we can read. We tunnel that payload through Shadowsocks with the original destination `(1.2.3.4, 443)` as the SS address header.
+The OS is configured to route some destination prefix through the TUN. The app's `connect(1.2.3.4:443)` produces a TCP SYN that comes out of the TUN. We hand that to smoltcp, which speaks TCP back to the app (synthesizing SYN-ACK packets) and gives us a `TcpSocket` whose payload we can read. We relay that payload through the tunnel transport with the original destination `(1.2.3.4, 443)` as the target address.
 
 ## Module Layout
 
@@ -117,13 +117,12 @@ src/
 │   ├── stack.rs    (poll loop, connection lifecycle)
 │   └── stream.rs   (AsyncRead/AsyncWrite over smoltcp TcpSocket)
 ├── transport/
-│   └── shadowsocks/  (NEW)
-│       ├── crypto.rs   (AEAD-2022: AES-128-GCM, AES-256-GCM)
+│   └── tcp_tunnel/  (NEW — first transport)
 │       ├── header.rs   (SOCKS5-style address encoding)
-│       ├── stream.rs   (encrypted stream wrapper)
+│       ├── stream.rs   (relay stream wrapper)
 │       └── client.rs   (dial logic)
 ├── proxy/        (NEW — orchestrator)
-│   └── tcp.rs      (accepted stream → SS client, bidirectional copy)
+│   └── tcp.rs      (accepted stream → tunnel client, bidirectional copy)
 └── main.rs
 ```
 
@@ -214,7 +213,7 @@ With `netstack-smoltcp` you do **not** hand-manage smoltcp sockets or 5-tuples. 
 
 ```rust
 while let Some((stream, local_addr, _remote_addr)) = tcp_listener.next().await {
-    // local_addr == original destination the app dialed == SS target
+    // local_addr == original destination the app dialed == tunnel target
     tokio::spawn(handle_conn(stream, local_addr));
 }
 ```
@@ -237,8 +236,8 @@ pub struct AcceptedConn {
 The orchestrator's job for each `AcceptedConn`:
 
 ```rust
-async fn handle_conn(conn: AcceptedConn, ss: Arc<ShadowsocksClient>) -> Result<()> {
-    let mut remote = ss.dial(conn.original_dst).await?;
+async fn handle_conn(conn: AcceptedConn, transport: Arc<TunnelClient>) -> Result<()> {
+    let mut remote = transport.dial(conn.original_dst).await?;
     let (mut lr, mut lw) = tokio::io::split(conn.stream);
     let (mut rr, mut rw) = tokio::io::split(remote);
 
@@ -256,24 +255,24 @@ Use `tokio::io::copy_bidirectional` instead if you want fewer moving parts:
 tokio::io::copy_bidirectional(&mut conn.stream, &mut remote).await?;
 ```
 
-## Shadowsocks-2022 Client Sketch
+## TCP Tunnel Transport Sketch (first transport)
 
-For the first test protocol, implement **Shadowsocks-2022** (`2022-blake3-aes-128-gcm` is the simplest variant). Wire format for TCP:
+For the first transport, implement a **plain TCP tunnel** — a minimal relay to a tunnel
+server. The client opens a TCP connection to the server, sends the target address, then
+relays application bytes in both directions. No bespoke crypto: if you want the relay
+encrypted, wrap it in TLS via `rustls` (already in the locked stack), which keeps the
+transport itself simple and the crypto delegated to a vetted library.
+
+Wire format for TCP (illustrative, keep it minimal):
 
 ```
-Request:
-[salt (16 bytes)] [encrypted: type(1) + timestamp(8) + addr + padding_len(2) + padding + payload]
+Request (client → server):
+[addr (SOCKS5-style ATYP|ADDR|PORT)] [payload bytes...]
 
-Response:
-[salt (16 bytes)] [encrypted: type(1) + timestamp(8) + request_salt(16) + payload]
-
-Per-chunk after header:
-[encrypted_length(2) + length_tag(16)] [encrypted_payload + payload_tag(16)]
+After the header, the connection is a transparent byte relay in both directions.
 ```
 
-Key derivation: BLAKE3 over `(pre_shared_key || salt)` → session subkey. AEAD: AES-128-GCM with a 96-bit nonce that increments per chunk.
-
-Address encoding (same as Shadowsocks original, SOCKS5-style):
+Address encoding (SOCKS5-style):
 ```
 ATYP(1) | ADDR | PORT(2)
 ATYP=1 → IPv4(4)
@@ -281,32 +280,41 @@ ATYP=3 → DOMAIN: len(1) + name
 ATYP=4 → IPv6(16)
 ```
 
-The `ShadowsocksClient::dial(target)` method:
-1. Open a TCP connection to the SS server using `tokio::net::TcpStream`.
-2. Generate a random 16-byte salt.
-3. Derive session key via BLAKE3.
-4. Build the request header with `target`'s SOCKS5 encoding.
-5. Encrypt and send the header.
-6. Return a `ShadowsocksStream` that handles per-chunk AEAD framing on both directions.
+The `TunnelClient::dial(target)` method:
+1. Open a TCP connection to the tunnel server using `tokio::net::TcpStream`
+   (optionally wrapped in a `rustls` client session).
+2. Encode and send the target address header (SOCKS5-style).
+3. Return a stream that relays bytes transparently on both directions.
 
-The `ShadowsocksStream` implements `AsyncRead + AsyncWrite`. Internally it buffers partial AEAD chunks and decrypts as length+tag pairs come in. **This is the part most prone to bugs** — make sure you have round-trip tests against a real `sing-box` or `shadowsocks-rust` server before integrating with the netstack.
+The returned stream implements `AsyncRead + AsyncWrite`. Keep round-trip tests against a
+simple relay/echo server (Appendix B in PLAN.md) before integrating with the netstack —
+framing/buffering bugs are easiest to isolate there.
 
 ## Suggested Build Order
 
-1. **Plain forwarder first.** Replace the SS client with `tokio::net::TcpStream::connect(original_dst)` directly. This verifies the netstack pipeline end-to-end without crypto complexity. You should be able to `curl 1.1.1.1` through your TUN and have it work.
+1. **Plain forwarder first.** Dial `tokio::net::TcpStream::connect(original_dst)`
+   directly (no tunnel server). This verifies the netstack pipeline end-to-end without
+   any transport complexity. You should be able to `curl 1.1.1.1` through your TUN and
+   have it work.
 
-2. **Shadowsocks-2022 client in isolation.** Write it with unit tests and integration tests against `sing-box` running locally as the SS server. Don't touch the TUN yet.
+2. **TCP tunnel transport in isolation.** Write it with unit tests and integration tests
+   against a simple relay server running locally. Don't touch the TUN yet.
 
-3. **Wire them together.** Replace the plain forwarder with the SS client. Same `curl` test should now flow through your SS server.
+3. **Wire them together.** Replace the plain forwarder with the tunnel client. The same
+   `curl` test should now flow through your tunnel server.
 
-Each step is independently verifiable. Don't skip step 1 — it will save you days of debugging because crypto bugs and netstack bugs look identical from the outside (both produce "connection hangs").
+Each step is independently verifiable. Don't skip step 1 — it will save you days of
+debugging because transport bugs and netstack bugs look identical from the outside (both
+produce "connection hangs").
 
 ## UDP Note
 
 UDP is a separate path:
 - smoltcp's `UdpSocket` surfaces datagrams with `(src_endpoint, dst_endpoint, payload)`.
-- Shadowsocks-2022 UDP uses a separate framing (single-packet AEAD with a per-packet nonce).
-- You also need an association table mapping `(client_src, original_dst)` to a long-lived UDP socket to the SS server, with idle timeout.
+- The tunnel transport carries each datagram with a small per-packet framing (length +
+  target address).
+- You also need an association table mapping `(client_src, original_dst)` to a long-lived
+  UDP socket to the tunnel server, with idle timeout.
 
 Defer UDP until TCP works end-to-end.
 
@@ -315,11 +323,10 @@ Defer UDP until TCP works end-to-end.
 - `smoltcp::phy::Device` trait shape (GAT lifetimes changed across 0.9 → 0.10 → 0.11)
 - `smoltcp::iface::Interface::poll` signature
 - `tun-rs` async read/write APIs (the crate has both sync and async surfaces)
-- `ring::aead::LessSafeKey` for the GCM nonce-management you need (or use `aws-lc-rs`)
-- `blake3::derive_key` vs `blake3::Hasher::new_keyed`
+- `rustls` client config / `tokio-rustls` `TlsConnector` API (if wrapping the relay in TLS)
 
 ## Open Questions to Resolve
 
 1. **Routing setup**: how does the OS route traffic through the TUN? You'll need a `ip route add` step or to set the TUN as the default gateway with policy routing to avoid loops. Document this in the README before the design is "done."
-2. **DNS**: where do DNS queries go? They'll hit the TUN as UDP/53 by default. Decide: (a) proxy them through SS like everything else, (b) intercept and resolve via a configured resolver, (c) bypass entirely.
-3. **MTU**: the TUN MTU and the SS server's path MTU interact. Default to 1500 - overhead, document the math.
+2. **DNS**: where do DNS queries go? They'll hit the TUN as UDP/53 by default. Decide: (a) proxy them through the tunnel like everything else, (b) intercept and resolve via a configured resolver, (c) bypass entirely.
+3. **MTU**: the TUN MTU and the tunnel server's path MTU interact. Default to 1500 - overhead, document the math.

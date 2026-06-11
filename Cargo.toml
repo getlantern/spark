@@ -17,6 +17,15 @@ license = "MIT OR Apache-2.0"
 netstack-smoltcp = { path = "vendor/netstack-smoltcp" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
+# tun-rs 2.8.x: `async` pulls the tokio-backed AsyncDevice. The framed Stream/Sink
+# (`async_framed`) is added at M2 when we bridge the TUN into the netstack.
+tun-rs = { version = "2.8", features = ["async"] }
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
 
 # Locked release profile (CLAUDE.md). Profiles only take effect from the workspace
 # root, so they live here, not in member manifests.

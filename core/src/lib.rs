@@ -1,7 +1,9 @@
 //! `spark-core` — the process- and IPC-agnostic proxy core.
 //!
-//! At M0 this crate only pins the vendored netstack as a `path` dependency and
-//! carries the [`examples/netstack_smoke`](../examples/netstack_smoke.rs) gate that
-//! proves the netstack composes on the real toolchain. The TUN, packet-parser,
-//! netstack, transport, and proxy modules land in later milestones (see
-//! `docs/PLAN.md`); the public surface is intentionally empty until M1.
+//! M0 pinned the vendored netstack. M1 adds the TUN data-path foundation: an async
+//! [`tun`] device abstraction and a minimal zero-copy IP [`packet`] inspector (enough
+//! to log flows and answer ICMP echo). The netstack, transport, and proxy modules land
+//! in later milestones (see `docs/PLAN.md`).
+
+pub mod packet;
+pub mod tun;

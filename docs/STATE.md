@@ -4,35 +4,38 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M1 — TUN scaffold** (not started)
-- Last gate passed: **M0 (netstack compile gate)** on 2026-06-10 — `NETSTACK OK`,
-  release build clean, clippy + fmt clean, on rustc 1.93.1.
-- Tree status: **green** (`cargo check --workspace`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo fmt --check` all clean as of 2026-06-10).
+- Milestone: **M2 — plain TCP forwarder through the netstack** (not started)
+- Last gate passed: **M0** on 2026-06-10. **M1 (TUN scaffold) implemented + green +
+  unit-tested on 2026-06-10**; the *live* `ping`→ICMP gate is **pending a privileged run**
+  (no passwordless sudo on this box — see Blockers). Echo-reply logic itself is proven by
+  unit tests (valid IPv4+ICMP checksums, swapped addresses).
+- Tree status: **green** — `cargo check/clippy --all-targets -D warnings/fmt --check`
+  clean; `cargo test -p spark-core` = 4 passed; release `spark` ~902 KB.
 
 ## Next chunk (exactly what the next session should do)
-Execute **M1 — TUN scaffold** (PLAN.md §4). One bounded session:
-1. Add `tun-rs` (2.8.x, `async`/`async_framed` features) as a workspace dependency and
-   wire it into `core/`. **Verify the `tun-rs` 2.8.x async API against docs.rs/source
-   before writing against it** — the crate has both sync and async surfaces and the
-   builder/`into_framed` shape has moved across minor versions.
-2. `core/src/tun/`: an async TUN abstraction (open device, async read/write of IP
-   packets, expose a framed Stream/Sink of `AnyIpPktFrame`-shaped buffers so it bridges
-   straight into the netstack later).
-3. `core/src/packet/`: a minimal zero-copy IPv4/IPv6 parser (version, proto, src/dst).
-   Use `bytes` (add to the locked deps list — it's already named in CLAUDE.md).
-4. `cli/src/main.rs`: replace the M0 banner with a driver that brings the device up,
-   logs `{src,dst,proto,len}` for each packet, and replies to ICMP echo requests.
-5. **Gate (Linux):** bring the device up, `ping <tun-addr>` returns ICMP echo replies
-   produced by the tool; logs show parsed packets. NOTE: dev box is macOS (`utun`) — the
-   gate is specified on Linux. Decide at session start whether to gate on a Linux box/VM
-   or to bring up `utun` on macOS and adapt the ping test; record the platform caveat.
+**First**, if not already done, run the M1 live gate to fully close M1 (one command, needs
+root — see Blockers). Then execute **M2 — plain TCP forwarder through the netstack**
+(PLAN.md §4), session 1 of 1–2:
+1. `core/src/netstack/`: write the `Netstack`/`TcpFlow` trait (per CLAUDE.md) + the
+   netstack-smoltcp impl. Bridge the TUN ↔ `Stack`: `stack.split()` → forward
+   `tun.recv` bytes into the `Sink` and `Stream` items back out via `tun.send`. **Add the
+   `tun-rs` `async_framed` feature now** and consider `DeviceFramed`/`BytesCodec` for the
+   bridge, OR keep the raw `recv`/`send` loop and convert `BytesMut`↔`Vec<u8>`
+   (`AnyIpPktFrame = Vec<u8>`; the `Stack` stream item is `io::Result<Vec<u8>>`).
+2. Spawn the netstack `Runner` (required); accept loop pulls `(TcpStream, local_addr=
+   original_dst, remote_addr)` from the `TcpListener`.
+3. `core/src/proxy/tcp.rs`: for each flow, `tokio::net::TcpStream::connect(original_dst)`
+   then `copy_bidirectional` (DIRECT dial — no tunnel transport yet; that's M3/M4).
+4. Session-1 boundary: bridge + accept loop compiling green. Session 2: routing docs +
+   the green `curl --interface <tun> https://1.1.1.1` gate (needs root + route setup).
 
 ## Blockers / waiting on human
-- None for M1.
-- **M1 platform note:** PLAN's M1 gate is written for Linux (`ping <tun-addr>` → ICMP
-  reply). This dev box is macOS arm64 (`utun`). Either run the gate on Linux or adapt to
-  `utun` and note the naming/route caveat (PLAN M1 checkpoint asks for exactly this).
+- **M1 live gate (pending, needs root):** run and confirm `ping` replies, then mark M1
+  fully passed. macOS: `sudo RUST_LOG=debug ./target/release/spark --addr 10.0.0.1
+  --prefix 24`, note the assigned `utunN` in the log, then `ping 10.0.0.2` (ping a *peer*
+  in the subnet, not 10.0.0.1 which the host answers locally). Linux: same with
+  `--name tun0`. Steps are in README "M1 ICMP-echo gate". This box has **no passwordless
+  sudo**, so the agent cannot run it.
 - Upcoming (not blocking yet): a simple TCP relay test server needed at **M3** (PLAN
   Appendix B); if a transport TLS-wraps its relay, confirm the `rustls` client config
   (verification + roots) before trusting it.
@@ -62,11 +65,27 @@ Execute **M1 — TUN scaffold** (PLAN.md §4). One bounded session:
   dep → effective MSRV **≥ 1.85**. Dev box ran rustc **1.93.1** (active `stable`); MSRV floor
   enforced via `rust-version = "1.85"` in every manifest, not by pinning the toolchain.
 
-## Baseline binary size (M0)
-- `target/release/spark` = **285,936 bytes (~280 KB)**, stripped Mach-O arm64. NOT yet a
-  meaningful floor: the CLI links only the (empty) `spark-core` lib — the netstack is pulled
-  in by the *example*, not the shipped binary. Real size tracking starts at M1/M2 when the
-  CLI links the TUN + netstack paths. Budget: <3 MB stripped.
+### tun-rs (VERIFIED at M1 against the 2.8.5 source — trust)
+- `tun_rs::DeviceBuilder::new().ipv4(addr, prefix_or_mask, dst: Option<IPv4>).ipv6(addr,
+  prefix).name(S: Into<String>).mtu(u16).build_async() -> io::Result<AsyncDevice>`
+  (`src/builder.rs:902,962,980,906,917,1355`). `.ipv4` mask arg is generic `ToIpv4Netmask`;
+  a `u8` prefix works (we pass `24`). `build_sync()` also exists.
+- `AsyncDevice::recv(&self, &mut [u8]).await -> io::Result<usize>` and `send(&self, &[u8])
+  .await -> io::Result<usize>` (inherent; `&self` → shareable via `Arc`)
+  (`src/async_device/unix|macos|windows/mod.rs`). `try_recv`/`try_send` exist too.
+- `AsyncDevice: Deref<Target = DeviceImpl>`, so `dev.name() -> io::Result<String>` and
+  `dev.mtu() -> io::Result<u16>` (and `addresses()`) work via auto-deref
+  (`src/async_device/*/mod.rs` Deref; `src/platform/macos/device.rs:182,230`).
+- **macOS normalizes utun frames to raw IP** — no 4-byte AF prefix to strip; the parser
+  keys on `buf[0] >> 4` on every platform (matches tun-rs's own cross-platform example).
+- Framed bridge (for M2): `tun_rs::async_framed::{DeviceFramed, BytesCodec}` behind the
+  `async_framed` feature; `DeviceFramed::new(dev, BytesCodec::new())` is a `Stream<Item=
+  io::Result<BytesMut>>` + `Sink<BytesMut>`. We added only the `async` feature at M1.
+
+## Baseline binary size (M1)
+- `target/release/spark` = **923,344 bytes (~902 KB)**, stripped Mach-O arm64. Now
+  meaningful: links tun-rs + tokio(full) + clap + tracing-subscriber. (M0 was ~280 KB —
+  empty CLI.) Budget: <3 MB stripped — comfortable headroom.
 
 ## Decisions log (append-only)
 - 2026-06-10 (M0): Vendored `netstack-smoltcp` **0.2.2** by copying the published crates.io
@@ -80,6 +99,15 @@ Execute **M1 — TUN scaffold** (PLAN.md §4). One bounded session:
   cu=1, strip, panic=abort) lives in the **root** manifest (profiles only apply from root).
 - 2026-06-10 (M0): `rust-toolchain.toml` uses `channel = "stable"` (not a hard pin); MSRV
   floor ≥1.85 enforced by `rust-version` in each manifest. Active stable on dev box = 1.93.1.
+- 2026-06-10 (M1): **Hand-rolled** the IP parser + ICMP echo logic (`core/src/packet/`)
+  instead of pulling `pnet_packet` (what the tun-rs example uses) — a TUN in IP mode never
+  sees L2/ARP, and keeping it dep-free protects the size budget. ~120 lines, unit-tested
+  (RFC-1071 checksum; v4 IP+ICMP and v6 ICMPv6 pseudo-header).
+- 2026-06-10 (M1): **Log hygiene enforced from M1, not deferred to M6.** The driver logs
+  `proto`+`len` at `info`; src/dst addresses only at `debug` (`--debug` or `RUST_LOG=debug`).
+  Satisfies M1's "logs show parsed packets" without leaking destinations by default.
+- 2026-06-10 (M1): tun-rs added with the `async` feature only (tokio AsyncDevice, raw
+  recv/send loop). `async_framed` deferred to M2 when the netstack bridge needs it.
 - Language/stack: Rust + tokio + rustls(ring) + ring; netstack = **vendored** netstack-smoltcp
   over smoltcp; TUN = tun-rs (desktop). Rationale in CLAUDE.md (locked stack).
 - MSRV ≥ 1.85 (toolchain floor above).
@@ -92,5 +120,5 @@ Execute **M1 — TUN scaffold** (PLAN.md §4). One bounded session:
 - Config format: TOML (alternate import formats deferred).
 
 ## Milestone checklist
-- [x] M0  [ ] M1  [ ] M2  [ ] M3a [ ] M3b [ ] M4 [ ] M5 [ ] M6
+- [x] M0  [~] M1 (code+tests green; live ping gate pending root)  [ ] M2  [ ] M3a [ ] M3b [ ] M4 [ ] M5 [ ] M6
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

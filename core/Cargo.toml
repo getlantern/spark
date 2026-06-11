@@ -13,3 +13,7 @@ path = "src/lib.rs"
 netstack-smoltcp.workspace = true
 tokio.workspace = true
 futures.workspace = true
+tun-rs.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
