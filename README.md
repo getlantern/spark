@@ -46,6 +46,36 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --example netstack_smoke -p spark-core   # prints NETSTACK OK (M0 gate)
 ```
 
+## Configuration
+
+`spark` is configured by `--config <file.toml>` or, when that is absent, by the individual
+CLI flags (`--name`, `--addr`, `--prefix`, `--mtu`, `--server`, `--debug`). When `--config`
+is given it provides the full configuration and the flags are ignored.
+
+Every field has a default, so a partial file is valid; unknown keys are rejected. The full
+schema (all values shown at their defaults):
+
+```toml
+[tun]
+# name = "tun0"   # requested device name; omit to let the OS choose (utunN on macOS)
+addr = "10.0.0.1" # IPv4 address assigned to the interface
+prefix = 24       # IPv4 prefix length
+# mtu = 1500      # MTU override; omit to use the device default
+
+[transport]
+# server = "203.0.113.1:8388"  # tunnel server; omit to dial destinations directly
+
+[udp]
+idle_timeout_secs = 60  # reclaim a UDP NAT association after this much silence
+
+[log]
+debug = false   # log src/dst addresses and disable IP redaction (also: --debug, RUST_LOG=debug)
+```
+
+**Log hygiene:** addresses are logged only at `debug` level, and at the default level the
+log writer additionally redacts any IP literal as a backstop — so default-level logs never
+contain destination IPs. `--debug` (or `debug = true`) disables both.
+
 ### M1 ICMP-echo gate (requires root)
 
 `spark` brings up a TUN device, logs each IP packet, and answers ICMP echo requests.

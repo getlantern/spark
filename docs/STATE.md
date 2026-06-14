@@ -4,29 +4,34 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M5 — UDP path. CODE COMPLETE 2026-06-11** (session 1 framing+NAT table +
-  session 2 orchestration/transports/netstack-UDP/CLI). TCP path (M2→M4) also code-complete.
-  **Only the live DNS/echo gate remains for M5 — needs root (a TUN).** Next *implementable*
-  milestone: **M6** (config/CLI/log-hygiene, no root).
+- Milestone: **M6 — config / CLI / log-hygiene. CODE COMPLETE 2026-06-14.** TOML config
+  schema, IP-literal redaction backstop, `--config` loading, graceful-shutdown polish.
+  TCP path (M2→M4) and UDP path (M5) also code-complete. **Live gates still pending root:**
+  M6's "SIGINT tears down the device", plus M1/M2/M4/M5. Next *implementable*: **M7**
+  (control-plane IPC + privileged service split — large; likely wants a design pass first).
 - Last gate passed: **M0** 2026-06-10; **M1**/**M2-s1** code green 2026-06-10 (live gates
-  pending root); **M3a**+**M3b**+**M4 code** green 2026-06-11; **M5 code** (s1+s2) green
-  2026-06-11 — `UdpTransport`/`PacketSink`/`PacketSource` traits, `DirectTransport` +
-  `TunnelClient` UDP impls, `proxy::udp::run_udp` orchestration, netstack UDP surface.
-  Hermetic tests: `run_udp` via `DirectTransport`+loopback echo; `TunnelClient::dial_udp`
-  via an in-test UDP tunnel relay (sentinel+target handshake + connect-mode framing).
+  pending root); **M3a/M3b/M4 code** + **M5 code** green 2026-06-11; **M6 code** green
+  2026-06-14 — `core::config::Config` (serde+toml, defaults, deny_unknown), `core::redact`
+  (IPv4 dotted-quad + bracketed-IPv6 scrubber), CLI `--config` + `RedactingWriter`.
 - Tree status: **green** — `cargo clippy --workspace --all-targets -D warnings` / `fmt
-  --check` clean; `cargo test -p spark-core` = **26 unit + 3 integration passed**;
-  `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.06 MB**.
+  --check` clean; `cargo test -p spark-core` = **36 unit + 3 integration + 1 doctest passed**;
+  `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.17 MB**.
 
 ## Next chunk (exactly what the next session should do)
 Two independent tracks — pick by whether a privileged box is available:
 
-**(A) Implementable now without root — M6 (config, CLI, log-hygiene hardening).** PLAN §4 M6:
-TOML config schema (`serde`), a `tracing` redaction layer (addresses suppressed unless
-`--debug`), graceful shutdown, structured module errors. *Gate:* a test asserts default-level
-logs contain no IPs/hostnames; config round-trips; SIGINT tears down cleanly. No root needed.
+**(A) Implementable now without root — M7 (control-plane IPC + privileged service split).**
+PLAN §4 M7 + `docs/process-architecture-and-ipc.md`: the `ipc/` crate (versioned message
+protocol, length-prefixed `postcard` framing, `Hello` handshake, req_ids, timeouts, bounded
+log/event streams), peer authentication, and the `service/` split (privileged tunnel process
+owns the TUN/routes/core; unprivileged client drives it). **Large milestone — like the UDP
+path, worth a short design pass + decision before coding** (postcard wire shape, auth model
+per-platform, fd-passing). The protocol/crate logic is unit-testable without root.
 
 **(B) Root-gated live verification (human), do when a privileged window opens:**
+- **M6 SIGINT/device-teardown gate** — bring the device up, send SIGINT, confirm the TUN
+  interface is removed cleanly (Drop-driven). Also confirm default-level logs show no IPs
+  during a real session (the redaction backstop + level convention).
 - **M5 live UDP gate** — with the device up, a DNS query (UDP/53) and a UDP echo both
   round-trip through the tunnel; idle associations are reclaimed after 60s
   (`DEFAULT_IDLE_TIMEOUT`). DNS strategy = proxy-through-tunnel (no :53 special-casing).
@@ -104,6 +109,9 @@ logs contain no IPs/hostnames; config round-trips; SIGINT tears down cleanly. No
   io::Result<BytesMut>>` + `Sink<BytesMut>`. We added only the `async` feature at M1.
 
 ## Baseline binary size
+- **M6:** `target/release/spark` = **1,223,760 bytes (~1.17 MB)**, stripped Mach-O arm64.
+  +~114 KB over M5 — `toml` + `serde` pull in a real TOML parser/serializer (the largest
+  single dep jump so far). Budget <3 MB — still comfortable, but watch dep weight from here.
 - **M5:** `target/release/spark` = **1,107,152 bytes (~1.06 MB)**, stripped Mach-O arm64.
   +~33 KB over M4 — the UDP transports + `run_udp` orchestration + netstack UDP surface are
   now linked. Budget <3 MB — comfortable.
@@ -118,6 +126,18 @@ logs contain no IPs/hostnames; config round-trips; SIGINT tears down cleanly. No
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-14 (M6): **TOML config (serde+toml) + IP-redaction backstop + `--config` rule.**
+  `core/src/config`: `Config` with per-section defaults (`#[serde(default, deny_unknown_fields)]`
+  so partial files work and typos error); `Option` fields use `skip_serializing_if` for clean
+  round-trips. Sections: `[tun]`/`[transport]`/`[udp]`/`[log]`. Added `serde` + `toml` (locked
+  stack). CLI: `--config <file>` loads the full config and the individual flags are ignored
+  when set; otherwise flags build the `Config` (`Cli::to_config`). **Log hygiene = level
+  convention + redaction backstop:** addresses only in `debug!` (filtered at default `info`),
+  AND a `RedactingWriter` scrubs IPv4 dotted-quads + bracketed IPv6 from output unless `--debug`
+  (`core/src/redact.rs`, dep-free; no regex). Redaction deliberately skips hostnames/bare-IPv6
+  (false-positive risk on module paths / version strings) — those rely on the level convention.
+  Graceful shutdown: `select!` drop + explicit `drop(tun)` → Drop tears the device down. Live
+  SIGINT-device gate needs root. Binary +~114 KB (toml/serde parser) → ~1.17 MB.
 - 2026-06-11 (M5 s2): **UDP transport surface = split `PacketSink`/`PacketSource` +
   `UdpTransport::dial_udp`; own framing, connect-mode, magic-sentinel dispatch; netstack
   reply via mpsc drain.** Researched prior art (sing-box UoT `common/uot`, sing-quic
@@ -236,5 +256,5 @@ logs contain no IPs/hostnames; config round-trips; SIGINT tears down cleanly. No
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
   [~] M5 (code complete: framing + NAT table + transports + orchestration + netstack UDP, green; live DNS gate pending root)
-  [ ] M6
+  [~] M6 (config + redaction + CLI green+tested; live SIGINT/device-teardown gate pending root)
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
