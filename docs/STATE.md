@@ -16,9 +16,13 @@
 - **M7 through-the-service gate PASSED on macOS 2026-06-15.** `spark-service` (root, with
   `--spark-gid` + `--protect-interface`) + `spark connect`/`status` + curl: the unprivileged
   client drove the privileged daemon to bring the tunnel up and real traffic forwarded through
-  it. The full ship-shaped desktop architecture is live. **Live-verified so far: M1 (ICMP),
-  M2 (direct TCP), M7 (service TCP).** Not yet live: M5 (UDP), M4 (tunnel-server path, needs a
-  relay binary), M6 (SIGINT teardown), and the M7 kill-switch refinements above.
+  it. The full ship-shaped desktop architecture is live.
+- **M5 UDP gate PASSED on macOS 2026-06-15:** `dig @9.9.9.9 example.com` (routed into the tun,
+  `spark run --protect-interface`) resolved through the tunnel — TUN → netstack UDP → `run_udp`
+  NAT association → protected UDP dial → reply pump → back. UDP path live.
+- **Live-verified: M1 (ICMP), M2 (direct TCP), M5 (UDP), M7 (service TCP).** The desktop data
+  path is confirmed live across TCP+UDP, direct + through-service. Not yet live: M4 (tunnel-server
+  path, needs a relay binary), M6 (SIGINT teardown), and the M7 kill-switch refinements above.
 - **M7 s3 live smoke (no root, real processes over a real unix socket):** `spark-service`
   daemon + `spark` client verified end-to-end — peer-cred auth refuses a non-root uid under a
   root-only policy AND allows it under `--spark-gid 20`; `Hello` handshake + `GetStatus`
@@ -365,7 +369,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
-  [~] M5 (code complete: framing + NAT table + transports + orchestration + netstack UDP, green; live DNS gate pending root)
+  [x] M5 (framing + NAT table + orchestration + netstack UDP; **live DNS gate PASSED on macOS 2026-06-15** — dig @9.9.9.9 resolved through the tunnel)
   [~] M6 (config + redaction + CLI green+tested; live SIGINT/device-teardown gate pending root)
 - [x] M7 (ipc + service + daemon/client; **through-the-service gate PASSED on macOS 2026-06-15** —
   client drove the daemon, traffic forwarded end-to-end. Remaining refinements: fail-open
