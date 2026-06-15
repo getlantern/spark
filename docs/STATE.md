@@ -4,29 +4,37 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M6 — config / CLI / log-hygiene. CODE COMPLETE 2026-06-14.** TOML config
-  schema, IP-literal redaction backstop, `--config` loading, graceful-shutdown polish.
-  TCP path (M2→M4) and UDP path (M5) also code-complete. **Live gates still pending root:**
-  M6's "SIGINT tears down the device", plus M1/M2/M4/M5. Next *implementable*: **M7**
-  (control-plane IPC + privileged service split — large; likely wants a design pass first).
-- Last gate passed: **M0** 2026-06-10; **M1**/**M2-s1** code green 2026-06-10 (live gates
-  pending root); **M3a/M3b/M4 code** + **M5 code** green 2026-06-11; **M6 code** green
-  2026-06-14 — `core::config::Config` (serde+toml, defaults, deny_unknown), `core::redact`
-  (IPv4 dotted-quad + bracketed-IPv6 scrubber), CLI `--config` + `RedactingWriter`.
+- Milestone: **M7 — control-plane IPC + service split. SESSION 1 DONE 2026-06-14** (the `ipc/`
+  protocol crate). Design decided (see `ipc-service-split-design-m7` memory + below). M2→M6
+  code-complete. **Session 2 (needs root for its live gate):** `service/` actor loop + Linux
+  unix-socket transport + `SO_PEERCRED`/`spark`-group authz + the `cli/` client mode.
+- Last gate passed: **M0**..**M6** as before; **M7 session 1** green 2026-06-14 — `spark-ipc`:
+  `Request`/`Response`/`Push` message types, postcard message codec, length-delimited framing
+  (`encode_frame`/`decode_frame` with `Incomplete`/`FrameTooLarge` guards), `Hello` version
+  `negotiate`. Pure protocol — no transport, no async, no tokio; 8 unit tests.
 - Tree status: **green** — `cargo clippy --workspace --all-targets -D warnings` / `fmt
-  --check` clean; `cargo test -p spark-core` = **36 unit + 3 integration + 1 doctest passed**;
-  `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.17 MB**.
+  --check` clean; `cargo test --workspace` = **core 36 unit + 3 integration + 1 doctest,
+  spark-ipc 8** passed; `netstack_smoke` prints `NETSTACK OK`; release `spark` **~1.17 MB**
+  (unchanged — `ipc` not linked into the binary until session 2's client mode).
 
 ## Next chunk (exactly what the next session should do)
 Two independent tracks — pick by whether a privileged box is available:
 
-**(A) Implementable now without root — M7 (control-plane IPC + privileged service split).**
-PLAN §4 M7 + `docs/process-architecture-and-ipc.md`: the `ipc/` crate (versioned message
-protocol, length-prefixed `postcard` framing, `Hello` handshake, req_ids, timeouts, bounded
-log/event streams), peer authentication, and the `service/` split (privileged tunnel process
-owns the TUN/routes/core; unprivileged client drives it). **Large milestone — like the UDP
-path, worth a short design pass + decision before coding** (postcard wire shape, auth model
-per-platform, fd-passing). The protocol/crate logic is unit-testable without root.
+**(A) M7 session 2 — service + transport (code mostly doable without root; live gate needs it).**
+Design is decided (`ipc-service-split-design-m7` memory). Session 1 (`ipc/` protocol crate) is
+done. Remaining:
+1. `service/`: the actor/event-loop owning tunnel state (`mpsc<Command>` + `oneshot` replies,
+   no `Arc<Mutex>`); embeds `core/`; broadcasts state to subscribers via bounded per-conn mpsc
+   (drop-oldest + `Push::Dropped`). Linux unix-socket transport (`tokio::net::UnixListener` at
+   `/run/spark/control.sock`) with the length-delimited frame codec; `SO_PEERCRED` authz —
+   policy **root + `spark` group** (confirmed). Fail-open route-restore + the loud
+   `TunnelEvent::FellOpenToDirect` drop event.
+2. `cli/`: a client mode that connects to the socket, does the `Hello` handshake, sends a
+   command, prints the response/stream.
+3. *Live gate (root):* unprivileged client drives the service to connect (curl passes);
+   killing the client leaves the tunnel up; killing the service restores direct routing + emits
+   the drop event; an unauthorized uid is refused; an incompatible version handshake is rejected.
+   The actor loop + framing wiring are unit-testable over an in-memory duplex without root.
 
 **(B) Root-gated live verification (human), do when a privileged window opens:**
 - **M6 SIGINT/device-teardown gate** — bring the device up, send SIGINT, confirm the TUN
@@ -126,6 +134,18 @@ per-platform, fd-passing). The protocol/crate logic is unit-testable without roo
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-14 (M7 design + s1): **Control-plane IPC = postcard + length-delimited framing over
+  a unix socket; `SO_PEERCRED` + `spark` group; service actor loop; protocol is mobile-portable.**
+  Decided with Adam after researching Mullvad (Rust, gRPC/tonic) and Tailscale (Go, HTTP/JSON
+  LocalAPI + operator model). gRPC ruled out by CLAUDE.md's no-hyper rule + the <3 MB budget;
+  HTTP needs a stack — so postcard (already in serde) + a `u32`-LE length frame. **Split the
+  message codec from the framing** so message-oriented transports (Apple NE `sendProviderMessage`,
+  Android in-process) reuse the messages WITHOUT framing; only stream transports frame. Service =
+  one event loop (`mpsc<Command>`+`oneshot`, no locks) broadcasting to bounded subscribers.
+  Auth = root + `spark` group via `SO_PEERCRED` (Linux/macOS-daemon only; Android has no boundary,
+  iOS uses code-signing + App Group). Full design + mobile analysis in the
+  `ipc-service-split-design-m7` memory. **Session 1 landed:** `spark-ipc` (types + codec + framing
+  + `negotiate`), pure/no-async, 8 tests. `MAX_FRAME_LEN` (1 MiB) caps hostile-peer allocation.
 - 2026-06-14 (M6): **TOML config (serde+toml) + IP-redaction backstop + `--config` rule.**
   `core/src/config`: `Config` with per-section defaults (`#[serde(default, deny_unknown_fields)]`
   so partial files work and typos error); `Option` fields use `skip_serializing_if` for clean
@@ -257,4 +277,5 @@ per-platform, fd-passing). The protocol/crate logic is unit-testable without roo
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
   [~] M5 (code complete: framing + NAT table + transports + orchestration + netstack UDP, green; live DNS gate pending root)
   [~] M6 (config + redaction + CLI green+tested; live SIGINT/device-teardown gate pending root)
+- [~] M7 (session 1: `ipc/` protocol crate green+tested; session 2 service/transport/authz + live gate pending root)
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

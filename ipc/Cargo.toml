@@ -10,3 +10,6 @@ name = "spark_ipc"
 path = "src/lib.rs"
 
 [dependencies]
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
