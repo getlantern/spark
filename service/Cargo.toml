@@ -23,8 +23,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 anyhow.workspace = true
-
-[dev-dependencies]
-# Test-only: read the current uid/gid to build an "allow this user" auth policy for the
-# same-process unix-socket round-trip tests.
-libc = "0.2"
+# Socket file ownership/perms (chown to the spark group) + the test `getuid`/`getgid`.
+libc.workspace = true

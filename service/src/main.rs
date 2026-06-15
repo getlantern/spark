@@ -76,10 +76,45 @@ async fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&args.socket);
     let listener = UnixListener::bind(&args.socket)
         .with_context(|| format!("binding control socket {}", args.socket.display()))?;
+    // The OS enforces connect permission on the socket file, so the daemon (running
+    // privileged) must open it up to the authorized peers: group `spark_gid` + mode 0660.
+    // peer-cred auth in `serve` remains the authoritative check (don't trust perms alone).
+    secure_socket(&args.socket, args.spark_gid)
+        .with_context(|| format!("securing control socket {}", args.socket.display()))?;
     info!(socket = %args.socket.display(), "spark-service listening for control connections");
 
     serve(listener, policy, cmd_tx)
         .await
         .context("control listener failed")?;
+    Ok(())
+}
+
+/// Restrict the control socket to root + the `spark` group: chown its group to `group` (when
+/// set) and set mode `0660`. The connecting peer is still authenticated by `SO_PEERCRED`
+/// (see `serve`); this is the filesystem layer of defense.
+#[cfg(unix)]
+fn secure_socket(path: &std::path::Path, group: Option<u32>) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(gid) = group {
+        let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "socket path contains a NUL",
+            )
+        })?;
+        // SAFETY: `cpath` is a valid NUL-terminated path for the call; owner `u32::MAX` (-1)
+        // leaves the owner unchanged and only sets the group.
+        let rc = unsafe { libc::chown(cpath.as_ptr(), u32::MAX, gid) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+}
+
+#[cfg(not(unix))]
+fn secure_socket(_path: &std::path::Path, _group: Option<u32>) -> std::io::Result<()> {
     Ok(())
 }
