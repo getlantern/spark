@@ -9,7 +9,13 @@ license.workspace = true
 name = "spark_ipc"
 path = "src/lib.rs"
 
+[features]
+# Async length-delimited framing over a byte stream (unix socket / named pipe). Off by
+# default so message-oriented consumers (Apple NE, Android in-process) stay tokio-free.
+stream = ["dep:tokio"]
+
 [dependencies]
 serde.workspace = true
 postcard.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, optional = true }

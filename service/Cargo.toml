@@ -10,3 +10,8 @@ name = "spark_service"
 path = "src/lib.rs"
 
 [dependencies]
+spark-ipc = { path = "../ipc", features = ["stream"] }
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

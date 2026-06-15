@@ -18,12 +18,16 @@
 
 pub mod codec;
 pub mod message;
+#[cfg(feature = "stream")]
+pub mod stream;
 
 pub use codec::{
     decode_frame, decode_message, encode_frame, encode_message, IpcError, MAX_FRAME_LEN,
 };
 pub use message::{
     negotiate, ErrorCode, LogLevel, LogLine, ProtocolVersion, Push, ReqId, Request, RequestPayload,
-    Response, ResponsePayload, TunnelEvent, TunnelState, TunnelStatus, MIN_SUPPORTED_VERSION,
-    PROTOCOL_VERSION,
+    Response, ResponsePayload, ServerMessage, TunnelEvent, TunnelState, TunnelStatus,
+    MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
 };
+#[cfg(feature = "stream")]
+pub use stream::{read_frame, write_frame};

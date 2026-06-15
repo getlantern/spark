@@ -82,6 +82,17 @@ pub enum ResponsePayload {
     },
 }
 
+/// Everything the service sends to the client on the wire. Because replies and pushes
+/// share one connection, the client decodes this envelope and demultiplexes: a
+/// [`Response`] correlates to a request by `req_id`; a [`Push`] is unsolicited stream data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerMessage {
+    /// A reply to a client [`Request`].
+    Response(Response),
+    /// A server-initiated stream item.
+    Push(Push),
+}
+
 /// A server-initiated push (no `req_id`); only sent after a [`RequestPayload::Subscribe`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Push {
