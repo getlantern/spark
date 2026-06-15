@@ -86,7 +86,7 @@ mod tests {
         let (cmd_tx, cmd_rx) = channel();
         let engine = FakeEngine::default();
         let running = engine.running.clone();
-        tokio::spawn(run_service(engine, cmd_rx));
+        tokio::spawn(run_service(engine, cmd_rx, false));
 
         // Allow the current user (the test process is the peer).
         let uid = unsafe { libc::getuid() };
@@ -122,7 +122,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
 
         let (cmd_tx, cmd_rx) = channel();
-        tokio::spawn(run_service(FakeEngine::default(), cmd_rx));
+        tokio::spawn(run_service(FakeEngine::default(), cmd_rx, false));
 
         // Allow only an impossible group; the current non-root user is refused.
         let policy = AuthPolicy {

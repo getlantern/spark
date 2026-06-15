@@ -9,9 +9,12 @@
   desktop stack (M1–M7) is now live on macOS. **M8 packaging session 1 done 2026-06-15:**
   cross-build checks (Linux full + Windows core/ipc), systemd/launchd units + example config in
   `packaging/`, `scripts/size-budget.sh` (both binaries ~39% of the 3 MB budget). Remaining M8:
-  distro packages (deb/Homebrew/MSI), the Windows named-pipe transport, multi-platform run. M7
-  refinements (kill-switch route-restore, supplementary-group resolution, drop-oldest) + the M4
-  tunnel-server / M6 SIGINT live gates also pending.
+  distro packages (deb/Homebrew/MSI), the Windows named-pipe transport, multi-platform run.
+  **M7 kill-switch (signaling half) done 2026-06-15:** an unexpected data-path exit now fires
+  `FellOpenToDirect` + sets the `direct_fallback` status, with a `[kill_switch] fail_closed`
+  config knob. Remaining M7 refinements: the *active* route-restore/blocking (platform/root
+  work), supplementary-group resolution, drop-oldest backpressure. The M4 tunnel-server / M6
+  SIGINT live gates also pending.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
@@ -40,11 +43,11 @@
   responses and pushes). Hermetic duplex tests cover handshake/connect/status, pre-handshake
   rejection, version-mismatch rejection, and subscribe→push delivery.
 - Tree status: **green** — `cargo clippy --workspace --all-targets --all-features -D warnings`
-  / `fmt --check` clean; `cargo test --workspace --all-features` all pass (core 36 + 3 integ +
-  doctest; **spark-ipc 10** incl. stream; **spark-service 8**); release `spark` **~1.17 MB**
-  (unchanged — ipc/service not linked into the binary until the live cli client mode).
-  NB: the ipc `stream` tests need the feature → use `--all-features` (or `-p spark-ipc
-  --features stream`).
+  / `fmt --check` clean; `cargo test --workspace --all-features` all pass (core 39 + 3 integ +
+  doctest; **spark-ipc 10** incl. stream; **spark-service 12** incl. the 2 new kill-switch tests);
+  release `spark` **1,257,008 bytes (~1.20 MB)** / `spark-service` **1,257,520 bytes (~1.20 MB)**
+  (both 39% of the 3 MB budget). NB: the ipc `stream` tests need the feature → use
+  `--all-features` (or `-p spark-ipc --features stream`).
 
 ## Next chunk (exactly what the next session should do)
 Two independent tracks — pick by whether a privileged box is available:
@@ -196,6 +199,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (M7 kill-switch, signaling half): **An unexpected data-path exit fails open
+  loudly; `[kill_switch] fail_closed` overrides to fail closed. Active route-restore deferred.**
+  `engine::CoreEngine::start` now takes an `exit: mpsc::Sender<()>` and runs the TCP+UDP
+  forwarders under ONE supervisor task; the task fires `exit` only if a forwarder loop returns
+  on its own (a deliberate `stop` aborts the task before that line, so a clean disconnect never
+  signals). `run_service` owns the `exit_rx` and selects on it: while `state == Connected`, an
+  exit signal calls `engine.stop()` (reclaims the dead device), then — fail-open (default) —
+  sets `direct_fallback = true` + transitions `Disconnected`, or — fail-closed — transitions
+  `Failed`; either way it broadcasts `Push::Event(FellOpenToDirect)` and `warn!`s. (The
+  `FellOpenToDirect` event + `TunnelStatus.direct_fallback` flag already existed in the M7-s2
+  protocol; this wires the producer.) `core::config::KillSwitchConfig { fail_closed: bool }`
+  (default false = fail open, per process-architecture §5); `spark-service` reads it and passes
+  `fail_closed` into `run_service`. `spark status` prints a loud `WARNING: failed open …` when
+  `direct_fallback`. `FakeEngine` grew a `kill()` to simulate the exit; 2 new hermetic tests
+  (`unexpected_exit_fails_open_loudly` / `…fails_closed_when_configured`) over the duplex.
+  **Signaling only** — the *active* route-table restore / traffic-blocking is still the deferred
+  platform/root half (tracked with supplementary-group resolution + drop-oldest backpressure).
+  Sizes unchanged at ~1.20 MB each.
 - 2026-06-15 (M8 s1): **Desktop packaging — cross-build checks + service units + size gate.**
   Release profile already locked (opt-level=z/lto=fat/cu=1/strip/panic=abort). `cargo check
   --target` verified Linux (full workspace) and Windows (`spark-core`+`spark-ipc`); the Windows
@@ -384,7 +405,8 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   [x] M5 (framing + NAT table + orchestration + netstack UDP; **live DNS gate PASSED on macOS 2026-06-15** — dig @9.9.9.9 resolved through the tunnel)
   [~] M6 (config + redaction + CLI green+tested; live SIGINT/device-teardown gate pending root)
 - [x] M7 (ipc + service + daemon/client; **through-the-service gate PASSED on macOS 2026-06-15** —
-  client drove the daemon, traffic forwarded end-to-end. Remaining refinements: fail-open
-  route-restore + `FellOpenToDirect` event, supplementary-group resolution, drop-oldest backpressure)
+  client drove the daemon, traffic forwarded end-to-end. Kill-switch **signaling** done
+  (`FellOpenToDirect` + `direct_fallback` + `fail_closed` knob). Remaining refinements: the
+  *active* fail-open route-restore/blocking, supplementary-group resolution, drop-oldest backpressure)
 - [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget script/docs done; distro packages [deb/homebrew/MSI] + multi-platform run pending)
   [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

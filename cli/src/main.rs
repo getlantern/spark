@@ -93,6 +93,7 @@ impl RunArgs {
                 protect_interface: self.protect_interface.clone(),
             },
             udp: config::UdpConfig::default(),
+            kill_switch: config::KillSwitchConfig::default(),
             log: config::LogConfig { debug: self.debug },
         }
     }

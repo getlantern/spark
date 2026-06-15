@@ -61,8 +61,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // The event loop owns the engine + tunnel state; connections talk to it over `cmd_tx`.
+    let fail_closed = config.kill_switch.fail_closed;
     let (cmd_tx, cmd_rx) = channel();
-    tokio::spawn(run_service(CoreEngine::new(config), cmd_rx));
+    tokio::spawn(run_service(CoreEngine::new(config), cmd_rx, fail_closed));
 
     let policy = AuthPolicy {
         spark_gid: args.spark_gid,

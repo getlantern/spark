@@ -79,7 +79,7 @@ mod tests {
     use crate::service::{channel, run_service};
     use spark_ipc::{
         ErrorCode, RequestPayload, Response, ResponsePayload, TunnelEvent, TunnelState,
-        PROTOCOL_VERSION,
+        TunnelStatus, PROTOCOL_VERSION,
     };
     use std::sync::atomic::Ordering;
     use tokio::io::DuplexStream;
@@ -92,16 +92,89 @@ mod tests {
         }
     }
 
-    /// Stand up the event loop + a served connection over a duplex; return the client end and
-    /// the fake engine's "running" flag.
-    fn spin_up() -> (DuplexStream, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    /// Stand up the event loop + a served connection over a duplex with the given kill-switch
+    /// mode; return the client end and a handle to the fake engine (for `running` / `kill`).
+    fn spin_up_with(fail_closed: bool) -> (DuplexStream, FakeEngine) {
         let (cmd_tx, cmd_rx) = channel();
         let engine = FakeEngine::default();
-        let running = engine.running.clone();
-        tokio::spawn(run_service(engine, cmd_rx));
+        let handle = engine.clone();
+        tokio::spawn(run_service(engine, cmd_rx, fail_closed));
         let (client, server) = tokio::io::duplex(4096);
         tokio::spawn(serve_connection(server, cmd_tx));
-        (client, running)
+        (client, handle)
+    }
+
+    /// Default spin-up (fail-open), returning the client + the engine's "running" flag.
+    fn spin_up() -> (DuplexStream, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        let (client, engine) = spin_up_with(false);
+        (client, engine.running.clone())
+    }
+
+    /// Subscribe, connect, then read server messages until the expected push arrives (skipping
+    /// the interleaved `StateChanged` pushes); returns whether the tunnel ended up in direct
+    /// fallback.
+    async fn fail_after_unexpected_exit(fail_closed: bool) -> TunnelStatus {
+        let (mut client, engine) = spin_up_with(fail_closed);
+        expect_response(request(&mut client, hello(1)).await);
+        expect_response(
+            request(
+                &mut client,
+                Request {
+                    req_id: 2,
+                    payload: RequestPayload::Subscribe {
+                        events: true,
+                        logs: false,
+                    },
+                },
+            )
+            .await,
+        );
+        expect_response(
+            request(
+                &mut client,
+                Request {
+                    req_id: 3,
+                    payload: RequestPayload::Connect,
+                },
+            )
+            .await,
+        );
+        assert!(engine.running.load(Ordering::SeqCst));
+
+        // The data path dies on its own; expect a loud FellOpenToDirect push.
+        engine.kill().await;
+        let mut saw_fell_open = false;
+        for _ in 0..6 {
+            if let ServerMessage::Push(Push::Event(TunnelEvent::FellOpenToDirect)) =
+                spark_ipc::read_frame::<_, ServerMessage>(&mut client)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            {
+                saw_fell_open = true;
+                break;
+            }
+        }
+        assert!(
+            saw_fell_open,
+            "expected a FellOpenToDirect push after the tunnel died"
+        );
+
+        match expect_response(
+            request(
+                &mut client,
+                Request {
+                    req_id: 4,
+                    payload: RequestPayload::GetStatus,
+                },
+            )
+            .await,
+        )
+        .payload
+        {
+            ResponsePayload::Status(s) => s,
+            other => panic!("expected status, got {other:?}"),
+        }
     }
 
     /// Send one request and read one server message back.
@@ -248,5 +321,29 @@ mod tests {
             }
         }
         assert!(got_ack && got_push, "ack={got_ack} push={got_push}");
+    }
+
+    #[tokio::test]
+    async fn unexpected_exit_fails_open_loudly() {
+        // Default (fail-open): a dead data path → FellOpenToDirect + status restored to
+        // direct (Disconnected, direct_fallback=true).
+        let status = fail_after_unexpected_exit(false).await;
+        assert!(
+            status.direct_fallback,
+            "fail-open should report direct fallback"
+        );
+        assert_eq!(status.state, TunnelState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn unexpected_exit_fails_closed_when_configured() {
+        // Per-profile fail-closed override: same loud event, but status is Failed (blocked),
+        // not direct fallback. (Active traffic blocking is the deferred platform piece.)
+        let status = fail_after_unexpected_exit(true).await;
+        assert!(
+            !status.direct_fallback,
+            "fail-closed should NOT report direct fallback"
+        );
+        assert_eq!(status.state, TunnelState::Failed);
     }
 }

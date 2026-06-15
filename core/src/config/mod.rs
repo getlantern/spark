@@ -37,8 +37,20 @@ pub struct Config {
     pub transport: TransportConfig,
     /// UDP forwarding settings.
     pub udp: UdpConfig,
+    /// Kill-switch behavior when the tunnel drops.
+    pub kill_switch: KillSwitchConfig,
     /// Logging settings.
     pub log: LogConfig,
+}
+
+/// What happens to traffic if the tunnel drops unexpectedly. The product default is **fail
+/// open** (restore direct routing, loudly) — see process-architecture-and-ipc.md §5.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct KillSwitchConfig {
+    /// When `true`, block traffic instead of falling back to direct routing (the per-profile
+    /// fail-closed override). Default `false` = fail open.
+    pub fail_closed: bool,
 }
 
 /// TUN device settings.
@@ -214,6 +226,7 @@ mod tests {
                 udp: UdpConfig {
                     idle_timeout_secs: 30,
                 },
+                kill_switch: KillSwitchConfig { fail_closed: true },
                 log: LogConfig { debug: true },
             },
         ] {

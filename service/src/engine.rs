@@ -5,11 +5,16 @@
 //! here. The real engine — which brings up the TUN, installs routes, and runs `spark-core` —
 //! is privileged and wired in the live path (it needs root); the loop is written against this
 //! trait so it can be unit-tested with a fake.
+//!
+//! `start` is handed an `exit` sender it fires if the data path dies on its own (a netstack or
+//! forwarder loop returned) — distinct from a deliberate `stop`. The event loop watches the
+//! other end to fail open and alert (the kill-switch); see [`crate::service`].
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -27,8 +32,10 @@ pub struct EngineError(pub String);
 /// Drives the actual tunnel data path on behalf of the control-plane event loop.
 #[async_trait]
 pub trait TunnelEngine: Send {
-    /// Bring the tunnel up (open the device, install routes, start the core).
-    async fn start(&mut self) -> Result<(), EngineError>;
+    /// Bring the tunnel up (open the device, install routes, start the core). `exit` is fired
+    /// (one `()`) if the data path later dies on its own — NOT on a deliberate [`stop`](Self::stop),
+    /// which aborts before the signal is sent.
+    async fn start(&mut self, exit: mpsc::Sender<()>) -> Result<(), EngineError>;
     /// Tear the tunnel down and restore direct routing.
     async fn stop(&mut self) -> Result<(), EngineError>;
 }
@@ -39,11 +46,11 @@ pub trait TunnelEngine: Send {
 ///
 /// Opening the device requires elevated privilege, so `start` only succeeds when the service
 /// runs privileged; the live gate exercises it under root. Route installation/restoration
-/// (the fail-open kill-switch) is the remaining piece layered on top.
+/// (the active half of the fail-open kill-switch) is the remaining piece layered on top.
 pub struct CoreEngine {
     config: Config,
     tun: Option<Arc<Tun>>,
-    tasks: Vec<JoinHandle<()>>,
+    supervisor: Option<JoinHandle<()>>,
 }
 
 impl CoreEngine {
@@ -52,14 +59,14 @@ impl CoreEngine {
         Self {
             config,
             tun: None,
-            tasks: Vec::new(),
+            supervisor: None,
         }
     }
 }
 
 #[async_trait]
 impl TunnelEngine for CoreEngine {
-    async fn start(&mut self) -> Result<(), EngineError> {
+    async fn start(&mut self, exit: mpsc::Sender<()>) -> Result<(), EngineError> {
         if self.tun.is_some() {
             return Ok(()); // already running
         }
@@ -80,29 +87,35 @@ impl TunnelEngine for CoreEngine {
 
         let mut netstack = SmoltcpNetstack::new(Arc::clone(&tun))
             .map_err(|e| EngineError(format!("starting the netstack: {e}")))?;
-
+        let udp_surface = netstack.take_udp();
         let idle = Duration::from_secs(self.config.udp.idle_timeout_secs);
-        if let Some((udp_inbound, udp_reply)) = netstack.take_udp() {
-            self.tasks.push(tokio::spawn(proxy::udp::run_udp(
-                udp_inbound,
-                udp_reply,
-                udp_transport,
-                idle,
-            )));
-        }
-        self.tasks
-            .push(tokio::spawn(proxy::tcp::run(netstack, tcp_transport)));
+
+        // One supervisor task runs the data-path loops. It signals `exit` only if a loop
+        // returns on its own; `stop` aborts the task before that line is reached.
+        let supervisor = tokio::spawn(async move {
+            match udp_surface {
+                Some((udp_inbound, udp_reply)) => {
+                    tokio::select! {
+                        _ = proxy::tcp::run(netstack, tcp_transport) => {}
+                        _ = proxy::udp::run_udp(udp_inbound, udp_reply, udp_transport, idle) => {}
+                    }
+                }
+                None => proxy::tcp::run(netstack, tcp_transport).await,
+            }
+            let _ = exit.send(()).await; // unexpected exit (not reached on abort)
+        });
+
+        self.supervisor = Some(supervisor);
         self.tun = Some(tun);
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), EngineError> {
-        for task in self.tasks.drain(..) {
+        if let Some(task) = self.supervisor.take() {
             task.abort();
         }
         // Dropping the last `Tun` reference tears the OS device down (and restores routing).
-        let was_up = self.tun.take().is_some();
-        if was_up {
+        if self.tun.take().is_some() {
             info!("tunnel down");
         }
         Ok(())
@@ -113,23 +126,36 @@ impl TunnelEngine for CoreEngine {
 pub(crate) mod test_support {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::Mutex;
 
     /// A fake engine that records whether the tunnel is "running" without touching the
-    /// network. Lets the event loop be tested with no TUN and no root.
+    /// network, and lets a test simulate an unexpected exit by firing [`Self::kill`].
     #[derive(Clone, Default)]
     pub struct FakeEngine {
         pub running: Arc<AtomicBool>,
+        exit: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    }
+
+    impl FakeEngine {
+        /// Simulate the data path dying unexpectedly (fires the `exit` sender from `start`).
+        pub async fn kill(&self) {
+            let sender = self.exit.lock().unwrap().clone();
+            if let Some(tx) = sender {
+                let _ = tx.send(()).await;
+            }
+        }
     }
 
     #[async_trait]
     impl TunnelEngine for FakeEngine {
-        async fn start(&mut self) -> Result<(), EngineError> {
+        async fn start(&mut self, exit: mpsc::Sender<()>) -> Result<(), EngineError> {
             self.running.store(true, Ordering::SeqCst);
+            *self.exit.lock().unwrap() = Some(exit);
             Ok(())
         }
         async fn stop(&mut self) -> Result<(), EngineError> {
             self.running.store(false, Ordering::SeqCst);
+            *self.exit.lock().unwrap() = None;
             Ok(())
         }
     }
