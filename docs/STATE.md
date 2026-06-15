@@ -4,13 +4,21 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M7 — control-plane IPC + service split. SESSIONS 1+2+3 CODE DONE 2026-06-14;
-  control plane LIVE-VERIFIED (no root) 2026-06-15.** Design in `ipc-service-split-design-m7`
-  memory. M2→M6 code-complete. **Remaining for M7 = the privileged data-path gate only** (TUN
-  bring-up + routing + curl through the service — needs root); shares the M1–M6 live-gate queue.
+- Milestone: **M7 — control-plane IPC + service split. DONE 2026-06-15** (code + through-the-
+  service gate live-verified on macOS; design in `ipc-service-split-design-m7` memory). The full
+  desktop stack (M1–M7) is now live on macOS. **Next: M8 (desktop packaging + size budget) — no
+  root needed.** Remaining M7 refinements (kill-switch route-restore, supplementary-group
+  resolution, drop-oldest backpressure) and the M5 UDP / M4 tunnel-server / M6 SIGINT live gates
+  are tracked below.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
-  end-to-end. M1 (ICMP) + M2 (TCP) now both live. Next live: M7 through-the-service + M5 UDP.
+  end-to-end.
+- **M7 through-the-service gate PASSED on macOS 2026-06-15.** `spark-service` (root, with
+  `--spark-gid` + `--protect-interface`) + `spark connect`/`status` + curl: the unprivileged
+  client drove the privileged daemon to bring the tunnel up and real traffic forwarded through
+  it. The full ship-shaped desktop architecture is live. **Live-verified so far: M1 (ICMP),
+  M2 (direct TCP), M7 (service TCP).** Not yet live: M5 (UDP), M4 (tunnel-server path, needs a
+  relay binary), M6 (SIGINT teardown), and the M7 kill-switch refinements above.
 - **M7 s3 live smoke (no root, real processes over a real unix socket):** `spark-service`
   daemon + `spark` client verified end-to-end — peer-cred auth refuses a non-root uid under a
   root-only policy AND allows it under `--spark-gid 20`; `Hello` handshake + `GetStatus`
@@ -359,5 +367,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
   [~] M5 (code complete: framing + NAT table + transports + orchestration + netstack UDP, green; live DNS gate pending root)
   [~] M6 (config + redaction + CLI green+tested; live SIGINT/device-teardown gate pending root)
-- [~] M7 (s1 ipc + s2 service + s3 daemon/listener/engine/cli-client all green; control plane live-verified no-root; privileged TUN+curl gate pending root)
+- [x] M7 (ipc + service + daemon/client; **through-the-service gate PASSED on macOS 2026-06-15** —
+  client drove the daemon, traffic forwarded end-to-end. Remaining refinements: fail-open
+  route-restore + `FellOpenToDirect` event, supplementary-group resolution, drop-oldest backpressure)
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
