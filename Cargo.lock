@@ -1164,6 +1164,7 @@ dependencies = [
  "bytes",
  "clap",
  "spark-core",
+ "spark-ipc",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1199,11 +1200,16 @@ dependencies = [
 name = "spark-service"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "clap",
+ "libc",
+ "spark-core",
  "spark-ipc",
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

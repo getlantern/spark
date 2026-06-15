@@ -30,4 +30,4 @@ pub use message::{
     MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
 };
 #[cfg(feature = "stream")]
-pub use stream::{read_frame, write_frame};
+pub use stream::{read_frame, write_frame, Client};

@@ -13,6 +13,9 @@ use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::codec::{decode_message, encode_frame, MAX_FRAME_LEN};
+use crate::message::{
+    ProtocolVersion, Request, RequestPayload, ResponsePayload, ServerMessage, PROTOCOL_VERSION,
+};
 
 /// Write `msg` as one length-delimited frame to `writer`.
 pub async fn write_frame<W, M>(writer: &mut W, msg: &M) -> io::Result<()>
@@ -51,6 +54,80 @@ where
     decode_message(&body)
         .map(Some)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// A control-plane client over a byte stream: does the [`PROTOCOL_VERSION`] handshake and
+/// issues request/response calls, transparently skipping any interleaved [`Push`](crate::Push)
+/// stream items. The caller supplies the connected stream (a `UnixStream` on desktop), so
+/// this stays transport-generic and testable over a duplex.
+pub struct Client<S> {
+    stream: S,
+    next_id: u64,
+}
+
+impl<S> Client<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Wrap a connected stream. Call [`handshake`](Self::handshake) before any command.
+    pub fn new(stream: S) -> Self {
+        Self { stream, next_id: 0 }
+    }
+
+    /// Perform the `Hello` handshake, returning the negotiated protocol version. Errors if
+    /// the service rejects the version.
+    pub async fn handshake(&mut self) -> io::Result<ProtocolVersion> {
+        match self
+            .request(RequestPayload::Hello {
+                client_version: PROTOCOL_VERSION,
+            })
+            .await?
+        {
+            ResponsePayload::Hello { negotiated, .. } => Ok(negotiated),
+            ResponsePayload::Error { message, .. } => {
+                Err(io::Error::new(io::ErrorKind::InvalidData, message))
+            }
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected handshake reply: {other:?}"),
+            )),
+        }
+    }
+
+    /// Send one request and return its response payload, skipping any `Push` items that
+    /// arrive in between.
+    pub async fn request(&mut self, payload: RequestPayload) -> io::Result<ResponsePayload> {
+        self.next_id += 1;
+        let req_id = self.next_id;
+        write_frame(&mut self.stream, &Request { req_id, payload }).await?;
+        loop {
+            match read_frame::<_, ServerMessage>(&mut self.stream).await? {
+                Some(ServerMessage::Response(resp)) if resp.req_id == req_id => {
+                    return Ok(resp.payload)
+                }
+                // Ignore stray responses (shouldn't happen) and unsolicited pushes.
+                Some(_) => continue,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "service closed the connection",
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Read the next server-initiated [`Push`](crate::Push), or `None` on a clean close.
+    /// Useful after `Subscribe`. (Responses, if any, are skipped.)
+    pub async fn next_push(&mut self) -> io::Result<Option<crate::Push>> {
+        loop {
+            match read_frame::<_, ServerMessage>(&mut self.stream).await? {
+                Some(ServerMessage::Push(push)) => return Ok(Some(push)),
+                Some(ServerMessage::Response(_)) => continue,
+                None => return Ok(None),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

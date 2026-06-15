@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 spark-core = { path = "../core" }
+spark-ipc = { path = "../ipc", features = ["stream"] }
 tokio.workspace = true
 clap.workspace = true
 tracing.workspace = true

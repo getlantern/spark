@@ -9,9 +9,22 @@ license.workspace = true
 name = "spark_service"
 path = "src/lib.rs"
 
+[[bin]]
+name = "spark-service"
+path = "src/main.rs"
+
 [dependencies]
 spark-ipc = { path = "../ipc", features = ["stream"] }
+spark-core = { path = "../core" }
 tokio.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+# Test-only: read the current uid/gid to build an "allow this user" auth policy for the
+# same-process unix-socket round-trip tests.
+libc = "0.2"

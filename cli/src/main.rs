@@ -1,14 +1,14 @@
-//! `spark` CLI driver.
+//! `spark` CLI.
 //!
-//! Bring up a TUN device, bridge it into the userspace netstack, and forward TCP and UDP
-//! flows to their original destinations — directly, or through a tunnel server when one is
-//! configured. Configuration comes from `--config <file.toml>` (the full schema, see
-//! `spark_core::config`) or, when that is absent, from the individual flags below.
+//! Two modes, by subcommand:
+//! - `spark run …` — bring the tunnel up **in-process** (the dev driver): open the TUN,
+//!   bridge it into the netstack, and forward TCP/UDP directly or through a tunnel server.
+//! - `spark connect|disconnect|status …` — act as the unprivileged **control client** for a
+//!   running `spark-service` daemon, over its unix-socket control channel.
 //!
 //! Log hygiene (a product privacy property, see `docs/GOAL.md`): source/destination
-//! addresses are emitted only at `debug`, and at the default level the log writer also
-//! redacts any IP literal as a backstop. Run with `--debug` (or `RUST_LOG=debug`) to see
-//! addresses and disable redaction.
+//! addresses are emitted only at `debug`, and at the default level the log writer redacts IP
+//! literals as a backstop. Run with `--debug` (or `RUST_LOG=debug`) to see addresses.
 
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use spark_core::config::{self, Config};
 use spark_core::netstack::SmoltcpNetstack;
 use spark_core::proxy;
@@ -25,6 +25,8 @@ use spark_core::redact::redact_addrs;
 use spark_core::transport::tcp_tunnel::client::TunnelClient;
 use spark_core::transport::{DirectTransport, Transport, UdpTransport};
 use spark_core::tun::Tun;
+use spark_ipc::{Client, RequestPayload, ResponsePayload};
+use tokio::net::UnixStream;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -32,40 +34,49 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "spark", version, about)]
 struct Cli {
-    /// Load the full configuration from a TOML file. When set, the individual flags below
-    /// are ignored.
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the tunnel in-process (dev driver). Requires privilege to open the TUN.
+    Run(RunArgs),
+    /// Tell a running spark-service to bring the tunnel up.
+    Connect(CtlArgs),
+    /// Tell a running spark-service to tear the tunnel down.
+    Disconnect(CtlArgs),
+    /// Print the tunnel status from a running spark-service.
+    Status(CtlArgs),
+}
+
+/// Flags for the in-process `run` driver.
+#[derive(Args, Debug)]
+struct RunArgs {
+    /// Load the full configuration from a TOML file. When set, the other flags are ignored.
     #[arg(long)]
     config: Option<PathBuf>,
-
     /// Requested TUN device name (the OS may assign a different one).
     #[arg(long)]
     name: Option<String>,
-
     /// IPv4 address to assign to the TUN interface.
     #[arg(long, default_value = "10.0.0.1")]
     addr: Ipv4Addr,
-
     /// IPv4 prefix length for the interface address.
     #[arg(long, default_value_t = 24)]
     prefix: u8,
-
     /// MTU for the TUN interface (defaults to the device's own MTU when unset).
     #[arg(long)]
     mtu: Option<u16>,
-
-    /// Tunnel server address (`host:port`). When set, flows are tunneled through it;
-    /// when omitted, flows are dialed directly to their original destination.
+    /// Tunnel server address (`host:port`); omit to dial destinations directly.
     #[arg(long)]
     server: Option<SocketAddr>,
-
-    /// Log source/destination addresses too and disable redaction (equivalent to
-    /// `RUST_LOG=debug`). Off by default for log hygiene.
+    /// Log source/destination addresses too and disable redaction.
     #[arg(long)]
     debug: bool,
 }
 
-impl Cli {
-    /// Build a [`Config`] from the individual flags (used when `--config` is not given).
+impl RunArgs {
     fn to_config(&self) -> Config {
         Config {
             tun: config::TunConfig {
@@ -83,14 +94,30 @@ impl Cli {
     }
 }
 
+/// Flags for the control-client subcommands.
+#[derive(Args, Debug)]
+struct CtlArgs {
+    /// Control socket of the running spark-service.
+    #[arg(long, default_value = "/var/run/spark.sock")]
+    socket: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    match Cli::parse().command {
+        Command::Run(args) => run_tunnel(args).await,
+        Command::Connect(ctl) => control(ctl.socket, RequestPayload::Connect).await,
+        Command::Disconnect(ctl) => control(ctl.socket, RequestPayload::Disconnect).await,
+        Command::Status(ctl) => control(ctl.socket, RequestPayload::GetStatus).await,
+    }
+}
 
-    let config = match &cli.config {
+/// The in-process driver (the former all-in-one behavior).
+async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
+    let config = match &args.config {
         Some(path) => Config::from_path(path)
             .with_context(|| format!("loading config from {}", path.display()))?,
-        None => cli.to_config(),
+        None => args.to_config(),
     };
 
     init_tracing(config.log.debug);
@@ -107,7 +134,6 @@ async fn main() -> anyhow::Result<()> {
     let name = tun.name().context("reading TUN device name")?;
     let mtu = tun.mtu();
 
-    // One underlying transport serves both the TCP and UDP forwarders.
     let (tcp_transport, udp_transport): (Arc<dyn Transport>, Arc<dyn UdpTransport>) = match config
         .transport
         .server
@@ -130,8 +156,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut netstack = SmoltcpNetstack::new(Arc::clone(&tun)).context("starting the netstack")?;
 
-    // Drive the UDP path on the netstack's UDP surface (taken before the netstack moves into
-    // the TCP accept loop).
     let idle_timeout = Duration::from_secs(config.udp.idle_timeout_secs);
     if let Some((udp_inbound, udp_reply)) = netstack.take_udp() {
         tokio::spawn(proxy::udp::run_udp(
@@ -151,17 +175,40 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Dropping `netstack` (in either branch's future) aborts the runner + bridge + UDP drain
-    // tasks; dropping the last `Tun` reference tears the OS device down. Make that explicit
-    // and ordered so teardown is deterministic.
     drop(tun);
     info!("shut down cleanly");
     Ok(())
 }
 
-/// Initialize tracing. `RUST_LOG` wins if set; otherwise `debug` selects the `debug` level
-/// and the default is `info`. Unless in debug mode, the writer redacts IP literals as a
-/// privacy backstop on top of the level convention.
+/// Connect to a running spark-service, handshake, issue one command, and print the result.
+async fn control(socket: PathBuf, payload: RequestPayload) -> anyhow::Result<()> {
+    let stream = UnixStream::connect(&socket)
+        .await
+        .with_context(|| format!("connecting to spark-service at {}", socket.display()))?;
+    let mut client = Client::new(stream);
+    client
+        .handshake()
+        .await
+        .context("control handshake with the service")?;
+
+    match client.request(payload).await.context("control request")? {
+        ResponsePayload::Ack => println!("ok"),
+        ResponsePayload::Status(s) => {
+            println!("state: {:?}", s.state);
+            if s.direct_fallback {
+                println!("WARNING: failed open — traffic is routing directly, not tunneled");
+            }
+        }
+        ResponsePayload::Error { code, message } => {
+            anyhow::bail!("service error [{code:?}]: {message}");
+        }
+        ResponsePayload::Hello { .. } => {}
+    }
+    Ok(())
+}
+
+/// Initialize tracing. `RUST_LOG` wins if set; otherwise `debug` selects `debug` and the
+/// default is `info`. Unless in debug mode, the writer redacts IP literals as a backstop.
 fn init_tracing(debug: bool) {
     let default = if debug { "debug" } else { "info" };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));

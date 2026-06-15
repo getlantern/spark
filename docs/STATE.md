@@ -4,10 +4,16 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
-- Milestone: **M7 — control-plane IPC + service split. SESSIONS 1+2 (no-root core) DONE
-  2026-06-14.** Design decided (`ipc-service-split-design-m7` memory). M2→M6 code-complete.
-  **Remaining (needs root): the live privileged gate** — `UnixListener` accept + real
-  `SO_PEERCRED` extraction + the real `TunnelEngine` (TUN + core) + `cli/` client subcommand.
+- Milestone: **M7 — control-plane IPC + service split. SESSIONS 1+2+3 CODE DONE 2026-06-14;
+  control plane LIVE-VERIFIED (no root) 2026-06-15.** Design in `ipc-service-split-design-m7`
+  memory. M2→M6 code-complete. **Remaining for M7 = the privileged data-path gate only** (TUN
+  bring-up + routing + curl through the service — needs root); shares the M1–M6 live-gate queue.
+- **M7 s3 live smoke (no root, real processes over a real unix socket):** `spark-service`
+  daemon + `spark` client verified end-to-end — peer-cred auth refuses a non-root uid under a
+  root-only policy AND allows it under `--spark-gid 20`; `Hello` handshake + `GetStatus`
+  (Disconnected) round-trip; `connect` → `CoreEngine::start` opens the TUN, fails cleanly
+  without root, and the structured `Error` propagates back through the IPC; status then shows
+  `Failed`. Only the actual privileged TUN+routing+curl is unverified.
 - Last gate passed: **M0**..**M6** as before; **M7 s1** (ipc protocol crate) + **M7 s2** (service
   no-root core) green 2026-06-14. s2: `spark-ipc` gained `ServerMessage` (response/push demux
   envelope) + a feature-gated async `stream` layer (`read_frame`/`write_frame`); `spark-service`
@@ -26,23 +32,23 @@
 ## Next chunk (exactly what the next session should do)
 Two independent tracks — pick by whether a privileged box is available:
 
-**(A) M7 session 3 — live privileged wiring (needs root).** The no-root core (s1+s2) is done.
-Remaining:
-1. `service/`: the `UnixListener` accept loop at `/run/spark/control.sock`, extracting real
-   `SO_PEERCRED` (uid/gid, + resolve `spark` supplementary-group membership) → `auth::AuthPolicy`;
-   the real `TunnelEngine` impl that brings up the TUN + runs `spark-core` (the existing
-   `SmoltcpNetstack` + proxy); privilege drop after device/route setup; supervision; fail-open
-   route-restore emitting `TunnelEvent::FellOpenToDirect`.
-2. `cli/`: a client subcommand that connects, does the `Hello` handshake, sends a command, and
-   prints the response/stream (reuses `spark-ipc` `read_frame`/`write_frame`).
-3. *Live gate (root):* unprivileged client drives the service to connect (curl passes); killing
-   the client leaves the tunnel up; killing the service restores direct routing + emits the drop
-   event; a fail-closed profile blocks instead; an unauthorized uid is refused; an incompatible
-   version handshake is rejected.
-   Refinement to fold in: drop-oldest + `Push::Dropped` accounting on subscriber backpressure
-   (s2 currently drops-newest, best-effort).
+**(A) Privileged live gates (root) — the box is privileged now.** Build the release binaries
+(`cargo build --release`), then run with `sudo`. Recommended order (verify the data path before
+the service layer, per build-order discipline):
+1. **Data path first (M1/M2):** `sudo ./target/release/spark run --addr 10.0.0.1 --prefix 24`
+   (macOS picks a `utunN`), then `ping 10.0.0.2` (M1) and the README M2 curl gate. Confirms the
+   TUN + netstack + forwarder work live on this box (never yet verified).
+2. **M7 data-path-through-service gate:** `sudo ./target/release/spark-service --socket
+   /var/run/spark.sock --spark-gid <gid>` (or run client as root); then `spark connect` →
+   tunnel comes up; `spark status` → Connected; curl gate passes; kill the **client** → tunnel
+   stays; kill the **service** → routing restored (+ `FellOpenToDirect`); unauthorized uid
+   refused (already shown); version mismatch rejected.
+3. **M5 UDP gate** (DNS/echo) and **M6 SIGINT/device-teardown** once the device is up.
+Then fold in the s2 refinements: real `SO_PEERCRED` supplementary-group resolution, route
+install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-oldest +
+`Push::Dropped` backpressure, socket perms (chown root:spark 0660).
 
-**(B) Root-gated live verification (human), do when a privileged window opens:**
+**(B) Other root-gated live verification, do when a privileged window opens:**
 - **M6 SIGINT/device-teardown gate** — bring the device up, send SIGINT, confirm the TUN
   interface is removed cleanly (Drop-driven). Also confirm default-level logs show no IPs
   during a real session (the redaction backstop + level convention).
@@ -123,6 +129,9 @@ Remaining:
   io::Result<BytesMut>>` + `Sink<BytesMut>`. We added only the `async` feature at M1.
 
 ## Baseline binary size
+- **M7 (s3):** two binaries now. `spark` = **1,240,448 bytes (~1.18 MB)** (+~17 KB over M6 —
+  the client mode links `spark-ipc` + postcard). `spark-service` (new daemon) = **1,257,344
+  bytes (~1.20 MB)** (core + ipc + service). Both well under the 3 MB budget.
 - **M6:** `target/release/spark` = **1,223,760 bytes (~1.17 MB)**, stripped Mach-O arm64.
   +~114 KB over M5 — `toml` + `serde` pull in a real TOML parser/serializer (the largest
   single dep jump so far). Budget <3 MB — still comfortable, but watch dep weight from here.
@@ -140,6 +149,17 @@ Remaining:
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (M7 s3): **Live daemon path — `spark-service` binary + `spark` client subcommands;
+  peer creds via tokio `UnixStream::peer_cred` (no libc).** `service::listener::serve` accepts on
+  a `UnixListener`, reads `peer_cred()` (works on macOS via `LOCAL_PEERCRED`/`getpeereid`, Linux
+  via `SO_PEERCRED`), applies `AuthPolicy`, spawns `serve_connection`. `engine::CoreEngine` is the
+  real `TunnelEngine` (opens TUN, runs `SmoltcpNetstack` + proxy — same as `spark run`; needs
+  root). `cli` refactored to subcommands: `run` (in-process driver) + `connect`/`disconnect`/
+  `status` (control client via `ipc::Client`). `ipc::Client` (stream feature) does the handshake
+  + request, skipping interleaved pushes. **Control plane live-verified without root** over a real
+  unix socket (auth refuse+allow, handshake, status, connect→clean-error, state→Failed). `libc`
+  is a service dev-dep only (test `getuid`). Binaries: `spark` ~1.18 MB (+ipc/postcard for client),
+  `spark-service` ~1.20 MB. Privileged TUN+routing+curl gate still pending (shares M1–M6 queue).
 - 2026-06-14 (M7 s2): **Service = actor event loop; `ServerMessage` demux envelope; feature-gated
   async `stream` layer; auth policy pure+testable.** Added `ipc::ServerMessage` (Response|Push) so
   the client can demux replies from pushes on one connection (gap found while wiring s2). Async
@@ -296,5 +316,5 @@ Remaining:
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
   [~] M5 (code complete: framing + NAT table + transports + orchestration + netstack UDP, green; live DNS gate pending root)
   [~] M6 (config + redaction + CLI green+tested; live SIGINT/device-teardown gate pending root)
-- [~] M7 (s1 `ipc/` + s2 service no-root core green+tested; s3 live unix-socket/SO_PEERCRED/real-engine/cli-client + gate pending root)
+- [~] M7 (s1 ipc + s2 service + s3 daemon/listener/engine/cli-client all green; control plane live-verified no-root; privileged TUN+curl gate pending root)
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
