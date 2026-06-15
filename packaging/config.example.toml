@@ -1,0 +1,24 @@
+# Example spark-service configuration.
+# Install to /etc/spark/config.toml, adjust for your host, and reference it with --config.
+# Every field has a default, so anything you omit falls back; unknown keys are rejected.
+
+[tun]
+addr = "10.0.0.1"
+prefix = 24
+# name = "utun9"   # requested device name; the OS may assign a different one
+# mtu = 1500       # omit to use the device default
+
+[transport]
+# Pin the daemon's upstream dials to your physical egress interface so they bypass the tunnel
+# route (REQUIRED on macOS to avoid a forwarding loop; recommended on Linux). Set to your
+# internet-facing NIC:
+#   macOS:  route -n get default | awk '/interface:/{print $2}'   (often en0)
+#   Linux:  ip route show default | awk '{print $5; exit}'        (often eth0 / wlan0)
+protect_interface = "en0"
+# server = "203.0.113.1:8388"   # tunnel through a server; omit to dial destinations directly
+
+[udp]
+idle_timeout_secs = 60   # reclaim a UDP NAT association after this much silence
+
+[log]
+debug = false   # keep false in production — addresses are redacted at the default level

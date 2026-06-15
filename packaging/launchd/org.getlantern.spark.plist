@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  spark-service launchd daemon (macOS daemon-path distribution: CLI/Homebrew/enterprise).
+  Install to /Library/LaunchDaemons/org.getlantern.spark.plist (owned root:wheel, 0644) and
+  load with `sudo launchctl load /Library/LaunchDaemons/org.getlantern.spark.plist`.
+  LaunchDaemons run as root, which the TUN + routes require. (The App-Store/GUI macOS form
+  uses a NetworkExtension System Extension instead — that is the M10 Apple path, not this.)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.getlantern.spark</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/spark-service</string>
+        <string>--socket</string>
+        <string>/var/run/spark.sock</string>
+        <string>--config</string>
+        <string>/etc/spark/config.toml</string>
+        <!-- Root-only control by default. To allow a non-root group, add:
+             <string>&#45;&#45;spark-gid</string><string>GID</string> -->
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/var/log/spark-service.log</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/spark-service.log</string>
+</dict>
+</plist>

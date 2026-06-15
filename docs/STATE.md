@@ -6,10 +6,12 @@
 ## Current position
 - Milestone: **M7 — control-plane IPC + service split. DONE 2026-06-15** (code + through-the-
   service gate live-verified on macOS; design in `ipc-service-split-design-m7` memory). The full
-  desktop stack (M1–M7) is now live on macOS. **Next: M8 (desktop packaging + size budget) — no
-  root needed.** Remaining M7 refinements (kill-switch route-restore, supplementary-group
-  resolution, drop-oldest backpressure) and the M5 UDP / M4 tunnel-server / M6 SIGINT live gates
-  are tracked below.
+  desktop stack (M1–M7) is now live on macOS. **M8 packaging session 1 done 2026-06-15:**
+  cross-build checks (Linux full + Windows core/ipc), systemd/launchd units + example config in
+  `packaging/`, `scripts/size-budget.sh` (both binaries ~39% of the 3 MB budget). Remaining M8:
+  distro packages (deb/Homebrew/MSI), the Windows named-pipe transport, multi-platform run. M7
+  refinements (kill-switch route-restore, supplementary-group resolution, drop-oldest) + the M4
+  tunnel-server / M6 SIGINT live gates also pending.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
@@ -194,6 +196,16 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (M8 s1): **Desktop packaging — cross-build checks + service units + size gate.**
+  Release profile already locked (opt-level=z/lto=fat/cu=1/strip/panic=abort). `cargo check
+  --target` verified Linux (full workspace) and Windows (`spark-core`+`spark-ipc`); the Windows
+  control transport (`UnixListener`/`UnixStream` are unix-only) needs a named-pipe port before
+  `spark-service`/`spark` build there — tracked. `packaging/`: a `config.example.toml`, a
+  systemd unit (`spark.service`) and a launchd plist (`org.getlantern.spark.plist`) — both
+  config-driven, root-only control by default (opt into a group via `--spark-gid`), TUN defaults
+  10.0.0.1/24. `scripts/size-budget.sh` builds + fails over the 3 MB/binary budget (both ~1.20 MB
+  = 39%). macOS daemon path = launchd (the App-Store/iOS NE path is M10). Full distro packages
+  (deb/Homebrew/MSI) + multi-platform run deferred.
 - 2026-06-15 (socket protection): **`core::net::SocketProtector` pins upstream dials to a
   physical interface so they bypass the tunnel route (fixes the macOS forwarding loop).**
   `IP_BOUND_IF`/`IP_UNICAST_IF` via `socket2::bind_device_by_index_v4/v6` (feature `all`), index
@@ -374,4 +386,5 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 - [x] M7 (ipc + service + daemon/client; **through-the-service gate PASSED on macOS 2026-06-15** —
   client drove the daemon, traffic forwarded end-to-end. Remaining refinements: fail-open
   route-restore + `FellOpenToDirect` event, supplementary-group resolution, drop-oldest backpressure)
-- [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
+- [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget script/docs done; distro packages [deb/homebrew/MSI] + multi-platform run pending)
+  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)

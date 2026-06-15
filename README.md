@@ -76,6 +76,16 @@ debug = false   # log src/dst addresses and disable IP redaction (also: --debug,
 log writer additionally redacts any IP literal as a backstop — so default-level logs never
 contain destination IPs. `--debug` (or `debug = true`) disables both.
 
+## Packaging (desktop)
+
+Two binaries: the privileged `spark-service` daemon and the unprivileged `spark` client.
+Service-install units (systemd / launchd), an example config, the size-budget check, and the
+per-target cross-build status live in [`packaging/`](packaging/README.md). Quick check:
+
+```bash
+cargo build --release && ./scripts/size-budget.sh   # both binaries must be < 3 MB stripped
+```
+
 ### M1 ICMP-echo gate (requires root)
 
 `spark` brings up a TUN device, logs each IP packet, and answers ICMP echo requests.
