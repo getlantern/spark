@@ -68,15 +68,21 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 - Record routing cmds + poll/latency in the Decisions log and tick M1/M2/M4 as they pass.
 
 ## Blockers / waiting on human
-- **M1 live gate (pending, needs root):** run and confirm `ping` replies, then mark M1
-  fully passed. macOS: `sudo RUST_LOG=debug ./target/release/spark --addr 10.0.0.1
-  --prefix 24`, note the assigned `utunN` in the log, then `ping 10.0.0.2` (ping a *peer*
-  in the subnet, not 10.0.0.1 which the host answers locally). Linux: same with
-  `--name tun0`. Steps are in README "M1 ICMP-echo gate". This box has **no passwordless
-  sudo**, so the agent cannot run it.
-- Upcoming (not blocking yet): a simple TCP relay test server needed at **M3** (PLAN
-  Appendix B); if a transport TLS-wraps its relay, confirm the `rustls` client config
-  (verification + roots) before trusting it.
+- **M1 live ICMP gate — PASSED on macOS 2026-06-15.** `sudo spark run --addr 10.0.0.1
+  --prefix 24` brought up the `utunN` (ifconfig showed `inet 10.0.0.1`, UP), and
+  `ping 10.0.0.2` got replies with `rx proto=icmp` in the log. The TUN + netstack data path
+  is confirmed alive on a real OS. (Agent still has no passwordless sudo; the human ran it.)
+- **macOS TCP-curl gate is loop-blocked on a single machine (NOT a bug — platform).** macOS
+  has no `SO_BINDTODEVICE`, so getting traffic into the tun requires a *global* route to the
+  destination, which then also catches spark's own upstream dial (and a relay's) → infinite
+  loop. Clean live TCP/UDP gates therefore need EITHER a **Linux box** (`curl --interface
+  tun0` uses SO_BINDTODEVICE → per-socket, no global route, no loop) OR **macOS socket
+  protection** (`IP_BOUND_IF` on the upstream dials so spark's sockets bypass the tun route —
+  real platform work, also needed for a shipping macOS daemon; the Apple NE path gets this
+  from the OS for free). ICMP doesn't loop (answered by the netstack, no upstream dial), which
+  is why ping works. A relay server does NOT fix the macOS loop (the relay's dial loops too).
+- Upcoming (not blocking yet): if a transport TLS-wraps its relay, confirm the `rustls` client
+  config (verification + roots) before trusting it.
 
 ## Verified API facts (RE-CONFIRMED at M0 on rustc 1.93.1 against vendored 0.2.2 source — trust)
 - netstack-smoltcp **0.2.2** vendored at `vendor/netstack-smoltcp/` (src copied from the
@@ -310,7 +316,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 - Config format: TOML (alternate import formats deferred).
 
 ## Milestone checklist
-- [x] M0  [~] M1 (code+tests green; live ping gate pending root)
+- [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [~] M2 (session 1: bridge+forwarder green+unit-tested; live curl gate pending root)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
