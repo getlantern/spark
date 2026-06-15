@@ -10,6 +10,7 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod config;
+pub mod net;
 pub mod netstack;
 pub mod packet;
 pub mod proxy;

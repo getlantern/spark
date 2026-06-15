@@ -22,8 +22,7 @@ use spark_core::config::{self, Config};
 use spark_core::netstack::SmoltcpNetstack;
 use spark_core::proxy;
 use spark_core::redact::redact_addrs;
-use spark_core::transport::tcp_tunnel::client::TunnelClient;
-use spark_core::transport::{DirectTransport, Transport, UdpTransport};
+use spark_core::transport;
 use spark_core::tun::Tun;
 use spark_ipc::{Client, RequestPayload, ResponsePayload};
 use tokio::net::UnixStream;
@@ -71,6 +70,10 @@ struct RunArgs {
     /// Tunnel server address (`host:port`); omit to dial destinations directly.
     #[arg(long)]
     server: Option<SocketAddr>,
+    /// Physical interface to pin upstream sockets to (e.g. `en0`), so the proxy's own dials
+    /// bypass the tunnel route. Required on macOS to forward without a routing loop.
+    #[arg(long)]
+    protect_interface: Option<String>,
     /// Log source/destination addresses too and disable redaction.
     #[arg(long)]
     debug: bool,
@@ -87,6 +90,7 @@ impl RunArgs {
             },
             transport: config::TransportConfig {
                 server: self.server,
+                protect_interface: self.protect_interface.clone(),
             },
             udp: config::UdpConfig::default(),
             log: config::LogConfig { debug: self.debug },
@@ -134,25 +138,16 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
     let name = tun.name().context("reading TUN device name")?;
     let mtu = tun.mtu();
 
-    let (tcp_transport, udp_transport): (Arc<dyn Transport>, Arc<dyn UdpTransport>) = match config
-        .transport
-        .server
-    {
+    match &config.transport.server {
         Some(server) => {
-            info!(device = %name, mtu, addr = %config.tun.addr, %server, "TUN up — tunneling TCP+UDP through server; Ctrl-C to stop");
-            let client = Arc::new(TunnelClient::new(server));
-            let tcp: Arc<dyn Transport> = client.clone();
-            let udp: Arc<dyn UdpTransport> = client;
-            (tcp, udp)
+            info!(device = %name, mtu, addr = %config.tun.addr, %server, "TUN up — tunneling TCP+UDP through server; Ctrl-C to stop")
         }
         None => {
-            info!(device = %name, mtu, addr = %config.tun.addr, "TUN up — forwarding TCP+UDP directly (no tunnel); Ctrl-C to stop");
-            let direct = Arc::new(DirectTransport);
-            let tcp: Arc<dyn Transport> = direct.clone();
-            let udp: Arc<dyn UdpTransport> = direct;
-            (tcp, udp)
+            info!(device = %name, mtu, addr = %config.tun.addr, "TUN up — forwarding TCP+UDP directly (no tunnel); Ctrl-C to stop")
         }
-    };
+    }
+    let (tcp_transport, udp_transport) =
+        transport::from_config(&config).context("building the transport")?;
 
     let mut netstack = SmoltcpNetstack::new(Arc::clone(&tun)).context("starting the netstack")?;
 

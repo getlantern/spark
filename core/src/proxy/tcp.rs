@@ -128,7 +128,7 @@ mod tests {
     #[tokio::test]
     async fn forwards_directly_to_original_dst() {
         let echo = spawn_echo().await;
-        assert_echo_through(Arc::new(DirectTransport), echo).await;
+        assert_echo_through(Arc::new(DirectTransport::default()), echo).await;
     }
 
     /// `TunnelClient`: the same flow, but the forwarder dials through a tunnel server. This

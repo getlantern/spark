@@ -76,6 +76,11 @@ pub struct TransportConfig {
     /// are dialed directly to their original destination.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server: Option<SocketAddr>,
+    /// Physical interface to pin upstream sockets to (e.g. `"en0"`), so the proxy's own
+    /// dials bypass the tunnel route. Required on macOS to forward without a routing loop;
+    /// `None` leaves sockets on the default route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protect_interface: Option<String>,
 }
 
 /// UDP forwarding settings.
@@ -204,6 +209,7 @@ mod tests {
                 },
                 transport: TransportConfig {
                     server: Some("[2001:db8::1]:443".parse().unwrap()),
+                    protect_interface: Some("en0".into()),
                 },
                 udp: UdpConfig {
                     idle_timeout_secs: 30,

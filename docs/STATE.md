@@ -32,12 +32,19 @@
 ## Next chunk (exactly what the next session should do)
 Two independent tracks — pick by whether a privileged box is available:
 
-**(A) Privileged live gates (root) — the box is privileged now.** Build the release binaries
-(`cargo build --release`), then run with `sudo`. Recommended order (verify the data path before
-the service layer, per build-order discipline):
-1. **Data path first (M1/M2):** `sudo ./target/release/spark run --addr 10.0.0.1 --prefix 24`
-   (macOS picks a `utunN`), then `ping 10.0.0.2` (M1) and the README M2 curl gate. Confirms the
-   TUN + netstack + forwarder work live on this box (never yet verified).
+**(A) Privileged live gates (root) — the box is privileged now.** Build (`cargo build --release`),
+then run with `sudo`. **macOS curl recipe (loop-free via socket protection):**
+```
+EGRESS=$(route -n get default | awk '/interface:/{print $2}')   # e.g. en0
+sudo ./target/release/spark run --addr 10.0.0.1 --prefix 24 --protect-interface "$EGRESS"
+# note device=utunN in the log; in another terminal:
+sudo route -n add -host 1.1.1.1 -interface utunN     # send just this dest into the tun
+curl -v --max-time 10 https://1.1.1.1                # spark dials 1.1.1.1 pinned to $EGRESS → no loop
+sudo route -n delete -host 1.1.1.1                   # cleanup
+```
+1. **M1 PASSED** (ping 10.0.0.2). **M2 curl** is now runnable on macOS via the recipe above
+   (socket protection breaks the loop). Linux alternative: `curl --interface tun0` (no route/
+   protect needed — SO_BINDTODEVICE).
 2. **M7 data-path-through-service gate:** `sudo ./target/release/spark-service --socket
    /var/run/spark.sock --spark-gid <gid>` (or run client as root); then `spark connect` →
    tunnel comes up; `spark status` → Connected; curl gate passes; kill the **client** → tunnel
@@ -72,15 +79,14 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   --prefix 24` brought up the `utunN` (ifconfig showed `inet 10.0.0.1`, UP), and
   `ping 10.0.0.2` got replies with `rx proto=icmp` in the log. The TUN + netstack data path
   is confirmed alive on a real OS. (Agent still has no passwordless sudo; the human ran it.)
-- **macOS TCP-curl gate is loop-blocked on a single machine (NOT a bug — platform).** macOS
-  has no `SO_BINDTODEVICE`, so getting traffic into the tun requires a *global* route to the
-  destination, which then also catches spark's own upstream dial (and a relay's) → infinite
-  loop. Clean live TCP/UDP gates therefore need EITHER a **Linux box** (`curl --interface
-  tun0` uses SO_BINDTODEVICE → per-socket, no global route, no loop) OR **macOS socket
-  protection** (`IP_BOUND_IF` on the upstream dials so spark's sockets bypass the tun route —
-  real platform work, also needed for a shipping macOS daemon; the Apple NE path gets this
-  from the OS for free). ICMP doesn't loop (answered by the netstack, no upstream dial), which
-  is why ping works. A relay server does NOT fix the macOS loop (the relay's dial loops too).
+- **macOS TCP loop — SOLVED via socket protection 2026-06-15.** `core/src/net.rs`
+  `SocketProtector` pins upstream dials to a physical interface (`IP_BOUND_IF`/`IP_UNICAST_IF`
+  via `socket2::bind_device_by_index_v4/v6`, index from `libc::if_nametoindex`), so spark's
+  own dial bypasses the global route-into-the-tun → no loop. Wired through `transport::from_config`
+  + the `--protect-interface <if>` flag / `[transport] protect_interface` config. **IP_BOUND_IF
+  verified working on this box** (the `protect_binds_a_socket_without_error` test passes, no root).
+  The live curl gate is now runnable here — see "Next chunk (A)". (Linux also works via the same
+  binding; the Apple NE path gets protection from the OS instead.)
 - Upcoming (not blocking yet): if a transport TLS-wraps its relay, confirm the `rustls` client
   config (verification + roots) before trusting it.
 
@@ -135,9 +141,11 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   io::Result<BytesMut>>` + `Sink<BytesMut>`. We added only the `async` feature at M1.
 
 ## Baseline binary size
-- **M7 (s3):** two binaries now. `spark` = **1,240,448 bytes (~1.18 MB)** (+~17 KB over M6 —
-  the client mode links `spark-ipc` + postcard). `spark-service` (new daemon) = **1,257,344
-  bytes (~1.20 MB)** (core + ipc + service). Both well under the 3 MB budget.
+- **socket protection:** `spark` = **1,256,976 bytes (~1.20 MB)**, `spark-service` =
+  **1,257,360 bytes (~1.20 MB)** — +~16 KB on `spark` for the protected-connect path (`socket2`
+  was already transitive via tokio; `libc` is tiny). Both well under the 3 MB budget.
+- **M7 (s3):** two binaries: `spark` = **1,240,448 bytes (~1.18 MB)** (client mode links
+  `spark-ipc` + postcard). `spark-service` = **1,257,344 bytes (~1.20 MB)** (core + ipc + service).
 - **M6:** `target/release/spark` = **1,223,760 bytes (~1.17 MB)**, stripped Mach-O arm64.
   +~114 KB over M5 — `toml` + `serde` pull in a real TOML parser/serializer (the largest
   single dep jump so far). Budget <3 MB — still comfortable, but watch dep weight from here.
@@ -155,6 +163,16 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (socket protection): **`core::net::SocketProtector` pins upstream dials to a
+  physical interface so they bypass the tunnel route (fixes the macOS forwarding loop).**
+  `IP_BOUND_IF`/`IP_UNICAST_IF` via `socket2::bind_device_by_index_v4/v6` (feature `all`), index
+  from `libc::if_nametoindex`; no-op on platforms without it. TCP via `tokio::TcpSocket` +
+  `SockRef` pre-connect; UDP built via `socket2::Socket` then `UdpSocket::from_std`. Both
+  `DirectTransport` and `TunnelClient` carry `Option<SocketProtector>`; built centrally by the
+  new `transport::from_config(&Config)` (used by `spark run` and `CoreEngine`). New
+  `[transport] protect_interface` config + `--protect-interface` flag. Verified live (no root)
+  that the setsockopt applies on macOS. Deps added: `socket2` (already transitive via tokio),
+  `libc`. Sizes ~1.20 MB each.
 - 2026-06-15 (M7 s3): **Live daemon path — `spark-service` binary + `spark` client subcommands;
   peer creds via tokio `UnixStream::peer_cred` (no libc).** `service::listener::serve` accepts on
   a `UnixListener`, reads `peer_cred()` (works on macOS via `LOCAL_PEERCRED`/`getpeereid`, Linux

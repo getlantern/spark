@@ -29,6 +29,10 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Control-plane IPC wire codec (CLAUDE.md locked stack). `use-std` for `to_stdvec` + std error.
 postcard = { version = "1", features = ["use-std"] }
+# Socket protection (IP_BOUND_IF / IP_UNICAST_IF) so upstream dials bypass the tunnel route;
+# `all` enables bind_device_by_index_*. `libc` for if_nametoindex (name → interface index).
+socket2 = { version = "0.6", features = ["all"] }
+libc = "0.2"
 thiserror = "2"
 anyhow = "1"
 

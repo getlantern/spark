@@ -351,7 +351,7 @@ mod tests {
         tokio::spawn(run_udp(
             in_rx,
             reply_tx,
-            Arc::new(DirectTransport),
+            Arc::new(DirectTransport::default()),
             Duration::from_secs(30),
         ));
 

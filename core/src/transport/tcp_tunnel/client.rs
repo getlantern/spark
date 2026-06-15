@@ -11,7 +11,10 @@ use tokio::net::TcpStream;
 use super::header::Address;
 use super::stream::TunnelStream;
 use super::udp::{udp_associate_sentinel, TunnelUdpSink, TunnelUdpSource};
-use crate::transport::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
+use crate::net::SocketProtector;
+use crate::transport::{
+    protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport,
+};
 use crate::BoxedStream;
 
 /// A client for the plain TCP tunnel. Holds the tunnel server address; each dial opens a
@@ -23,19 +26,31 @@ use crate::BoxedStream;
 /// connection to the server (a different address) follows the normal route.
 pub struct TunnelClient {
     server: SocketAddr,
+    protector: Option<SocketProtector>,
 }
 
 impl TunnelClient {
     /// Create a client that tunnels through the server at `server`.
     pub fn new(server: SocketAddr) -> Self {
-        Self { server }
+        Self {
+            server,
+            protector: None,
+        }
+    }
+
+    /// Pin the connections to the tunnel server to a physical interface, so they bypass the
+    /// tunnel route (avoiding a loop when the server's address is itself routed into the TUN —
+    /// and the standard protection a privileged daemon needs).
+    pub fn with_socket_protection(mut self, protector: SocketProtector) -> Self {
+        self.protector = Some(protector);
+        self
     }
 
     /// Connect to the tunnel server, send the `target` address header, and return a relay
     /// stream. This is the address-typed entry point (it accepts domain targets); the
     /// [`Transport`] impl is the `SocketAddr` interface the proxy core uses.
     pub async fn dial(&self, target: Address) -> io::Result<TunnelStream<TcpStream>> {
-        let mut conn = TcpStream::connect(self.server).await?;
+        let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         let mut header = BytesMut::with_capacity(target.encoded_len());
         target.encode(&mut header);
         conn.write_all(&header).await?;
@@ -62,7 +77,7 @@ impl UdpTransport for TunnelClient {
         // UDP-associate handshake: send the magic sentinel (so the server switches to UDP
         // relay mode without changing the TCP header format), then the real target once
         // (connect-mode). After that the stream carries `[u16 len][payload]` datagrams.
-        let mut conn = TcpStream::connect(self.server).await?;
+        let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         let mut header = BytesMut::new();
         udp_associate_sentinel().encode(&mut header);
         Address::Ip(target).encode(&mut header);

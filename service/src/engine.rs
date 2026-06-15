@@ -15,8 +15,7 @@ use tokio::task::JoinHandle;
 use spark_core::config::Config;
 use spark_core::netstack::SmoltcpNetstack;
 use spark_core::proxy;
-use spark_core::transport::tcp_tunnel::client::TunnelClient;
-use spark_core::transport::{DirectTransport, Transport, UdpTransport};
+use spark_core::transport;
 use spark_core::tun::{Tun, TunConfig};
 
 /// An error from bringing the tunnel up or down.
@@ -72,21 +71,8 @@ impl TunnelEngine for CoreEngine {
             .map_err(|e| EngineError(format!("opening TUN device: {e}")))?,
         );
 
-        let (tcp_transport, udp_transport): (Arc<dyn Transport>, Arc<dyn UdpTransport>) =
-            match self.config.transport.server {
-                Some(server) => {
-                    let client = Arc::new(TunnelClient::new(server));
-                    let tcp: Arc<dyn Transport> = client.clone();
-                    let udp: Arc<dyn UdpTransport> = client;
-                    (tcp, udp)
-                }
-                None => {
-                    let direct = Arc::new(DirectTransport);
-                    let tcp: Arc<dyn Transport> = direct.clone();
-                    let udp: Arc<dyn UdpTransport> = direct;
-                    (tcp, udp)
-                }
-            };
+        let (tcp_transport, udp_transport) = transport::from_config(&self.config)
+            .map_err(|e| EngineError(format!("building transport: {e}")))?;
 
         let mut netstack = SmoltcpNetstack::new(Arc::clone(&tun))
             .map_err(|e| EngineError(format!("starting the netstack: {e}")))?;

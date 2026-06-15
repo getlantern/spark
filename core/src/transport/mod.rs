@@ -20,11 +20,85 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::net::{TcpStream, UdpSocket};
+use socket2::SockRef;
+use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
+use crate::config::Config;
+use crate::net::SocketProtector;
 use crate::BoxedStream;
 
 pub mod tcp_tunnel;
+
+/// Connect a TCP stream to `addr`, optionally pinning the socket to a physical interface
+/// (so the dial bypasses the tunnel route — see [`SocketProtector`]). Shared by
+/// [`DirectTransport`] and the tunnel client (which dials its server).
+pub(crate) async fn protected_tcp_connect(
+    addr: SocketAddr,
+    protector: Option<&SocketProtector>,
+) -> io::Result<TcpStream> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    if let Some(p) = protector {
+        p.protect(SockRef::from(&socket), addr.is_ipv4())?;
+    }
+    socket.connect(addr).await
+}
+
+/// Build a connected UDP socket to `target`, optionally pinned to a physical interface.
+fn protected_udp_socket(
+    target: SocketAddr,
+    protector: Option<&SocketProtector>,
+) -> io::Result<socket2::Socket> {
+    let domain = if target.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    if let Some(p) = protector {
+        p.protect(SockRef::from(&socket), target.is_ipv4())?;
+    }
+    let bind = if target.is_ipv4() {
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+    };
+    socket.bind(&bind.into())?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
+}
+
+/// Build the TCP + UDP transports from `config`: a tunnel client when `transport.server` is
+/// set, otherwise direct; both pinned to `transport.protect_interface` when configured.
+pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let protector = match config.transport.protect_interface.as_deref() {
+        Some(name) => Some(SocketProtector::for_interface(name)?),
+        None => None,
+    };
+    Ok(match config.transport.server {
+        Some(server) => {
+            let mut client = tcp_tunnel::client::TunnelClient::new(server);
+            if let Some(p) = protector {
+                client = client.with_socket_protection(p);
+            }
+            let client = Arc::new(client);
+            (
+                client.clone() as Arc<dyn Transport>,
+                client as Arc<dyn UdpTransport>,
+            )
+        }
+        None => {
+            let direct = Arc::new(DirectTransport::new(protector));
+            (
+                direct.clone() as Arc<dyn Transport>,
+                direct as Arc<dyn UdpTransport>,
+            )
+        }
+    })
+}
 
 /// A way to obtain a bidirectional byte stream to a target address.
 ///
@@ -75,13 +149,24 @@ pub trait UdpTransport: Send + Sync {
 }
 
 /// Connects/sends straight to the target with no tunnel — the direct behavior, expressed as
-/// both a [`Transport`] (TCP) and a [`UdpTransport`] (UDP).
-pub struct DirectTransport;
+/// both a [`Transport`] (TCP) and a [`UdpTransport`] (UDP). An optional [`SocketProtector`]
+/// pins its dials to a physical interface so they bypass the tunnel route.
+#[derive(Default)]
+pub struct DirectTransport {
+    protector: Option<SocketProtector>,
+}
+
+impl DirectTransport {
+    /// A direct transport, optionally pinning outbound sockets to a physical interface.
+    pub fn new(protector: Option<SocketProtector>) -> Self {
+        Self { protector }
+    }
+}
 
 #[async_trait]
 impl Transport for DirectTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
-        let stream = TcpStream::connect(target).await?;
+        let stream = protected_tcp_connect(target, self.protector.as_ref()).await?;
         Ok(Box::new(stream))
     }
 }
@@ -92,14 +177,10 @@ impl UdpTransport for DirectTransport {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        // Bind an ephemeral local socket in the target's address family, then `connect` so
-        // send/recv talk only to `target`.
-        let bind = if target.is_ipv4() {
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-        } else {
-            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
-        };
-        let socket = UdpSocket::bind(bind).await?;
+        // Build an ephemeral socket (pinned to the protected interface if any), then
+        // `connect` so send/recv talk only to `target`.
+        let socket = protected_udp_socket(target, self.protector.as_ref())?;
+        let socket = UdpSocket::from_std(socket.into())?;
         socket.connect(target).await?;
         let socket = Arc::new(socket);
         Ok((
