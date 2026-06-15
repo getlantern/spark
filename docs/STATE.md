@@ -8,6 +8,9 @@
   control plane LIVE-VERIFIED (no root) 2026-06-15.** Design in `ipc-service-split-design-m7`
   memory. M2→M6 code-complete. **Remaining for M7 = the privileged data-path gate only** (TUN
   bring-up + routing + curl through the service — needs root); shares the M1–M6 live-gate queue.
+- **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
+  netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
+  end-to-end. M1 (ICMP) + M2 (TCP) now both live. Next live: M7 through-the-service + M5 UDP.
 - **M7 s3 live smoke (no root, real processes over a real unix socket):** `spark-service`
   daemon + `spark` client verified end-to-end — peer-cred auth refuses a non-root uid under a
   root-only policy AND allows it under `--spark-gid 20`; `Hello` handshake + `GetStatus`
@@ -42,9 +45,24 @@ sudo route -n add -host 1.1.1.1 -interface utunN     # send just this dest into 
 curl -v --max-time 10 https://1.1.1.1                # spark dials 1.1.1.1 pinned to $EGRESS → no loop
 sudo route -n delete -host 1.1.1.1                   # cleanup
 ```
-1. **M1 PASSED** (ping 10.0.0.2). **M2 curl** is now runnable on macOS via the recipe above
-   (socket protection breaks the loop). Linux alternative: `curl --interface tun0` (no route/
-   protect needed — SO_BINDTODEVICE).
+1. **M1 PASSED** (ping). **M2 curl PASSED on macOS 2026-06-15** via the recipe above (socket
+   protection breaks the loop). The direct TCP data path is live-verified end-to-end.
+2. **M7 through-the-service gate (now runnable):** `spark-service` has a `--protect-interface`
+   flag too. Run:
+   ```
+   sudo ./target/release/spark-service --socket /tmp/spark.sock --spark-gid $(id -g) --protect-interface "$EGRESS"
+   sudo route -n add -host 1.1.1.1 -interface <utunN>   # device from the daemon's log
+   ./target/release/spark connect --socket /tmp/spark.sock   # → ok; tunnel up
+   ./target/release/spark status  --socket /tmp/spark.sock   # → Connected
+   curl -v --max-time 10 https://1.1.1.1                     # flows through the daemon
+   # kill the client → tunnel stays; kill the daemon → routing reverts
+   ```
+   (Daemon TUN defaults to 10.0.0.1/24; pass `--config` for other settings.)
+3. **M5 UDP gate:** route a resolver into the tun, e.g.
+   `sudo route -n add -host 9.9.9.9 -interface <utunN>`, then
+   `dig @9.9.9.9 example.com` (or `nslookup example.com 9.9.9.9`) while `spark run
+   --protect-interface "$EGRESS"` is up — expect an answer + a UDP association in the log.
+   Linux alternative for TCP: `curl --interface tun0` (no route/protect needed).
 2. **M7 data-path-through-service gate:** `sudo ./target/release/spark-service --socket
    /var/run/spark.sock --spark-gid <gid>` (or run client as root); then `spark connect` →
    tunnel comes up; `spark status` → Connected; curl gate passes; kill the **client** → tunnel
@@ -335,7 +353,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 
 ## Milestone checklist
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
-  [~] M2 (session 1: bridge+forwarder green+unit-tested; live curl gate pending root)
+  [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
   [~] M4 (Transport trait + wiring + CLI flag green; live curl-through-server gate pending root)
   [~] M5 (code complete: framing + NAT table + transports + orchestration + netstack UDP, green; live DNS gate pending root)

@@ -33,6 +33,12 @@ struct Args {
     /// only root may connect.
     #[arg(long)]
     spark_gid: Option<u32>,
+
+    /// Physical interface to pin upstream sockets to (e.g. `en0`), so the daemon's own dials
+    /// bypass the tunnel route. Overrides `[transport] protect_interface` from the config.
+    /// Required on macOS to forward without a routing loop.
+    #[arg(long)]
+    protect_interface: Option<String>,
 }
 
 #[tokio::main]
@@ -44,11 +50,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let config = match &args.config {
+    let mut config = match &args.config {
         Some(path) => Config::from_path(path)
             .with_context(|| format!("loading config from {}", path.display()))?,
         None => Config::default(),
     };
+    // A `--protect-interface` flag overrides the config field for convenience.
+    if args.protect_interface.is_some() {
+        config.transport.protect_interface = args.protect_interface.clone();
+    }
 
     // The event loop owns the engine + tunnel state; connections talk to it over `cmd_tx`.
     let (cmd_tx, cmd_rx) = channel();
