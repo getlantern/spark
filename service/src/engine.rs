@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::task::JoinHandle;
+use tracing::info;
 
 use spark_core::config::Config;
 use spark_core::netstack::SmoltcpNetstack;
@@ -70,6 +71,9 @@ impl TunnelEngine for CoreEngine {
             })
             .map_err(|e| EngineError(format!("opening TUN device: {e}")))?,
         );
+        let device = tun.name().unwrap_or_else(|_| "?".to_string());
+        let tunneled = self.config.transport.server.is_some();
+        info!(device = %device, addr = %self.config.tun.addr, tunneled, "tunnel up");
 
         let (tcp_transport, udp_transport) = transport::from_config(&self.config)
             .map_err(|e| EngineError(format!("building transport: {e}")))?;
@@ -97,7 +101,10 @@ impl TunnelEngine for CoreEngine {
             task.abort();
         }
         // Dropping the last `Tun` reference tears the OS device down (and restores routing).
-        self.tun = None;
+        let was_up = self.tun.take().is_some();
+        if was_up {
+            info!("tunnel down");
+        }
         Ok(())
     }
 }

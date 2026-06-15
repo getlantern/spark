@@ -47,12 +47,13 @@ sudo route -n delete -host 1.1.1.1                   # cleanup
 ```
 1. **M1 PASSED** (ping). **M2 curl PASSED on macOS 2026-06-15** via the recipe above (socket
    protection breaks the loop). The direct TCP data path is live-verified end-to-end.
-2. **M7 through-the-service gate (now runnable):** `spark-service` has a `--protect-interface`
-   flag too. Run:
+2. **M7 through-the-service gate (now runnable).** NB: the daemon creates the TUN on `connect`,
+   NOT at startup — so `connect` comes first, and the device name appears in the daemon log
+   (`tunnel up device=utunN`) only then.
    ```
    sudo ./target/release/spark-service --socket /tmp/spark.sock --spark-gid $(id -g) --protect-interface "$EGRESS"
-   sudo route -n add -host 1.1.1.1 -interface <utunN>   # device from the daemon's log
-   ./target/release/spark connect --socket /tmp/spark.sock   # → ok; tunnel up
+   ./target/release/spark connect --socket /tmp/spark.sock   # → ok; daemon logs "tunnel up device=utunN"
+   sudo route -n add -host 1.1.1.1 -interface <utunN>        # use the device from that log line
    ./target/release/spark status  --socket /tmp/spark.sock   # → Connected
    curl -v --max-time 10 https://1.1.1.1                     # flows through the daemon
    # kill the client → tunnel stays; kill the daemon → routing reverts
