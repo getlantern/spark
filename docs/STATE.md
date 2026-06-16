@@ -12,8 +12,14 @@
   transport done 2026-06-15** — the *whole* workspace now cross-builds for Windows
   (`cargo check --target x86_64-pc-windows-msvc`, warning-free), not just core/ipc: `service::pipe`
   serves an admin-only named pipe (SDDL DACL = the auth boundary, no `SO_PEERCRED` analog), and
-  `main.rs`/`cli` cfg-split the bind/connect. Remaining M8: distro packages (deb/Homebrew/MSI),
-  multi-platform release builds + a live Windows run.
+  `main.rs`/`cli` cfg-split the bind/connect. **M8 packaging session 2 done 2026-06-15:**
+  `.github/workflows/ci.yml` (fmt+clippy+test on all 3 OSes + both cross-checks + size budget)
+  and `release.yml` (on a `v*` tag: per-target release build → size gate → package → publish to
+  the GitHub Release); packaging defs — `packaging/debian/build-deb.sh` (hand-rolled `dpkg-deb`,
+  no cargo-deb), `packaging/homebrew/spark.rb`, Windows `.zip`. Remaining M8: a **live release
+  run** (push a tag), pushing the filled Homebrew formula to the tap, a **live Windows run**, and
+  a proper **SCM service + MSI** (needs a service-control handler in `spark-service` first —
+  deferred, not shipped half-working). GUI deliberately deferred (M7 scope; CLI is the client).
   **M7 refinements all landed 2026-06-15** (3 commits): (1) kill-switch signaling — unexpected
   data-path exit fires `FellOpenToDirect` + sets `direct_fallback`, `[kill_switch] fail_closed`
   knob; (2) **supplementary-group resolution** — `service::groups` resolves a peer uid's full
@@ -210,6 +216,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (M8 s2 — CI + release automation + packaging defs): **GitHub Actions for gates +
+  tag-driven release; hand-rolled `dpkg-deb` over cargo-deb; GUI stays deferred (CLI is the
+  client).** Asked Adam re: UI → **defer GUI** (matches M7's "the client may be a CLI" + the
+  whole-project DoD), so M8 packages service + CLI only. `ci.yml`: fmt/clippy(`-D warnings`)/test
+  on ubuntu+macos+windows, the Windows+Linux `--all-targets` cross-checks (warnings=errors), and
+  `size-budget.sh` on ubuntu+macos. `release.yml`: on `v*`, a target matrix (macOS arm64+x86_64,
+  linux x86_64, windows x86_64) builds release → size gate → packages (tar.gz+sha / `.deb` /
+  `.zip`) → `softprops/action-gh-release`. **Hand-rolled the `.deb`** (`packaging/debian/build-deb.sh`
+  + `control.template`/`postinst`/`prerm`/`conffiles`) instead of cargo-deb, so the layout/modes
+  are fully explicit and don't depend on a tool's metadata schema — `/usr/bin/spark`,
+  `/usr/sbin/spark-service`, systemd unit, `/etc/spark/config.toml` (conffile). `homebrew/spark.rb`
+  = binary formula + root launchd service; release fills per-arch url+sha256 → tap. Windows = a
+  `.zip` of the `.exe`s + config; a proper **SCM service + MSI is deferred** (needs a
+  service-control handler in `spark-service`, e.g. the `windows-service` crate — don't ship a
+  half-working `ServiceInstall`). Workflow-injection safe (`github.ref_name` only via `$REF_NAME`).
+  Validated: YAML (ruby), formula (`ruby -c`), scripts (`bash -n`), `.deb` staging dry-run
+  (tree + rendered control; `dpkg-deb` itself runs on the runner). Not yet run live: no tag
+  pushed, no CI run observed (can't execute Actions locally).
 - 2026-06-15 (M8 — Windows control transport): **Named pipe with an admin-only DACL is the
   Windows control channel; the DACL is the auth boundary (no `SO_PEERCRED` analog).** The
   per-connection serve loop (`conn::serve_connection`) was already transport-generic, so only the
@@ -471,5 +495,9 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   resolution, push backpressure (`Push::Dropped`), and opt-in active route-management
   (`[routing] manage`, split-default, `Teardown` fail-open/closed). Only the live route gate
   under root remains.)
-- [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget script/docs done; **Windows named-pipe control transport done — whole workspace cross-builds for Windows**; distro packages [deb/homebrew/MSI] + multi-platform release builds + live Windows run pending)
+- [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget done; **Windows
+  named-pipe transport done — whole workspace cross-builds for Windows**; **CI + tag-driven
+  release workflows + deb/Homebrew/Windows-zip packaging defs done**. Pending: a live release run
+  [push a tag], Homebrew-tap push, live Windows run, and SCM service + MSI [needs a service-control
+  handler first])
   [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
