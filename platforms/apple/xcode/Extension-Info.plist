@@ -1,11 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Info.plist for the Packet Tunnel Provider EXTENSION target. NSExtensionPrincipalClass names
-     the NEPacketTunnelProvider subclass (PacketTunnelProvider, in the extension's module). -->
+<!-- Info.plist for the Packet Tunnel Provider EXTENSION target. CFBundleIdentifier must resolve
+     to $(PRODUCT_BUNDLE_IDENTIFIER) (= org.getlantern.spark.tunnel) so the embed-time prefix
+     check against the parent app passes. NSExtensionPrincipalClass names the
+     NEPacketTunnelProvider subclass in the extension's module. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
     <string>Spark Tunnel</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>NSExtension</key>
     <dict>
         <key>NSExtensionPointIdentifier</key>

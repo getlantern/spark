@@ -1,0 +1,55 @@
+# XcodeGen spec for the spark macOS app + Packet Tunnel Provider app-extension.
+# Generate: xcodegen generate (from platforms/apple/). Build the xcframework first
+# (./build-xcframework.sh). The .xcodeproj is generated output (gitignored).
+#
+# macOS uses the app-EXTENSION packaging (not a system extension) to avoid the SIP-gated
+# `systemextensionsctl developer` path; the NE entitlement is provisioned via automatic signing
+# under team ACZRKC3LQ9.
+name: Spark
+options:
+  bundleIdPrefix: org.getlantern.spark
+  deploymentTarget:
+    macOS: "12.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: ACZRKC3LQ9
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+
+targets:
+  SparkApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/SparkApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.getlantern.spark
+        CODE_SIGN_ENTITLEMENTS: xcode/SparkApp.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Lantern"
+        INFOPLIST_KEY_LSUIElement: YES # menu-bar/agent app, no Dock icon needed for the test
+    dependencies:
+      - target: SparkTunnel
+        embed: true
+
+  SparkTunnel:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/SparkNE
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.getlantern.spark.tunnel
+        CODE_SIGN_ENTITLEMENTS: xcode/SparkTunnel.entitlements
+        INFOPLIST_FILE: xcode/Extension-Info.plist
+    dependencies:
+      # The Rust core as a static-lib xcframework: link it into the extension, don't embed.
+      - framework: SparkCore.xcframework
+        embed: false
+        link: true
