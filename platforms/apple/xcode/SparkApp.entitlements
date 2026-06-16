@@ -4,6 +4,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- The managing app needs the Network Extensions capability too (not just the extension)
+         to save an NETunnelProviderManager config — otherwise saveToPreferences = permission denied. -->
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+    </array>
     <key>com.apple.security.application-groups</key>
     <array>
         <string>group.org.getlantern.spark</string>

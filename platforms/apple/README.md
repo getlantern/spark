@@ -64,25 +64,42 @@ swift build              # type-checks PacketTunnelProvider + FdResolver + the s
 `xcode/` has the `.entitlements` (extension: `packet-tunnel-provider` + App Group; app: App Group)
 and the extension `Info.plist` (`NSExtensionPrincipalClass = $(PRODUCT_MODULE_NAME).PacketTunnelProvider`).
 
+## Build it
+
+```bash
+brew install xcodegen                 # one-time
+./build-xcframework.sh                # SparkCore.xcframework
+xcodegen generate                     # -> Spark.xcodeproj (gitignored)
+xcodebuild -project Spark.xcodeproj -scheme SparkApp -configuration Debug \
+    -destination 'platform=macOS' -allowProvisioningUpdates build
+```
+
+`project.yml` defines the macOS **SparkApp** (SwiftUI harness) + the **SparkTunnel** Packet Tunnel
+app-extension (embeds `SparkCore.xcframework` + `Sources/SparkNE`), automatic signing under team
+`ACZRKC3LQ9`.
+
 ## Status & live-gate handoff (M10)
 
-- **Done — build-verified here (sessions 1–2):** `spark-core` + `spark-apple` build for
-  `aarch64-apple-ios`/`-ios-sim`/`-darwin`; `SparkCore.xcframework` packages all three; the unified
-  Swift provider + fd-resolver + FFI compile (`swift build`).
-- **Live gate is BLOCKED on provisioning, not code.** On this box: only a *Developer ID* cert
-  (no Apple-development identity), **zero provisioning profiles**, **no Xcode-logged-in team**, and
-  `systemextensionsctl developer` is **blocked by SIP** (so a macOS *system extension* can't run in
-  dev mode without disabling SIP / notarizing). The NE entitlement *cannot be self-authorized* — it
-  needs a provisioning profile from team `ACZRKC3LQ9`.
-- **Reachable path (no SIP changes):** package the macOS NE as an **app-extension** (not a system
-  extension) and provision it. To run the live gate you (the human) need to:
-  1. In Xcode, sign in to the Apple account for team `ACZRKC3LQ9` (Settings → Accounts).
-  2. Create an Xcode project: a macOS (and/or iOS) **App** target + a **Network Extension**
-     (Packet Tunnel) target embedding `SparkCore.xcframework` + the `Sources/SparkNE` Swift; set
-     bundle IDs `org.getlantern.spark` / `org.getlantern.spark.tunnel`, the entitlements + Info.plist
-     from `xcode/`, and enable automatic signing (Xcode will provision the App IDs + the NE
-     capability under the team). (`brew install xcodegen` + a `project.yml` can generate this — ask
-     and I'll add one.)
-  3. Run the app, start the VPN (consent dialog), and browse — `log stream --predicate
-     'subsystem == "org.getlantern.spark"'` shows the core forwarding (tag `tunnel`/`spark`).
+- **Verified here (sessions 1–3):** the whole stack **builds and signs** — `xcodebuild
+  -allowProvisioningUpdates` auto-created the `Apple Development` cert + `Mac Team Provisioning
+  Profile: org.getlantern.spark{,.tunnel}` with the `packet-tunnel-provider` entitlement, and the
+  signed `.appex` carries it (`codesign -d --entitlements`). The **app side runs**: launch →
+  `NETunnelProviderManager` save (one-time consent) → `startVPNTunnel` succeeds (the managing app
+  needs the NE entitlement too, else `saveToPreferences` = *permission denied* — fixed in
+  `SparkApp.entitlements`).
+- **Remaining: the system won't *launch the provider*.** After `startVPNTunnel`, the connection
+  goes to `Disconnected` and the extension's `startTunnel` never runs (no provider logs). This is a
+  macOS NE host-validation gate — a development-signed, **un-notarized** app's packet-tunnel
+  provider is refused by `nesessionmanager`. The exact reason is in the unified log (which this
+  agent's shell can't read), so to pin/fix it:
+  1. **Read the reason:** in your terminal / Console.app —
+     `log show --last 5m --predicate 'process == "nesessionmanager" OR process == "neagent"' | grep -i spark`
+     (or filter Console by subsystem `org.getlantern.spark`). The provider's own logs use that
+     subsystem (categories `tunnel`/`app`).
+  2. **Likely fix — notarize:** re-sign with **Developer ID** + a Developer-ID NE provisioning
+     profile, `xcrun notarytool submit` (creds appear to be in `AC_USERNAME`/`AC_PASSWORD`), staple,
+     and run from `/Applications`. (System-extension dev mode via `systemextensionsctl developer on`
+     is the other route but is **SIP-blocked** here.)
 - iOS live gate needs a physical device (NE packet tunnels don't run on the simulator).
+- Cleanup: a non-functional "Spark" VPN config + `/Applications/SparkApp.app` were left from the
+  bring-up; remove via System Settings → VPN and `rm -rf /Applications/SparkApp.app`.

@@ -33,7 +33,6 @@ targets:
         CODE_SIGN_ENTITLEMENTS: xcode/SparkApp.entitlements
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSHumanReadableCopyright: "Lantern"
-        INFOPLIST_KEY_LSUIElement: YES # menu-bar/agent app, no Dock icon needed for the test
     dependencies:
       - target: SparkTunnel
         embed: true

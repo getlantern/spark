@@ -9,6 +9,9 @@ import os
 ///
 /// Loop avoidance: the NE process's own upstream dials egress the real interface (they're not
 /// routed back through `packetFlow`), so no per-socket protection is needed.
+///
+/// Logs go to the unified log under subsystem `org.getlantern.spark` — read with Console.app or
+/// `log stream --predicate 'subsystem == "org.getlantern.spark"'`.
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let log = Logger(subsystem: "org.getlantern.spark", category: "tunnel")
     private let mtu = 1500
@@ -18,6 +21,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         options _: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
+        log.notice("startTunnel: configuring full-tunnel settings")
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         let ipv4 = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4.includedRoutes = [NEIPv4Route.default()] // capture all IPv4
@@ -37,13 +41,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 completionHandler(NEVPNError(.configurationInvalid))
                 return
             }
-            self.log.info("tunnel up; handing fd=\(fd) to native (mtu=\(self.mtu))")
+            self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu))")
 
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
             // thread. The core owns `fd` and closes it on stop.
-            let worker = Thread { [mtu = self.mtu] in
+            let worker = Thread { [mtu = self.mtu, log = self.log] in
                 let rc = spark_tunnel_run(fd, Int32(mtu))
-                self.log.info("spark_tunnel_run returned \(rc)")
+                log.notice("spark_tunnel_run returned \(rc)")
             }
             worker.name = "spark-tunnel"
             worker.stackSize = 1 << 20
@@ -57,7 +61,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void
     ) {
-        log.info("stopTunnel (reason \(reason.rawValue))")
+        log.notice("stopTunnel (reason \(reason.rawValue))")
         spark_tunnel_stop()
         worker = nil
         completionHandler()
