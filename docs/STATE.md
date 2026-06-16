@@ -60,6 +60,21 @@
   `systemextensionsctl developer` is SIP-blocked. The NE entitlement needs a profile from team
   `ACZRKC3LQ9` (human step). Reachable path = macOS **app-extension** + automatic signing under
   that team; steps in `platforms/apple/README.md`. iOS gate needs a device.
+- **M10 (Apple) session 3 (2026-06-16) — macOS app+extension BUILD+SIGN verified; live provider
+  launch blocked.** After Adam signed Xcode into team `ACZRKC3LQ9`: XcodeGen project (`project.yml`)
+  for SparkApp (SwiftUI harness) + SparkTunnel (Packet Tunnel app-extension embedding the
+  xcframework + `Sources/SparkNE`). `xcodebuild -allowProvisioningUpdates` **auto-minted an Apple
+  Development cert + `Mac Team Provisioning Profile: org.getlantern.spark{,.tunnel}` with the
+  `packet-tunnel-provider` entitlement** — so spark NE signing is proven; the signed `.appex`
+  carries the entitlement. **App side runs** (consent → save → `startVPNTunnel`). Fixes found live:
+  the managing app ALSO needs the NE entitlement (else `saveToPreferences`=permission denied);
+  app `GENERATE_INFOPLIST_FILE`; full extension Info.plist keys (CFBundleIdentifier) for the embed
+  prefix check; `NSApplicationDelegate` auto-connect. **Blocker:** macOS won't *host the provider*
+  — `startTunnel` never runs, connection → Disconnected. It's the NE host-validation gate for a
+  **dev-signed, un-notarized** app; the `nesessionmanager` reason isn't readable from the agent's
+  shell (even unsandboxed — the sandbox flagged it). **Next (human): notarize** (Developer ID +
+  `notarytool`, creds look present in `AC_USERNAME`/`AC_PASSWORD`) or read the daemon log to
+  confirm. The build+sign + Swift provider are the durable, verified deliverable.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
