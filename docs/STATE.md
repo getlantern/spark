@@ -39,16 +39,17 @@
   only remaining M7 piece is the **live route gate under root** (command construction is
   unit-tested but the `route`/`ip` calls aren't yet exercised live). The M4 tunnel-server / M6
   SIGINT live gates also pending.
-- **M9 (Android) sessions 1–2 done:** **s1 (2026-06-15)** — `spark-core` cross-compiles for
-  `aarch64-linux-android`; added the `Tun::from_fd` mobile fd-ingestion seam; gated
-  `Tun::open`/`name` to non-android (tun-rs has no `DeviceBuilder`/`name` there). **s2 (2026-06-16)**
-  — `platforms/android` cdylib (`libspark_android.so`) + `core::android::run_tunnel`: the JNI data
-  path. `SparkBridge.nativeRun(fd, mtu)` adopts the `VpnService` fd → netstack → direct forwarder;
-  `nativeStop` fires a global `Notify`. **Built both ABIs with cargo-ndk** (NDK 28.2, API 24,
-  arm64-v8a + x86_64); the `.so` exports `nativeRun`/`nativeStop` and links only libc/libm/libdl.
-  Primitive-only JNI (no `jni` crate); loop avoidance = `VpnService.addDisallowedApplication(self)`.
-  Next (M9 completion): Kotlin `SparkVpnService` + a Gradle module + the on-device/emulator browse
-  gate (toolchain IS on this box — NDK 23–29, emulators incl. `Medium_Phone_API_35`).
+- **M9 (Android) DONE 2026-06-16 — gate PASSED on the emulator.** s1: `spark-core` cross-compiles
+  for `aarch64-linux-android` + `Tun::from_fd` seam (`Tun::open`/`name` gated off android). s2:
+  `platforms/android` cdylib (`libspark_android.so`) + `core::android::run_tunnel` (adopts the
+  `VpnService` fd → netstack → direct forwarder; `nativeStop` fires a global `Notify`); primitive
+  JNI (no `jni` crate); core `tracing` → logcat via a liblog bridge. s3: `platforms/android/demo`
+  Gradle app (AGP 8.9.1/Gradle 8.11.1/Kotlin 2.1.21, minSdk 24) — `SparkVpnService` establishes a
+  full-tunnel + `addDisallowedApplication(self)` + `detachFd` → `nativeRun`. **Gate (Medium_Phone_
+  API_35, arm64):** Android reports VPN **CONNECTED + VALIDATED**; an `adb shell` HTTP request
+  (uid 2000 → tun0 → spark → upstream) returned **`HTTP/1.1 204`**; logcat shows the core forwarding
+  TCP flows; force-stop cleanly releases `tun0`. Remaining (later): richer config/tunnel-server on
+  android, cargo-ndk as a Gradle pre-build task.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
@@ -240,6 +241,22 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-16 (M9 s3 — Android VpnService app + emulator gate PASSED): **`platforms/android/demo`
+  drives the tunnel end-to-end on an emulator.** Minimal single-module Gradle app (AGP 8.9.1 /
+  Gradle 8.11.1 / Kotlin 2.1.21, minSdk 24, compileSdk 35, framework-only — no AndroidX);
+  `SparkVpnService:VpnService` does `Builder().setMtu(1500).addAddress("10.0.0.2",24)
+  .addRoute("0.0.0.0",0).addDisallowedApplication(packageName).establish()` → `detachFd()` →
+  `SparkBridge.nativeRun(fd, mtu)` on a worker thread; `onDestroy`→`nativeStop`. `MainActivity`
+  handles consent + auto-connects (test harness). **Gate on Medium_Phone_API_35 (arm64):** VPN
+  **CONNECTED + VALIDATED** (Android's own probe passed through spark); `adb shell` (uid 2000,
+  through tun0) HTTP→connectivitycheck.gstatic.com/generate_204 = **204**; `adb logcat -s spark`
+  showed `tunnel up` + `tcp flow … dst=8.8.8.8:853` + `tcp flow completed`; force-stop released
+  `tun0`. **Gotchas:** (1) the `ACTIVATE_VPN` appop does NOT suppress the consent dialog on API 35
+  — must tap OK once (uiautomator → button1 bounds), after which spark is the prepared VPN and
+  `prepare()` returns null; (2) the `am start -S` cold-start is needed so `onCreate` re-fires the
+  auto-connect; (3) `am startservice` can't start the VpnService from shell (BIND_VPN_SERVICE,
+  uid 10208 only). `demo/` build outputs (jniLibs/, build/, .gradle/, local.properties)
+  gitignored; gradle wrapper committed. Build artifacts NOT committed.
 - 2026-06-16 (M9 s2 — Android JNI native library): **`platforms/android` cdylib +
   `core::android` run the data path on the VpnService fd; primitive-only JNI (no `jni` crate);
   loop avoidance via `addDisallowedApplication`.** New workspace member `platforms/android`
@@ -578,8 +595,8 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   done — `spark-service` is dual-mode (service under SCM / foreground)**; **MSI (WiX) done —
   installs binaries + registers the service**. Packaging feature-complete; pending only live
   verifications: a release run [push a tag], Homebrew-tap push, live Windows run, Event-Log logging)
-- [~] M9 (Android — s1: core cross-compiles for `aarch64-linux-android` + `Tun::from_fd` seam.
-  s2: **`platforms/android` cdylib + `core::android` — `libspark_android.so` builds for both ABIs
-  via cargo-ndk, JNI `nativeRun`/`nativeStop` verified**. Pending: Kotlin `SparkVpnService` + a
-  Gradle module + the on-device/emulator browse gate)
+- [x] M9 (Android — **DONE; browse gate PASSED on the emulator 2026-06-16**: core cross-compiles
+  for `aarch64-linux-android` + `Tun::from_fd`; `libspark_android.so` (cdylib) + `core::android`;
+  `platforms/android/demo` `SparkVpnService` app — `adb shell` HTTP→204 through tun0→spark, VPN
+  CONNECTED+VALIDATED, core forwarding in logcat)
   [ ] M10 (Apple)  [ ] M11 (transports)
