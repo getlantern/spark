@@ -1,24 +1,25 @@
 import NetworkExtension
 import os
 import SwiftUI
+import SystemExtensions
 
-/// Minimal container app / test harness: installs an `NETunnelProviderManager` pointing at the
-/// Packet Tunnel Provider extension and starts/stops it. The first start triggers the system's
-/// one-time "allow VPN configuration" approval. Auto-connects on launch (window-independent, via
-/// the app delegate) so the gate can drive it with a single `open`.
+/// Container app / test harness. On launch it activates the Packet Tunnel **system extension**
+/// (first run prompts approval in System Settings → Privacy & Security), then installs an
+/// `NETunnelProviderManager` and starts it (first run prompts the VPN consent). Logs go to the
+/// unified log under subsystem `org.getlantern.spark` (read with Console.app).
 @main
 struct SparkApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
+        WindowGroup { ContentView() }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_: Notification) {
-        Vpn.shared.connect()
+        // Activate the system extension, then bring the tunnel up once it's installed/approved.
+        SysExt.shared.onReady = { Vpn.shared.connect() }
+        SysExt.shared.activate()
     }
 }
 
@@ -26,15 +27,67 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 12) {
             Text("spark")
-            Button("Connect") { Vpn.shared.connect() }
+            Button("Activate + Connect") { SysExt.shared.onReady = { Vpn.shared.connect() }; SysExt.shared.activate() }
             Button("Disconnect") { Vpn.shared.disconnect() }
+            Button("Open Extension Settings") { SysExt.shared.openSettings() }
         }
         .padding(24)
     }
 }
 
-/// Loads/saves the tunnel config and drives start/stop. The managing app needs the Network
-/// Extensions entitlement too (see SparkApp.entitlements) or `saveToPreferences` is denied.
+/// Drives system-extension activation (`OSSystemExtensionRequest`). `onReady` fires once the
+/// extension is active.
+final class SysExt: NSObject, OSSystemExtensionRequestDelegate {
+    static let shared = SysExt()
+    private let log = Logger(subsystem: "org.getlantern.spark", category: "sysext")
+    private let extBundleId = "org.getlantern.spark.tunnel"
+    var onReady: (() -> Void)?
+
+    func activate() {
+        log.notice("submitting system extension activation for \(self.extBundleId)")
+        let req = OSSystemExtensionRequest.activationRequest(
+            forExtensionWithIdentifier: extBundleId, queue: .main
+        )
+        req.delegate = self
+        OSSystemExtensionManager.shared.submitRequest(req)
+    }
+
+    func openSettings() {
+        // macOS 15+ deep-links to the Network Extensions pane; older falls back to Privacy/Security.
+        let urls = [
+            "x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.system_extension.network_extension.extension-point",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension",
+            "x-apple.systempreferences:com.apple.preference.security",
+        ]
+        for u in urls where NSWorkspace.shared.open(URL(string: u)!) { return }
+    }
+
+    // MARK: OSSystemExtensionRequestDelegate
+
+    func request(
+        _: OSSystemExtensionRequest,
+        actionForReplacingExtension _: OSSystemExtensionProperties,
+        withExtension _: OSSystemExtensionProperties
+    ) -> OSSystemExtensionRequest.ReplacementAction {
+        .replace // always take the bundled build during dev
+    }
+
+    func requestNeedsUserApproval(_: OSSystemExtensionRequest) {
+        log.notice("system extension needs user approval (System Settings → Privacy & Security)")
+        DispatchQueue.main.async { self.openSettings() }
+    }
+
+    func request(_: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        log.notice("system extension activation finished: \(result.rawValue)")
+        if result == .completed { onReady?() }
+    }
+
+    func request(_: OSSystemExtensionRequest, didFailWithError error: Error) {
+        log.error("system extension activation failed: \(error.localizedDescription)")
+    }
+}
+
+/// Loads/saves the tunnel config and drives start/stop via `NETunnelProviderManager`.
 final class Vpn {
     static let shared = Vpn()
     private let log = Logger(subsystem: "org.getlantern.spark", category: "app")
@@ -59,7 +112,6 @@ final class Vpn {
                     self.log.error("saveToPreferences failed: \(error.localizedDescription)")
                     return
                 }
-                // Reload so the connection reference is valid after the save.
                 manager.loadFromPreferences { error in
                     if let error {
                         self.log.error("reload failed: \(error.localizedDescription)")

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Info.plist for the Packet Tunnel Provider EXTENSION target. CFBundleIdentifier must resolve
-     to $(PRODUCT_BUNDLE_IDENTIFIER) (= org.getlantern.spark.tunnel) so the embed-time prefix
-     check against the parent app passes. NSExtensionPrincipalClass names the
-     NEPacketTunnelProvider subclass in the extension's module. -->
+<!-- Info.plist for the Packet Tunnel Provider SYSTEM EXTENSION. Unlike an app-extension (NSExtension),
+     a NE system extension declares a NetworkExtension dict: NEMachServiceName (must be prefixed by
+     an App Group the extension belongs to) and NEProviderClasses mapping the packet-tunnel point to
+     the provider class in this target's module. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -24,12 +24,15 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
-    <key>NSExtension</key>
+    <key>NetworkExtension</key>
     <dict>
-        <key>NSExtensionPointIdentifier</key>
-        <string>com.apple.networkextension.packet-tunnel</string>
-        <key>NSExtensionPrincipalClass</key>
-        <string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
+        <key>NEMachServiceName</key>
+        <string>group.org.getlantern.spark.packet</string>
+        <key>NEProviderClasses</key>
+        <dict>
+            <key>com.apple.networkextension.packet-tunnel</key>
+            <string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
+        </dict>
     </dict>
 </dict>
 </plist>
