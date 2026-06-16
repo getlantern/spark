@@ -80,11 +80,19 @@
   entitlement (sandbox off), app `system-extension.install` + `OSSystemExtensionRequest` activation
   (`SysExt`). **Compiles** (`xcodebuild CODE_SIGNING_ALLOWED=NO build` SUCCEEDED). **Last mile
   (human, Xcode GUI):** `xcodebuild` CLI auto-provisioning mints a *development* profile that can't
-  carry the systemextension entitlement (App ID NE capability stuck on the app-ext value); fix is a
-  couple clicks in Xcode → Signing & Capabilities (re-syncs the App ID + Developer-ID profile),
-  then Archive → Direct Distribution (notarizes) → `/Applications` → approve sysext + VPN → browse
-  gate. Steps in `platforms/apple/README.md`. The Rust core + FFI + Swift provider + sysext
-  conversion are the durable, verified deliverable; only Apple provisioning/notarization remains.
+  carry the systemextension entitlement — it's **distribution-only** (confirmed in both CLI and the
+  Xcode GUI: "profile doesn't match the networkextension entitlement"). **Resolved the signing
+  model by decoding lantern's working profile** (`MacOS Tunnel Development Profile` = a *Developer-ID*
+  profile, `ProvisionsAllDevices=true`, entitlements `packet-tunnel-provider-systemextension` +
+  `system-extension.install` + app group): lantern uses **MANUAL** signing + `Developer ID
+  Application` + a portal-created Developer-ID profile per target, NOT automatic. `project.yml` now
+  mirrors that (commit `f2cdf15`): Manual, `CODE_SIGN_IDENTITY[sdk=macosx*]="Developer ID
+  Application"`, team `ACZRKC3LQ9`, profiles `Spark macOS App` / `Spark macOS Tunnel`. **Only
+  remaining step (human, one-time portal): create those two Developer-ID profiles + the
+  `group.org.getlantern.spark` App Group**; then the documented `archive → exportArchive →
+  notarytool → stapler → /Applications` recipe (in `platforms/apple/README.md`) runs, and the
+  runtime gate is two GUI approvals (sysext Allow + VPN consent). Rust core + FFI + Swift provider
+  + sysext conversion are done/verified; only Apple portal provisioning + notarization remain.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
