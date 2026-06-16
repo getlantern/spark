@@ -56,6 +56,11 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.getlantern.spark.tunnel
+        # A system extension bundle MUST be named <CFBundleIdentifier>.systemextension (sysextd
+        # resolves the requested identifier to that exact filename — a mismatched name fails with
+        # OSSystemExtensionErrorExtensionNotFound/code 4 even though the bundle is present). So the
+        # product (bundle + executable) is named by the bundle id, mirroring lantern's PacketTunnel.
+        PRODUCT_NAME: org.getlantern.spark.tunnel
         CODE_SIGN_ENTITLEMENTS: xcode/SparkTunnel.entitlements
         INFOPLIST_FILE: xcode/Extension-Info.plist
         # Portal-created Developer-ID profile for org.getlantern.spark.tunnel

@@ -93,6 +93,45 @@
   notarytool → stapler → /Applications` recipe (in `platforms/apple/README.md`) runs, and the
   runtime gate is two GUI approvals (sysext Allow + VPN consent). Rust core + FFI + Swift provider
   + sysext conversion are done/verified; only Apple portal provisioning + notarization remain.
+- **M10 (Apple) session 4 (2026-06-16) — profiles created but CERT/KEY MISMATCH; archive blocked.**
+  The two Developer-ID profiles now exist and are installed (`~/Library/Developer/Xcode/UserData/
+  Provisioning Profiles/`: `Spark macOS Tunnel`=728ace7f…, `Spark macOS App`=d6fb84dc…). **Both embed
+  exactly ONE signing cert, `D9868CA8…` (Developer ID Application, team ACZRKC3LQ9), whose private key
+  is NOT in this keychain.** `security find-identity -v -p codesigning` shows we hold keys for three
+  *other* Dev-ID-Application certs — `9558A60E…` (exp 2030-05-21), `FB8932C8…` (2030-02-11),
+  `5C6882DC…` (2029-10-21) — none listed in the profiles. So `xcodebuild … archive` fails:
+  *"Provisioning profile 'Spark macOS Tunnel' doesn't include signing certificate 'Developer ID
+  Application…'"* (overriding `CODE_SIGN_IDENTITY` to a held SHA-1 is accepted but the profile must
+  ALSO list that cert — it lists only D9868CA8). The profile is Apple-signed/immutable and there's no
+  ASC API key / fastlane here to regenerate it programmatically. **Resolution (human, one-time):**
+  (A, recommended) in the portal, edit both profiles to include a held cert (the one expiring
+  2030-05-21 = `9558A60E`), re-download → reinstall → re-archive; or (B) import `D9868CA8`'s `.p12`
+  (cert+key) from the machine that created it, then the existing profiles work as-is. Everything
+  downstream (export → notarytool → stapler → /Applications → 2 GUI approvals → browse gate) is
+  scripted in `platforms/apple/README.md`. Caveat verified via clean isolated profile decode
+  (`security cms -D` + per-cert `plutil -extract DeveloperCertificates.$i` + `openssl x509
+  -fingerprint`); a section-merging `awk` earlier gave a false "profiles contain held certs" reading.
+- **M10 (Apple) session 5 (2026-06-16) — macOS LIVE GATE PASSED. ✅** Adam regenerated both
+  Developer-ID profiles around a held cert (`9558A60E`, exp 2030-05-21) → reinstalled → `archive`
+  signs clean (Developer ID Application → DICA → Apple Root, hardened runtime), `exportArchive`
+  needed **manual** signing + an explicit `provisioningProfiles` map in `ExportOptions.plist`
+  (automatic can't do Developer-ID sysext), notarytool **Accepted**, stapled, copied to
+  `/Applications`. Then **three sysext activation bugs surfaced via `OSSystemExtensionRequest`**, each
+  fixed (the unified log is unreadable from the agent shell, so diagnosed with a temporary
+  `/tmp/spark_app_trace.log` file-trace + comparison against lantern's built `.systemextension`):
+  (1) **code 4 extensionNotFound** — a sysext bundle MUST be named `<CFBundleIdentifier>.systemextension`
+  with a matching executable; ours was `SparkTunnel.systemextension`. Fix: `PRODUCT_NAME =
+  org.getlantern.spark.tunnel` in `project.yml` (also makes `$(PRODUCT_MODULE_NAME)` →
+  `org_getlantern_spark_tunnel`, so the Info.plist principal class resolves). (2) **code 8 code
+  signature invalid** — Developer-ID sysext must be notarized; the plain `build` wasn't. Fix: ship
+  the archive/notarize path. (3) **code 9** — network_extension sysext requires
+  `NSSystemExtensionUsageDescription`; added it to `xcode/Extension-Info.plist`. After those: sysext
+  → `[activated waiting for user]` → Adam approved in System Settings → `[activated enabled]`, provider
+  process runs from `/Library/SystemExtensions/…`, VPN **(Connected)** (reused prior consent, no new
+  dialog). **Browse gate PASSED:** default route → `utun14` (10.0.0.2); `generate_204` → HTTP 204 in
+  0.19s; `https://example.com` → HTTP 200 — curl → utun → netstack → direct forwarder → upstream.
+  Diagnostic file-trace scaffolding removed from `SparkApp.swift` after the gate (clean source
+  rebuilds green). **M10 macOS is DONE; iOS device gate still pending (NE doesn't run on the sim).**
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.

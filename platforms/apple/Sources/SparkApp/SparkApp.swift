@@ -83,7 +83,8 @@ final class SysExt: NSObject, OSSystemExtensionRequestDelegate {
     }
 
     func request(_: OSSystemExtensionRequest, didFailWithError error: Error) {
-        log.error("system extension activation failed: \(error.localizedDescription)")
+        let ns = error as NSError
+        log.error("system extension activation failed (\(ns.domain) code=\(ns.code)): \(error.localizedDescription)")
     }
 }
 

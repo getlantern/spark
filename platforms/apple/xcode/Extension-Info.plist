@@ -24,6 +24,10 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
+    <!-- Required for any network_extension system extension; OSSystemExtensionRequest fails with
+         code 9 (validation) if absent. -->
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>Spark uses a network extension to route your traffic through the secure tunnel.</string>
     <key>NetworkExtension</key>
     <dict>
         <key>NEMachServiceName</key>

@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Developer ID export for notarization (models lantern's macos-release). Automatic signing
-     lets Xcode create the Developer-ID NE provisioning profiles for org.getlantern.spark{,.tunnel}. -->
+<!-- Developer ID export for notarization (models lantern's macos-release). MANUAL signing with the
+     Developer ID Application identity + the portal-created Developer-ID profiles per bundle id (the
+     packet-tunnel-provider-systemextension entitlement is distribution-only, so there is no automatic
+     Developer-ID flow — see project.yml / README.md "live-gate handoff"). -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -9,6 +11,15 @@
     <key>teamID</key>
     <string>ACZRKC3LQ9</string>
     <key>signingStyle</key>
-    <string>automatic</string>
+    <string>manual</string>
+    <key>signingCertificate</key>
+    <string>Developer ID Application</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>org.getlantern.spark</key>
+        <string>Spark macOS App</string>
+        <key>org.getlantern.spark.tunnel</key>
+        <string>Spark macOS Tunnel</string>
+    </dict>
 </dict>
 </plist>

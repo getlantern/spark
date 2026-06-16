@@ -78,7 +78,37 @@ xcodebuild -project Spark.xcodeproj -scheme SparkApp -configuration Debug \
 app-extension (embeds `SparkCore.xcframework` + `Sources/SparkNE`), automatic signing under team
 `ACZRKC3LQ9`.
 
-## Status & live-gate handoff (M10)
+## Status: macOS LIVE GATE PASSED ✅ (M10, 2026-06-16)
+
+The notarized Developer ID **system extension** runs on macOS with no SIP changes: default route →
+`utun14` (10.0.0.2), `generate_204` → HTTP 204, `https://example.com` → HTTP 200, i.e.
+curl → utun → netstack → direct forwarder → upstream → back. The full recipe (archive → export →
+notarize → staple → /Applications → approve sysext + VPN consent → browse) is the one below and it
+works as written.
+
+### Three hard requirements for a macOS NE system extension (each one fails activation silently)
+
+`OSSystemExtensionRequest` surfaces these as numeric `OSSystemExtensionErrorDomain` codes; the
+unified log shows the cause (Console.app, subsystem `org.getlantern.spark`):
+
+1. **code 4 `extensionNotFound`** — the `.systemextension` bundle MUST be named
+   `<CFBundleIdentifier>.systemextension` (and its executable named `<CFBundleIdentifier>`), not the
+   target name. `sysextd` resolves the requested id to that exact filename. Fix in `project.yml`:
+   `PRODUCT_NAME = org.getlantern.spark.tunnel` on the SparkTunnel target (this also makes
+   `$(PRODUCT_MODULE_NAME)` → `org_getlantern_spark_tunnel`, so the `NEProviderClasses` principal
+   class in `Extension-Info.plist` resolves at runtime). Mirrors lantern's `org.getlantern.lantern.PacketTunnel`.
+2. **code 8 `code signature invalid`** — a Developer-ID sysext must be **notarized** to load on a
+   SIP-enabled Mac. A plain `xcodebuild build` won't do; use the archive → notarytool → staple path.
+3. **code 9 (validation)** — a `network_extension` sysext requires `NSSystemExtensionUsageDescription`
+   in the **extension's** Info.plist (`xcode/Extension-Info.plist`). Absent → activation rejected.
+
+Other gotchas hit along the way: `exportArchive` for Developer-ID needs **manual** signing +
+an explicit `provisioningProfiles` map in `ExportOptions.plist` (automatic can't mint a Developer-ID
+sysext profile); the portal Developer-ID profile must embed a cert whose **private key is in this
+keychain** (regenerate it selecting that cert if not); and once a `Spark` VPN config has been
+consented, reconnect reuses it with **no new dialog**.
+
+### History (sessions 1–4)
 
 - **Verified here (sessions 1–3):** the whole stack **builds and signs** — `xcodebuild
   -allowProvisioningUpdates` auto-created the `Apple Development` cert + `Mac Team Provisioning
