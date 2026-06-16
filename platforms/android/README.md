@@ -39,11 +39,35 @@ rm -f platforms/android/jniLibs/*/libtun_rs-*.so
 Output lands in `platforms/android/jniLibs/<abi>/libspark_android.so` (gitignored — it's a build
 artifact). The eventual Gradle module runs this as a pre-build step and bundles `jniLibs/`.
 
-## Still to do (M9 completion)
+## Demo app + emulator gate
 
-- `platforms/android/` Kotlin: a `SparkVpnService : VpnService` that builds the tunnel
-  (`Builder().setMtu(...).addAddress(...).addRoute("0.0.0.0", 0).addDisallowedApplication(packageName).establish()`),
-  `detachFd()`, and calls `SparkBridge.nativeRun(fd, mtu)` on a worker thread; `onDestroy` →
-  `nativeStop()`. (See lantern's `LanternVpnService.kt` for the establish pattern.)
-- A minimal Gradle module/app + the cargo-ndk pre-build wiring.
-- The on-device/emulator browse-test gate.
+`demo/` is a minimal single-module Gradle app (AGP 8.9.1 / Gradle 8.11.1 / Kotlin 2.1.21,
+minSdk 24) that drives the library: `SparkVpnService : VpnService` builds the tunnel
+(`setMtu(1500).addAddress("10.0.0.2",24).addRoute("0.0.0.0",0).addDisallowedApplication(packageName).establish()`),
+`detachFd()`s, and runs `SparkBridge.nativeRun(fd, mtu)` on a worker thread; `MainActivity`
+handles VPN consent. The core's `tracing` events go to logcat (tag `spark`) via the cdylib's
+liblog bridge.
+
+**M9 gate — PASSED on an emulator (Medium_Phone_API_35, arm64) 2026-06-16:**
+
+```bash
+# 1. build the .so into the app, then the APK
+cargo ndk -t arm64-v8a -t x86_64 -P 24 -o demo/app/src/main/jniLibs build --release -p spark-android
+rm -f demo/app/src/main/jniLibs/*/libtun_rs-*.so
+(cd demo && ./gradlew assembleDebug)
+adb install -r demo/app/build/outputs/apk/debug/app-debug.apk
+# 2. start it; grant the VPN consent dialog once (tap OK) — spark becomes the prepared VPN
+adb shell am start -n org.getlantern.spark/.MainActivity
+# 3. browse test from a non-app uid (adb shell uid 2000 → tun0 → spark → upstream):
+adb shell 'printf "GET /generate_204 HTTP/1.1\r\nHost: connectivitycheck.gstatic.com\r\nConnection: close\r\n\r\n" | nc connectivitycheck.gstatic.com 80 | head -1'
+# => HTTP/1.1 204 No Content   ✓   (and `adb logcat -s spark` shows the forwarded TCP flows)
+```
+
+Android reported the VPN `CONNECTED` **+ VALIDATED** (its own connectivity probe passed through
+spark). Force-stopping the app cleanly releases `tun0` (fail-open via OS fd cleanup).
+
+## Still to do (later)
+
+- A richer config path (host-specific config / a tunnel server) — the demo runs the default
+  direct forwarder. Would want the `jni` crate once strings/callbacks are involved.
+- Wire `cargo ndk` as a Gradle pre-build task so `assembleDebug` rebuilds the `.so` automatically.

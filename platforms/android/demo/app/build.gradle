@@ -1,0 +1,40 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'org.getlantern.spark'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'org.getlantern.spark'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        // Match the ABIs cargo-ndk builds into src/main/jniLibs.
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        debug {
+            // The .so in src/main/jniLibs is already release-built by cargo-ndk; nothing to do.
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+// Framework-only (android.app.Activity + android.net.VpnService) — no AndroidX dependencies, so
+// the build needs nothing from the network beyond AGP/Kotlin themselves.
+dependencies {
+}
