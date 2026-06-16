@@ -50,6 +50,14 @@
   (uid 2000 → tun0 → spark → upstream) returned **`HTTP/1.1 204`**; logcat shows the core forwarding
   TCP flows; force-stop cleanly releases `tun0`. Remaining (later): richer config/tunnel-server on
   android, cargo-ndk as a Gradle pre-build task.
+- **M10 (Apple) session 1 done 2026-06-16:** packet-I/O architecture **decided after deep research**
+  — **fd-trick primary + packet-object fallback**, hand-rolled **C ABI**, one `NEPacketTunnelProvider`
+  for iOS+macOS (matches lantern/WireGuard/sing-box/Mullvad/Proton; see decisions log). Generalized
+  `core::android` → `core::fd_tunnel` (shared by the Android JNI + the new Apple C ABI); new
+  `platforms/apple` staticlib (`spark_tunnel_run`/`stop`) **builds for `aarch64-apple-ios`/`-ios-sim`/
+  `-darwin`**, exports the C symbols. Next: Swift provider + xcframework + Xcode app/extension +
+  signing (team `ACZRKC3LQ9`); **macOS NE live gate on this Mac** (Developer ID cert present; iOS
+  needs a device; NE won't run on the simulator).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
@@ -208,10 +216,13 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (`src/async_device/*/mod.rs` Deref; `src/platform/macos/device.rs:182,230`).
 - **fd adoption (mobile, VERIFIED at M9 s1 against 2.8.5):** `unsafe AsyncDevice::from_fd(fd:
   RawFd) -> io::Result<AsyncDevice>` (`src/async_device/{unix,macos}/mod.rs`; takes ownership) and
-  `borrow_raw(fd)` (doesn't). `SyncDevice::from_fd` is `#[cfg(unix)]`. **Android caveat:** tun-rs
-  on `target_os="android"` exposes only the fd path — **no `DeviceBuilder`** and **no
-  `AsyncDevice::name()`** (verified: `cargo check --target aarch64-linux-android` errors E0432 +
-  E0599 until `Tun::open`/`name` are gated `not(android)`). `recv`/`send`/`mtu` work on android.
+  `borrow_raw(fd)` (doesn't). `SyncDevice::from_fd` is `#[cfg(unix)]`. **Android + iOS caveat:**
+  tun-rs on `target_os="android"` AND `target_os="ios"` exposes only the fd path — **no
+  `DeviceBuilder`** and **no `AsyncDevice::name()`** (verified: `cargo check --target
+  aarch64-linux-android` AND `--target aarch64-apple-ios` both error E0432 + E0599 until
+  `Tun::open`/`name` are gated `not(any(android, ios))`). macOS keeps them (`spark run` opens a
+  device there). `recv`/`send`/`mtu`/`from_fd` work on all. **`spark-core` + `spark-apple`
+  build for `aarch64-apple-ios`/`-ios-sim`/`-darwin` (M10 s1).**
 - **macOS normalizes utun frames to raw IP** — no 4-byte AF prefix to strip; the parser
   keys on `buf[0] >> 4` on every platform (matches tun-rs's own cross-platform example).
 - Framed bridge (for M2): `tun_rs::async_framed::{DeviceFramed, BytesCodec}` behind the
@@ -241,6 +252,29 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-16 (M10 s1 — Apple packet-I/O architecture DECIDED + C-ABI staticlib): **fd-trick
+  primary (+ packet-object fallback), hand-rolled C ABI, one provider for iOS+macOS.** Decided
+  with Adam after deep research (3 agent passes: lantern's own NE, the Rust↔Swift FFI landscape,
+  NE packet-I/O + iOS/macOS unification, then a second pass on Mullvad/Proton/Tailscale + Apple's
+  official line). **Field survey:** WireGuard-apple, sing-box, **our own lantern** (team
+  `ACZRKC3LQ9`), **Mullvad**, and **Proton** (incl. Proton's *Rust* tunnel) all use the fd-trick
+  (`packetFlow.value(forKeyPath:"socket.fileDescriptor")` → public-symbol fd-scan fallback);
+  **Tailscale** alone uses the official `readPacketObjects`/`writePackets` (for correct multipath
+  egress). 5 of 6 → fd-trick, App-Store-proven for years. **Apple's official line (DTS/eskimo):**
+  the fd-trick is *unsupported* ("don't start down that path") — non-public ivar (Guideline
+  2.5.1), and Apple is migrating to a socket-less stack so the fd "may not exist" someday; blessed
+  path is `packetFlow`; WWDC25 steers toward Network Relays/MASQUE. **Resolution:** fd-primary
+  (reuses our entire `Tun::from_fd` netstack — max iOS/macOS/Android/desktop unification, leaner
+  under the 50 MiB packet-tunnel cap, proven under *our* Apple account) **+ a packet-object
+  fallback** as a documented follow-up that also future-proofs against Apple removing the fd. FFI
+  = **hand-rolled C ABI** (the FFI research's pick: unifies with the Android JNI — packets don't
+  cross the boundary in fd-mode, so the surface is control-only `run(fd)/stop`; uniffi/swift-bridge
+  rejected — uniffi only wins if we also migrate Android to Kotlin). **This deviates from PLAN.md's
+  M10 packet-object default; this entry supersedes it.** Built: `core::android`→`core::fd_tunnel`
+  (shared android+ios+macos), `platforms/apple` staticlib (`spark_tunnel_run`/`stop`), builds for
+  `aarch64-apple-ios`/`-ios-sim`/`-darwin`. Live gate target = macOS NE on this box (Developer ID
+  cert present; iOS needs a device; NE doesn't run on the simulator) — build-verify now, macOS
+  live gate next. Memory: tune smoltcp buffers 16–32 KiB/socket for the 50 MiB cap (iOS only).
 - 2026-06-16 (M9 s3 — Android VpnService app + emulator gate PASSED): **`platforms/android/demo`
   drives the tunnel end-to-end on an emulator.** Minimal single-module Gradle app (AGP 8.9.1 /
   Gradle 8.11.1 / Kotlin 2.1.21, minSdk 24, compileSdk 35, framework-only — no AndroidX);
@@ -599,4 +633,8 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   for `aarch64-linux-android` + `Tun::from_fd`; `libspark_android.so` (cdylib) + `core::android`;
   `platforms/android/demo` `SparkVpnService` app — `adb shell` HTTP→204 through tun0→spark, VPN
   CONNECTED+VALIDATED, core forwarding in logcat)
-  [ ] M10 (Apple)  [ ] M11 (transports)
+- [~] M10 (Apple — **s1 done: architecture DECIDED (fd-trick primary + packet-object fallback,
+  C ABI, unified iOS+macOS provider) after deep research; `core::fd_tunnel` shared with Android;
+  `platforms/apple` C-ABI staticlib builds for ios/ios-sim/darwin.** Pending: Swift
+  PacketTunnelProvider + xcframework + Xcode app/extension + signing; macOS NE live gate.)
+  [ ] M11 (transports)
