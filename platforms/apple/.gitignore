@@ -1,3 +1,5 @@
-# Build output (regenerate with cargo build --target <apple> + the xcframework packaging).
+# Build output (regenerate: ./build-xcframework.sh, then `swift build`).
 /target/
-/*.xcframework/
+/SparkCore.xcframework/
+/.build/
+/.swiftpm/

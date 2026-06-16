@@ -48,14 +48,41 @@ done
 Exports (`include/spark.h`): `int32_t spark_tunnel_run(int32_t fd, int32_t mtu)` (blocks until
 stop; 0 ok / -1 err) and `void spark_tunnel_stop(void)`.
 
-## Status & still to do (M10)
+## Swift provider (build-verified)
 
-- **Done (session 1, build-verified here):** `spark-core` + `spark-apple` build for
-  `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-darwin`; the `.a` exports the C ABI.
-- **Next:** the unified Swift `PacketTunnelProvider` (one subclass for iOS + macOS, `#if os()`
-  for the deltas) doing fd-resolution → `spark_tunnel_run`; the `.xcframework`; an Xcode app +
-  extension target with entitlements (`com.apple.developer.networking.networkextension` =
-  `packet-tunnel-provider` on iOS / `packet-tunnel-provider-systemextension` on macOS) + an App
-  Group; signing under team `ACZRKC3LQ9` (lantern's profiles are the template).
-- **Live gate:** macOS NE system extension on this Mac (Developer ID-signable here) is the
-  reachable gate; iOS needs a device + provisioning. NE packet tunnels don't run on the simulator.
+`Sources/SparkNE/` holds the **one** `PacketTunnelProvider: NEPacketTunnelProvider` for iOS *and*
+macOS, plus `FdResolver` (KVC → public-symbol fd-scan). `startTunnel` configures a full-tunnel
+route, resolves the `utun` fd, and runs `spark_tunnel_run(fd, mtu)` on a worker thread;
+`stopTunnel` calls `spark_tunnel_stop`. `Package.swift` compile-verifies the Swift + the C FFI
+against `SparkCore.xcframework`:
+
+```bash
+./build-xcframework.sh   # 3 .a's -> SparkCore.xcframework (ios-arm64, ios-arm64-simulator, macos-arm64)
+swift build              # type-checks PacketTunnelProvider + FdResolver + the spark_tunnel_* FFI
+```
+
+`xcode/` has the `.entitlements` (extension: `packet-tunnel-provider` + App Group; app: App Group)
+and the extension `Info.plist` (`NSExtensionPrincipalClass = $(PRODUCT_MODULE_NAME).PacketTunnelProvider`).
+
+## Status & live-gate handoff (M10)
+
+- **Done — build-verified here (sessions 1–2):** `spark-core` + `spark-apple` build for
+  `aarch64-apple-ios`/`-ios-sim`/`-darwin`; `SparkCore.xcframework` packages all three; the unified
+  Swift provider + fd-resolver + FFI compile (`swift build`).
+- **Live gate is BLOCKED on provisioning, not code.** On this box: only a *Developer ID* cert
+  (no Apple-development identity), **zero provisioning profiles**, **no Xcode-logged-in team**, and
+  `systemextensionsctl developer` is **blocked by SIP** (so a macOS *system extension* can't run in
+  dev mode without disabling SIP / notarizing). The NE entitlement *cannot be self-authorized* — it
+  needs a provisioning profile from team `ACZRKC3LQ9`.
+- **Reachable path (no SIP changes):** package the macOS NE as an **app-extension** (not a system
+  extension) and provision it. To run the live gate you (the human) need to:
+  1. In Xcode, sign in to the Apple account for team `ACZRKC3LQ9` (Settings → Accounts).
+  2. Create an Xcode project: a macOS (and/or iOS) **App** target + a **Network Extension**
+     (Packet Tunnel) target embedding `SparkCore.xcframework` + the `Sources/SparkNE` Swift; set
+     bundle IDs `org.getlantern.spark` / `org.getlantern.spark.tunnel`, the entitlements + Info.plist
+     from `xcode/`, and enable automatic signing (Xcode will provision the App IDs + the NE
+     capability under the team). (`brew install xcodegen` + a `project.yml` can generate this — ask
+     and I'll add one.)
+  3. Run the app, start the VPN (consent dialog), and browse — `log stream --predicate
+     'subsystem == "org.getlantern.spark"'` shows the core forwarding (tag `tunnel`/`spark`).
+- iOS live gate needs a physical device (NE packet tunnels don't run on the simulator).

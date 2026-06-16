@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Entitlements for the Packet Tunnel Provider EXTENSION target. The networkextension
+     entitlement must be authorized by a provisioning profile (Apple Developer portal /
+     automatic signing under team ACZRKC3LQ9) — it cannot be self-signed.
+     macOS *system extension* variant: use "packet-tunnel-provider-systemextension" instead. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+    </array>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.org.getlantern.spark</string>
+    </array>
+</dict>
+</plist>

@@ -1,0 +1,4 @@
+module SparkCore {
+    header "spark.h"
+    export *
+}
