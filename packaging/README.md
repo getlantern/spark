@@ -20,9 +20,31 @@ and checks it (CI-friendly: non-zero exit if over). Current (aarch64, stripped):
 | --- | --- |
 | `aarch64-apple-darwin` (macOS) | native; data path live-verified (M1/M2/M5/M7) |
 | `x86_64-unknown-linux-gnu` (Linux) | full workspace cross-checks clean |
-| `x86_64-pc-windows-msvc` (Windows) | `spark-core` + `spark-ipc` cross-check clean; the control transport (`UnixListener`/`UnixStream`) still needs a Windows **named-pipe** port before `spark-service`/`spark` build there |
+| `x86_64-pc-windows-msvc` (Windows) | full workspace cross-checks clean; control transport is the admin-only **named pipe** (`service::pipe`). Not yet run on a real Windows host |
 
 Verify a target yourself with e.g. `cargo check --workspace --all-features --target x86_64-unknown-linux-gnu`.
+CI (`.github/workflows/ci.yml`) runs fmt + clippy + tests on all three OSes plus both cross-checks on every push/PR.
+
+## Release builds & distribution
+
+Tagging `vX.Y.Z` triggers `.github/workflows/release.yml`, which builds release binaries on
+each native runner, enforces the size budget, packages per platform, and uploads everything to
+the GitHub Release:
+
+| Platform | Artifact | Built by |
+| --- | --- | --- |
+| macOS (arm64 + x86_64) | `spark-<ver>-<target>.tar.gz` (+ `.sha256`) | `tar` in the workflow |
+| Linux (x86_64) | `spark_<ver>_amd64.deb` + tarball | `packaging/debian/build-deb.sh` (hand-rolled `dpkg-deb`) |
+| Windows (x86_64) | `spark-<ver>-<target>.zip` (binaries + example config) | `Compress-Archive` in the workflow |
+
+**Homebrew:** `packaging/homebrew/spark.rb` is the formula. After a release, fill its per-arch
+`url` + `sha256` from the published macOS tarballs (the `.sha256` assets) and push it to the tap
+(mirrors the wider release flow). Then `brew install <tap>/spark` installs both binaries and a
+root launchd service.
+
+**Debian:** `build-deb.sh` lays out `/usr/bin/spark`, `/usr/sbin/spark-service`, the systemd
+unit, and `/etc/spark/config.toml` (a conffile), with `postinst`/`prerm` that reload systemd
+and stop/disable on removal. It deliberately avoids `cargo-deb` so the layout is fully explicit.
 
 ## Linux — systemd
 
@@ -53,6 +75,18 @@ The App-Store/GUI macOS form (and iOS) use a NetworkExtension instead of a daemo
 
 ## Windows
 
-`spark-service` needs a named-pipe control transport (the unix-socket listener is unix-only)
-before it runs on Windows; the SCM service wrapper + MSI follow once that lands. Tracked as the
-Windows item in `docs/STATE.md`.
+`spark-service` and `spark` build for Windows; the control channel is an admin-only **named
+pipe** (`\\.\pipe\spark`, DACL-restricted to SYSTEM + Administrators — see `service::pipe`).
+The release workflow ships a `.zip` of the two `.exe`s + example config. Run the daemon from an
+elevated prompt:
+
+```powershell
+spark-service.exe --config C:\ProgramData\spark\config.toml
+spark.exe connect    # in another (elevated) prompt
+```
+
+**Still to do (tracked in `docs/STATE.md`):** a proper SCM-integrated Windows service +
+MSI installer. That needs `spark-service` to implement the service control handler (e.g. the
+`windows-service` crate) so it responds to SCM start/stop — until then it runs as a console
+process, so the MSI/`ServiceInstall` is deferred rather than shipped half-working. A live run
+on a real Windows host is also still pending.

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Stop and disable the service before the package is removed, so we don't leave a running
+# daemon pointing at deleted binaries. `$1` is "remove" or "upgrade"; only act on removal.
+set -e
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl stop spark || true
+    systemctl disable spark || true
+fi
+
+exit 0

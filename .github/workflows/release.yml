@@ -1,0 +1,112 @@
+# Release: on a v* tag, build release binaries for the three desktop targets on their native
+# runners, enforce the size budget, package each platform's artifact, and publish them to the
+# GitHub Release. Packaging definitions live under packaging/.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # manual dry run (uses the branch name as the version)
+
+permissions:
+  contents: write # create the Release + upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-latest, os: unix }
+          - { target: x86_64-apple-darwin, runner: macos-latest, os: unix }
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} --bin spark --bin spark-service
+
+      # Untrusted-input hygiene: the tag name reaches shells only via $REF_NAME, never inlined.
+      - name: Size budget (< 3 MB stripped per binary)
+        if: matrix.os != 'windows'
+        run: |
+          status=0
+          for b in spark spark-service; do
+            f="target/${{ matrix.target }}/release/$b"
+            sz=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f")
+            pct=$((sz * 100 / (3 * 1024 * 1024)))
+            if [ "$sz" -gt $((3 * 1024 * 1024)) ]; then
+              echo "$b: $sz bytes (${pct}%) OVER BUDGET"; status=1
+            else
+              echo "$b: $sz bytes (${pct}%) ok"
+            fi
+          done
+          exit $status
+
+      - name: Package tarball (macOS / Linux)
+        if: matrix.os != 'windows'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          ver="${REF_NAME#v}"
+          bindir="target/$TARGET/release"
+          mkdir -p dist
+          tarball="spark-$ver-$TARGET.tar.gz"
+          tar -C "$bindir" -czf "dist/$tarball" spark spark-service
+          ( cd dist && shasum -a 256 "$tarball" > "$tarball.sha256" )
+
+      - name: Package .deb (Linux)
+        if: matrix.os == 'linux'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          ver="${REF_NAME#v}"
+          packaging/debian/build-deb.sh "$ver" amd64 "target/$TARGET/release" dist
+
+      - name: Package zip (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ver = $env:REF_NAME -replace '^v',''
+          $bindir = "target/$env:TARGET/release"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item packaging/config.example.toml "$bindir/config.example.toml"
+          $items = @("$bindir/spark.exe", "$bindir/spark-service.exe", "$bindir/config.example.toml")
+          Compress-Archive -Path $items -DestinationPath "dist/spark-$ver-$env:TARGET.zip"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

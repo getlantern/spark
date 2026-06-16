@@ -1,0 +1,11 @@
+#!/bin/sh
+# Reload systemd so it sees the new unit, but do NOT auto-start: the admin enables it after
+# editing /etc/spark/config.toml (the install ships defaults that need tailoring per host).
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    echo "spark installed. Edit /etc/spark/config.toml, then: sudo systemctl enable --now spark"
+fi
+
+exit 0

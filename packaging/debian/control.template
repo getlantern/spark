@@ -1,0 +1,12 @@
+Package: spark
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Lantern <team@getlantern.org>
+Section: net
+Priority: optional
+Depends: libc6
+Description: From-scratch multi-protocol VPN/proxy tunnel
+ spark routes traffic through a local TUN device, terminates connections in a
+ userspace netstack, and forwards them through pluggable tunnel transports.
+ This package installs the privileged spark-service daemon (with a systemd unit)
+ and the unprivileged spark control client.
