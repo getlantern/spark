@@ -50,14 +50,16 @@
   (uid 2000 → tun0 → spark → upstream) returned **`HTTP/1.1 204`**; logcat shows the core forwarding
   TCP flows; force-stop cleanly releases `tun0`. Remaining (later): richer config/tunnel-server on
   android, cargo-ndk as a Gradle pre-build task.
-- **M10 (Apple) session 1 done 2026-06-16:** packet-I/O architecture **decided after deep research**
-  — **fd-trick primary + packet-object fallback**, hand-rolled **C ABI**, one `NEPacketTunnelProvider`
-  for iOS+macOS (matches lantern/WireGuard/sing-box/Mullvad/Proton; see decisions log). Generalized
-  `core::android` → `core::fd_tunnel` (shared by the Android JNI + the new Apple C ABI); new
-  `platforms/apple` staticlib (`spark_tunnel_run`/`stop`) **builds for `aarch64-apple-ios`/`-ios-sim`/
-  `-darwin`**, exports the C symbols. Next: Swift provider + xcframework + Xcode app/extension +
-  signing (team `ACZRKC3LQ9`); **macOS NE live gate on this Mac** (Developer ID cert present; iOS
-  needs a device; NE won't run on the simulator).
+- **M10 (Apple) sessions 1–2 done 2026-06-16; live gate BLOCKED on provisioning.** s1: decided
+  **fd-trick + packet-object fallback / C ABI / unified provider** (deep research, see decisions
+  log); `core::android`→`core::fd_tunnel` (shared by Android JNI + Apple C ABI); `platforms/apple`
+  staticlib builds for ios/ios-sim/darwin. s2: `SparkCore.xcframework` (3 slices); the **unified
+  Swift `PacketTunnelProvider`** (iOS+macOS) + `FdResolver` (KVC → public fd-scan) + entitlements/
+  Info.plist; `swift build` **compile-verifies the provider + the C FFI**. **Live gate can't run
+  here:** only a Developer ID cert, no Xcode-logged-in team, 0 provisioning profiles, and
+  `systemextensionsctl developer` is SIP-blocked. The NE entitlement needs a profile from team
+  `ACZRKC3LQ9` (human step). Reachable path = macOS **app-extension** + automatic signing under
+  that team; steps in `platforms/apple/README.md`. iOS gate needs a device.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
@@ -633,8 +635,9 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   for `aarch64-linux-android` + `Tun::from_fd`; `libspark_android.so` (cdylib) + `core::android`;
   `platforms/android/demo` `SparkVpnService` app — `adb shell` HTTP→204 through tun0→spark, VPN
   CONNECTED+VALIDATED, core forwarding in logcat)
-- [~] M10 (Apple — **s1 done: architecture DECIDED (fd-trick primary + packet-object fallback,
-  C ABI, unified iOS+macOS provider) after deep research; `core::fd_tunnel` shared with Android;
-  `platforms/apple` C-ABI staticlib builds for ios/ios-sim/darwin.** Pending: Swift
-  PacketTunnelProvider + xcframework + Xcode app/extension + signing; macOS NE live gate.)
+- [~] M10 (Apple — **s1–s2 done: architecture decided (fd-trick + packet-object fallback, C ABI,
+  unified provider); `core::fd_tunnel` shared with Android; `platforms/apple` staticlib +
+  `SparkCore.xcframework`; unified Swift `PacketTunnelProvider` + `FdResolver` compile-verified
+  (`swift build`).** Live gate BLOCKED on provisioning — needs a team-`ACZRKC3LQ9` profile for the
+  NE entitlement [human step]; macOS app-extension path + iOS device gate pending.)
   [ ] M11 (transports)
