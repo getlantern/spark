@@ -39,6 +39,12 @@
   only remaining M7 piece is the **live route gate under root** (command construction is
   unit-tested but the `route`/`ip` calls aren't yet exercised live). The M4 tunnel-server / M6
   SIGINT live gates also pending.
+- **M9 (Android) session 1 done 2026-06-15:** `spark-core` cross-compiles for
+  `aarch64-linux-android` (`cargo check --target`, `-D warnings` clean). Added the `Tun::from_fd`
+  mobile fd-ingestion seam (host-verified); gated `Tun::open`/`name` to non-android (tun-rs has no
+  `DeviceBuilder`/`name` there). No NDK needed for the check (no C deps yet). Next: JNI bridge
+  (`cfg(target_os="android")`), `platforms/android` Kotlin `VpnService`, NDK/Gradle cdylib build,
+  on-device gate — all need an Android toolchain (not on this box).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
@@ -195,6 +201,12 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 - `AsyncDevice: Deref<Target = DeviceImpl>`, so `dev.name() -> io::Result<String>` and
   `dev.mtu() -> io::Result<u16>` (and `addresses()`) work via auto-deref
   (`src/async_device/*/mod.rs` Deref; `src/platform/macos/device.rs:182,230`).
+- **fd adoption (mobile, VERIFIED at M9 s1 against 2.8.5):** `unsafe AsyncDevice::from_fd(fd:
+  RawFd) -> io::Result<AsyncDevice>` (`src/async_device/{unix,macos}/mod.rs`; takes ownership) and
+  `borrow_raw(fd)` (doesn't). `SyncDevice::from_fd` is `#[cfg(unix)]`. **Android caveat:** tun-rs
+  on `target_os="android"` exposes only the fd path — **no `DeviceBuilder`** and **no
+  `AsyncDevice::name()`** (verified: `cargo check --target aarch64-linux-android` errors E0432 +
+  E0599 until `Tun::open`/`name` are gated `not(android)`). `recv`/`send`/`mtu` work on android.
 - **macOS normalizes utun frames to raw IP** — no 4-byte AF prefix to strip; the parser
   keys on `buf[0] >> 4` on every platform (matches tun-rs's own cross-platform example).
 - Framed bridge (for M2): `tun_rs::async_framed::{DeviceFramed, BytesCodec}` behind the
@@ -224,6 +236,21 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (M9 s1 — Android core foundation): **Mobile adopts an fd, doesn't open a device;
+  `spark-core` now cross-compiles for `aarch64-linux-android`.** Added `Tun::from_fd(fd, mtu)`
+  (`#[cfg(unix)]`) wrapping `tun_rs::AsyncDevice::from_fd` — the seam for Android
+  `VpnService.establish()`+`detachFd` (and Apple `NEPacketTunnelFlow` at M10); MTU passed in (the
+  platform side sets it, the fd has no queryable interface). Verified against tun-rs 2.8.5 source:
+  `from_fd`/`borrow_raw` are `#[cfg(unix)]`; tun-rs supports android (`target_os="android"` cfgs,
+  `aarch64-linux-android` in its target list) but exposes **only** the fd path there — no
+  `DeviceBuilder`, no `AsyncDevice::name()`. So `Tun::open`/`Tun::name` are now
+  `#[cfg(not(target_os="android"))]` (desktop creates the device; mobile adopts the fd). The
+  cross-check caught both gaps — would've been invisible without `--target aarch64-linux-android`.
+  No C deps in the tree yet (no ring/rustls), so the android `cargo check` needs **no NDK**
+  (check doesn't link). Building a real `.so`/cdylib + the JNI/Kotlin/Gradle layers + the
+  on-device gate are the next chunks and DO need an Android toolchain (NDK + SDK + emulator), not
+  present on this box. `spark-service`/`spark` are **not** built for android (VpnService is
+  in-process, same-uid — no privileged-daemon split per M9 design; only `core` ships there).
 - 2026-06-15 (M8 — Windows SCM service handler): **`spark-service` is a dual-mode binary; SCM
   integration via the `windows-service` crate; daemon body shared in a lib module.** Asked Adam
   re: FFI layer → **`windows-service` crate** (Mullvad's; +1 Windows-only dep, approved) over
@@ -527,4 +554,8 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   done — `spark-service` is dual-mode (service under SCM / foreground)**; **MSI (WiX) done —
   installs binaries + registers the service**. Packaging feature-complete; pending only live
   verifications: a release run [push a tag], Homebrew-tap push, live Windows run, Event-Log logging)
-  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
+- [~] M9 (Android — session 1: **`spark-core` cross-compiles for `aarch64-linux-android`**; the
+  `Tun::from_fd` mobile fd-ingestion seam is in + host-verified; `Tun::open`/`name` gated to
+  non-android. Pending: JNI bridge in core `cfg(target_os="android")`, `platforms/android` Kotlin
+  `VpnService` module, NDK/Gradle cdylib build, on-device browse gate — all need an Android toolchain)
+  [ ] M10 (Apple)  [ ] M11 (transports)
