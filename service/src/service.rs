@@ -45,7 +45,7 @@ pub async fn run_service<E: TunnelEngine>(
     let mut state = TunnelState::Disconnected;
     let mut direct_fallback = false;
     let mut handshook = false;
-    let mut subscribers: Vec<mpsc::Sender<Push>> = Vec::new();
+    let mut subscribers: Vec<Subscriber> = Vec::new();
 
     // The actor owns one exit channel; `start` is handed the sender and the data-path
     // supervisor fires it if a forwarder loop returns on its own. Nothing fires it while
@@ -105,7 +105,7 @@ pub async fn run_service<E: TunnelEngine>(
                         direct_fallback,
                     }),
                     RequestPayload::Subscribe { .. } => {
-                        subscribers.push(push_tx.clone());
+                        subscribers.push(Subscriber::new(push_tx.clone()));
                         ResponsePayload::Ack
                     }
                 };
@@ -138,12 +138,53 @@ pub async fn run_service<E: TunnelEngine>(
     }
 }
 
+/// A subscribed connection's push channel plus its overflow accounting.
+struct Subscriber {
+    /// The connection's push sender.
+    tx: mpsc::Sender<Push>,
+    /// Stream items dropped (channel full) since the last delivered [`Push::Dropped`] marker.
+    dropped: u64,
+}
+
+impl Subscriber {
+    fn new(tx: mpsc::Sender<Push>) -> Self {
+        Self { tx, dropped: 0 }
+    }
+
+    /// Deliver `event`, flushing any pending drop accounting first. Returns `false` when the
+    /// receiver has closed (so the caller prunes this subscriber).
+    ///
+    /// Delivery is non-blocking (`try_send`) so a wedged client never stalls the event loop. On
+    /// a full channel the item is dropped and counted; the count rides out as a [`Push::Dropped`]
+    /// once the channel drains, telling the client to re-sync via `GetStatus`.
+    fn deliver(&mut self, event: &Push) -> bool {
+        use mpsc::error::TrySendError;
+        if self.dropped > 0 {
+            match self.tx.try_send(Push::Dropped {
+                count: self.dropped,
+            }) {
+                Ok(()) => self.dropped = 0,
+                // Still backed up — fold this event into the count and try again next time.
+                Err(TrySendError::Full(_)) => {
+                    self.dropped = self.dropped.saturating_add(1);
+                    return true;
+                }
+                Err(TrySendError::Closed(_)) => return false,
+            }
+        }
+        match self.tx.try_send(event.clone()) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.dropped = self.dropped.saturating_add(1);
+                true
+            }
+            Err(TrySendError::Closed(_)) => false,
+        }
+    }
+}
+
 /// Move to `new` state and notify subscribers of the change.
-fn transition(
-    state: &mut TunnelState,
-    new: TunnelState,
-    subscribers: &mut Vec<mpsc::Sender<Push>>,
-) {
+fn transition(state: &mut TunnelState, new: TunnelState, subscribers: &mut Vec<Subscriber>) {
     if *state == new {
         return;
     }
@@ -151,14 +192,54 @@ fn transition(
     broadcast(subscribers, Push::Event(TunnelEvent::StateChanged(new)));
 }
 
-/// Push `event` to every subscriber. Dead subscribers (closed receivers) are pruned; if a
-/// subscriber's channel is full the event is dropped (best-effort — a drop-oldest +
-/// `Push::Dropped` accounting is a documented refinement).
-fn broadcast(subscribers: &mut Vec<mpsc::Sender<Push>>, event: Push) {
-    subscribers.retain(|s| {
-        !matches!(
-            s.try_send(event.clone()),
-            Err(mpsc::error::TrySendError::Closed(_))
-        )
-    });
+/// Push `event` to every subscriber, pruning any whose receiver has closed. Slow subscribers
+/// keep their slot — overflow is counted and surfaced as a later [`Push::Dropped`].
+fn broadcast(subscribers: &mut Vec<Subscriber>, event: Push) {
+    subscribers.retain_mut(|sub| sub.deliver(&event));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_event() -> Push {
+        Push::Event(TunnelEvent::StateChanged(TunnelState::Connected))
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_is_kept_and_told_how_many_it_missed() {
+        // A 2-slot channel that we never drain: the first 2 events buffer, the rest overflow.
+        let (tx, mut rx) = mpsc::channel::<Push>(2);
+        let mut subs = vec![Subscriber::new(tx)];
+
+        for _ in 0..5 {
+            broadcast(&mut subs, state_event());
+        }
+        assert_eq!(
+            subs.len(),
+            1,
+            "a slow (but live) subscriber must not be pruned"
+        );
+
+        // Two events fit; the other three were dropped and counted.
+        assert!(matches!(rx.try_recv(), Ok(Push::Event(_))));
+        assert!(matches!(rx.try_recv(), Ok(Push::Event(_))));
+
+        // Draining freed the channel; the next broadcast flushes the drop marker first.
+        broadcast(&mut subs, Push::Event(TunnelEvent::FellOpenToDirect));
+        assert!(matches!(rx.try_recv(), Ok(Push::Dropped { count: 3 })));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Push::Event(TunnelEvent::FellOpenToDirect))
+        ));
+    }
+
+    #[tokio::test]
+    async fn closed_subscriber_is_pruned() {
+        let (tx, rx) = mpsc::channel::<Push>(4);
+        let mut subs = vec![Subscriber::new(tx)];
+        drop(rx); // client hung up
+        broadcast(&mut subs, state_event());
+        assert!(subs.is_empty(), "a closed subscriber should be pruned");
+    }
 }
