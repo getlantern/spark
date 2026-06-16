@@ -71,10 +71,20 @@
   app `GENERATE_INFOPLIST_FILE`; full extension Info.plist keys (CFBundleIdentifier) for the embed
   prefix check; `NSApplicationDelegate` auto-connect. **Blocker:** macOS won't *host the provider*
   — `startTunnel` never runs, connection → Disconnected. It's the NE host-validation gate for a
-  **dev-signed, un-notarized** app; the `nesessionmanager` reason isn't readable from the agent's
-  shell (even unsandboxed — the sandbox flagged it). **Next (human): notarize** (Developer ID +
-  `notarytool`, creds look present in `AC_USERNAME`/`AC_PASSWORD`) or read the daemon log to
-  confirm. The build+sign + Swift provider are the durable, verified deliverable.
+  **dev-signed, un-notarized** app. **Diagnosed (s3 cont.):** `nesessionmanager` *registers* the
+  plugin but won't *host* the un-notarized app-extension; the Developer-ID export then proved the
+  rule — non-App-Store macOS NE must be a **system extension** (`packet-tunnel-provider-systemextension`),
+  not an app-extension (`packet-tunnel-provider` = App-Store only). **Converted to a system
+  extension** (commit `da0f239`, lantern's model): `Sources/SparkTunnelMain/main.swift`
+  (`NEProvider.startSystemExtensionMode`), `NetworkExtension` Info.plist dict, `-systemextension`
+  entitlement (sandbox off), app `system-extension.install` + `OSSystemExtensionRequest` activation
+  (`SysExt`). **Compiles** (`xcodebuild CODE_SIGNING_ALLOWED=NO build` SUCCEEDED). **Last mile
+  (human, Xcode GUI):** `xcodebuild` CLI auto-provisioning mints a *development* profile that can't
+  carry the systemextension entitlement (App ID NE capability stuck on the app-ext value); fix is a
+  couple clicks in Xcode → Signing & Capabilities (re-syncs the App ID + Developer-ID profile),
+  then Archive → Direct Distribution (notarizes) → `/Applications` → approve sysext + VPN → browse
+  gate. Steps in `platforms/apple/README.md`. The Rust core + FFI + Swift provider + sysext
+  conversion are the durable, verified deliverable; only Apple provisioning/notarization remains.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
