@@ -29,11 +29,15 @@ anyhow.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-# Windows control transport: build the named pipe's admin-only DACL (SECURITY_ATTRIBUTES from an
-# SDDL string). Already in the lockfile transitively (via tokio/socket2); used directly here.
+# Windows control transport + service integration.
+# - windows-sys: the named pipe's admin-only DACL (SECURITY_ATTRIBUTES from an SDDL string).
+#   Already in the lockfile transitively (via tokio/socket2); used directly here.
+# - windows-service: SCM integration (run spark-service as a proper Windows service). Type-safe
+#   wrappers over StartServiceCtrlDispatcher/RegisterServiceCtrlHandlerEx/SetServiceStatus.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
 ] }
+windows-service = "0.7"

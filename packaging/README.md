@@ -77,16 +77,27 @@ The App-Store/GUI macOS form (and iOS) use a NetworkExtension instead of a daemo
 
 `spark-service` and `spark` build for Windows; the control channel is an admin-only **named
 pipe** (`\\.\pipe\spark`, DACL-restricted to SYSTEM + Administrators — see `service::pipe`).
-The release workflow ships a `.zip` of the two `.exe`s + example config. Run the daemon from an
-elevated prompt:
+The release workflow ships a `.zip` of the two `.exe`s + example config.
+
+`spark-service` is a **dual-mode binary**: launched by the Service Control Manager it runs as a
+proper Windows service (reports RUNNING, handles STOP/SHUTDOWN; see `service::winsvc`); launched
+from a console it runs in the foreground. So you can either run it directly:
 
 ```powershell
-spark-service.exe --config C:\ProgramData\spark\config.toml
+spark-service.exe --config C:\ProgramData\spark\config.toml   # foreground (dev)
 spark.exe connect    # in another (elevated) prompt
 ```
 
-**Still to do (tracked in `docs/STATE.md`):** a proper SCM-integrated Windows service +
-MSI installer. That needs `spark-service` to implement the service control handler (e.g. the
-`windows-service` crate) so it responds to SCM start/stop — until then it runs as a console
-process, so the MSI/`ServiceInstall` is deferred rather than shipped half-working. A live run
-on a real Windows host is also still pending.
+…or register it as a service with the SCM (the service responds to `sc stop`/`sc start`
+correctly now that it implements the control handler):
+
+```powershell
+sc.exe create spark binPath= "\"C:\Program Files\spark\spark-service.exe\" --config \"C:\ProgramData\spark\config.toml\"" start= auto
+sc.exe start spark
+sc.exe stop  spark
+```
+
+**Still to do (tracked in `docs/STATE.md`):** an **MSI** that drops the binaries + config and runs
+the `sc create` above via WiX `ServiceInstall` (now unblocked — the binary speaks SCM). Service
+logging currently goes to stderr (discarded under the SCM); routing to the Windows Event Log or a
+file is a refinement. A live run on a real Windows host is also still pending.

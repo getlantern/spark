@@ -139,6 +139,13 @@ pub async fn run_service<E: TunnelEngine>(
             }
         }
     }
+
+    // The command channel closed — all control senders dropped, i.e. the daemon is shutting down
+    // (e.g. a Windows-service STOP cancelled the listener). Tear the tunnel down so we don't
+    // leave it up with no one driving it; restore direct routing on the way out.
+    if state == TunnelState::Connected {
+        let _ = engine.stop(Teardown::RestoreDirect).await;
+    }
 }
 
 /// A subscribed connection's push channel plus its overflow accounting.

@@ -13,8 +13,13 @@
 
 pub mod auth;
 pub mod conn;
+pub mod daemon;
 pub mod engine;
 pub mod service;
+
+// Windows Service Control Manager integration (run as a proper Windows service).
+#[cfg(windows)]
+pub mod winsvc;
 
 // The control transport is platform-specific: a unix-domain socket (peer-cred auth + socket
 // perms) on unix, a named pipe (admin-only DACL) on Windows. Both plug into the shared,
