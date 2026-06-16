@@ -39,12 +39,16 @@
   only remaining M7 piece is the **live route gate under root** (command construction is
   unit-tested but the `route`/`ip` calls aren't yet exercised live). The M4 tunnel-server / M6
   SIGINT live gates also pending.
-- **M9 (Android) session 1 done 2026-06-15:** `spark-core` cross-compiles for
-  `aarch64-linux-android` (`cargo check --target`, `-D warnings` clean). Added the `Tun::from_fd`
-  mobile fd-ingestion seam (host-verified); gated `Tun::open`/`name` to non-android (tun-rs has no
-  `DeviceBuilder`/`name` there). No NDK needed for the check (no C deps yet). Next: JNI bridge
-  (`cfg(target_os="android")`), `platforms/android` Kotlin `VpnService`, NDK/Gradle cdylib build,
-  on-device gate — all need an Android toolchain (not on this box).
+- **M9 (Android) sessions 1–2 done:** **s1 (2026-06-15)** — `spark-core` cross-compiles for
+  `aarch64-linux-android`; added the `Tun::from_fd` mobile fd-ingestion seam; gated
+  `Tun::open`/`name` to non-android (tun-rs has no `DeviceBuilder`/`name` there). **s2 (2026-06-16)**
+  — `platforms/android` cdylib (`libspark_android.so`) + `core::android::run_tunnel`: the JNI data
+  path. `SparkBridge.nativeRun(fd, mtu)` adopts the `VpnService` fd → netstack → direct forwarder;
+  `nativeStop` fires a global `Notify`. **Built both ABIs with cargo-ndk** (NDK 28.2, API 24,
+  arm64-v8a + x86_64); the `.so` exports `nativeRun`/`nativeStop` and links only libc/libm/libdl.
+  Primitive-only JNI (no `jni` crate); loop avoidance = `VpnService.addDisallowedApplication(self)`.
+  Next (M9 completion): Kotlin `SparkVpnService` + a Gradle module + the on-device/emulator browse
+  gate (toolchain IS on this box — NDK 23–29, emulators incl. `Medium_Phone_API_35`).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
@@ -236,6 +240,26 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-16 (M9 s2 — Android JNI native library): **`platforms/android` cdylib +
+  `core::android` run the data path on the VpnService fd; primitive-only JNI (no `jni` crate);
+  loop avoidance via `addDisallowedApplication`.** New workspace member `platforms/android`
+  (`crate-type=["cdylib"]`, `libspark_android.so`) depends on `spark-core`; its JNI symbols are
+  `cfg(target_os="android")` so on desktop it's an empty cdylib (stays in the green-checked set).
+  `core::android::run_tunnel(fd, mtu)` = `Tun::from_fd` → `transport::from_config` (default,
+  direct) → `SmoltcpNetstack` → `proxy::tcp::run` + `run_udp`, on a private tokio runtime, racing
+  a process-global `Notify` that `stop()` fires. JNI is **primitive-only** (`nativeRun(fd, mtu)
+  -> jint`, `nativeStop()`; `extern "system"`, raw `*mut c_void` for env/class we don't deref) so
+  **no `jni` crate** — chosen because the first cut needs no string/callback marshalling. **Loop
+  avoidance = the Kotlin side's `VpnService.addDisallowedApplication(<self>)`** (excludes the
+  in-process proxy's own upstream dials from the tunnel — the Android analog of the desktop
+  `SocketProtector`), so no per-socket JNI `protect()` callback. Build tool: **cargo-ndk 4.1.2**
+  (`-P` is the API level, NOT `-p` which collides with cargo's package flag); `ANDROID_NDK_HOME`
+  → the lantern-pinned NDK **28.2.13676358**; ABIs arm64-v8a + x86_64, API 24. **Verified**: both
+  `.so`s build; arm64 `libspark_android.so` exports `nativeRun`/`nativeStop` (llvm-nm) and DT_NEEDED
+  is only libc/libm/libdl (tun-rs statically linked; cargo-ndk's stray `libtun_rs-*.so` dylib
+  byproduct is dropped — tun-rs declares an extra dylib crate-type). `jniLibs/` gitignored. Prior
+  art: lantern's `LanternVpnService.kt` (`establish()`/`detachFd`/`protect`); lantern uses gomobile
+  (Go) so only its Kotlin VpnService + Gradle (NDK 28.2, minSdk 24, abiFilters arm64-v8a) transfer.
 - 2026-06-15 (M9 s1 — Android core foundation): **Mobile adopts an fd, doesn't open a device;
   `spark-core` now cross-compiles for `aarch64-linux-android`.** Added `Tun::from_fd(fd, mtu)`
   (`#[cfg(unix)]`) wrapping `tun_rs::AsyncDevice::from_fd` — the seam for Android
@@ -554,8 +578,8 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   done — `spark-service` is dual-mode (service under SCM / foreground)**; **MSI (WiX) done —
   installs binaries + registers the service**. Packaging feature-complete; pending only live
   verifications: a release run [push a tag], Homebrew-tap push, live Windows run, Event-Log logging)
-- [~] M9 (Android — session 1: **`spark-core` cross-compiles for `aarch64-linux-android`**; the
-  `Tun::from_fd` mobile fd-ingestion seam is in + host-verified; `Tun::open`/`name` gated to
-  non-android. Pending: JNI bridge in core `cfg(target_os="android")`, `platforms/android` Kotlin
-  `VpnService` module, NDK/Gradle cdylib build, on-device browse gate — all need an Android toolchain)
+- [~] M9 (Android — s1: core cross-compiles for `aarch64-linux-android` + `Tun::from_fd` seam.
+  s2: **`platforms/android` cdylib + `core::android` — `libspark_android.so` builds for both ABIs
+  via cargo-ndk, JNI `nativeRun`/`nativeStop` verified**. Pending: Kotlin `SparkVpnService` + a
+  Gradle module + the on-device/emulator browse gate)
   [ ] M10 (Apple)  [ ] M11 (transports)
