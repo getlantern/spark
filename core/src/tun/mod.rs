@@ -10,7 +10,11 @@
 use std::io;
 use std::net::Ipv4Addr;
 
-use tun_rs::{AsyncDevice, DeviceBuilder};
+use tun_rs::AsyncDevice;
+// On Android the OS creates the interface (via `VpnService`); `tun-rs` exposes no
+// `DeviceBuilder` there, only the fd path (`from_fd`). So device *creation* is desktop-only.
+#[cfg(not(target_os = "android"))]
+use tun_rs::DeviceBuilder;
 
 /// Errors from bringing up or naming the TUN device.
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +47,9 @@ pub struct Tun {
 
 impl Tun {
     /// Bring up a TUN device per `cfg`. Requires elevated privileges on every desktop
-    /// platform.
+    /// platform. Not available on Android, where the OS creates the interface and the core
+    /// adopts its fd via [`from_fd`](Self::from_fd) instead.
+    #[cfg(not(target_os = "android"))]
     pub fn open(cfg: TunConfig) -> Result<Self, TunError> {
         let mut builder = DeviceBuilder::new().ipv4(cfg.ipv4.0, cfg.ipv4.1, None);
         if let Some(name) = cfg.name {
@@ -57,12 +63,34 @@ impl Tun {
         Ok(Self { dev, mtu })
     }
 
+    /// Adopt an existing TUN file descriptor instead of creating a device. This is the mobile
+    /// path: the OS owns the privilege to create the interface, so Android's
+    /// `VpnService.establish()` (via `detachFd`) and Apple's `NEPacketTunnelFlow` hand the app a
+    /// ready-configured fd, and the core only moves packets. Takes ownership of `fd` (closing it
+    /// on drop). `mtu` is supplied by the caller — the same value it set on the platform side
+    /// (e.g. `VpnService.Builder.setMtu`) — since the fd isn't a queryable named interface here.
+    ///
+    /// # Safety
+    /// `fd` must be a valid, open TUN file descriptor owned by no one else; this takes ownership
+    /// and will close it on drop. Passing an invalid or aliased fd is undefined behavior.
+    #[cfg(unix)]
+    pub unsafe fn from_fd(fd: std::os::fd::RawFd, mtu: u16) -> Result<Self, TunError> {
+        // SAFETY: forwarded to the caller's contract above (valid, solely-owned TUN fd).
+        let dev = unsafe { AsyncDevice::from_fd(fd) }.map_err(TunError::Create)?;
+        Ok(Self {
+            dev,
+            mtu: mtu as usize,
+        })
+    }
+
     /// The device MTU in bytes — the maximum packet size to size receive buffers to.
     pub fn mtu(&self) -> usize {
         self.mtu
     }
 
-    /// The OS-assigned interface name.
+    /// The OS-assigned interface name. Not available on Android (a from-fd device has no
+    /// queryable name; the `VpnService` owns the interface).
+    #[cfg(not(target_os = "android"))]
     pub fn name(&self) -> Result<String, TunError> {
         self.dev.name().map_err(TunError::Query)
     }
