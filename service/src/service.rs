@@ -13,7 +13,7 @@ use spark_ipc::{
     TunnelState, TunnelStatus, PROTOCOL_VERSION,
 };
 
-use crate::engine::TunnelEngine;
+use crate::engine::{Teardown, TunnelEngine};
 
 /// Depth of the command channel feeding the event loop.
 const COMMAND_DEPTH: usize = 64;
@@ -95,7 +95,7 @@ pub async fn run_service<E: TunnelEngine>(
                         }
                     },
                     RequestPayload::Disconnect => {
-                        let _ = engine.stop().await;
+                        let _ = engine.stop(Teardown::RestoreDirect).await;
                         direct_fallback = false;
                         transition(&mut state, TunnelState::Disconnected, &mut subscribers);
                         ResponsePayload::Ack
@@ -118,7 +118,10 @@ pub async fn run_service<E: TunnelEngine>(
             // kill-switch. Fail open (restore direct routing) or closed (block), loudly.
             Some(()) = exit_rx.recv() => {
                 if state == TunnelState::Connected {
-                    let _ = engine.stop().await; // reclaim the dead device
+                    // Reclaim the dead device and settle routing per policy: fail open (restore
+                    // direct) by default, or fail closed (blackhole) for a fail-closed profile.
+                    let teardown = if fail_closed { Teardown::Block } else { Teardown::RestoreDirect };
+                    let _ = engine.stop(teardown).await;
                     if fail_closed {
                         direct_fallback = false;
                         transition(&mut state, TunnelState::Failed, &mut subscribers);

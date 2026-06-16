@@ -20,5 +20,18 @@ protect_interface = "en0"
 [udp]
 idle_timeout_secs = 60   # reclaim a UDP NAT association after this much silence
 
+[routing]
+# When true, spark seizes the routing table on connect (full-tunnel) and restores/blackholes
+# it on teardown — the active half of the kill-switch. When false (default), you route traffic
+# into the TUN yourself (the dev-gate workflow). Needs `protect_interface` set above so the
+# daemon's own dials bypass the tunnel.
+manage = false
+
+[kill_switch]
+# Only meaningful with [routing] manage = true. false (default) = fail OPEN: if the data path
+# dies, restore direct routing (loudly) so the network keeps working. true = fail CLOSED:
+# blackhole traffic instead of leaking it directly.
+fail_closed = false
+
 [log]
 debug = false   # keep false in production — addresses are redacted at the default level

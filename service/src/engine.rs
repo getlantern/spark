@@ -21,6 +21,7 @@ use tracing::info;
 use spark_core::config::Config;
 use spark_core::netstack::SmoltcpNetstack;
 use spark_core::proxy;
+use spark_core::routing::RouteManager;
 use spark_core::transport;
 use spark_core::tun::{Tun, TunConfig};
 
@@ -29,6 +30,15 @@ use spark_core::tun::{Tun, TunConfig};
 #[error("tunnel engine error: {0}")]
 pub struct EngineError(pub String);
 
+/// How to leave routing when tearing the tunnel down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Teardown {
+    /// Restore direct routing — a normal disconnect, or the fail-open kill-switch.
+    RestoreDirect,
+    /// Blackhole traffic instead of restoring direct routing — the fail-closed kill-switch.
+    Block,
+}
+
 /// Drives the actual tunnel data path on behalf of the control-plane event loop.
 #[async_trait]
 pub trait TunnelEngine: Send {
@@ -36,8 +46,8 @@ pub trait TunnelEngine: Send {
     /// (one `()`) if the data path later dies on its own — NOT on a deliberate [`stop`](Self::stop),
     /// which aborts before the signal is sent.
     async fn start(&mut self, exit: mpsc::Sender<()>) -> Result<(), EngineError>;
-    /// Tear the tunnel down and restore direct routing.
-    async fn stop(&mut self) -> Result<(), EngineError>;
+    /// Tear the tunnel down, leaving the routing end-state requested by `teardown`.
+    async fn stop(&mut self, teardown: Teardown) -> Result<(), EngineError>;
 }
 
 /// The production engine: opens the TUN, starts `spark-core`'s netstack + forwarders, and
@@ -45,12 +55,15 @@ pub trait TunnelEngine: Send {
 /// here it is owned by the privileged service and toggled by control-plane commands.
 ///
 /// Opening the device requires elevated privilege, so `start` only succeeds when the service
-/// runs privileged; the live gate exercises it under root. Route installation/restoration
-/// (the active half of the fail-open kill-switch) is the remaining piece layered on top.
+/// runs privileged; the live gate exercises it under root. Full-tunnel route management (the
+/// active half of the kill-switch) is opt-in via `[routing] manage`; the live route commands
+/// themselves are unit-tested but not yet exercised under root.
 pub struct CoreEngine {
     config: Config,
     tun: Option<Arc<Tun>>,
     supervisor: Option<JoinHandle<()>>,
+    /// Present only while connected with `[routing] manage` on — owns the installed routes.
+    routes: Option<RouteManager>,
 }
 
 impl CoreEngine {
@@ -60,6 +73,7 @@ impl CoreEngine {
             config,
             tun: None,
             supervisor: None,
+            routes: None,
         }
     }
 }
@@ -107,16 +121,39 @@ impl TunnelEngine for CoreEngine {
 
         self.supervisor = Some(supervisor);
         self.tun = Some(tun);
+
+        // Take over the routing table only when asked (full-tunnel); otherwise the operator
+        // routes traffic in. Keep the manager even if install fails so `stop` can clear any
+        // partial state.
+        if self.config.routing.manage {
+            let mut routes = RouteManager::new(&device);
+            let outcome = routes.install().await;
+            self.routes = Some(routes);
+            if let Err(e) = outcome {
+                let _ = self.stop(Teardown::RestoreDirect).await;
+                return Err(EngineError(format!("installing routes: {e}")));
+            }
+        }
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), EngineError> {
+    async fn stop(&mut self, teardown: Teardown) -> Result<(), EngineError> {
         if let Some(task) = self.supervisor.take() {
             task.abort();
         }
-        // Dropping the last `Tun` reference tears the OS device down (and restores routing).
+        // Drop the TUN first: the OS removes the device (and the routes through it), so the
+        // split-default covers fall away even before we touch the table.
         if self.tun.take().is_some() {
             info!("tunnel down");
+        }
+        // Then settle the routing end-state. The ops clear stale covers first, so they're
+        // correct regardless of whether the device teardown already removed them.
+        if let Some(mut routes) = self.routes.take() {
+            let result = match teardown {
+                Teardown::RestoreDirect => routes.restore().await,
+                Teardown::Block => routes.block().await,
+            };
+            result.map_err(|e| EngineError(format!("tearing down routes: {e}")))?;
         }
         Ok(())
     }
@@ -128,11 +165,13 @@ pub(crate) mod test_support {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
-    /// A fake engine that records whether the tunnel is "running" without touching the
-    /// network, and lets a test simulate an unexpected exit by firing [`Self::kill`].
+    /// A fake engine that records whether the tunnel is "running" (and how it was last torn
+    /// down) without touching the network, and lets a test simulate an unexpected exit by
+    /// firing [`Self::kill`].
     #[derive(Clone, Default)]
     pub struct FakeEngine {
         pub running: Arc<AtomicBool>,
+        last_teardown: Arc<Mutex<Option<Teardown>>>,
         exit: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     }
 
@@ -144,6 +183,11 @@ pub(crate) mod test_support {
                 let _ = tx.send(()).await;
             }
         }
+
+        /// The teardown mode of the most recent `stop` (the kill-switch routing decision).
+        pub fn last_teardown(&self) -> Option<Teardown> {
+            *self.last_teardown.lock().unwrap()
+        }
     }
 
     #[async_trait]
@@ -153,8 +197,9 @@ pub(crate) mod test_support {
             *self.exit.lock().unwrap() = Some(exit);
             Ok(())
         }
-        async fn stop(&mut self) -> Result<(), EngineError> {
+        async fn stop(&mut self, teardown: Teardown) -> Result<(), EngineError> {
             self.running.store(false, Ordering::SeqCst);
+            *self.last_teardown.lock().unwrap() = Some(teardown);
             *self.exit.lock().unwrap() = None;
             Ok(())
         }

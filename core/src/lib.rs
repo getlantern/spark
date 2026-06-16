@@ -15,6 +15,7 @@ pub mod netstack;
 pub mod packet;
 pub mod proxy;
 pub mod redact;
+pub mod routing;
 pub mod transport;
 pub mod tun;
 

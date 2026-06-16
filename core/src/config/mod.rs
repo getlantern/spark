@@ -37,10 +37,22 @@ pub struct Config {
     pub transport: TransportConfig,
     /// UDP forwarding settings.
     pub udp: UdpConfig,
+    /// Whether spark manages the routing table (full-tunnel) itself.
+    pub routing: RoutingConfig,
     /// Kill-switch behavior when the tunnel drops.
     pub kill_switch: KillSwitchConfig,
     /// Logging settings.
     pub log: LogConfig,
+}
+
+/// Whether spark takes over the routing table to capture all traffic (full-tunnel). Off by
+/// default, leaving routing to the operator; when on, the service installs the split-default
+/// covers on connect and restores/blackholes them on teardown (see [`crate::routing`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoutingConfig {
+    /// When `true`, spark installs and tears down full-tunnel routes itself. Default `false`.
+    pub manage: bool,
 }
 
 /// What happens to traffic if the tunnel drops unexpectedly. The product default is **fail
@@ -226,6 +238,7 @@ mod tests {
                 udp: UdpConfig {
                     idle_timeout_secs: 30,
                 },
+                routing: RoutingConfig { manage: true },
                 kill_switch: KillSwitchConfig { fail_closed: true },
                 log: LogConfig { debug: true },
             },

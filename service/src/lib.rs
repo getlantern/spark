@@ -19,6 +19,6 @@ pub mod service;
 
 pub use auth::{AuthPolicy, PeerCreds};
 pub use conn::serve_connection;
-pub use engine::{CoreEngine, EngineError, TunnelEngine};
+pub use engine::{CoreEngine, EngineError, Teardown, TunnelEngine};
 pub use listener::serve;
 pub use service::{channel, run_service, Envelope};

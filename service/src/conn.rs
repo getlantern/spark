@@ -76,6 +76,7 @@ where
 mod tests {
     use super::*;
     use crate::engine::test_support::FakeEngine;
+    use crate::engine::Teardown;
     use crate::service::{channel, run_service};
     use spark_ipc::{
         ErrorCode, RequestPayload, Response, ResponsePayload, TunnelEvent, TunnelState,
@@ -159,6 +160,15 @@ mod tests {
             saw_fell_open,
             "expected a FellOpenToDirect push after the tunnel died"
         );
+
+        // The engine must have been told the matching routing decision (the active half of the
+        // kill-switch): blackhole when failing closed, restore-direct when failing open.
+        let expected = if fail_closed {
+            Teardown::Block
+        } else {
+            Teardown::RestoreDirect
+        };
+        assert_eq!(engine.last_teardown(), Some(expected));
 
         match expect_response(
             request(
