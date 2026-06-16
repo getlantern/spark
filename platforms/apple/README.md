@@ -87,19 +87,25 @@ app-extension (embeds `SparkCore.xcframework` + `Sources/SparkNE`), automatic si
   `NETunnelProviderManager` save (one-time consent) → `startVPNTunnel` succeeds (the managing app
   needs the NE entitlement too, else `saveToPreferences` = *permission denied* — fixed in
   `SparkApp.entitlements`).
-- **Remaining: the system won't *launch the provider*.** After `startVPNTunnel`, the connection
-  goes to `Disconnected` and the extension's `startTunnel` never runs (no provider logs). This is a
-  macOS NE host-validation gate — a development-signed, **un-notarized** app's packet-tunnel
-  provider is refused by `nesessionmanager`. The exact reason is in the unified log (which this
-  agent's shell can't read), so to pin/fix it:
-  1. **Read the reason:** in your terminal / Console.app —
-     `log show --last 5m --predicate 'process == "nesessionmanager" OR process == "neagent"' | grep -i spark`
-     (or filter Console by subsystem `org.getlantern.spark`). The provider's own logs use that
-     subsystem (categories `tunnel`/`app`).
-  2. **Likely fix — notarize:** re-sign with **Developer ID** + a Developer-ID NE provisioning
-     profile, `xcrun notarytool submit` (creds appear to be in `AC_USERNAME`/`AC_PASSWORD`), staple,
-     and run from `/Applications`. (System-extension dev mode via `systemextensionsctl developer on`
-     is the other route but is **SIP-blocked** here.)
+- **Remaining: the macOS live run needs a SYSTEM EXTENSION + notarization** (this app-extension is
+  the App-Store shape). Diagnosed live: `nesessionmanager` *registers* the plugin
+  (`LSPlugInKitProxy pluginID=org.getlantern.spark.tunnel`) but won't *host* it — the un-notarized
+  app-extension provider is refused. Attempting the Developer-ID export then surfaced the rule
+  directly: Xcode auto-created `Mac Team Direct Provisioning Profile: org.getlantern.spark{,.tunnel}`
+  but the export failed because they don't match the `packet-tunnel-provider` entitlement —
+  **Developer ID NE uses `packet-tunnel-provider-systemextension`** (a *system* extension), while
+  `packet-tunnel-provider` (this target) is App-Store-only. So the non-App-Store macOS path is what
+  lantern does: a **system extension**, Developer-ID-signed + **notarized**.
+- **macOS live-gate conversion (next):** change `SparkTunnel` to a system-extension target with the
+  `packet-tunnel-provider-systemextension` entitlement; add the app's `OSSystemExtensionRequest`
+  activation flow; Developer-ID sign (`Developer ID Application: … ACZRKC3LQ9`, `--options runtime`,
+  per-component inner→outer like lantern's `osxcodesign`); `xcrun notarytool submit` (creds in
+  `AC_USERNAME`/`AC_PASSWORD`) + `stapler staple`; install to `/Applications`, approve the system
+  extension (System Settings) + the VPN consent, then browse-test. A notarized system extension
+  loads **without** SIP-off, so the SIP block on `systemextensionsctl developer` is moot.
+  Model: lantern `Makefile` `macos-release` → `sign-app` / `notarize-darwin`.
+- **App-Store path (alternative):** the current app-extension + `packet-tunnel-provider` is correct
+  for TestFlight/App-Store distribution (hosted differently than a local Developer-ID run).
 - iOS live gate needs a physical device (NE packet tunnels don't run on the simulator).
 - Cleanup: a non-functional "Spark" VPN config + `/Applications/SparkApp.app` were left from the
   bring-up; remove via System Settings → VPN and `rm -rf /Applications/SparkApp.app`.
