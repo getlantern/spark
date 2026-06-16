@@ -10,22 +10,28 @@
 //! session [`frame`]s. Multiple logical streams are multiplexed over one session by `stream_id`;
 //! idle sessions are pooled and reused so new requests rarely produce a fresh visible handshake.
 //!
-//! ## Status (built in this chunk vs. deferred)
+//! ## Status (built vs. deferred)
 //!
 //! - [`frame`] — the session-frame codec ([`Command`], [`Frame`]). **Built.**
 //! - [`padding`] — the padding-scheme parser/model ([`PaddingScheme`]). **Built.**
-//! - Deferred to later chunks: the auth record (needs SHA-256) + `cmdSettings` (+ `padding-md5`,
-//!   needs MD5); the padding *engine* that applies a plan to outgoing writes; the session/stream
-//!   multiplexer + idle-session pool; and the [`super::Transport`] impl over a `btls` TLS stream.
+//! - [`io`] — async framed I/O ([`io::FrameReader`]/[`io::FrameWriter`]) over a byte stream. **Built.**
+//! - [`session`] — the client-side multiplexer ([`Session`]/[`Stream`]). **Built.**
+//! - Deferred to later chunks: the auth record (SHA-256) + `cmdSettings` (+ `padding-md5`, MD5);
+//!   the padding *engine* that applies a plan to outgoing writes; the idle-session **pool**; and
+//!   the [`super::Transport`] impl over a `btls` TLS stream (which also makes outbound backpressure
+//!   bounded — see [`session`]).
 //!
 //! Reference: the AnyTLS protocol spec (`anytls/anytls-go`, `docs/protocol.md`) and the
 //! `m11-transport-candidates-anytls-samizdat` memory.
 
 pub mod frame;
+pub mod io;
 pub mod padding;
+pub mod session;
 
 pub use frame::{Command, Frame, FrameError};
 pub use padding::{PaddingError, PaddingScheme, Seg};
+pub use session::{Session, Stream};
 
 /// The AnyTLS protocol version this implementation speaks (advertised in `cmdSettings` as `v=`).
 /// v2 adds `SynAck`, the heartbeat commands, and `ServerSettings`.

@@ -146,10 +146,23 @@
   Incomplete-vs-malformed, mirrors `tcp_tunnel/header.rs`), `padding.rs` (the server-pushable
   padding-scheme parser/model: `stop=N` + per-write `LO-HI`/`c` segment plans, `DEFAULT_SCHEME`),
   `mod.rs` (layering doc + version consts). 58 core tests pass (15 new), clippy `-D warnings` clean.
-  **Next chunks (per ADR build order):** (2) session/stream **multiplexer** + idle-session pool;
-  (3) auth record (SHA-256) + `cmdSettings`/padding-md5 + the padding **engine** (applies a plan to
-  writes, `cmdWaste` fill); (4) wire **`btls`/`tokio-btls`** TLS + the `Transport` impl + config
-  selection; then the live gate (same curl/DNS gates as the TCP tunnel + CI JA4-drift green).
+  **Chunk 2 (2026-06-16): the session multiplexer, green.** Added `anytls/io.rs` (`FrameReader`/
+  `FrameWriter` — async framed I/O over any `AsyncRead`/`AsyncWrite`, using the new zero-copy
+  `Frame::decode(&mut BytesMut)`) and `anytls/session.rs` (`Session` + `Stream`). **Actor-style, no
+  shared Mutex** (the `anytls-rs` deadlock-avoidance answer): transport is `tokio::io::split` into a
+  reader task (owns `ReadHalf` + the `HashMap<stream_id, inbound sender>`; demuxes `cmdPSH`/`cmdFIN`)
+  and a writer task (owns `WriteHalf`; serializes all outbound frames, coalesces bursts). `Stream`
+  is `AsyncRead+AsyncWrite`; `open_stream` registers via an **oneshot-acked** control msg *before*
+  sending SYN (no reply-before-registered race). Tested over an in-memory `duplex`: open/relay/close,
+  two-stream demux, peer-FIN→EOF. **Client-side only** (spark opens; no accept). 65 core tests pass
+  (7 new); clippy clean. Known follow-ups noted in-code: outbound is **unbounded** for now
+  (backpressure becomes bounded poll-reserve when wired to TLS in chunk 4); inbound is bounded but
+  HOL-blocks across streams until per-stream flow control. **Idle-session pool moved to chunk 4**
+  (it owns session *creation*, which needs the TLS factory).
+  **Next chunks (per ADR build order):** (3) auth record (SHA-256) + `cmdSettings`/padding-md5 + the
+  padding **engine** (applies a plan to writes, `cmdWaste` fill); (4) wire **`btls`/`tokio-btls`** TLS
+  + the idle-session **pool** + the `Transport` impl + config selection; then the live gate (same
+  curl/DNS gates as the TCP tunnel + CI JA4-drift green).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.

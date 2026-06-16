@@ -157,6 +157,35 @@ impl Frame {
             total,
         ))
     }
+
+    /// Decode one frame from the front of a streaming buffer, **consuming it zero-copy** on
+    /// success (the payload aliases `buf` via [`BytesMut::split_to`] + `freeze`, no copy).
+    ///
+    /// - `Ok(Some(frame))` — a full frame was decoded and removed from `buf`.
+    /// - `Ok(None)` — `buf` holds only a truncated prefix; read more and retry (nothing consumed).
+    /// - `Err(_)` — malformed (permanent); nothing consumed.
+    ///
+    /// This is the data-path-friendly counterpart to [`parse`](Self::parse): the session reader
+    /// ([`super::io::FrameReader`]) appends socket reads into a `BytesMut` and drains frames with it.
+    pub fn decode(buf: &mut BytesMut) -> Result<Option<Frame>, FrameError> {
+        if buf.len() < HEADER_LEN {
+            return Ok(None);
+        }
+        let command = Command::from_u8(buf[0])?;
+        let stream_id = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+        let data_len = u16::from_be_bytes([buf[5], buf[6]]) as usize;
+        let total = HEADER_LEN + data_len;
+        if buf.len() < total {
+            return Ok(None);
+        }
+        let mut frame = buf.split_to(total);
+        let payload = frame.split_off(HEADER_LEN).freeze();
+        Ok(Some(Frame {
+            command,
+            stream_id,
+            payload,
+        }))
+    }
 }
 
 /// Errors from encoding or parsing an AnyTLS session frame.
@@ -293,5 +322,42 @@ mod tests {
         let mut buf = BytesMut::new();
         Frame::control(Command::Fin, 3).encode(&mut buf);
         assert_eq!(buf.len(), HEADER_LEN);
+    }
+
+    #[test]
+    fn decode_drains_frames_and_reports_partial() {
+        // Two whole frames back-to-back, plus a truncated third.
+        let mut buf = BytesMut::new();
+        let a = Frame::new(Command::Psh, 1, Bytes::from_static(b"alpha")).unwrap();
+        let b = Frame::control(Command::Fin, 2);
+        a.encode(&mut buf);
+        b.encode(&mut buf);
+        let third = Frame::new(Command::Psh, 3, Bytes::from_static(b"partial")).unwrap();
+        let mut third_bytes = BytesMut::new();
+        third.encode(&mut third_bytes);
+        buf.extend_from_slice(&third_bytes[..HEADER_LEN + 2]); // header + 2 of 7 body bytes
+
+        assert_eq!(Frame::decode(&mut buf).unwrap(), Some(a));
+        assert_eq!(Frame::decode(&mut buf).unwrap(), Some(b));
+        // The third is incomplete → None, and nothing of it is consumed.
+        let before = buf.len();
+        assert_eq!(Frame::decode(&mut buf).unwrap(), None);
+        assert_eq!(buf.len(), before, "partial frame must not be consumed");
+
+        // Completing it lets it decode.
+        buf.extend_from_slice(&third_bytes[HEADER_LEN + 2..]);
+        assert_eq!(Frame::decode(&mut buf).unwrap(), Some(third));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn decode_surfaces_malformed_without_consuming() {
+        let mut buf = BytesMut::from(&[11u8, 0, 0, 0, 0, 0, 0][..]); // unknown command
+        assert_eq!(Frame::decode(&mut buf), Err(FrameError::UnknownCommand(11)));
+        assert_eq!(
+            buf.len(),
+            HEADER_LEN,
+            "malformed frame must not be consumed"
+        );
     }
 }
