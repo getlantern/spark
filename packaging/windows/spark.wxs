@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX v4/v5 source for the spark MSI. Built in CI with the `wix` dotnet tool:
+    wix build -arch x64 \
+      -d Version=<x.y.z> \
+      -d BinDir=<dir with spark.exe + spark-service.exe> \
+      -d ConfigSrc=packaging/config.example.toml \
+      -o spark-<x.y.z>-x64.msi packaging/windows/spark.wxs
+
+  Installs both binaries to "Program Files\spark", registers spark-service as a Windows service
+  (LocalSystem, auto-start), and ships the example config as reference. The service is registered
+  with no config-file argument, so it runs on the built-in defaults (Config::default) and starts
+  cleanly without a host-specific config — the example is unix-shaped (e.g. protect_interface =
+  "en0") and is not used as the live config on Windows.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="spark"
+      Manufacturer="Lantern"
+      Version="$(var.Version)"
+      UpgradeCode="F0AB9C21-1BE1-469A-857C-4D82C7AEEAB5"
+      Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of spark is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="spark">
+        <!-- The unprivileged control client. -->
+        <Component Id="SparkClient">
+          <File Id="spark.exe" Source="$(var.BinDir)\spark.exe" KeyPath="yes" />
+        </Component>
+
+        <!-- The privileged daemon, registered as a LocalSystem Windows service. No config-file
+             argument: it runs on Config::default() so it starts cleanly without host config. -->
+        <Component Id="SparkService">
+          <File Id="spark_service.exe" Source="$(var.BinDir)\spark-service.exe" KeyPath="yes" />
+          <ServiceInstall
+              Id="SparkServiceInstall"
+              Name="spark"
+              DisplayName="spark VPN tunnel"
+              Description="Privileged spark tunnel daemon (owns the TUN, routes, and core)."
+              Type="ownProcess"
+              Start="auto"
+              ErrorControl="normal"
+              Vital="yes" />
+          <ServiceControl
+              Id="SparkServiceControl"
+              Name="spark"
+              Start="install"
+              Stop="both"
+              Remove="uninstall"
+              Wait="yes" />
+        </Component>
+
+        <!-- The example config, shipped as reference (not the live config). -->
+        <Component Id="ConfigExample">
+          <File
+              Id="config.example.toml"
+              Source="$(var.ConfigSrc)"
+              Name="config.example.toml"
+              KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="spark" Level="1">
+      <ComponentRef Id="SparkClient" />
+      <ComponentRef Id="SparkService" />
+      <ComponentRef Id="ConfigExample" />
+    </Feature>
+  </Package>
+</Wix>

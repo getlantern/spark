@@ -89,6 +89,25 @@ jobs:
           $items = @("$bindir/spark.exe", "$bindir/spark-service.exe", "$bindir/config.example.toml")
           Compress-Archive -Path $items -DestinationPath "dist/spark-$ver-$env:TARGET.zip"
 
+      - name: Build MSI (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ver = $env:REF_NAME -replace '^v',''
+          $bindir = "target/$env:TARGET/release"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          # WiX v5 (uses the v4 schema). ServiceInstall is core, so no extension is needed.
+          dotnet tool install --global wix
+          wix build -arch x64 `
+            -d "Version=$ver" `
+            -d "BinDir=$bindir" `
+            -d "ConfigSrc=packaging/config.example.toml" `
+            -o "dist/spark-$ver-x64.msi" `
+            packaging/windows/spark.wxs
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:

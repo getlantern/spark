@@ -97,7 +97,14 @@ sc.exe start spark
 sc.exe stop  spark
 ```
 
-**Still to do (tracked in `docs/STATE.md`):** an **MSI** that drops the binaries + config and runs
-the `sc create` above via WiX `ServiceInstall` (now unblocked — the binary speaks SCM). Service
-logging currently goes to stderr (discarded under the SCM); routing to the Windows Event Log or a
-file is a refinement. A live run on a real Windows host is also still pending.
+Or install the **MSI** (`spark-<ver>-x64.msi`, built by the release workflow from
+`packaging/windows/spark.wxs` with the `wix` dotnet tool): it drops both binaries into
+`Program Files\spark`, registers the `spark` service (LocalSystem, auto-start) via WiX
+`ServiceInstall`/`ServiceControl`, and ships the example config as reference. The service is
+registered with no config-file argument, so it starts on `Config::default()` — the example is
+unix-shaped (`protect_interface = "en0"`) and isn't used as the live config on Windows.
+
+**Still to do (tracked in `docs/STATE.md`):** the MSI hasn't been built on a real WiX toolchain
+yet (the `.wxs` is well-formed XML; first build happens in CI). Service logging currently goes to
+stderr (discarded under the SCM) — routing to the Windows Event Log or a file is a refinement. A
+live run on a real Windows host is also still pending.
