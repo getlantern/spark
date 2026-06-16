@@ -1,19 +1,18 @@
 //! `spark-service` — the privileged tunnel daemon.
 //!
-//! Owns the TUN device + the core, and serves an unprivileged client over a unix-socket
-//! control channel authenticated by peer credentials. Run it privileged (the device + routes
-//! need it); the client is `spark` in client mode.
+//! Owns the TUN device + the core, and serves an unprivileged client over a control channel
+//! authenticated at the OS boundary: a unix-domain socket with peer-credential auth on unix, a
+//! named pipe with an admin-only DACL on Windows. Run it privileged (the device + routes need
+//! it); the client is `spark` in client mode.
 
 use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
 use spark_core::config::Config;
-use spark_service::auth::AuthPolicy;
 use spark_service::engine::CoreEngine;
-use spark_service::listener::serve;
-use spark_service::service::{channel, run_service};
-use tokio::net::UnixListener;
+use spark_service::service::{channel, run_service, Envelope};
+use tokio::sync::mpsc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -22,7 +21,13 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "spark-service", version, about)]
 struct Args {
     /// Path of the control socket to listen on.
+    #[cfg(unix)]
     #[arg(long, default_value = "/var/run/spark.sock")]
+    socket: PathBuf,
+
+    /// Named pipe to listen on (e.g. `\\.\pipe\spark`).
+    #[cfg(windows)]
+    #[arg(long, default_value = r"\\.\pipe\spark")]
     socket: PathBuf,
 
     /// TOML config for the tunnel (TUN settings + transport). Defaults are used if omitted.
@@ -30,7 +35,8 @@ struct Args {
     config: Option<PathBuf>,
 
     /// gid of the `spark` group permitted to control the daemon (besides root). When unset,
-    /// only root may connect.
+    /// only root may connect. Unix only — on Windows access is controlled by the pipe DACL.
+    #[cfg(unix)]
     #[arg(long)]
     spark_gid: Option<u32>,
 
@@ -65,6 +71,17 @@ async fn main() -> anyhow::Result<()> {
     let (cmd_tx, cmd_rx) = channel();
     tokio::spawn(run_service(CoreEngine::new(config), cmd_rx, fail_closed));
 
+    listen(&args, cmd_tx).await
+}
+
+/// Bind the unix control socket (root + `spark` group, mode 0660) and serve it. Peer-cred auth
+/// in `serve` remains the authoritative check — the perms are the filesystem layer of defense.
+#[cfg(unix)]
+async fn listen(args: &Args, cmd_tx: mpsc::Sender<Envelope>) -> anyhow::Result<()> {
+    use spark_service::auth::AuthPolicy;
+    use spark_service::serve;
+    use tokio::net::UnixListener;
+
     let policy = AuthPolicy {
         spark_gid: args.spark_gid,
         allow_uids: Vec::new(),
@@ -77,22 +94,29 @@ async fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&args.socket);
     let listener = UnixListener::bind(&args.socket)
         .with_context(|| format!("binding control socket {}", args.socket.display()))?;
-    // The OS enforces connect permission on the socket file, so the daemon (running
-    // privileged) must open it up to the authorized peers: group `spark_gid` + mode 0660.
-    // peer-cred auth in `serve` remains the authoritative check (don't trust perms alone).
     secure_socket(&args.socket, args.spark_gid)
         .with_context(|| format!("securing control socket {}", args.socket.display()))?;
     info!(socket = %args.socket.display(), "spark-service listening for control connections");
 
     serve(listener, policy, cmd_tx)
         .await
-        .context("control listener failed")?;
-    Ok(())
+        .context("control listener failed")
+}
+
+/// Serve the Windows named pipe. The pipe's admin-only DACL is the authorization boundary
+/// (see [`spark_service::pipe`]); there is no separate peer-credential check.
+#[cfg(windows)]
+async fn listen(args: &Args, cmd_tx: mpsc::Sender<Envelope>) -> anyhow::Result<()> {
+    use spark_service::serve;
+
+    info!(pipe = %args.socket.display(), "spark-service listening for control connections (named pipe)");
+    serve(args.socket.as_os_str(), cmd_tx)
+        .await
+        .context("control listener failed")
 }
 
 /// Restrict the control socket to root + the `spark` group: chown its group to `group` (when
-/// set) and set mode `0660`. The connecting peer is still authenticated by `SO_PEERCRED`
-/// (see `serve`); this is the filesystem layer of defense.
+/// set) and set mode `0660`.
 #[cfg(unix)]
 fn secure_socket(path: &std::path::Path, group: Option<u32>) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
@@ -113,9 +137,4 @@ fn secure_socket(path: &std::path::Path, group: Option<u32>) -> std::io::Result<
         }
     }
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-}
-
-#[cfg(not(unix))]
-fn secure_socket(_path: &std::path::Path, _group: Option<u32>) -> std::io::Result<()> {
-    Ok(())
 }

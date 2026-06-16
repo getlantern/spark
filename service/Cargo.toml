@@ -23,5 +23,17 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 anyhow.workspace = true
-# Socket file ownership/perms (chown to the spark group) + the test `getuid`/`getgid`.
+
+# Unix control transport: socket file ownership/perms (chown to the spark group), peer-cred
+# supplementary-group resolution, and the test `getuid`/`getgid`.
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# Windows control transport: build the named pipe's admin-only DACL (SECURITY_ATTRIBUTES from an
+# SDDL string). Already in the lockfile transitively (via tokio/socket2); used directly here.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }

@@ -25,7 +25,6 @@ use spark_core::redact::redact_addrs;
 use spark_core::transport;
 use spark_core::tun::Tun;
 use spark_ipc::{Client, RequestPayload, ResponsePayload};
-use tokio::net::UnixStream;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -104,8 +103,28 @@ impl RunArgs {
 #[derive(Args, Debug)]
 struct CtlArgs {
     /// Control socket of the running spark-service.
+    #[cfg(unix)]
     #[arg(long, default_value = "/var/run/spark.sock")]
     socket: PathBuf,
+    /// Named pipe of the running spark-service.
+    #[cfg(windows)]
+    #[arg(long, default_value = r"\\.\pipe\spark")]
+    socket: PathBuf,
+}
+
+/// Connect to the running service's control endpoint: a unix-domain socket on unix, a named
+/// pipe on Windows. Returns a connected byte stream for [`Client`].
+#[cfg(unix)]
+async fn connect_control(
+    endpoint: &std::path::Path,
+) -> io::Result<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> {
+    tokio::net::UnixStream::connect(endpoint).await
+}
+#[cfg(windows)]
+async fn connect_control(
+    endpoint: &std::path::Path,
+) -> io::Result<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> {
+    tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint.as_os_str())
 }
 
 #[tokio::main]
@@ -179,7 +198,7 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
 
 /// Connect to a running spark-service, handshake, issue one command, and print the result.
 async fn control(socket: PathBuf, payload: RequestPayload) -> anyhow::Result<()> {
-    let stream = UnixStream::connect(&socket)
+    let stream = connect_control(&socket)
         .await
         .with_context(|| format!("connecting to spark-service at {}", socket.display()))?;
     let mut client = Client::new(stream);

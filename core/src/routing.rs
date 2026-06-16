@@ -21,7 +21,6 @@
 //! under root on a real box — that is gated with the rest of the privileged live gates.
 
 use std::io;
-use std::process::Stdio;
 
 use tracing::{debug, warn};
 
@@ -101,7 +100,7 @@ async fn run(ops: Vec<RouteOp>) -> io::Result<()> {
 async fn run_one(op: &RouteOp) -> io::Result<()> {
     let output = tokio::process::Command::new(ROUTE_PROGRAM)
         .args(&op.args)
-        .stdin(Stdio::null())
+        .stdin(std::process::Stdio::null())
         .output()
         .await?;
     if output.status.success() || op.ignore_failure {
@@ -169,8 +168,7 @@ fn clear_op(half: &str) -> RouteOp {
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn via_tun_op(half: &str, tun: &str) -> RouteOp {
-    let _ = tun;
-    RouteOp::required(vec!["add", half])
+    RouteOp::required(vec!["add", half, tun])
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn blackhole_op(half: &str) -> RouteOp {
