@@ -1,0 +1,18 @@
+[package]
+name = "spark-apple"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The Apple C-ABI static library, linked into the NetworkExtension Packet Tunnel Provider
+# (iOS + macOS) and packaged as an .xcframework. NE extensions statically link, so `staticlib`.
+# On non-Apple targets the FFI is cfg-d out → an empty staticlib, so it stays in the workspace's
+# green-checked set without affecting other platforms.
+[lib]
+name = "spark_apple"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+spark-core = { path = "../../core" }

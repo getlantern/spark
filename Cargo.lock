@@ -1157,6 +1157,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "spark-android"
+version = "0.1.0"
+dependencies = [
+ "spark-core",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "spark-apple"
+version = "0.1.0"
+dependencies = [
+ "spark-core",
+]
+
+[[package]]
 name = "spark-cli"
 version = "0.1.0"
 dependencies = [

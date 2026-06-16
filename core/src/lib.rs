@@ -9,11 +9,12 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-// Android entry (run the data path on a VpnService-provided fd). The JNI symbols live in the
-// `platforms/android` cdylib; this is the run/stop logic it calls.
-#[cfg(target_os = "android")]
-pub mod android;
+// Run the data path on an OS-provided TUN fd — the shared entry for Android `VpnService` and
+// Apple NetworkExtension (iOS + macOS). The FFI shims (`platforms/android` JNI, `platforms/apple`
+// C ABI) call into this.
 pub mod config;
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+pub mod fd_tunnel;
 pub mod net;
 pub mod netstack;
 pub mod packet;

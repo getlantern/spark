@@ -16,3 +16,9 @@ path = "src/lib.rs"
 
 [dependencies]
 spark-core = { path = "../../core" }
+
+# Android-only: route the core's `tracing` events to logcat (otherwise they vanish — an Android
+# app's stdout isn't logcat). `__android_log_write` is in the NDK's liblog.
+[target.'cfg(target_os = "android")'.dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true

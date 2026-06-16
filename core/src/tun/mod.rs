@@ -11,9 +11,10 @@ use std::io;
 use std::net::Ipv4Addr;
 
 use tun_rs::AsyncDevice;
-// On Android the OS creates the interface (via `VpnService`); `tun-rs` exposes no
-// `DeviceBuilder` there, only the fd path (`from_fd`). So device *creation* is desktop-only.
-#[cfg(not(target_os = "android"))]
+// On Android (`VpnService`) and Apple iOS (NetworkExtension) the OS creates the interface and
+// hands us a fd; `tun-rs` exposes no `DeviceBuilder`/`name` on those targets, only the fd path
+// (`from_fd`). So device *creation* is desktop-only (incl. macOS, where `spark run` opens one).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tun_rs::DeviceBuilder;
 
 /// Errors from bringing up or naming the TUN device.
@@ -47,9 +48,9 @@ pub struct Tun {
 
 impl Tun {
     /// Bring up a TUN device per `cfg`. Requires elevated privileges on every desktop
-    /// platform. Not available on Android, where the OS creates the interface and the core
-    /// adopts its fd via [`from_fd`](Self::from_fd) instead.
-    #[cfg(not(target_os = "android"))]
+    /// platform. Not available on Android or iOS, where the OS creates the interface and the
+    /// core adopts its fd via [`from_fd`](Self::from_fd) instead.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn open(cfg: TunConfig) -> Result<Self, TunError> {
         let mut builder = DeviceBuilder::new().ipv4(cfg.ipv4.0, cfg.ipv4.1, None);
         if let Some(name) = cfg.name {
@@ -88,9 +89,9 @@ impl Tun {
         self.mtu
     }
 
-    /// The OS-assigned interface name. Not available on Android (a from-fd device has no
-    /// queryable name; the `VpnService` owns the interface).
-    #[cfg(not(target_os = "android"))]
+    /// The OS-assigned interface name. Not available on Android/iOS (a from-fd device has no
+    /// queryable name; the OS owns the interface).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn name(&self) -> Result<String, TunError> {
         self.dev.name().map_err(TunError::Query)
     }
