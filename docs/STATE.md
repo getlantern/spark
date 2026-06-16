@@ -10,10 +10,16 @@
   cross-build checks (Linux full + Windows core/ipc), systemd/launchd units + example config in
   `packaging/`, `scripts/size-budget.sh` (both binaries ~39% of the 3 MB budget). Remaining M8:
   distro packages (deb/Homebrew/MSI), the Windows named-pipe transport, multi-platform run.
-  **M7 kill-switch (signaling half) done 2026-06-15:** an unexpected data-path exit now fires
-  `FellOpenToDirect` + sets the `direct_fallback` status, with a `[kill_switch] fail_closed`
-  config knob. Remaining M7 refinements: the *active* route-restore/blocking (platform/root
-  work), supplementary-group resolution, drop-oldest backpressure. The M4 tunnel-server / M6
+  **M7 refinements all landed 2026-06-15** (3 commits): (1) kill-switch signaling — unexpected
+  data-path exit fires `FellOpenToDirect` + sets `direct_fallback`, `[kill_switch] fail_closed`
+  knob; (2) **supplementary-group resolution** — `service::groups` resolves a peer uid's full
+  login group set (`getpwuid_r`+`getgrouplist`) so `spark` membership counts as a *secondary*
+  group, not just primary; (3) **backpressure** — a slow subscriber is kept and told how many
+  pushes it missed via `Push::Dropped{count}` (drop-newest + accounting); (4) **active
+  route-management** — opt-in `[routing] manage` full-tunnel via `core::routing::RouteManager`
+  (split-default 0/1+128/1 covers; `Teardown::RestoreDirect`/`Block` for fail-open/closed). The
+  only remaining M7 piece is the **live route gate under root** (command construction is
+  unit-tested but the `route`/`ip` calls aren't yet exercised live). The M4 tunnel-server / M6
   SIGINT live gates also pending.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
@@ -43,11 +49,12 @@
   responses and pushes). Hermetic duplex tests cover handshake/connect/status, pre-handshake
   rejection, version-mismatch rejection, and subscribe→push delivery.
 - Tree status: **green** — `cargo clippy --workspace --all-targets --all-features -D warnings`
-  / `fmt --check` clean; `cargo test --workspace --all-features` all pass (core 39 + 3 integ +
-  doctest; **spark-ipc 10** incl. stream; **spark-service 12** incl. the 2 new kill-switch tests);
-  release `spark` **1,257,008 bytes (~1.20 MB)** / `spark-service` **1,257,520 bytes (~1.20 MB)**
-  (both 39% of the 3 MB budget). NB: the ipc `stream` tests need the feature → use
-  `--all-features` (or `-p spark-ipc --features stream`).
+  / `fmt --check` clean; `cargo test --workspace --all-features` all pass (core **43** + 3 integ +
+  doctest; **spark-ipc 10** incl. stream; **spark-service 17**); release `spark` **1,257,040 bytes
+  (~1.20 MB, 41%)** / `spark-service` **1,274,400 bytes (~1.21 MB, 42%)** of the 3 MB budget.
+  (`spark` unchanged — routing is dead-code-eliminated there; `spark-service` +17 KB for routing +
+  `tokio::process`.) NB: the ipc `stream` tests need the feature → use `--all-features` (or
+  `-p spark-ipc --features stream`).
 
 ## Next chunk (exactly what the next session should do)
 Two independent tracks — pick by whether a privileged box is available:
@@ -199,6 +206,40 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (M7 refinement — active route management): **Opt-in full-tunnel via the
+  split-default trick; `Teardown::{RestoreDirect,Block}` actuates the kill-switch.** Decided
+  with Adam (asked: own-the-table vs operator-driven) → **opt-in `[routing] manage`** (default
+  off keeps the manual dev gates; on = spark owns routing). `core::routing::RouteManager`
+  installs `0.0.0.0/1` + `128.0.0.0/1` via the TUN — more specific than the `0.0.0.0/0` default,
+  so they win, while the real default is never touched → restore = delete the covers (or let the
+  TUN vanish; the kernel removes its routes), crash-safe with no state to reconstruct. Upstream
+  dials bypass via `SocketProtector` (why that was built first). `TunnelEngine::stop` now takes a
+  `Teardown`: `RestoreDirect` (disconnect / fail-open) deletes covers; `Block` (fail-closed)
+  blackholes both halves (Linux `ip route add blackhole`, macOS `route … -interface lo0`, both
+  TUN-independent so they outlive teardown). All ops clear stale covers first → order-independent
+  + self-heal on reconnect-after-block. IPv4 only (TUN is v4-only; v6 split-default deferred).
+  Command construction unit-tested per platform; **live `route`/`ip` calls not yet run under
+  root** (gated with the other live gates). Deps: none new (`tokio::process` from existing full
+  features). `spark-service` +17 KB; `spark` unchanged (DCE — `spark run` doesn't manage routes).
+- 2026-06-15 (M7 refinement — peer supplementary groups): **Resolve the peer uid's full login
+  group set so `spark` membership counts as a secondary group.** `peer_cred()` reports only the
+  primary gid; admins normally add users to `spark` as a *supplementary* group. New
+  `service::groups::resolve_groups` does `getpwuid_r` (uid→name) + `getgrouplist` (name→groups),
+  best-effort (any failure → just `[gid]`). `PeerCreds` gained `groups: Vec<u32>` (resolved off
+  the live socket in the listener); `AuthPolicy::authorize` stays a pure fn but now matches
+  `spark_gid` against primary gid OR any supplementary group. `getgrouplist`'s group-element type
+  differs by platform (Apple `c_int` vs Linux `gid_t`, both 32-bit) — handled with a cfg alias.
+  Verified signatures against vendored libc 0.2.186 source before writing the FFI.
+- 2026-06-15 (M7 refinement — push backpressure): **Drop-newest + `Push::Dropped{count}`
+  accounting; a slow subscriber is kept, not silently starved.** `broadcast` previously dropped
+  events on a full subscriber channel with no signal. Now each `Subscriber` carries an overflow
+  counter; on a full channel the item is dropped + counted (delivery stays non-blocking so a
+  wedged client never stalls the loop), and the count rides out as a `Push::Dropped` once the
+  channel drains — the client's cue to re-sync via `GetStatus`. NOT literal drop-oldest (a tokio
+  mpsc sender can't evict the oldest without a shared broadcast ring, which would dismantle the
+  per-connection subscriber model); correctness is identical for state since the freshest truth
+  is one `GetStatus` away. `Push::Dropped` already existed in the protocol — this wires the
+  producer.
 - 2026-06-15 (M7 kill-switch, signaling half): **An unexpected data-path exit fails open
   loudly; `[kill_switch] fail_closed` overrides to fail closed. Active route-restore deferred.**
   `engine::CoreEngine::start` now takes an `exit: mpsc::Sender<()>` and runs the TCP+UDP
@@ -405,8 +446,10 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   [x] M5 (framing + NAT table + orchestration + netstack UDP; **live DNS gate PASSED on macOS 2026-06-15** — dig @9.9.9.9 resolved through the tunnel)
   [~] M6 (config + redaction + CLI green+tested; live SIGINT/device-teardown gate pending root)
 - [x] M7 (ipc + service + daemon/client; **through-the-service gate PASSED on macOS 2026-06-15** —
-  client drove the daemon, traffic forwarded end-to-end. Kill-switch **signaling** done
-  (`FellOpenToDirect` + `direct_fallback` + `fail_closed` knob). Remaining refinements: the
-  *active* fail-open route-restore/blocking, supplementary-group resolution, drop-oldest backpressure)
+  client drove the daemon, traffic forwarded end-to-end. All refinements landed: kill-switch
+  signaling (`FellOpenToDirect`/`direct_fallback`/`fail_closed`), peer supplementary-group
+  resolution, push backpressure (`Push::Dropped`), and opt-in active route-management
+  (`[routing] manage`, split-default, `Teardown` fail-open/closed). Only the live route gate
+  under root remains.)
 - [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget script/docs done; distro packages [deb/homebrew/MSI] + multi-platform run pending)
   [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
