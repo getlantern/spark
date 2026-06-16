@@ -94,23 +94,39 @@ app-extension (embeds `SparkCore.xcframework` + `Sources/SparkNE`), automatic si
   `system-extension.install` + the `OSSystemExtensionRequest` activation flow (`SysExt` in
   `SparkApp.swift`). Verified: `xcodebuild … CODE_SIGNING_ALLOWED=NO build` → **BUILD SUCCEEDED**
   (this is lantern's `main.swift` + `SystemExtensionManager` model).
-- **Remaining blocker: the Developer-ID provisioning profile.** `xcodebuild` CLI auto-provisioning
-  keeps minting a *development* profile that can't carry `packet-tunnel-provider-systemextension`
-  (a distribution-flavor entitlement) — the App ID's Network-Extensions capability is stuck on the
-  app-extension value from the first build, and the CLI won't re-sync it. **The fix is a couple of
-  clicks in the Xcode GUI** (which the CLI can't drive):
-  1. `open platforms/apple/Spark.xcodeproj`; for **both** `SparkApp` and `SparkTunnel` targets →
-     *Signing & Capabilities* → team `ACZRKC3LQ9`, automatic signing → let Xcode resolve/“Try Again”
-     (it re-registers the App ID's NE capability + creates Developer-ID profiles with the
-     systemextension value). This also registers the App Group `group.org.getlantern.spark`.
-  2. **Notarize + run:** Product → Archive → Distribute → *Direct Distribution* (Developer ID,
-     notarizes + staples) → export to `/Applications`. Or CLI once profiles exist: `xcodebuild
-     -exportArchive … -exportOptionsPlist ExportOptions.plist` → `ditto -c -k --keepParent
-     SparkApp.app spark.zip` → `xcrun notarytool submit spark.zip --apple-id "$AC_USERNAME"
-     --password "$AC_PASSWORD" --team-id ACZRKC3LQ9 --wait` → `xcrun stapler staple SparkApp.app`.
-  3. Launch from `/Applications` → approve the system extension (System Settings → Privacy &
-     Security) → approve the VPN consent → browse-test. Provider logs to subsystem
-     `org.getlantern.spark` (Console.app). A notarized sysext loads **without** SIP-off.
+- **Signing = lantern's model (already configured in `project.yml`):** **Manual** signing,
+  `CODE_SIGN_IDENTITY[sdk=macosx*] = "Developer ID Application"`, team `ACZRKC3LQ9`, and a named
+  **Developer-ID provisioning profile** per target (`Spark macOS App`, `Spark macOS Tunnel`).
+  Automatic *development* signing can't carry `packet-tunnel-provider-systemextension` (it's
+  distribution-only — confirmed in both the CLI and the Xcode GUI), so manual + portal profiles is
+  the only working path (verified by decoding lantern's `MacOS Tunnel Development Profile`, which is
+  actually a Developer-ID profile: `ProvisionsAllDevices=true`, entitlements
+  `packet-tunnel-provider-systemextension` + `system-extension.install` + the app group).
+- **Remaining (human, one-time): create the two Developer-ID profiles in the Apple Developer portal**
+  (developer.apple.com → Certificates, IDs & Profiles), then download (Xcode installs them):
+  1. **App Group:** register `group.org.getlantern.spark` (Identifiers → App Groups).
+  2. **App IDs** (register if not auto-created): `org.getlantern.spark` and
+     `org.getlantern.spark.tunnel`, each with **Network Extensions** + **App Groups** + **System
+     Extension** capabilities.
+  3. **Profiles** (Profiles → + → **Developer ID**, the macOS distribution type that gives
+     `ProvisionsAllDevices`): one for each App ID. Name them exactly **`Spark macOS App`** and
+     **`Spark macOS Tunnel`** (matching `project.yml`).
+- **Then build → notarize → run** (CLI, once the profiles are installed):
+  ```bash
+  ./build-xcframework.sh && xcodegen generate
+  xcodebuild -project Spark.xcodeproj -scheme SparkApp -configuration Release \
+      -destination 'generic/platform=macOS' -archivePath /tmp/Spark.xcarchive ARCHS=arm64 archive
+  xcodebuild -exportArchive -archivePath /tmp/Spark.xcarchive -exportPath /tmp/SparkExport \
+      -exportOptionsPlist ExportOptions.plist
+  ditto -c -k --keepParent /tmp/SparkExport/SparkApp.app /tmp/spark.zip
+  xcrun notarytool submit /tmp/spark.zip --apple-id "$AC_USERNAME" --password "$AC_PASSWORD" \
+      --team-id ACZRKC3LQ9 --wait
+  xcrun stapler staple /tmp/SparkExport/SparkApp.app
+  cp -R /tmp/SparkExport/SparkApp.app /Applications/ && open /Applications/SparkApp.app
+  ```
+  Then approve the system extension (System Settings → Privacy & Security) + the VPN consent, and
+  browse-test. Provider logs to subsystem `org.getlantern.spark` (Console.app). A notarized sysext
+  loads **without** SIP-off.
 - iOS live gate needs a physical device (NE packet tunnels don't run on the simulator).
 - Cleanup from bring-up: a non-functional "Spark" VPN config + `/Applications/SparkApp.app` —
   remove via System Settings → VPN and `rm -rf /Applications/SparkApp.app`.

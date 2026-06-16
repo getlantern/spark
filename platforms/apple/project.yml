@@ -1,10 +1,12 @@
-# XcodeGen spec for the spark macOS app + Packet Tunnel Provider app-extension.
+# XcodeGen spec for the spark macOS app + Packet Tunnel Provider SYSTEM EXTENSION.
 # Generate: xcodegen generate (from platforms/apple/). Build the xcframework first
 # (./build-xcframework.sh). The .xcodeproj is generated output (gitignored).
 #
-# macOS uses the app-EXTENSION packaging (not a system extension) to avoid the SIP-gated
-# `systemextensionsctl developer` path; the NE entitlement is provisioned via automatic signing
-# under team ACZRKC3LQ9.
+# Signing mirrors getlantern/lantern's working setup: MANUAL signing with the Developer ID
+# Application identity + portal-created Developer-ID provisioning profiles (the
+# `packet-tunnel-provider-systemextension` entitlement is distribution-only, so automatic
+# *development* signing can't carry it). Create the two profiles (see README.md "live-gate
+# handoff"), then their names go in PROVISIONING_PROFILE_SPECIFIER below.
 name: Spark
 options:
   bundleIdPrefix: org.getlantern.spark
@@ -14,12 +16,15 @@ options:
 
 settings:
   base:
-    DEVELOPMENT_TEAM: ACZRKC3LQ9
-    CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.9"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_HARDENED_RUNTIME: YES
+    # Manual Developer-ID signing for macOS (lantern's model).
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ACZRKC3LQ9
+    "DEVELOPMENT_TEAM[sdk=macosx*]": ACZRKC3LQ9
+    "CODE_SIGN_IDENTITY[sdk=macosx*]": "Developer ID Application"
 
 targets:
   SparkApp:
@@ -33,6 +38,8 @@ targets:
         CODE_SIGN_ENTITLEMENTS: xcode/SparkApp.entitlements
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSHumanReadableCopyright: "Lantern"
+        # Portal-created Developer-ID profile for org.getlantern.spark (NE + system-extension.install).
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]": "Spark macOS App"
     dependencies:
       - target: SparkTunnel
         embed: true
@@ -51,6 +58,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.getlantern.spark.tunnel
         CODE_SIGN_ENTITLEMENTS: xcode/SparkTunnel.entitlements
         INFOPLIST_FILE: xcode/Extension-Info.plist
+        # Portal-created Developer-ID profile for org.getlantern.spark.tunnel
+        # (packet-tunnel-provider-systemextension + system-extension.install + app group).
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]": "Spark macOS Tunnel"
     dependencies:
       # The Rust core as a static-lib xcframework: link it into the extension, don't embed.
       - framework: SparkCore.xcframework
