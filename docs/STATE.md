@@ -16,10 +16,15 @@
   `.github/workflows/ci.yml` (fmt+clippy+test on all 3 OSes + both cross-checks + size budget)
   and `release.yml` (on a `v*` tag: per-target release build → size gate → package → publish to
   the GitHub Release); packaging defs — `packaging/debian/build-deb.sh` (hand-rolled `dpkg-deb`,
-  no cargo-deb), `packaging/homebrew/spark.rb`, Windows `.zip`. Remaining M8: a **live release
-  run** (push a tag), pushing the filled Homebrew formula to the tap, a **live Windows run**, and
-  a proper **SCM service + MSI** (needs a service-control handler in `spark-service` first —
-  deferred, not shipped half-working). GUI deliberately deferred (M7 scope; CLI is the client).
+  no cargo-deb), `packaging/homebrew/spark.rb`, Windows `.zip`. **Windows SCM service handler done
+  2026-06-15:** `spark-service` is now a dual-mode binary (`service::winsvc` via the
+  `windows-service` crate) — runs as a real Windows service under the SCM (RUNNING / STOP /
+  STOPPED) or in the foreground from a console; `sc create spark …` registers it and it responds
+  to `sc stop/start`. The daemon body moved to a shared lib module (`service::daemon`); `main.rs`
+  is a thin shim; unix behavior unchanged. Remaining M8: a **live release run** (push a tag),
+  pushing the filled Homebrew formula to the tap, a **live Windows run** (no host yet), the **MSI**
+  (now unblocked — WiX `ServiceInstall` wrapping the `sc create`), and service logging→Event Log.
+  GUI deliberately deferred (M7 scope; CLI is the client).
   **M7 refinements all landed 2026-06-15** (3 commits): (1) kill-switch signaling — unexpected
   data-path exit fires `FellOpenToDirect` + sets `direct_fallback`, `[kill_switch] fail_closed`
   knob; (2) **supplementary-group resolution** — `service::groups` resolves a peer uid's full
@@ -216,6 +221,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (M8 — Windows SCM service handler): **`spark-service` is a dual-mode binary; SCM
+  integration via the `windows-service` crate; daemon body shared in a lib module.** Asked Adam
+  re: FFI layer → **`windows-service` crate** (Mullvad's; +1 Windows-only dep, approved) over
+  hand-rolling the SCM trio with `windows-sys` — type-safe, far less untestable unsafe FFI.
+  `service::winsvc`: `service_dispatcher::start` → if launched by the SCM it runs the service to
+  completion (returns true), else returns `Error::Winapi(1063
+  ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)` → caller runs foreground. Control handler fires a
+  `oneshot` on STOP/SHUTDOWN; the daemon's `select!` ends its `listen` future → drops `cmd_tx` →
+  event loop winds down; STOPPED reported only after `block_on` returns. Because the SCM entry is
+  a *sync* callback that must own its tokio runtime, the daemon body moved to a shared lib module
+  **`service::daemon`** (`Args`, `run()`, `serve_daemon(args, shutdown)`); `main.rs` → thin shim;
+  dropped `#[tokio::main]` (explicit `Runtime` in both entries); **unix behavior unchanged**
+  (foreground, supervisor-signalled). `run_service` now does `engine.stop(RestoreDirect)` when its
+  command channel closes, so a service STOP restores routing gracefully (not just on runtime drop).
+  Deps: `windows-service 0.7` + transitive `windows-sys 0.52` fan-out (all target-gated). Verified
+  via `cargo check --target x86_64-pc-windows-msvc --all-targets` (-D warnings); macOS (74 tests)
+  + Linux cross-check green. **Not run under a real SCM** (no Windows host). MSI now unblocked;
+  Event-Log logging is a follow-up.
 - 2026-06-15 (M8 s2 — CI + release automation + packaging defs): **GitHub Actions for gates +
   tag-driven release; hand-rolled `dpkg-deb` over cargo-deb; GUI stays deferred (CLI is the
   client).** Asked Adam re: UI → **defer GUI** (matches M7's "the client may be a CLI" + the
@@ -497,7 +520,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   under root remains.)
 - [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget done; **Windows
   named-pipe transport done — whole workspace cross-builds for Windows**; **CI + tag-driven
-  release workflows + deb/Homebrew/Windows-zip packaging defs done**. Pending: a live release run
-  [push a tag], Homebrew-tap push, live Windows run, and SCM service + MSI [needs a service-control
-  handler first])
+  release workflows + deb/Homebrew/Windows-zip packaging defs done**; **Windows SCM service handler
+  done — `spark-service` is dual-mode (service under SCM / foreground)**. Pending: a live release
+  run [push a tag], Homebrew-tap push, live Windows run, the MSI [now unblocked], Event-Log logging)
   [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
