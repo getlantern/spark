@@ -7,9 +7,13 @@
 - Milestone: **M7 — control-plane IPC + service split. DONE 2026-06-15** (code + through-the-
   service gate live-verified on macOS; design in `ipc-service-split-design-m7` memory). The full
   desktop stack (M1–M7) is now live on macOS. **M8 packaging session 1 done 2026-06-15:**
-  cross-build checks (Linux full + Windows core/ipc), systemd/launchd units + example config in
-  `packaging/`, `scripts/size-budget.sh` (both binaries ~39% of the 3 MB budget). Remaining M8:
-  distro packages (deb/Homebrew/MSI), the Windows named-pipe transport, multi-platform run.
+  cross-build checks, systemd/launchd units + example config in `packaging/`,
+  `scripts/size-budget.sh` (both binaries ~40% of the 3 MB budget). **Windows named-pipe control
+  transport done 2026-06-15** — the *whole* workspace now cross-builds for Windows
+  (`cargo check --target x86_64-pc-windows-msvc`, warning-free), not just core/ipc: `service::pipe`
+  serves an admin-only named pipe (SDDL DACL = the auth boundary, no `SO_PEERCRED` analog), and
+  `main.rs`/`cli` cfg-split the bind/connect. Remaining M8: distro packages (deb/Homebrew/MSI),
+  multi-platform release builds + a live Windows run.
   **M7 refinements all landed 2026-06-15** (3 commits): (1) kill-switch signaling — unexpected
   data-path exit fires `FellOpenToDirect` + sets `direct_fallback`, `[kill_switch] fail_closed`
   knob; (2) **supplementary-group resolution** — `service::groups` resolves a peer uid's full
@@ -206,6 +210,22 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-15 (M8 — Windows control transport): **Named pipe with an admin-only DACL is the
+  Windows control channel; the DACL is the auth boundary (no `SO_PEERCRED` analog).** The
+  per-connection serve loop (`conn::serve_connection`) was already transport-generic, so only the
+  accept+auth front is platform-specific. New `service::pipe` creates the pipe with
+  `create_with_security_attributes_raw` + a `SECURITY_ATTRIBUTES` from SDDL
+  `D:P(A;;GA;;;SY)(A;;GA;;;BA)` (full control to Local System + Built-in Administrators only) —
+  an unprivileged process can't `open` it, so there's no per-conn cred check (the structural
+  analog of unix peer-cred, per CLAUDE.md's pipe-DACL note). Accept loop uses the tokio idiom
+  (create instance → `connect().await` → create *next* instance before serving → no
+  `ERROR_PIPE_BUSY`). `lib.rs` gates the transport: `listener` (unix socket) on unix, `pipe` on
+  Windows, both exporting `serve`; `groups` is unix-only. `main.rs`/`cli` cfg-split bind/connect
+  (`--socket` path + `AuthPolicy` + `secure_socket` on unix; `\\.\pipe\spark` on Windows). `libc`
+  → unix-only dep; `windows-sys` (already locked transitively) added Windows-only for the DACL.
+  Verified: the **whole workspace** now `cargo check --target x86_64-pc-windows-msvc`es
+  warning-free (was core/ipc only); Linux full-workspace + macOS native stay green. Live Windows
+  run not yet done (no Windows host) — gated with the other live gates.
 - 2026-06-15 (M7 refinement — active route management): **Opt-in full-tunnel via the
   split-default trick; `Teardown::{RestoreDirect,Block}` actuates the kill-switch.** Decided
   with Adam (asked: own-the-table vs operator-driven) → **opt-in `[routing] manage`** (default
@@ -451,5 +471,5 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   resolution, push backpressure (`Push::Dropped`), and opt-in active route-management
   (`[routing] manage`, split-default, `Teardown` fail-open/closed). Only the live route gate
   under root remains.)
-- [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget script/docs done; distro packages [deb/homebrew/MSI] + multi-platform run pending)
+- [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget script/docs done; **Windows named-pipe control transport done — whole workspace cross-builds for Windows**; distro packages [deb/homebrew/MSI] + multi-platform release builds + live Windows run pending)
   [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
