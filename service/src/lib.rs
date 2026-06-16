@@ -13,6 +13,7 @@
 pub mod auth;
 pub mod conn;
 pub mod engine;
+pub mod groups;
 pub mod listener;
 pub mod service;
 

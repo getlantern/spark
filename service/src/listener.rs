@@ -27,10 +27,16 @@ pub async fn serve(
     loop {
         let (stream, _addr) = listener.accept().await?;
         let creds = match stream.peer_cred() {
-            Ok(ucred) => PeerCreds {
-                uid: ucred.uid(),
-                gid: ucred.gid(),
-            },
+            Ok(ucred) => {
+                let (uid, gid) = (ucred.uid(), ucred.gid());
+                // Resolve the peer's full login group set so `spark` membership counts even
+                // when it's a supplementary (not primary) group.
+                PeerCreds {
+                    uid,
+                    gid,
+                    groups: crate::groups::resolve_groups(uid, gid),
+                }
+            }
             Err(e) => {
                 warn!(error = %e, "could not read peer credentials; refusing connection");
                 continue;

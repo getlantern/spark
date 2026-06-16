@@ -7,13 +7,17 @@
 //! the credentials from a live `UnixStream` (and resolving supplementary group membership) is
 //! the platform glue wired in the privileged/live path.
 
-/// Credentials of a connected peer, as reported by `SO_PEERCRED`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Credentials of a connected peer: its `SO_PEERCRED` uid/primary-gid plus the resolved
+/// supplementary group set (see [`crate::groups`]). `groups` always contains `gid`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerCreds {
     /// Effective user id of the peer process.
     pub uid: u32,
     /// Primary group id of the peer process.
     pub gid: u32,
+    /// The peer's full login group set (primary + supplementary), resolved from `uid`. Empty
+    /// only when resolution was skipped (e.g. in a unit test that sets `gid` directly).
+    pub groups: Vec<u32>,
 }
 
 /// Who may control the service. The decided desktop policy is **root + the `spark` group**.
@@ -35,13 +39,19 @@ impl AuthPolicy {
     }
 
     /// Whether `creds` may control the service. Root (uid 0) is always allowed; otherwise the
-    /// peer must be in the `spark` group or an explicitly-allowed uid.
+    /// peer must be in the `spark` group (as its primary *or* a supplementary group) or be an
+    /// explicitly-allowed uid.
     ///
-    /// Note: `SO_PEERCRED` reports only the peer's *primary* gid. The live path should resolve
-    /// the peer uid's full group set and pass a `PeerCreds` whose `gid` reflects `spark`
-    /// membership; this policy intentionally stays a pure function of `(uid, gid)`.
+    /// The supplementary set is resolved off the live socket by [`crate::groups`] and arrives
+    /// in `creds.groups`; this policy stays a pure function of the credentials it's handed.
     pub fn authorize(&self, creds: &PeerCreds) -> bool {
-        creds.uid == 0 || self.spark_gid == Some(creds.gid) || self.allow_uids.contains(&creds.uid)
+        if creds.uid == 0 || self.allow_uids.contains(&creds.uid) {
+            return true;
+        }
+        match self.spark_gid {
+            Some(gid) => creds.gid == gid || creds.groups.contains(&gid),
+            None => false,
+        }
     }
 }
 
@@ -51,28 +61,38 @@ mod tests {
 
     const SPARK_GID: u32 = 4242;
 
-    #[test]
-    fn root_is_always_allowed() {
-        let policy = AuthPolicy::root_and_group(SPARK_GID);
-        assert!(policy.authorize(&PeerCreds { uid: 0, gid: 99 }));
+    /// A peer whose primary gid is `gid` and supplementary set is `groups`.
+    fn creds(uid: u32, gid: u32, groups: &[u32]) -> PeerCreds {
+        PeerCreds {
+            uid,
+            gid,
+            groups: groups.to_vec(),
+        }
     }
 
     #[test]
-    fn spark_group_member_is_allowed() {
+    fn root_is_always_allowed() {
         let policy = AuthPolicy::root_and_group(SPARK_GID);
-        assert!(policy.authorize(&PeerCreds {
-            uid: 1000,
-            gid: SPARK_GID
-        }));
+        assert!(policy.authorize(&creds(0, 99, &[99])));
+    }
+
+    #[test]
+    fn spark_group_as_primary_is_allowed() {
+        let policy = AuthPolicy::root_and_group(SPARK_GID);
+        assert!(policy.authorize(&creds(1000, SPARK_GID, &[SPARK_GID])));
+    }
+
+    #[test]
+    fn spark_group_as_supplementary_is_allowed() {
+        // The common case: primary group is the user's own; `spark` is supplementary.
+        let policy = AuthPolicy::root_and_group(SPARK_GID);
+        assert!(policy.authorize(&creds(1000, 1000, &[1000, SPARK_GID])));
     }
 
     #[test]
     fn other_users_are_denied() {
         let policy = AuthPolicy::root_and_group(SPARK_GID);
-        assert!(!policy.authorize(&PeerCreds {
-            uid: 1000,
-            gid: 1000
-        }));
+        assert!(!policy.authorize(&creds(1000, 1000, &[1000, 20])));
     }
 
     #[test]
@@ -81,9 +101,6 @@ mod tests {
             spark_gid: Some(SPARK_GID),
             allow_uids: vec![1000],
         };
-        assert!(policy.authorize(&PeerCreds {
-            uid: 1000,
-            gid: 1000
-        }));
+        assert!(policy.authorize(&creds(1000, 1000, &[1000])));
     }
 }
