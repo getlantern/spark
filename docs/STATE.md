@@ -132,6 +132,24 @@
   0.19s; `https://example.com` → HTTP 200 — curl → utun → netstack → direct forwarder → upstream.
   Diagnostic file-trace scaffolding removed from `SparkApp.swift` after the gate (clean source
   rebuilds green). **M10 macOS is DONE; iOS device gate still pending (NE doesn't run on the sim).**
+- **M11 (additional transports) STARTED 2026-06-16 — TLS-backend decision + AnyTLS chunk 1.**
+  After a deep TLS-backend investigation (rustls can't mimic Chrome — maintainers refuse + no
+  SessionID API; budget relaxed to ~10 MB; evaluated rustls/boring/Cronet/OS-native/curl-impersonate;
+  empirical spike proved `wreq`'s **Chrome137 profile == real Chrome149** byte-for-byte on
+  JA4/peetprint/H2-Akamai), wrote **`docs/adr/0001-chrome-mimicry-tls-backend.md`**: keep
+  rustls+ring baseline; adopt **`btls`** (patched-BoringSSL fork) for *mimicry* transports (explicit
+  scoped exception to the rustls-only lock); first transport = **AnyTLS-on-`btls`**; pin/vendor +
+  CI JA4-drift check + curl-impersonate as escape-hatch/QUIC reference. Full rationale in the
+  `m11-transport-candidates-anytls-samizdat` memory. **Chunk 1 (this session): AnyTLS protocol core,
+  pure (bytes+thiserror, no TLS/deps yet), green.** `core/src/transport/anytls/`: `frame.rs` (the
+  `command|streamId|dataLen|data` session-frame codec + `Command` enum, encode/parse with
+  Incomplete-vs-malformed, mirrors `tcp_tunnel/header.rs`), `padding.rs` (the server-pushable
+  padding-scheme parser/model: `stop=N` + per-write `LO-HI`/`c` segment plans, `DEFAULT_SCHEME`),
+  `mod.rs` (layering doc + version consts). 58 core tests pass (15 new), clippy `-D warnings` clean.
+  **Next chunks (per ADR build order):** (2) session/stream **multiplexer** + idle-session pool;
+  (3) auth record (SHA-256) + `cmdSettings`/padding-md5 + the padding **engine** (applies a plan to
+  writes, `cmdWaste` fill); (4) wire **`btls`/`tokio-btls`** TLS + the `Transport` impl + config
+  selection; then the live gate (same curl/DNS gates as the TCP tunnel + CI JA4-drift green).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.

@@ -27,6 +27,7 @@ use crate::config::Config;
 use crate::net::SocketProtector;
 use crate::BoxedStream;
 
+pub mod anytls;
 pub mod tcp_tunnel;
 
 /// Connect a TCP stream to `addr`, optionally pinning the socket to a physical interface
