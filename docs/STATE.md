@@ -21,10 +21,13 @@
   `windows-service` crate) — runs as a real Windows service under the SCM (RUNNING / STOP /
   STOPPED) or in the foreground from a console; `sc create spark …` registers it and it responds
   to `sc stop/start`. The daemon body moved to a shared lib module (`service::daemon`); `main.rs`
-  is a thin shim; unix behavior unchanged. Remaining M8: a **live release run** (push a tag),
-  pushing the filled Homebrew formula to the tap, a **live Windows run** (no host yet), the **MSI**
-  (now unblocked — WiX `ServiceInstall` wrapping the `sc create`), and service logging→Event Log.
-  GUI deliberately deferred (M7 scope; CLI is the client).
+  is a thin shim; unix behavior unchanged. **Windows MSI done 2026-06-15:**
+  `packaging/windows/spark.wxs` (WiX v4/v5, built in CI via the `wix` dotnet tool) installs both
+  binaries + registers the service (`ServiceInstall`/`ServiceControl`, LocalSystem auto-start) +
+  ships the example config; well-formed XML, first real build happens in CI. M8 packaging is now
+  feature-complete; remaining are **live verifications**: a **release run** (push a tag),
+  Homebrew-tap push, a **live Windows run** (no host yet), and service logging→Event Log. GUI
+  deliberately deferred (M7 scope; CLI is the client).
   **M7 refinements all landed 2026-06-15** (3 commits): (1) kill-switch signaling — unexpected
   data-path exit fires `FellOpenToDirect` + sets `direct_fallback`, `[kill_switch] fail_closed`
   knob; (2) **supplementary-group resolution** — `service::groups` resolves a peer uid's full
@@ -521,6 +524,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 - [~] M8 (packaging: cross-build checks + systemd/launchd units + size-budget done; **Windows
   named-pipe transport done — whole workspace cross-builds for Windows**; **CI + tag-driven
   release workflows + deb/Homebrew/Windows-zip packaging defs done**; **Windows SCM service handler
-  done — `spark-service` is dual-mode (service under SCM / foreground)**. Pending: a live release
-  run [push a tag], Homebrew-tap push, live Windows run, the MSI [now unblocked], Event-Log logging)
+  done — `spark-service` is dual-mode (service under SCM / foreground)**; **MSI (WiX) done —
+  installs binaries + registers the service**. Packaging feature-complete; pending only live
+  verifications: a release run [push a tag], Homebrew-tap push, live Windows run, Event-Log logging)
   [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
