@@ -1,0 +1,18 @@
+[package]
+name = "spark-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The Android JNI library: a cdylib (`libspark_android.so`) loaded by the VpnService via
+# System.loadLibrary("spark_android"). Built with cargo-ndk; on non-Android targets it compiles
+# to an empty cdylib (the JNI symbols are cfg(target_os = "android")), so it stays in the
+# workspace's green-checked set without affecting desktop builds.
+[lib]
+name = "spark_android"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+spark-core = { path = "../../core" }

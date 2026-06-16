@@ -1,0 +1,3 @@
+# cargo-ndk build output (regenerate with the cargo ndk build below).
+/jniLibs/
+/target/

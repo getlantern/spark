@@ -9,6 +9,10 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+// Android entry (run the data path on a VpnService-provided fd). The JNI symbols live in the
+// `platforms/android` cdylib; this is the run/stop logic it calls.
+#[cfg(target_os = "android")]
+pub mod android;
 pub mod config;
 pub mod net;
 pub mod netstack;
