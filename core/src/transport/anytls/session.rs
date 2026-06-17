@@ -13,21 +13,27 @@
 //! ```
 //!
 //! Each [`Stream`] is an `AsyncRead + AsyncWrite` byte channel keyed by `stream_id`. The reader
-//! task demuxes inbound `cmdPSH`/`cmdFIN` to the right stream; the writer task serializes all
-//! outbound frames onto the single write half (no lock).
+//! task demuxes inbound `cmdPSH`/`cmdFIN` to the right stream; the writer serializes all outbound
+//! frames onto the single write half (no lock).
 //!
-//! **Client-side only** (spark opens streams; it does not accept). The idle-session **pool**
-//! (acquire/reuse/sweep) and session-level handling of `cmdSettings`/`cmdUpdatePaddingScheme`/auth
-//! land in later chunks. A [`Session`] must **outlive** the [`Stream`]s it opens (the pool will own
-//! sessions); when it drops, both tasks abort.
+//! Two constructors:
+//! - [`Session::new`] — the **raw** mux (frames written as-is, no handshake/padding). Low-level
+//!   building block, used in tests.
+//! - [`Session::client`] — a **client session**: writes the auth record, sends a buffered
+//!   `cmdSettings`, and shapes outgoing packets with the [`super::padding`] engine, faithfully to
+//!   anytls-go. Open a stream and write the SOCKS5 target address as its first bytes; that flushes
+//!   the buffered `cmdSettings`+`cmdSYN`+address as padded packet 1.
+//!
+//! **Client-side only** (spark opens streams; it does not accept). Deferred to chunk 4c: the
+//! idle-session **pool**, dynamic `cmdUpdatePaddingScheme` handling, and `cmdSYNACK` error
+//! reporting (the client sends optimistically). A [`Session`] must **outlive** the [`Stream`]s it
+//! opens; when it drops, both tasks abort.
 //!
 //! ## Backpressure (current state)
 //! - **Inbound** (peer → stream) is a *bounded* channel; the reader `.await`s on a full one, which
-//!   backpressures the peer but head-of-line-blocks other streams until per-stream flow control is
-//!   added.
-//! - **Outbound** (stream → writer) is *unbounded* for now, so [`Stream`] writes never block. When
-//!   this is wired to the real TLS transport (chunk 4) it becomes a bounded channel with poll-based
-//!   reservation so `poll_write` applies real backpressure.
+//!   backpressures the peer but head-of-line-blocks other streams until per-stream flow control.
+//! - **Outbound** (stream → writer) is *unbounded* for now, so [`Stream`] writes never block. It
+//!   becomes a bounded poll-reserve channel when wired to the real TLS transport.
 
 use std::collections::HashMap;
 use std::io;
@@ -35,22 +41,35 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll};
 
-use bytes::{Buf, Bytes};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use bytes::{Buf, Bytes, BytesMut};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use super::auth::encode_auth;
 use super::frame::{Command, Frame, MAX_PAYLOAD};
-use super::io::{FrameReader, FrameWriter};
+use super::io::FrameReader;
+use super::padding::{shape_records, PaddingScheme, Seg, SizeSampler, SystemSampler};
+use super::settings::Settings;
+use super::PROTOCOL_VERSION;
 
 /// Capacity of the reader's control channel (stream registrations).
 const CONTROL_CAP: usize = 16;
 /// Per-stream inbound queue depth (frames buffered for a stream before the reader backpressures).
 const STREAM_INBOUND_CAP: usize = 32;
+/// The `client=` identifier sent in `cmdSettings`.
+const CLIENT_ID: &str = concat!("spark/", env!("CARGO_PKG_VERSION"));
 
-/// A message to the reader task — currently only "register this new stream so inbound frames for
-/// `stream_id` are routable." Acked over `ack` so `open_stream` registers *before* sending the SYN
-/// (no race where a reply arrives before the stream is known).
+/// An item for the writer task: a frame to send, or the marker that ends the client's initial
+/// buffering phase (so `cmdSettings`+`cmdSYN`+address batch into padded packet 1).
+enum Out {
+    Frame(Frame),
+    EndBuffering,
+}
+
+/// A message to the reader task — register a new stream so inbound frames for `stream_id` are
+/// routable. Acked over `ack` so `open_stream` registers *before* sending the SYN (no race where a
+/// reply arrives before the stream is known).
 enum Control {
     Register {
         stream_id: u32,
@@ -59,26 +78,79 @@ enum Control {
     },
 }
 
+/// Client-mode writer state: the auth record to send first and the padding scheme to shape with.
+struct Handshake {
+    auth: Bytes,
+    scheme: PaddingScheme,
+}
+
 /// A multiplexed AnyTLS session over one byte transport. Cheap to hold; spawns two background
 /// tasks (reader/writer) that are aborted when the `Session` is dropped.
 pub struct Session {
-    outbound: mpsc::UnboundedSender<Frame>,
+    outbound: mpsc::UnboundedSender<Out>,
     control: mpsc::Sender<Control>,
     next_id: AtomicU32,
     tasks: Vec<JoinHandle<()>>,
 }
 
 impl Session {
-    /// Start a session over `transport` (already TLS-wrapped in production; an in-memory duplex in
-    /// tests). Spawns the reader and writer tasks.
+    /// The **raw** mux over `transport`: frames written as-is, no handshake or padding. Building
+    /// block / test harness; production clients use [`Session::client`].
     pub fn new<S>(transport: S) -> Session
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::spawn(transport, None)
+    }
+
+    /// A **client session** over `transport` (already TLS-wrapped in production). Writes the auth
+    /// record `sha256(password) | u16(padLen) | zeros` (padLen = the packet-0 scheme size), then a
+    /// buffered `cmdSettings`; subsequent packets are shaped by `scheme`. Open a stream and write
+    /// the SOCKS5 target address as its first bytes (anytls choreography).
+    pub fn client<S>(transport: S, password: &str, scheme: PaddingScheme) -> Session
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        // Auth padding length = the first packet-0 record size (anytls GenerateRecordPayloadSizes(0)[0]).
+        let mut sampler = SystemSampler::new();
+        let pad_len = match scheme.plan(0).first() {
+            Some(Seg::Size { lo, hi }) => {
+                (sampler.sample(*lo, *hi) as usize).min(u16::MAX as usize)
+            }
+            _ => 0,
+        };
+        let mut auth = BytesMut::new();
+        if encode_auth(password, &vec![0u8; pad_len], &mut auth).is_err() {
+            // Unreachable (pad_len is clamped to the 2-byte field); fall back to no padding.
+            auth.clear();
+            let _ = encode_auth(password, &[], &mut auth);
+        }
+        let settings = Settings::for_scheme(PROTOCOL_VERSION, CLIENT_ID, &scheme).encode();
+
+        let session = Self::spawn(
+            transport,
+            Some(Handshake {
+                auth: auth.freeze(),
+                scheme,
+            }),
+        );
+        // First buffered frame: cmdSettings (session-level, stream 0).
+        let _ = session.outbound.send(Out::Frame(Frame {
+            command: Command::Settings,
+            stream_id: 0,
+            payload: settings,
+        }));
+        session
+    }
+
+    fn spawn<S>(transport: S, handshake: Option<Handshake>) -> Session
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (rd, wr) = tokio::io::split(transport);
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::channel(CONTROL_CAP);
-        let writer = tokio::spawn(writer_task(FrameWriter::new(wr), outbound_rx));
+        let writer = tokio::spawn(writer_task(wr, outbound_rx, handshake));
         let reader = tokio::spawn(reader_task(FrameReader::new(rd), control_rx));
         Session {
             outbound: outbound_tx,
@@ -89,8 +161,8 @@ impl Session {
     }
 
     /// Open a new logical stream: allocate the next `stream_id`, register it with the reader (and
-    /// wait for the ack so replies are routable), then send `cmdSYN`. The returned [`Stream`]
-    /// relays bytes via `cmdPSH` and closes with `cmdFIN`.
+    /// wait for the ack so replies are routable), then send `cmdSYN` and end the initial buffering
+    /// phase. The returned [`Stream`] relays bytes via `cmdPSH` and closes with `cmdFIN`.
     ///
     /// The AnyTLS target address (the SOCKS5 `SocksAddr` the client sends as the first `cmdPSH`) is
     /// the caller's concern — this opens an address-agnostic byte stream.
@@ -108,8 +180,11 @@ impl Session {
             .map_err(|_| session_gone("reader"))?;
         ack_rx.await.map_err(|_| session_gone("reader"))?;
         self.outbound
-            .send(Frame::control(Command::Syn, stream_id))
+            .send(Out::Frame(Frame::control(Command::Syn, stream_id)))
             .map_err(|_| session_gone("writer"))?;
+        // End the client's initial buffering phase (a no-op for a raw session, and idempotent for
+        // later streams since buffering is already off).
+        let _ = self.outbound.send(Out::EndBuffering);
         Ok(Stream {
             stream_id,
             outbound: self.outbound.clone(),
@@ -135,27 +210,86 @@ fn session_gone(which: &str) -> io::Error {
     )
 }
 
-/// Owns the write half; serializes every outbound frame onto it. Coalesces a burst of
-/// already-queued frames before flushing.
+/// The writer task: client mode (auth + buffering + padding) or raw mode (frames as-is).
 async fn writer_task<W: AsyncWrite + Unpin>(
-    mut writer: FrameWriter<W>,
-    mut outbound: mpsc::UnboundedReceiver<Frame>,
+    wr: W,
+    outbound: mpsc::UnboundedReceiver<Out>,
+    handshake: Option<Handshake>,
 ) {
-    'outer: while let Some(frame) = outbound.recv().await {
-        if writer.write_frame(&frame).await.is_err() {
-            break;
+    match handshake {
+        Some(h) => client_writer(wr, outbound, h).await,
+        None => raw_writer(wr, outbound).await,
+    }
+}
+
+/// Raw mode: encode and write each frame, coalescing a burst before flushing. `EndBuffering` is a
+/// no-op here.
+async fn raw_writer<W: AsyncWrite + Unpin>(mut wr: W, mut outbound: mpsc::UnboundedReceiver<Out>) {
+    let _ = raw_writer_inner(&mut wr, &mut outbound).await;
+    let _ = wr.shutdown().await;
+}
+
+async fn raw_writer_inner<W: AsyncWrite + Unpin>(
+    wr: &mut W,
+    outbound: &mut mpsc::UnboundedReceiver<Out>,
+) -> io::Result<()> {
+    let mut buf = BytesMut::new();
+    while let Some(item) = outbound.recv().await {
+        let Out::Frame(f) = item else { continue };
+        buf.clear();
+        f.encode(&mut buf);
+        wr.write_all(&buf).await?;
+        while let Ok(Out::Frame(f)) = outbound.try_recv() {
+            buf.clear();
+            f.encode(&mut buf);
+            wr.write_all(&buf).await?;
         }
-        // Drain frames already queued so a burst becomes one flush.
-        while let Ok(f) = outbound.try_recv() {
-            if writer.write_frame(&f).await.is_err() {
-                break 'outer;
+        wr.flush().await?;
+    }
+    Ok(())
+}
+
+/// Client mode: write the auth record (packet 0), buffer frames until `EndBuffering`, then shape
+/// each write into padded records via [`shape_records`]. Each non-buffered frame is one packet.
+async fn client_writer<W: AsyncWrite + Unpin>(
+    mut wr: W,
+    mut outbound: mpsc::UnboundedReceiver<Out>,
+    h: Handshake,
+) {
+    let _ = client_writer_inner(&mut wr, &mut outbound, h).await;
+    let _ = wr.shutdown().await;
+}
+
+async fn client_writer_inner<W: AsyncWrite + Unpin>(
+    wr: &mut W,
+    outbound: &mut mpsc::UnboundedReceiver<Out>,
+    h: Handshake,
+) -> io::Result<()> {
+    let mut sampler = SystemSampler::new();
+    // Packet 0: the auth record, its own write (as anytls' dialer does).
+    wr.write_all(&h.auth).await?;
+    wr.flush().await?;
+
+    let mut buffering = true;
+    let mut buffer = BytesMut::new(); // accumulated cmdSettings+cmdSYN during buffering
+    let mut pkt: usize = 0;
+    while let Some(item) = outbound.recv().await {
+        match item {
+            Out::EndBuffering => buffering = false,
+            Out::Frame(f) if buffering => f.encode(&mut buffer),
+            Out::Frame(f) => {
+                // One packet = the buffered prefix (if any) ++ this frame.
+                let mut data = std::mem::take(&mut buffer);
+                f.encode(&mut data);
+                pkt += 1;
+                for rec in shape_records(&h.scheme, pkt, data.freeze(), &mut sampler) {
+                    wr.write_all(&rec).await?;
+                }
+                wr.flush().await?;
             }
         }
-        if writer.flush().await.is_err() {
-            break;
-        }
     }
-    let _ = writer.shutdown().await;
+    Ok(())
 }
 
 /// Owns the read half and the stream table; demuxes inbound frames to per-stream channels and
@@ -203,7 +337,8 @@ async fn route(frame: Frame, streams: &mut HashMap<u32, mpsc::Sender<Bytes>>) {
         Command::Fin => {
             streams.remove(&frame.stream_id);
         }
-        // Established-ack, server-role, and session-level frames are handled in later chunks.
+        // Established-ack, server-role, and session-level frames are handled in later chunks
+        // (cmdUpdatePaddingScheme / cmdSYNACK error reporting are 4c refinements). Waste = padding.
         Command::SynAck
         | Command::Syn
         | Command::Settings
@@ -211,16 +346,15 @@ async fn route(frame: Frame, streams: &mut HashMap<u32, mpsc::Sender<Bytes>>) {
         | Command::UpdatePaddingScheme
         | Command::Alert
         | Command::HeartRequest
-        | Command::HeartResponse => {}
-        // Padding — discard.
-        Command::Waste => {}
+        | Command::HeartResponse
+        | Command::Waste => {}
     }
 }
 
 /// One multiplexed logical stream: an `AsyncRead + AsyncWrite` byte channel over a `stream_id`.
 pub struct Stream {
     stream_id: u32,
-    outbound: mpsc::UnboundedSender<Frame>,
+    outbound: mpsc::UnboundedSender<Out>,
     inbound: mpsc::Receiver<Bytes>,
     /// Leftover from an inbound frame that didn't fit the caller's read buffer.
     read_rem: Bytes,
@@ -276,7 +410,7 @@ impl AsyncWrite for Stream {
             stream_id: this.stream_id,
             payload: Bytes::copy_from_slice(&data[..n]),
         };
-        match this.outbound.send(frame) {
+        match this.outbound.send(Out::Frame(frame)) {
             Ok(()) => Poll::Ready(Ok(n)),
             Err(_) => Poll::Ready(Err(session_gone("writer"))),
         }
@@ -294,7 +428,7 @@ impl AsyncWrite for Stream {
             this.write_closed = true;
             let _ = this
                 .outbound
-                .send(Frame::control(Command::Fin, this.stream_id));
+                .send(Out::Frame(Frame::control(Command::Fin, this.stream_id)));
         }
         Poll::Ready(Ok(()))
     }
@@ -303,6 +437,7 @@ impl AsyncWrite for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::anytls::io::FrameWriter;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     /// A minimal peer: echo every `cmdPSH` back on the same `stream_id`; ignore everything else.
@@ -402,5 +537,88 @@ mod tests {
         let n = stream.read(&mut buf).await.unwrap();
         assert_eq!(n, 0, "peer FIN should surface as EOF");
         peer.await.unwrap();
+    }
+
+    /// What an AnyTLS server peer observed during the client handshake.
+    struct HandshakeSeen {
+        hash_ok: bool,
+        settings: Option<Bytes>,
+        saw_syn: bool,
+        psh: Vec<u8>,
+    }
+
+    /// A minimal AnyTLS *server* peer: read + verify the auth record, then parse the frame stream
+    /// (discarding `cmdWaste` padding), collect the handshake frames, echo the first `cmdPSH`.
+    async fn anytls_server(io: DuplexStream, password: String) -> HandshakeSeen {
+        let (mut rd, wr) = tokio::io::split(io);
+        // Auth record: sha256(32) | u16(padLen) | padding.
+        let mut hash = [0u8; 32];
+        rd.read_exact(&mut hash).await.unwrap();
+        let mut len_be = [0u8; 2];
+        rd.read_exact(&mut len_be).await.unwrap();
+        let mut pad = vec![0u8; u16::from_be_bytes(len_be) as usize];
+        rd.read_exact(&mut pad).await.unwrap();
+        let expect = ring::digest::digest(&ring::digest::SHA256, password.as_bytes());
+        let hash_ok = hash == expect.as_ref();
+
+        // The rest is the (padded) frame stream.
+        let mut reader = FrameReader::new(rd);
+        let mut writer = FrameWriter::new(wr);
+        let mut seen = HandshakeSeen {
+            hash_ok,
+            settings: None,
+            saw_syn: false,
+            psh: Vec::new(),
+        };
+        while let Ok(Some(f)) = reader.next_frame().await {
+            match f.command {
+                Command::Settings => seen.settings = Some(f.payload),
+                Command::Syn => seen.saw_syn = true,
+                Command::Psh => {
+                    seen.psh.extend_from_slice(&f.payload);
+                    writer
+                        .write_frame(&Frame {
+                            command: Command::Psh,
+                            stream_id: f.stream_id,
+                            payload: f.payload,
+                        })
+                        .await
+                        .unwrap();
+                    writer.flush().await.unwrap();
+                }
+                Command::Fin => break,
+                _ => {} // discard cmdWaste padding and anything else
+            }
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn client_handshake_writes_auth_settings_syn_then_relays() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let password = "hunter2";
+        let peer = tokio::spawn(anytls_server(server_io, password.to_string()));
+
+        let session = Session::client(client_io, password, PaddingScheme::default());
+        let mut stream = session.open_stream().await.unwrap();
+        // The stream's first bytes stand in for the SOCKS5 target address + initial data.
+        stream.write_all(b"target-addr-and-data").await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut echo = [0u8; 20];
+        stream.read_exact(&mut echo).await.unwrap();
+        assert_eq!(&echo, b"target-addr-and-data", "relayed bytes round-trip");
+
+        stream.shutdown().await.unwrap();
+        drop(stream);
+        drop(session);
+
+        let seen = peer.await.unwrap();
+        assert!(seen.hash_ok, "auth record sha256(password) matches");
+        let settings = Settings::parse(&seen.settings.expect("cmdSettings sent")).unwrap();
+        assert_eq!(settings.version, PROTOCOL_VERSION);
+        assert!(settings.padding_md5.is_some(), "padding-md5 present");
+        assert!(seen.saw_syn, "cmdSYN sent");
+        assert_eq!(seen.psh, b"target-addr-and-data", "address/data delivered");
     }
 }

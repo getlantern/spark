@@ -190,13 +190,25 @@
   **packet 1** (shaped); (5) later writes = packets 2.. shaped while `pkt<stop`, then unpadded.
   Idle-session pool: `NewClient(..., idleCheck=30s, idleTimeout=30s, minIdleSession)`; reuse newest
   (`SkipList` keyed `MaxUint64-seq`), sweep on a timer.
-  **Remaining (per ADR): 4b** = the client-session handshake + the padding-applied writer (write auth,
-  buffer settings/SYN, route the writer through `shape_records` with the pktCounter/sendPadding-off-
-  at-stop), still generic over the byte stream → testable with a mock-server duplex. **4c** = the
-  **`btls`/`tokio-btls`** TLS connector with a Chrome profile (verify the btls SslConnector API +
-  the wreq-util-style profile; the big C/cmake dep — confirm build/CI/size impact) + the idle-session
-  **pool** + the `Transport`/`UdpTransport` impls + config selection. Then the **live gate** (same
-  curl/DNS gates as the TCP tunnel + the CI JA4-drift check).
+  **Chunk 4b (2026-06-16): client handshake + padding-applied writer, green.** Refactored
+  `session.rs`: the outbound channel now carries `Out{Frame|EndBuffering}`; the writer splits into
+  `raw_writer` (chunk-2 behavior, `Session::new`) and `client_writer` (`Session::client`). The client
+  writer writes the **auth record** (packet 0) first, **buffers** `cmdSettings`+`cmdSYN` until
+  `EndBuffering` (sent by `open_stream` after the SYN), then shapes each subsequent write into padded
+  records via `shape_records` (1-based pktCounter; passthrough past `stop`). `Session::client(transport,
+  password, scheme)` computes the auth (padLen = packet-0 size) + sends `Settings::for_scheme`. The
+  SOCKS5 target address is the stream's first write → flushes settings+syn+addr as padded packet 1.
+  Still generic over the byte stream. New end-to-end test (`anytls_server` mock over a duplex):
+  verifies the auth sha256, the buffered cmdSettings (v=2 + padding-md5), the SYN, address/data
+  delivery through padded records (waste discarded), and the echo round-trip. 80 core tests pass
+  (chunk-2 raw-mux tests still green). clippy clean. Deferred (in-code): dynamic
+  `cmdUpdatePaddingScheme`, `cmdSYNACK` error reporting (client sends optimistically), bounded
+  outbound backpressure.
+  **Remaining: 4c** = the **`btls`/`tokio-btls`** TLS connector with a Chrome profile (verify the
+  btls `SslConnector` API + the wreq-util-style profile; the big C/cmake dep — confirm build/CI/size
+  impact) + the idle-session **pool** + the `Transport`/`UdpTransport` impls + config selection +
+  reuse `tcp_tunnel/header.rs::Address` for the SOCKS5 target. Then the **live gate** (same curl/DNS
+  gates as the TCP tunnel + the CI JA4-drift check).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
