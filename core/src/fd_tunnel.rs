@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::netstack::SmoltcpNetstack;
+use crate::netstack;
 use crate::proxy;
 use crate::transport;
 use crate::tun::Tun;
@@ -48,9 +48,9 @@ pub fn run_tunnel(fd: i32, mtu: u16) -> std::io::Result<()> {
 
         let config = Config::default();
         let (tcp_transport, udp_transport) = transport::from_config(&config)?;
-        let mut netstack = SmoltcpNetstack::new(Arc::clone(&tun))?;
+        let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
         let idle = Duration::from_secs(config.udp.idle_timeout_secs);
-        if let Some((udp_inbound, udp_reply)) = netstack.take_udp() {
+        if let Some((udp_inbound, udp_reply)) = udp_surface {
             tokio::spawn(proxy::udp::run_udp(
                 udp_inbound,
                 udp_reply,
@@ -61,7 +61,7 @@ pub fn run_tunnel(fd: i32, mtu: u16) -> std::io::Result<()> {
 
         info!(mtu, "spark tunnel up (fd mode)");
         tokio::select! {
-            _ = proxy::tcp::run(netstack, tcp_transport) => warn!("netstack accept loop exited"),
+            _ = proxy::tcp::run(stack, tcp_transport) => warn!("netstack accept loop exited"),
             _ = shutdown().notified() => info!("stop requested; tearing the tunnel down"),
         }
         drop(tun);

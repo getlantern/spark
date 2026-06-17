@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 use spark_core::config::Config;
-use spark_core::netstack::SmoltcpNetstack;
+use spark_core::netstack;
 use spark_core::proxy;
 use spark_core::routing::RouteManager;
 use spark_core::transport;
@@ -99,9 +99,8 @@ impl TunnelEngine for CoreEngine {
         let (tcp_transport, udp_transport) = transport::from_config(&self.config)
             .map_err(|e| EngineError(format!("building transport: {e}")))?;
 
-        let mut netstack = SmoltcpNetstack::new(Arc::clone(&tun))
+        let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &self.config)
             .map_err(|e| EngineError(format!("starting the netstack: {e}")))?;
-        let udp_surface = netstack.take_udp();
         let idle = Duration::from_secs(self.config.udp.idle_timeout_secs);
 
         // One supervisor task runs the data-path loops. It signals `exit` only if a loop
@@ -110,11 +109,11 @@ impl TunnelEngine for CoreEngine {
             match udp_surface {
                 Some((udp_inbound, udp_reply)) => {
                     tokio::select! {
-                        _ = proxy::tcp::run(netstack, tcp_transport) => {}
+                        _ = proxy::tcp::run(stack, tcp_transport) => {}
                         _ = proxy::udp::run_udp(udp_inbound, udp_reply, udp_transport, idle) => {}
                     }
                 }
-                None => proxy::tcp::run(netstack, tcp_transport).await,
+                None => proxy::tcp::run(stack, tcp_transport).await,
             }
             let _ = exit.send(()).await; // unexpected exit (not reached on abort)
         });

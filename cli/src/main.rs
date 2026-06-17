@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use spark_core::config::{self, Config};
-use spark_core::netstack::SmoltcpNetstack;
+use spark_core::netstack;
 use spark_core::proxy;
 use spark_core::redact::redact_addrs;
 use spark_core::transport;
@@ -86,6 +86,8 @@ impl RunArgs {
                 addr: self.addr,
                 prefix: self.prefix,
                 mtu: self.mtu,
+                // The bare `run` flags default to the userspace stack; select `system` via --config.
+                stack: config::StackKind::default(),
             },
             transport: config::TransportConfig {
                 server: self.server,
@@ -176,10 +178,11 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
     let (tcp_transport, udp_transport) =
         transport::from_config(&config).context("building the transport")?;
 
-    let mut netstack = SmoltcpNetstack::new(Arc::clone(&tun)).context("starting the netstack")?;
+    let (stack, udp_surface) =
+        netstack::build(Arc::clone(&tun), &config).context("starting the netstack")?;
 
     let idle_timeout = Duration::from_secs(config.udp.idle_timeout_secs);
-    if let Some((udp_inbound, udp_reply)) = netstack.take_udp() {
+    if let Some((udp_inbound, udp_reply)) = udp_surface {
         tokio::spawn(proxy::udp::run_udp(
             udp_inbound,
             udp_reply,
@@ -192,7 +195,7 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {
             info!("signal received — shutting down");
         }
-        _ = proxy::tcp::run(netstack, tcp_transport) => {
+        _ = proxy::tcp::run(stack, tcp_transport) => {
             warn!("netstack accept loop exited unexpectedly");
         }
     }

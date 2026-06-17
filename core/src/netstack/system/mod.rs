@@ -16,7 +16,8 @@
 //!   listener→app) and resolve accepted connections back to their original endpoints. **Built.**
 //! - [`stack`] — [`SystemNetstack`](stack::SystemNetstack): the live wiring (TUN pump loop +
 //!   kernel listener accept loop + reaper) implementing [`Netstack`](super::Netstack). **Built.**
-//! - `[tun] stack = "system"` config knob — *next chunk*.
+//! - `[tun] stack = "system"` config knob + selection in [`build`](super::build). **Built.**
+//! - Live netns gate + the system-vs-userspace A/B benchmark — *next chunk*.
 //!
 //! Feature-gated behind `system-stack` (off by default; desktop-only — Linux/macOS). The proxy core
 //! and transports are untouched: a system-stack flow is a kernel `TcpStream` surfaced as the same

@@ -75,12 +75,61 @@ pub struct UdpDatagram {
 /// Obtained once from [`SmoltcpNetstack::take_udp`] and consumed by the UDP proxy loop.
 pub type UdpSurface = (mpsc::Receiver<UdpDatagram>, mpsc::Sender<UdpDatagram>);
 
-/// The netstack surface our proxy depends on. `netstack-smoltcp` is one impl.
+/// The netstack surface our proxy depends on. `netstack-smoltcp` is one impl; the kernel-TCP
+/// [`system`] stack is another, selected by config (see [`build`]).
 #[async_trait]
 pub trait Netstack: Send {
     /// Yield the next accepted TCP flow, or `None` once the netstack has shut down.
     async fn accept_tcp(&mut self) -> Option<TcpFlow>;
     // UDP surface added when the UDP path is built (M5).
+}
+
+/// Lets a boxed netstack be passed to the generic [`proxy`](crate::proxy) forwarders, so the impl
+/// can be chosen at runtime ([`build`]) while the core stays statically typed.
+#[async_trait]
+impl Netstack for Box<dyn Netstack> {
+    async fn accept_tcp(&mut self) -> Option<TcpFlow> {
+        (**self).accept_tcp().await
+    }
+}
+
+/// Build the configured netstack over `tun`: the userspace smoltcp stack (default) or the kernel
+/// [`system`] stack. Returns the TCP netstack plus the UDP surface to drive the UDP proxy — `None`
+/// for the system stack, which is TCP-only for now (UDP/ICMP is a later chunk).
+pub fn build(
+    tun: Arc<Tun>,
+    config: &crate::config::Config,
+) -> io::Result<(Box<dyn Netstack>, Option<UdpSurface>)> {
+    match config.tun.stack {
+        crate::config::StackKind::Userspace => {
+            let mut ns = SmoltcpNetstack::new(tun)?;
+            let udp = ns.take_udp();
+            Ok((Box::new(ns), udp))
+        }
+        crate::config::StackKind::System => build_system(tun, config),
+    }
+}
+
+/// Build the system (kernel-TCP) stack when the `system-stack` feature is present.
+#[cfg(feature = "system-stack")]
+fn build_system(
+    tun: Arc<Tun>,
+    config: &crate::config::Config,
+) -> io::Result<(Box<dyn Netstack>, Option<UdpSurface>)> {
+    // IPv4 only for now; the tun's configured address is the listener/server address.
+    let ns = system::SystemNetstack::new(tun, Some(config.tun.addr), None)?;
+    Ok((Box::new(ns), None))
+}
+
+/// Without the feature, selecting `stack = system` is a hard error rather than a silent fallback.
+#[cfg(not(feature = "system-stack"))]
+fn build_system(
+    _tun: Arc<Tun>,
+    _config: &crate::config::Config,
+) -> io::Result<(Box<dyn Netstack>, Option<UdpSurface>)> {
+    Err(io::Error::other(
+        "tun.stack = system but spark was built without the `system-stack` feature",
+    ))
 }
 
 /// A [`Netstack`] backed by the vendored `netstack-smoltcp` crate.

@@ -65,6 +65,20 @@ pub struct KillSwitchConfig {
     pub fail_closed: bool,
 }
 
+/// Which netstack terminates TCP from the TUN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StackKind {
+    /// Userspace smoltcp stack — cross-platform, the default.
+    #[default]
+    Userspace,
+    /// Kernel-TCP "system" stack: a NAT redirect gateway to a local kernel listener (sing-box's
+    /// `system`). Desktop-only (Linux/macOS) and requires the `system-stack` build feature; the
+    /// build errors at startup if it's selected without the feature. See
+    /// `docs/system-stack-design.md`.
+    System,
+}
+
 /// TUN device settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -79,6 +93,8 @@ pub struct TunConfig {
     /// MTU override; `None` uses the device default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+    /// Which netstack terminates TCP (`userspace` default, or `system`).
+    pub stack: StackKind,
 }
 
 impl Default for TunConfig {
@@ -88,6 +104,7 @@ impl Default for TunConfig {
             addr: Ipv4Addr::new(10, 0, 0, 1),
             prefix: 24,
             mtu: None,
+            stack: StackKind::default(),
         }
     }
 }
@@ -248,6 +265,7 @@ mod tests {
                     addr: Ipv4Addr::new(172, 16, 0, 1),
                     prefix: 16,
                     mtu: Some(1280),
+                    stack: StackKind::System,
                 },
                 transport: TransportConfig {
                     server: Some("[2001:db8::1]:443".parse().unwrap()),

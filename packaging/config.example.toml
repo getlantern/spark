@@ -7,6 +7,10 @@ addr = "10.0.0.1"
 prefix = 24
 # name = "utun9"   # requested device name; the OS may assign a different one
 # mtu = 1500       # omit to use the device default
+# stack = "userspace"  # which netstack terminates TCP. "userspace" (default) = the cross-platform
+#                      # smoltcp stack. "system" = kernel TCP via a NAT redirect gateway (sing-box's
+#                      # `system`): higher throughput, no multi-flow download collapse, but desktop-
+#                      # only (Linux/macOS) and requires a build with the `system-stack` feature.
 
 [transport]
 # Pin the daemon's upstream dials to your physical egress interface so they bypass the tunnel
