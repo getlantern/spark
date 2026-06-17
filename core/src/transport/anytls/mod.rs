@@ -37,6 +37,8 @@ pub mod settings;
 pub mod tls;
 #[cfg(feature = "anytls")]
 pub mod transport;
+#[cfg(feature = "anytls")]
+pub mod udp;
 
 pub use auth::encode_auth;
 pub use frame::{Command, Frame, FrameError};

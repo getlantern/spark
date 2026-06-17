@@ -239,8 +239,8 @@
   closed it (14→16 extensions). **Re-verified e2e still works** with the Chrome profile (productized
   `AnytlsTransport` → local anytls-go server → HTTP 200). clippy clean, 80 tests pass.
   **CI JA4-drift check:** the `/tmp/ja4-check` spike (boring connect → tls.peet.ws → assert JA4) is the
-  check to wire into CI (needs network). **Remaining follow-ups (non-blocking):** UDP-over-AnyTLS
-  (sing UoT v2); dynamic cmdUpdatePaddingScheme; `cmdSYNACK` error reporting.
+  check to wire into CI (needs network). **Remaining follow-ups (non-blocking):** dynamic
+  cmdUpdatePaddingScheme; `cmdSYNACK` error reporting.
 - **M11 AnyTLS idle-session pool + reconnect DONE 2026-06-16. ✅** `Session` gained `active_streams()`
   (an `Arc<AtomicUsize>` incremented in `open_stream`, decremented on `Stream` drop) and `is_alive()`
   (both bg tasks still running). `AnytlsTransport` replaced its single `OnceCell` with a
@@ -251,6 +251,14 @@
   `MIN_IDLE_SESSIONS=1` warm spare. Verified: unit test (counter inc/dec on stream drop, liveness) +
   a 2-dial e2e vs a local anytls-go server (both HTTP 200, 2nd reuses the pooled session). 81 core
   tests pass; clippy clean.
+- **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
+  target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
+  request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]
+  [payload]` (verified against `sing/common/uot` protocol.go+conn.go — interops with anytls-go's
+  `proxyOutboundUoT`). `AnytlsTransport` now impls `UdpTransport` too; `from_config` serves TCP+UDP
+  from ONE pooled transport. **e2e verified:** a DNS query (A example.com) through the UoT path →
+  local anytls-go server → 8.8.8.8:53 → valid response (id match, QR set, 2 answers). clippy clean.
+  Note: a UDP association close doesn't send cmdFIN (server reclaims via idle timeout) — minor.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.

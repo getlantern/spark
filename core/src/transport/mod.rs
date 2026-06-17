@@ -105,8 +105,7 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
     })
 }
 
-/// Build the AnyTLS TCP transport (feature `anytls`). UDP-over-AnyTLS (sing UoT v2) is a follow-up,
-/// so the UDP side is direct for now (DNS etc. bypass the AnyTLS tunnel).
+/// Build the AnyTLS transport (feature `anytls`) — TCP and UDP (sing UoT v2) over one session pool.
 #[cfg(feature = "anytls")]
 fn anytls_transport(
     cfg: &AnytlsConfig,
@@ -116,14 +115,14 @@ fn anytls_transport(
         .sni
         .clone()
         .unwrap_or_else(|| cfg.server.ip().to_string());
-    let tcp = Arc::new(anytls::AnytlsTransport::new(
+    // One transport serves both TCP and UDP (UoT v2), sharing the session pool.
+    let t = Arc::new(anytls::AnytlsTransport::new(
         cfg.server,
         cfg.password.clone(),
         sni,
-        protector.clone(),
+        protector,
     ));
-    let udp = Arc::new(DirectTransport::new(protector));
-    Ok((tcp as Arc<dyn Transport>, udp as Arc<dyn UdpTransport>))
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
 }
 
 /// Without the `anytls` feature, a configured AnyTLS transport is a hard error rather than a silent

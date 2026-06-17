@@ -18,10 +18,12 @@ use tokio::task::JoinHandle;
 
 use crate::net::SocketProtector;
 use crate::transport::tcp_tunnel::header::Address;
-use crate::transport::{protected_tcp_connect, Transport};
+use crate::transport::{
+    protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport,
+};
 use crate::BoxedStream;
 
-use super::{tls, PaddingScheme, Session};
+use super::{tls, udp, PaddingScheme, Session};
 
 /// Open a new session once a session is carrying this many streams (spreads load / bounds HOL).
 const MAX_STREAMS_PER_SESSION: usize = 64;
@@ -140,5 +142,18 @@ impl Transport for AnytlsTransport {
         Address::Ip(target).encode(&mut addr);
         stream.write_all(&addr).await?;
         Ok(Box::new(stream))
+    }
+}
+
+#[async_trait]
+impl UdpTransport for AnytlsTransport {
+    async fn dial_udp(
+        &self,
+        target: SocketAddr,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        // A UDP association is just another pooled stream, opened to the UoT v2 magic address.
+        let session = self.inner.acquire().await?;
+        let stream = session.open_stream().await?;
+        udp::associate(stream, target).await
     }
 }
