@@ -1,8 +1,7 @@
 # Design: Dynamically-loaded transports (WATER, and the alternatives)
 
-- **Status:** Proposed / exploration — 2026-06-17. No code. A decision doc for *how* spark should
-  let transports be delivered/updated independently of client releases. Promote the chosen tier(s)
-  to an ADR when we commit to building.
+- **Status:** Accepted — 2026-06-17, recorded in `docs/adr/0003-dynamic-transports.md` (Tier 1 first;
+  Tier 2 WATER-on-wasmi prototype next). This doc is the analysis behind that ADR. No code yet.
 - **Scope:** A `Transport` (and `UdpTransport`) whose *logic* is data — delivered out-of-band over
   the existing config/fronting channel, signed, and loaded at runtime — so a blocked protocol can be
   answered in hours instead of an app-store-release cycle. Does not change the proxy core, netstack,
