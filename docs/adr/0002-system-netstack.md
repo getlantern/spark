@@ -27,7 +27,8 @@
 ## Decision
 
 1. **Add a second `Netstack` implementation, the "system" stack**, behind a `system-stack` cargo
-   feature (off by default; desktop-only — Linux/macOS), selected by config `[tun] stack = "system"`
+   feature (off by default; needs a Linux/macOS-style tun fd — Linux, macOS, and Android via
+   `VpnService`; not iOS), selected by config `[tun] stack = "system"`
    (default `"userspace"`). Selecting it without the feature is a hard startup error.
 2. **Mechanism — a NAT redirect gateway** (`core/src/netstack/system/`): the tun's address is the
    `server` (a kernel TCP listener binds there); `gateway = server + 1` is a synthetic source. The
@@ -60,8 +61,14 @@
   rewrites every packet, so it is itself a serialization point. For real workloads (many concurrent
   connections) the stable, collapse-free profile is the better trade; lifting the peak (multiple
   pump tasks, or GSO on the pump) is future work.
-- **Desktop-only.** The local-listener + NAT model fits Linux/macOS; mobile keeps smoltcp. So we
-  maintain *both* stacks. (Cross-platform default stays userspace.)
+- **Not universal.** The redirect-listener model needs a Linux tun fd, so it fits Linux, macOS, and
+  **Android** (`VpnService` hands the app a Linux tun fd — sing-box runs `stack: system` on Android
+  this way; verified against `sing-tun@v0.7.11`). It does **not** fit **iOS** (`NEPacketTunnelFlow`,
+  no kernel tun). So we still maintain both stacks, and userspace stays the cross-platform default —
+  but Android is a *candidate* for the system stack (and thus the collapse fix), not excluded.
+  (Corrected 2026-06-17: an earlier draft said "desktop-only" — that wrongly lumped Android, which
+  is Linux-with-a-tun-fd, in with iOS. GSO is orthogonal and degrades gracefully where the fd lacks
+  `IFF_VNET_HDR`.)
 - **Operational:** redirected packets re-enter on the TUN destined to a local address, so Linux
   reverse-path filtering (`rp_filter`) must be relaxed on that path. NAT keys on source `addr:port`
   (a reused ephemeral port to a new target before cleanup returns a stale mapping). IPv6 not yet

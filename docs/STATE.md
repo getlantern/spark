@@ -308,6 +308,18 @@
   isn't). Incremental is kept as the GSO prerequisite (offloaded checksums must be adjusted
   incrementally). See `docs/system-stack-design.md` §9. **Remaining (non-blocking):** GSO/vnet-header
   (Linux) or multi-pump for the single-stream peak; IPv6 in the selection path; production `rp_filter`.
+- **CORRECTION 2026-06-17: the system stack is NOT desktop-only — it works on Android too.** Verified
+  against `sing-tun@v0.7.11`: `tun_linux.go New()` adopts a passed tun fd (the `FileDescriptor != 0`
+  branch) with no platform gate, and the system stack runs on it identically — **sing-box ships
+  `stack: system` on Android** by adopting the `VpnService` Linux tun fd. My earlier ADR/design-doc
+  "desktop-only / fights the mobile sandbox" claim conflated Android (Linux tun fd → works) with
+  **iOS** (`NEPacketTunnelFlow`, no kernel tun → genuinely doesn't apply). GSO is **orthogonal**:
+  `enableGSO()` is a runtime `IFF_VNET_HDR` check that *gracefully degrades to single-packet* if
+  absent (standard `VpnService` lacks it), so the system stack runs on Android with or without GSO.
+  **Implication: the concurrent-download collapse fix could reach Android** — spark's android build
+  just doesn't enable the `system-stack` feature yet (a choice). Android-specific work to enable it:
+  turn on the feature for `platforms/android`, route the `VpnService` fd into `SystemNetstack`, and
+  use `VpnService.protect()` for upstream-socket protection. Docs corrected (ADR 0002, design §7).
 - **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
   target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
   request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]

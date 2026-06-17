@@ -21,7 +21,9 @@
 //! - NAT lifecycle (FIN/RST removal) + the **mixed stack** (UDP via the proxy's datagram path, so
 //!   DNS works). **Built.** Remaining: pump parallelism / GSO for single-stream peak; IPv6.
 //!
-//! Feature-gated behind `system-stack` (off by default; desktop-only — Linux/macOS). The proxy core
+//! Feature-gated behind `system-stack` (off by default). Works wherever there's a Linux/macOS-style
+//! tun fd — Linux, macOS, and Android via `VpnService` (sing-box runs `stack: system` on Android the
+//! same way); not iOS (`NEPacketTunnelFlow`, no kernel tun). The proxy core
 //! and transports are untouched: a system-stack flow is a kernel `TcpStream` surfaced as the same
 //! [`TcpFlow`](super::TcpFlow).
 //!

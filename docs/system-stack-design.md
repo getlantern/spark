@@ -174,7 +174,15 @@ stack:
 | **Linux** | Good | The userspace-NAT approach needs no `TPROXY`/iptables (sing-tun does the rewrite itself). Runs in the privileged tunnel process. |
 | **macOS** | Good | utun + userspace NAT; runs in the M10 system extension that owns the utun. |
 | **Windows** | More work | sing-tun keeps a *separate* `stack_system_windows.go` — bind/socket semantics differ. |
-| **iOS / Android** | Keep userspace | The local-listener + NAT model fights the mobile sandbox/routing model; sing-box itself runs gVisor on iOS with shrunken TCP buffers (`stack_gvisor_tcpbuf_ios.go`). System stack should be **desktop-only**; smoltcp stays the mobile path. |
+| **Android** | **Viable** (corrected 2026-06-17) | Android's `VpnService` hands the app a **Linux tun fd**; sing-tun adopts it (`tun_linux.go New()`, `FileDescriptor != 0` branch) with no platform restriction, and **sing-box runs `stack: system` on Android** this way. spark's android build just doesn't *enable* the `system-stack` feature yet — a choice, not a limit. Android-specific plumbing: use `VpnService.protect()` for upstream-socket protection (vs. `IP_UNICAST_IF`). This means the collapse fix could reach Android, not only desktop. |
+| **iOS** | Keep userspace | `NEPacketTunnelFlow` (Network framework), **not** a Linux tun fd and no kernel tun — the redirect-to-local-listener mechanism doesn't apply. sing-box runs gVisor on iOS with shrunken TCP buffers (`stack_gvisor_tcpbuf_ios.go`). smoltcp stays the iOS path. |
+
+> **Correction (2026-06-17):** an earlier version of this doc + ADR 0002 said the system stack was
+> "desktop-only" because it "fights the mobile sandbox." That conflated Android with iOS. Android is
+> Linux-with-a-tun-fd → the system stack works (verified against `sing-tun@v0.7.11`); only **iOS** is
+> genuinely precluded (no kernel tun). GSO is orthogonal: `enableGSO()` is a runtime
+> `IFF_VNET_HDR` check that *gracefully degrades to single-packet* if the fd lacks it (standard
+> `VpnService` does), so the system stack runs on Android with or without GSO.
 
 ## 8. Security / attack surface
 
