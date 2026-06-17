@@ -38,7 +38,8 @@
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -90,6 +91,9 @@ pub struct Session {
     outbound: mpsc::UnboundedSender<Out>,
     control: mpsc::Sender<Control>,
     next_id: AtomicU32,
+    /// Count of currently-open [`Stream`]s (incremented in `open_stream`, decremented on
+    /// `Stream` drop) — lets the transport pool reuse and sweep sessions.
+    streams: Arc<AtomicUsize>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -156,8 +160,20 @@ impl Session {
             outbound: outbound_tx,
             control: control_tx,
             next_id: AtomicU32::new(1),
+            streams: Arc::new(AtomicUsize::new(0)),
             tasks: vec![writer, reader],
         }
+    }
+
+    /// Number of streams currently open on this session (0 = idle).
+    pub fn active_streams(&self) -> usize {
+        self.streams.load(Ordering::Relaxed)
+    }
+
+    /// Whether both background tasks are still running — i.e. the underlying connection is up. A
+    /// dropped or errored connection makes the reader task finish, so this turns `false`.
+    pub fn is_alive(&self) -> bool {
+        self.tasks.iter().all(|t| !t.is_finished())
     }
 
     /// Open a new logical stream: allocate the next `stream_id`, register it with the reader (and
@@ -185,12 +201,14 @@ impl Session {
         // End the client's initial buffering phase (a no-op for a raw session, and idempotent for
         // later streams since buffering is already off).
         let _ = self.outbound.send(Out::EndBuffering);
+        self.streams.fetch_add(1, Ordering::Relaxed);
         Ok(Stream {
             stream_id,
             outbound: self.outbound.clone(),
             inbound: inbound_rx,
             read_rem: Bytes::new(),
             write_closed: false,
+            streams: Arc::clone(&self.streams),
         })
     }
 }
@@ -359,12 +377,20 @@ pub struct Stream {
     /// Leftover from an inbound frame that didn't fit the caller's read buffer.
     read_rem: Bytes,
     write_closed: bool,
+    /// The session's open-stream counter; decremented when this stream drops.
+    streams: Arc<AtomicUsize>,
 }
 
 impl Stream {
     /// This stream's id within its session.
     pub fn id(&self) -> u32 {
         self.stream_id
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.streams.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -620,5 +646,30 @@ mod tests {
         assert!(settings.padding_md5.is_some(), "padding-md5 present");
         assert!(seen.saw_syn, "cmdSYN sent");
         assert_eq!(seen.psh, b"target-addr-and-data", "address/data delivered");
+    }
+
+    #[tokio::test]
+    async fn tracks_active_streams_and_liveness() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let peer = tokio::spawn(echo_peer(server_io));
+        let session = Session::new(client_io);
+        assert!(session.is_alive(), "a fresh session is alive");
+        assert_eq!(session.active_streams(), 0);
+
+        let s1 = session.open_stream().await.unwrap();
+        let s2 = session.open_stream().await.unwrap();
+        assert_eq!(session.active_streams(), 2, "two open streams");
+        drop(s1);
+        assert_eq!(
+            session.active_streams(),
+            1,
+            "drop decrements (the pool's idle signal)"
+        );
+        drop(s2);
+        assert_eq!(session.active_streams(), 0, "idle again");
+        assert!(session.is_alive());
+
+        drop(session);
+        peer.await.unwrap();
     }
 }

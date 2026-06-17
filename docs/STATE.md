@@ -239,8 +239,18 @@
   closed it (14→16 extensions). **Re-verified e2e still works** with the Chrome profile (productized
   `AnytlsTransport` → local anytls-go server → HTTP 200). clippy clean, 80 tests pass.
   **CI JA4-drift check:** the `/tmp/ja4-check` spike (boring connect → tls.peet.ws → assert JA4) is the
-  check to wire into CI (needs network). **Remaining follow-ups (non-blocking):** idle-session pool +
-  reconnect; UDP-over-AnyTLS (sing UoT v2); dynamic cmdUpdatePaddingScheme; `cmdSYNACK` error reporting.
+  check to wire into CI (needs network). **Remaining follow-ups (non-blocking):** UDP-over-AnyTLS
+  (sing UoT v2); dynamic cmdUpdatePaddingScheme; `cmdSYNACK` error reporting.
+- **M11 AnyTLS idle-session pool + reconnect DONE 2026-06-16. ✅** `Session` gained `active_streams()`
+  (an `Arc<AtomicUsize>` incremented in `open_stream`, decremented on `Stream` drop) and `is_alive()`
+  (both bg tasks still running). `AnytlsTransport` replaced its single `OnceCell` with a
+  `Mutex<Vec<Arc<Session>>>` pool: `acquire()` reuses the newest healthy session under a 64-stream
+  cap, evicts dead ones (reconnect = create fresh when none reusable), and connects new sessions
+  WITHOUT holding the lock (std Mutex, poison-tolerant `into_inner`, no await held). A 30s background
+  sweep (aborted on Drop) evicts dead sessions and drops idle (0-stream) ones beyond
+  `MIN_IDLE_SESSIONS=1` warm spare. Verified: unit test (counter inc/dec on stream drop, liveness) +
+  a 2-dial e2e vs a local anytls-go server (both HTTP 200, 2nd reuses the pooled session). 81 core
+  tests pass; clippy clean.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.

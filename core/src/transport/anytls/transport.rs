@@ -1,18 +1,20 @@
-//! The AnyTLS [`Transport`] (feature `anytls`, ADR 0001): dial targets through an AnyTLS session
-//! over BoringSSL TLS to the configured server.
+//! The AnyTLS [`Transport`] (feature `anytls`, ADR 0001): dial targets through pooled AnyTLS
+//! sessions over BoringSSL TLS to the configured server.
 //!
-//! A single session is established lazily and shared across dials (one TLS connection, many
-//! multiplexed streams — AnyTLS's model). The idle-session **pool** (multiple sessions, sweep) and
-//! session **reconnect** on death are follow-ups; this is the minimal working transport.
+//! **Session pool + reconnect** (anytls-go's model): sessions are reused across dials (one TLS
+//! connection multiplexes many streams), dead sessions are evicted and replaced (reconnect), and a
+//! background sweep drops idle sessions beyond a warm minimum. Each dial reuses the newest healthy
+//! session under a per-session stream cap, opening a fresh one only when none fits.
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::OnceCell;
+use tokio::task::JoinHandle;
 
 use crate::net::SocketProtector;
 use crate::transport::tcp_tunnel::header::Address;
@@ -21,51 +23,116 @@ use crate::BoxedStream;
 
 use super::{tls, PaddingScheme, Session};
 
-/// An AnyTLS client transport over a single shared, lazily-established session.
+/// Open a new session once a session is carrying this many streams (spreads load / bounds HOL).
+const MAX_STREAMS_PER_SESSION: usize = 64;
+/// How often the idle-session sweep runs.
+const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+/// Idle (zero-stream) sessions kept warm as spares; extras are swept.
+const MIN_IDLE_SESSIONS: usize = 1;
+
+/// An AnyTLS client transport over a pool of shared sessions.
 pub struct AnytlsTransport {
+    inner: Arc<Inner>,
+    sweep: JoinHandle<()>,
+}
+
+struct Inner {
     server: SocketAddr,
     password: String,
     sni: String,
     protector: Option<SocketProtector>,
-    session: OnceCell<Arc<Session>>,
+    pool: Mutex<Vec<Arc<Session>>>,
 }
 
 impl AnytlsTransport {
-    /// Build a transport dialing `server` (TLS SNI `sni`), authenticating with `password`. The
-    /// upstream TCP dial is pinned to `protector`'s interface so it bypasses the tunnel route.
+    /// Build a transport dialing `server` (TLS SNI `sni`), authenticating with `password`. Upstream
+    /// dials are pinned to `protector`'s interface so they bypass the tunnel route. Spawns the idle
+    /// sweep (must be called within a tokio runtime).
     pub fn new(
         server: SocketAddr,
         password: String,
         sni: String,
         protector: Option<SocketProtector>,
     ) -> Self {
-        Self {
+        let inner = Arc::new(Inner {
             server,
             password,
             sni,
             protector,
-            session: OnceCell::new(),
-        }
+            pool: Mutex::new(Vec::new()),
+        });
+        let sweep = tokio::spawn(sweep_loop(Arc::clone(&inner)));
+        Self { inner, sweep }
     }
+}
 
-    /// The shared session, established (TCP → TLS → AnyTLS client handshake) on first use.
-    async fn session(&self) -> io::Result<Arc<Session>> {
-        self.session
-            .get_or_try_init(|| async {
-                let tcp = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
-                let tls = tls::connect(tcp, &self.sni).await?;
-                let session = Session::client(tls, &self.password, PaddingScheme::default());
-                Ok::<_, io::Error>(Arc::new(session))
-            })
-            .await
-            .cloned()
+impl Drop for AnytlsTransport {
+    fn drop(&mut self) {
+        self.sweep.abort();
+    }
+}
+
+impl Inner {
+    /// A session to open a stream on: reuse the newest healthy, non-full one; otherwise establish a
+    /// fresh one (reconnect). Dead sessions are evicted under the lock; the TLS handshake for a new
+    /// session happens **without** the lock held.
+    async fn acquire(&self) -> io::Result<Arc<Session>> {
+        {
+            let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            pool.retain(|s| s.is_alive());
+            if let Some(s) = pool
+                .iter()
+                .rev()
+                .find(|s| s.active_streams() < MAX_STREAMS_PER_SESSION)
+            {
+                return Ok(Arc::clone(s));
+            }
+        }
+        // No reusable session — connect a new one (no lock held across the handshake).
+        let tcp = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        let tls = tls::connect(tcp, &self.sni).await?;
+        let session = Arc::new(Session::client(
+            tls,
+            &self.password,
+            PaddingScheme::default(),
+        ));
+        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        pool.push(Arc::clone(&session));
+        Ok(session)
+    }
+}
+
+/// Periodically evict dead sessions and drop idle ones beyond [`MIN_IDLE_SESSIONS`]. Busy sessions
+/// (open streams) are always kept; a dropped idle session's tasks abort and its connection closes.
+async fn sweep_loop(inner: Arc<Inner>) {
+    let mut tick = tokio::time::interval(IDLE_SWEEP_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let mut pool = inner.pool.lock().unwrap_or_else(|e| e.into_inner());
+        let mut idle_kept = 0;
+        let mut kept = Vec::with_capacity(pool.len());
+        // Newest first: keep all busy + alive sessions, plus up to MIN_IDLE idle spares.
+        for s in pool.drain(..).rev() {
+            if !s.is_alive() {
+                continue; // dead → drop
+            }
+            if s.active_streams() > 0 {
+                kept.push(s);
+            } else if idle_kept < MIN_IDLE_SESSIONS {
+                idle_kept += 1;
+                kept.push(s);
+            } // else: idle beyond the warm minimum → drop (closes its connection)
+        }
+        kept.reverse();
+        *pool = kept;
     }
 }
 
 #[async_trait]
 impl Transport for AnytlsTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
-        let session = self.session().await?;
+        let session = self.inner.acquire().await?;
         let mut stream = session.open_stream().await?;
         // AnyTLS choreography: the target address is the stream's first bytes (SOCKS5 grammar),
         // which also flushes the buffered cmdSettings+cmdSYN as padded packet 1.
