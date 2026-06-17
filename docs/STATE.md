@@ -289,6 +289,17 @@
   rationale: `docs/system-stack-design.md` §9 ("Validated"); doc status now Built+live-gated.
   **Follow-ups (non-blocking):** FIN/RST-driven NAT removal; the "mixed" stack (UDP/ICMP); pump
   parallelism / GSO to lift the single-stream peak; consider promoting the design doc to an ADR.
+- **System stack — FIN/RST removal + mixed (UDP) stack + ADR DONE 2026-06-17. ✅** (1) **FIN/RST NAT
+  removal:** the pump removes a mapping on RST and marks both-FIN connections "closing" for a short
+  60s reclaim (2h idle safety net) — no more hours-long port hold under churn. (2) **Mixed stack:**
+  the pump bridges UDP to spark's existing UDP proxy (`build_udp`/`udp_endpoints`/`ip_protocol` in
+  `rewrite.rs`; pump `select!`s TUN reads vs UDP replies; `SystemNetstack` now yields a `UdpSurface`
+  via `take_udp`), so DNS/UDP work over the kernel-TCP stack. **Live-gated on a netns droplet:** a
+  socat UDP echo round-trips through the system stack ('SPARK-UDP-PING' returned), TCP sanity
+  1494 Mbps. (3) **ADR `docs/adr/0002-system-netstack.md`** records the decision. 106 core tests
+  with `--features system-stack`; workspace + rustdoc green. **Remaining (non-blocking):** pump
+  parallelism / GSO-on-pump to lift the single-stream peak (~1.2 vs userspace ~1.67); IPv6 in the
+  selection path; `rp_filter` handling in production routing.
 - **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
   target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
   request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]
