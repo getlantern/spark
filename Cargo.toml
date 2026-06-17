@@ -49,6 +49,13 @@ md-5 = "0.10"
 # default builds stay rustls/ring-only. boring2/tokio-boring2 is the maintained impersonation fork.
 boring2 = "4.15"
 tokio-boring2 = "4.15"
+# wasmi: pure-Rust, no-JIT WebAssembly interpreter — the dynamic-transport (Path B) runtime
+# (ADR 0003). Pinned to the exact pre-release the design was validated against. Pulled ONLY by the
+# `wasm-transport` feature, so default builds carry no WASM runtime. No-JIT → iOS-safe.
+wasmi = "=2.0.0-beta.2"
+# Assembles the inline WebAssembly-text fixture into module bytes for the wasm-transport tests.
+# Test-only (dev-dependency); never linked into a release binary.
+wat = "1"
 
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed

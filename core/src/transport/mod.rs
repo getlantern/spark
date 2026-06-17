@@ -29,6 +29,10 @@ use crate::BoxedStream;
 
 pub mod anytls;
 pub mod tcp_tunnel;
+/// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
+/// `wasm-transport` feature so the base build carries no WASM runtime.
+#[cfg(feature = "wasm-transport")]
+pub mod wasm;
 
 /// Connect a TCP stream to `addr`, optionally pinning the socket to a physical interface
 /// (so the dial bypasses the tunnel route — see [`SocketProtector`]). Shared by

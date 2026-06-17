@@ -384,6 +384,23 @@
   `host_rand`; (2) wire into spark's `Transport` trait (host owns the protected upstream socket, feeds
   bytes through `transform_out`/`transform_in`); (3) Ed25519 module signing + anti-rollback version
   counter + out-of-band delivery.
+  **HOST RUNTIME BUILT IN-TREE 2026-06-17 (chunk 1 of the Path B build).** Promoted the `/tmp` PoC into
+  `core/src/transport/wasm/mod.rs` behind a `wasm-transport` feature (off by default → base build
+  carries no WASM runtime; `wasmi = "=2.0.0-beta.2"` is the only added dep, ADR-authorized). Surface:
+  `TransformModule::load(&[u8])` (compile, `Arc`-shareable) → `.instantiate()` → `Transform` with
+  `transform_out`/`transform_in(&[u8]) -> Vec<u8>` + `entropy_drawn()`. ABI v0 = exports
+  `memory`/`alloc(len)->ptr`/`transform_{out,in}(ptr,len)->i64` packed `(out_ptr<<32)|out_len`; sole
+  import `env::host_rand(ptr,len)` wired to `ring` `SystemRandom`. Host-fn faults recorded in
+  `Store` data + surfaced after the call (no `wasmi::Error` construction); every guest→host length
+  range-checked vs `MAX_TRANSFORM_LEN=1 MiB` before any alloc (untrusted-module hardening). 6 unit
+  tests green (round-trip recovers input, host_rand fires/`entropy_drawn==4`, empty input,
+  missing-export + non-wasm rejected, packing math) via an inline `.wat` XOR fixture assembled by a
+  `wat` dev-dep; `cargo clippy --features wasm-transport -Dwarnings` + default clippy + fmt + workspace
+  check all clean. wasmi API verified against docs.rs 2.0.0-beta.2 (`Linker::func_wrap`/
+  `instantiate_and_start`, `Instance::get_typed_func`/`get_memory`, `Memory::read`/`write`,
+  `Caller::get_export`, `TypedFunc::call`). **Next: chunk 2 — the `Transport`/`AsyncRead`+`AsyncWrite`
+  stream wrapper** (`WasmTransform` over the protected upstream; `Transform` is `Send` for the boxed
+  stream), then signing + delivery.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

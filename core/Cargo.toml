@@ -30,6 +30,13 @@ md-5.workspace = true
 # brotli cert compression — both part of the Chrome ClientHello profile.
 boring2 = { workspace = true, optional = true, features = ["pq-experimental", "cert-compression"] }
 tokio-boring2 = { workspace = true, optional = true }
+# wasmi: the Path B dynamic-transport runtime (ADR 0003). Optional — only the `wasm-transport`
+# feature pulls it, so the base build carries no WASM interpreter.
+wasmi = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
+wat.workspace = true
 
 [features]
 # AnyTLS-over-BoringSSL transport (ADR 0001). Off by default so the base build stays rustls/ring-only
@@ -39,3 +46,6 @@ anytls = ["dep:boring2", "dep:tokio-boring2"]
 # Off by default; needs a Linux/macOS-style tun fd (Linux, macOS, Android via VpnService — not iOS).
 # See docs/system-stack-design.md.
 system-stack = []
+# Path B dynamic transport (ADR 0003): a wasmi-hosted byte-transform module. Off by default so the
+# base build carries no WASM runtime. See docs/dynamic-transports-design.md §8.4.
+wasm-transport = ["dep:wasmi"]
