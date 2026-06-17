@@ -25,7 +25,9 @@ thiserror.workspace = true
 ring.workspace = true
 md-5.workspace = true
 # AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
-boring2 = { workspace = true, optional = true }
+# `pq-experimental` exposes Chrome's post-quantum group X25519MLKEM768; `cert-compression` exposes
+# brotli cert compression — both part of the Chrome ClientHello profile.
+boring2 = { workspace = true, optional = true, features = ["pq-experimental", "cert-compression"] }
 tokio-boring2 = { workspace = true, optional = true }
 
 [features]

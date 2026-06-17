@@ -226,12 +226,21 @@
   spark product tunnels real TLS traffic through AnyTLS to a remote DO server, live-verified. Gate
   script `/tmp/spark-anytls-gate.sh` (writes config with the detected egress, routes one dst into the
   tun, curls, cleans up). Also fixed a cosmetic cli log ("no tunnel" while tunneling AnyTLS).
-  **M11 AnyTLS is functionally complete + live-gated end-to-end.** Follow-ups (not blockers): **(b)**
-  Chrome fingerprint profile on the boring connector (port a wreq-util-style profile) + CI JA4-drift
-  check — this is the ADR's anti-fingerprinting goal (current connector is vanilla boring = works but
-  identifiable). **(c)** idle-session pool + reconnect; UDP-over-AnyTLS (sing UoT v2); dynamic
-  cmdUpdatePaddingScheme; `cmdSYNACK` error reporting. **DO droplet 578209897** kept running for the
-  Chrome-profile gate; destroy when done (`doctl compute droplet delete 578209897`).
+  **M11 AnyTLS is functionally complete + live-gated end-to-end.** **DO droplet 578209897 DESTROYED.**
+- **M11 AnyTLS Chrome fingerprint profile DONE + JA4-VERIFIED 2026-06-16. ✅** Ported the Chrome-137
+  profile from `wreq-util` onto the boring connector (`anytls/tls.rs`): cipher/sigalg/curve order
+  (CURVES_3 incl PQ X25519MLKEM768 — needs boring2 `pq-experimental`), GREASE, `permute_extensions`,
+  brotli cert-compression (boring2 `cert-compression` feature), ALPN h2+http/1.1, OCSP stapling, SCT,
+  ALPS (new codepoint), ECH grease. **Verified against `tls.peet.ws` (h2 client spike `/tmp/ja4-check`):
+  spark's JA4 = `t13d1516h2_8daaf6152771_d8a2da3f94cd` == real Chrome 149 EXACTLY.** (peetprint differs
+  = per-connection extension-order permutation, expected; h2-akamai differs = the spike's h2 client,
+  not spark — irrelevant since AnyTLS relays raw bytes.) Getting there: cipher hash matched first try;
+  the last 2 extensions (OCSP+SCT) were missing → `enable_ocsp_stapling()`+`enable_signed_cert_timestamps()`
+  closed it (14→16 extensions). **Re-verified e2e still works** with the Chrome profile (productized
+  `AnytlsTransport` → local anytls-go server → HTTP 200). clippy clean, 80 tests pass.
+  **CI JA4-drift check:** the `/tmp/ja4-check` spike (boring connect → tls.peet.ws → assert JA4) is the
+  check to wire into CI (needs network). **Remaining follow-ups (non-blocking):** idle-session pool +
+  reconnect; UDP-over-AnyTLS (sing UoT v2); dynamic cmdUpdatePaddingScheme; `cmdSYNACK` error reporting.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
