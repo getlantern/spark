@@ -50,10 +50,14 @@ md-5 = "0.10"
 boring2 = "4.15"
 tokio-boring2 = "4.15"
 
-# Locked release profile (CLAUDE.md). Profiles only take effect from the workspace
-# root, so they live here, not in member manifests.
+# Release profile. Profiles only take effect from the workspace root, so they live here, not in
+# member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed
+# "z" roughly HALVES data-path throughput — "z" disables the inlining/vectorization the smoltcp
+# per-packet inner loop needs. opt-level=3 ~doubled it (0.81→1.61 Gb/s up) for only +540 KB (base
+# build 1.26→1.80 MB, still under the original 3 MB target). Throughput is "critical" per CLAUDE.md;
+# the size budget was relaxed to ~10 MB. See docs/system-stack-design.md §9.
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
