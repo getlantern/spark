@@ -255,14 +255,21 @@ a port of water-rs. De-risks:
    `linker.func_wrap(... Caller<Host> ...)`, the same pattern wasmi has). Conclusion: **don't port
    water-rs** (stale: wasmtime 17 / 0.1.0, carries v0+v1+listener+relay+threads spark doesn't need) —
    **write a focused fresh wasmi host for just the v1 dialer/stream ABI**, ABI-compatible (loads the
-   same WATMs, preserves write-once-run-on-lantern) and small (`wasmi` +0.84 MB + `wasmi_wasi`).
-2. **THE crux — `wasmi_wasi` custom-fd insertion (next probe).** WATER's data path is
-   `wasmtime_wasi::net::Socket::from(tcp).into()` → `Box<dyn WasiFile>` → `ctx.push_file(...)` →
-   guest fd; the guest then `fd_read`/`fd_write`s it. The whole wasmtime lock-in *is* this `push_file`
-   mechanism (the engine ports trivially). So the single decisive question is: **can `wasmi_wasi`
-   (2.0.0-beta) insert a custom host socket as a WASI fd?** Yes → port is moderate; no → reimplement
-   the WASI fd subset (`fd_read`/`fd_write`/`fd_close`/`poll`) over a host-backed fd table
-   (significant). A ~10-minute check against the crate.
+   same WATMs, preserves write-once-run-on-lantern). Size: bare `wasmi` was +0.84 MB (§8.1), but
+   Path A also pulls `wasmi_wasi` + `wasi-common` + `cap-std` + `wiggle` (WATER needs WASI) → several
+   MB, still **≪ wasmtime's 15–20 MB** (precise number = a quick build-and-measure). A no-WASI
+   spark-specific ABI (Path B) is the one that stays near +0.84 MB.
+2. **THE crux — `wasmi_wasi` custom-fd insertion — RESOLVED YES (2026-06-17, inspected the crate).**
+   `wasmi_wasi 2.0.0-beta.2` is built on **`wasi-common` v36** (+ `cap-std`) — the *same* WASI crate
+   `water-rs` uses (at v17). It re-exports `wasi_common::{WasiCtx, WasiDir, WasiFile}`, and
+   `wasi-common` v36 has `WasiCtx::push_file(...)`, the `WasiFile` trait, and
+   `TcpStream::from_cap_std(...)` — i.e. **exactly** WATER's `Socket::from(tcp)` → `push_file` → guest
+   fd, *plus* a `tokio` variant (async-backed WASI, fits spark). So the wasmtime "lock-in" was really
+   a `wasi-common` feature, and `wasmi_wasi`/`wasmtime-wasi` are siblings over the same crate → the
+   port is **adaptation, not reinvention**: engine 1:1, host fns via `wasmi::Linker::func_wrap`, data
+   path via `wasmi_wasi` `push_file`. Residual frictions: `wasi-common` 17→36 API drift (adapt
+   water-rs's host code, don't copy), and `wasmi_wasi` is `2.0.0-beta` (pin carefully). **Path A is
+   de-risked.**
 3. **Capability scoping** via the host pre-dialing the *protected* upstream and inserting one fd
    (the `InsertConn`/dialer path), rather than module-driven `water_dial(target)` — narrows WATER's
    surface to spark's threat model.

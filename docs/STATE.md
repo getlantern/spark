@@ -351,8 +351,16 @@
   ABI** (ABI-compatible, small). **THE crux / next probe:** WATER's data path is wasmtime-wasi's
   `Socket::from(tcp) → push_file → guest fd`; the only real wasmtime lock-in is that `push_file` —
   so the decisive question is whether `wasmi_wasi` (2.0.0-beta) can insert a custom host socket as a
-  WASI fd (yes → moderate; no → reimplement the WASI fd subset). Fallback = a spark-specific minimal
-  ABI (no WASI). No code yet; promote a tier to an ADR when committed.
+  WASI fd. **RESOLVED YES 2026-06-17 (inspected the crate):** `wasmi_wasi` is built on `wasi-common`
+  v36 (same crate water-rs uses at v17), re-exports `WasiCtx`/`WasiFile`, and `wasi-common` v36 has
+  `push_file` + `TcpStream::from_cap_std` + a tokio variant — exactly WATER's `Socket::from(tcp) →
+  push_file → guest fd`. So the wasmtime "lock-in" was a `wasi-common` feature; `wasmi_wasi` and
+  `wasmtime-wasi` are siblings over the same crate → the port is adaptation not reinvention (engine
+  1:1, host fns via `wasmi::Linker::func_wrap`, data path via `wasmi_wasi` push_file). Residual:
+  `wasi-common` 17→36 API drift + `wasmi_wasi` is beta. **Path A (WATER-ABI-compat on wasmi) is
+  de-risked.** Size caveat: bare wasmi was +0.84 MB but Path A adds the WASI stack
+  (wasmi_wasi+wasi-common+cap-std+wiggle) → several MB, still ≪ wasmtime's 15-20 MB; a no-WASI Path B
+  stays near +0.84 MB. No code yet; promote to an ADR when committed.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
