@@ -37,6 +37,10 @@ set -euo pipefail
 SPARK_BIN="${SPARK_BIN:-./target/release/spark}"
 DURATION="${DURATION:-15}"
 STREAMS="${STREAMS:-1}"
+# Which netstack to benchmark: "userspace" (smoltcp, bare flags) or "system" (kernel TCP, via a
+# config file; requires a binary built --features system-stack). The kernel-TCP baseline row is
+# the same either way; only the spark row changes.
+STACK="${STACK:-userspace}"
 
 NS_CLI=sparkb-cli
 NS_SRV=sparkb-srv
@@ -55,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --spark)    SPARK_BIN="$2"; shift 2 ;;
     --duration) DURATION="$2";  shift 2 ;;
     --streams)  STREAMS="$2";   shift 2 ;;
+    --stack)    STACK="$2";     shift 2 ;;
     -h|--help)  grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -125,16 +130,37 @@ run_iperf "$B_UP"
 run_iperf "$B_DN" "-R"
 RESULTS+=("kernel-baseline|$(gbps "$(bps_received "$B_UP")")|$(gbps "$(bps_received "$B_DN")")|n/a")
 
-# ---- tunnel: spark userspace (smoltcp) --------------------------------------
-echo "==> starting spark in $NS_CLI (direct mode, TUN $TUN_ADDR, pinned to $VBC)"
-ip netns exec "$NS_CLI" "$SPARK_BIN" run \
-  --name "$TUN_NAME" --addr "$TUN_ADDR" --prefix "$TUN_PREFIX" \
-  --protect-interface "$VBC" >/tmp/sparkb.log 2>&1 &
+# ---- tunnel: spark ($STACK stack) -------------------------------------------
+echo "==> starting spark in $NS_CLI ($STACK stack, TUN $TUN_ADDR, pinned to $VBC)"
+if [[ "$STACK" == system ]]; then
+  SPARK_LABEL="spark-system"
+  SPARK_CONFIG=/tmp/sparkb.toml
+  SPARK_MATCH="$SPARK_CONFIG"
+  cat > "$SPARK_CONFIG" <<TOML
+[tun]
+name = "$TUN_NAME"
+addr = "$TUN_ADDR"
+prefix = $TUN_PREFIX
+stack = "system"
+[transport]
+protect_interface = "$VBC"
+TOML
+  # The system stack re-injects redirected packets on the TUN destined to a local address; relax
+  # reverse-path filtering so they aren't dropped. Set before the TUN is created so it inherits it.
+  ip netns exec "$NS_CLI" sysctl -wq net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0
+  ip netns exec "$NS_CLI" "$SPARK_BIN" run --config "$SPARK_CONFIG" >/tmp/sparkb.log 2>&1 &
+else
+  SPARK_LABEL="spark-smoltcp"
+  SPARK_MATCH="name $TUN_NAME"
+  ip netns exec "$NS_CLI" "$SPARK_BIN" run \
+    --name "$TUN_NAME" --addr "$TUN_ADDR" --prefix "$TUN_PREFIX" \
+    --protect-interface "$VBC" >/tmp/sparkb.log 2>&1 &
+fi
 
-# Resolve spark's PID by its unique --name arg rather than $! — `ip netns exec` may fork before it
-# execs spark, so $! can be a short-lived wrapper. pgrep -f on the unique TUN name is reliable.
+# Resolve spark's PID by a unique cmdline token rather than $! — `ip netns exec` may fork before it
+# execs spark, so $! can be a short-lived wrapper. pgrep -f is reliable.
 for _ in $(seq 1 25); do
-  SPARK_PID=$(pgrep -f "name $TUN_NAME" | head -1 || true)
+  SPARK_PID=$(pgrep -f "$SPARK_MATCH" | head -1 || true)
   [[ -n "$SPARK_PID" ]] && break
   sleep 0.2
 done
@@ -174,7 +200,7 @@ run_iperf "$T_UP"; run_iperf "$T_DN" "-R"
 w1=$(date +%s.%N); c1=$(cpu_of)
 CPU=$(awk -v a="$c0" -v b="$c1" -v tk="$TICK" -v w0="$w0" -v w1="$w1" \
       'BEGIN{printf "%.0f", (b-a)/tk/(w1-w0)*100}')
-RESULTS+=("spark-smoltcp|$(gbps "$(bps_received "$T_UP")")|$(gbps "$(bps_received "$T_DN")")|${CPU}%")
+RESULTS+=("$SPARK_LABEL|$(gbps "$(bps_received "$T_UP")")|$(gbps "$(bps_received "$T_DN")")|${CPU}%")
 
 # ---- report -----------------------------------------------------------------
 echo
@@ -184,15 +210,15 @@ printf "%-18s %12s %12s %10s\n" "stack" "up(Gb/s)" "down(Gb/s)" "spark CPU"
 printf -- "------------------ ------------ ------------ ----------\n"
 for r in "${RESULTS[@]}"; do IFS='|' read -r l u d c <<<"$r"; printf "%-18s %12s %12s %10s\n" "$l" "$u" "$d" "$c"; done
 echo
-# headroom = how much of the kernel ceiling the userspace stack leaves on the table.
-IFS='|' read -r _ bu bd _ <<<"${RESULTS[0]}"
-IFS='|' read -r _ tu td tc <<<"${RESULTS[1]}"
-awk -v bu="$bu" -v bd="$bd" -v tu="$tu" -v td="$td" -v tc="$tc" 'BEGIN{
+# headroom = how much of the kernel ceiling the spark stack leaves on the table.
+IFS='|' read -r sl bu bd _ <<<"${RESULTS[0]}"
+IFS='|' read -r sl tu td tc <<<"${RESULTS[1]}"
+awk -v sl="$sl" -v bu="$bu" -v bd="$bd" -v tu="$tu" -v td="$td" -v tc="$tc" 'BEGIN{
   printf "NOTE: the kernel-baseline is loopback-class (no real NIC, giant GSO segments) — read the\n";
   printf "ABSOLUTE spark throughput + CPU, not the %% (the %% is an upper bound on possible headroom).\n";
-  printf "userspace stack: %.2f/%.2f Gb/s up/down at %s CPU; %.0f%%/%.0f%% of the loopback ceiling.\n", tu, td, tc, tu/bu*100, td/bd*100;
-  printf "A kernel/system stack makes each flow a real kernel socket (parallel, kernel congestion\n";
-  printf "control, no single poll-loop bottleneck) + sheds reassembly CPU. If spark already saturates\n";
-  printf "your real uplink at low CPU, the system stack is not worth its complexity (design doc §9).\n";
+  printf "%s: %.2f/%.2f Gb/s up/down at %s CPU; %.0f%%/%.0f%% of the loopback ceiling.\n", sl, tu, td, tc, tu/bu*100, td/bd*100;
+  printf "Compare --stack userspace vs --stack system, especially download at -P 2+: the userspace\n";
+  printf "(smoltcp) stack collapses under concurrent download; the system (kernel-TCP) stack holds\n";
+  printf "(independent kernel sockets, no single poll loop). See docs/system-stack-design.md §9.\n";
 }'
 rm -f "$B_UP" "$B_DN" "$T_UP" "$T_DN" "$S"

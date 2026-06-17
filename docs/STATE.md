@@ -275,12 +275,20 @@
   `[tun] stack = "userspace"|"system"` (`config::StackKind`) routed through `netstack::build(...)`
   (all 3 construction sites — cli/fd_tunnel/service); a blanket `impl Netstack for Box<dyn Netstack>`
   keeps `proxy::tcp::run` generic. 102 core tests pass with `--features system-stack`; workspace
-  green default. **NEXT = chunk 5: live netns gate + system-vs-userspace throughput A/B on a
-  droplet** (this is the proof it fixes the concurrent-download collapse). **Known caveats to handle
-  at the gate:** Linux `rp_filter` may drop redirected packets re-entering on the TUN; NAT cleanup
-  is idle-eviction-only (no FIN/RST tracking); system stack is TCP-only (UDP/ICMP unhandled → no DNS
-  over it yet — the "mixed" stack is a later chunk). Design + measured rationale:
-  `docs/system-stack-design.md`.
+  green default.
+- **System stack — chunk 5 LIVE-GATED + A/B'd on a netns droplet 2026-06-17. ✅✅ It eliminates the
+  concurrent-download collapse.** `bench/netns-throughput.sh --stack {userspace,system}` (the bench
+  now A/Bs both). Download Gb/s by stream count — userspace vs system: 1→0.51/1.19, **2→0.13/1.09
+  (~8×)**, 4→0.30/0.95, 8→0.41/0.87. Userspace craters under concurrent download; the system stack
+  holds ~1 Gb/s and is stable across concurrency (download symmetric with upload). Tradeoff:
+  single-stream upload peak lower (system ~1.2 vs userspace ~1.67) — the single pump task rewrites
+  every packet, so the pump is itself a serialization point (future: multi-pump / GSO-on-pump). CPU
+  comparable (~130–140%). It tunnels end-to-end on Linux on the first try. **Confirmed-live caveats:**
+  needs `rp_filter=0` on the redirected path (the bench sets it); NAT cleanup is idle-eviction-only
+  (no FIN/RST); TCP-only (no UDP/DNS over it yet — the "mixed" stack is future). Full A/B table +
+  rationale: `docs/system-stack-design.md` §9 ("Validated"); doc status now Built+live-gated.
+  **Follow-ups (non-blocking):** FIN/RST-driven NAT removal; the "mixed" stack (UDP/ICMP); pump
+  parallelism / GSO to lift the single-stream peak; consider promoting the design doc to an ADR.
 - **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
   target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
   request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]

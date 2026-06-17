@@ -1,7 +1,9 @@
 # Design: System (kernel-TCP) Netstack — a second `Netstack` behind the trait
 
-- **Status:** Proposed / draft — 2026-06-17. No code yet. Promote to an ADR (`docs/adr/`) when we
-  commit to building it; this doc is the exploration that ADR would reference.
+- **Status:** **Built + live-gated (TCP) — 2026-06-17.** Implemented behind the `system-stack`
+  feature (`core/src/netstack/system/`), selected via `[tun] stack = "system"`. The netns A/B
+  (below, §9 "Validated") confirms it eliminates the concurrent-download collapse. TCP-only so far
+  (UDP/ICMP = the "mixed" stack — still future). Worth promoting to an ADR now that it's proven.
 - **Scope:** A second implementation of the existing `core::netstack::Netstack` trait that lets the
   **host kernel** own the TCP state machine, as an alternative to the userspace `SmoltcpNetstack`.
   Mirrors sing-box's `stack = system` option. Does **not** change the proxy core, the transports
@@ -252,6 +254,30 @@ collapse — **characterized; partial mitigation landed; full fix deferred** (sy
 netstack per-flow rework). (c) GSO on the bridge — prototype next; it batches segments across the
 TUN boundary and may *also* relieve the per-packet loop overhead behind the collapse. Decide on the
 system stack after (c).
+
+### Validated (2026-06-17, `bench/netns-throughput.sh --stack {userspace,system}`)
+
+The system stack was built (chunks 1–5) and A/B'd against userspace on the same droplet. Single TCP
+stream → N concurrent, 8s/direction; download is the collapse metric:
+
+| streams | userspace ↓ (Gb/s) | system ↓ (Gb/s) | userspace ↑ | system ↑ |
+|---|---|---|---|---|
+| 1 | 0.51 | 1.19 | 1.67 | 1.20 |
+| 2 | **0.13** | **1.09** | 1.47 | 1.16 |
+| 4 | 0.30 | 0.95 | 1.29 | 1.09 |
+| 8 | 0.41 | 0.87 | 1.23 | 1.02 |
+
+**The system stack eliminates the concurrent-download collapse** — userspace craters to 0.13 Gb/s at
+2 streams while the system stack holds ~1.09 (≈8×) and stays stable (0.9–1.2) across all concurrency;
+download becomes symmetric with upload. Confirms the thesis: independent kernel sockets, no shared
+poll loop, so the single-dispatch pathology cannot occur.
+
+The tradeoff: single-stream *upload* peak is lower (system ~1.2 vs userspace ~1.67) because the
+single pump task rewrites every packet — the pump is itself a serialization point (a future
+optimization: multiple pump tasks, or GSO on the pump). CPU is comparable (~130–140%). For real
+workloads (browsers open many concurrent downloads) the stable, collapse-free profile is the better
+trade. Caveats confirmed live: needs `rp_filter=0` on the redirected path, and NAT cleanup is still
+idle-eviction-only (no FIN/RST). TCP-only (UDP/DNS not yet over this stack).
 
 ## 10. Tradeoffs & alternatives
 
