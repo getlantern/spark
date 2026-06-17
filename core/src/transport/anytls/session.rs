@@ -24,10 +24,10 @@
 //!   anytls-go. Open a stream and write the SOCKS5 target address as its first bytes; that flushes
 //!   the buffered `cmdSettings`+`cmdSYN`+address as padded packet 1.
 //!
-//! **Client-side only** (spark opens streams; it does not accept). Deferred to chunk 4c: the
-//! idle-session **pool**, dynamic `cmdUpdatePaddingScheme` handling, and `cmdSYNACK` error
-//! reporting (the client sends optimistically). A [`Session`] must **outlive** the [`Stream`]s it
-//! opens; when it drops, both tasks abort.
+//! **Client-side only** (spark opens streams; it does not accept). The client adopts a server
+//! `cmdUpdatePaddingScheme` (swapping the shared scheme the writer shapes with) and closes a stream
+//! on a non-empty `cmdSYNACK` (the server's upstream-dial error). A [`Session`] must **outlive** the
+//! [`Stream`]s it opens; when it drops, both tasks abort.
 //!
 //! ## Backpressure (current state)
 //! - **Inbound** (peer → stream) is a *bounded* channel; the reader `.await`s on a full one, which
@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -80,9 +80,10 @@ enum Control {
 }
 
 /// Client-mode writer state: the auth record to send first and the padding scheme to shape with.
+/// The scheme is shared so the reader can swap it on a server `cmdUpdatePaddingScheme`.
 struct Handshake {
     auth: Bytes,
-    scheme: PaddingScheme,
+    scheme: Arc<Mutex<PaddingScheme>>,
 }
 
 /// A multiplexed AnyTLS session over one byte transport. Cheap to hold; spawns two background
@@ -135,7 +136,7 @@ impl Session {
             transport,
             Some(Handshake {
                 auth: auth.freeze(),
-                scheme,
+                scheme: Arc::new(Mutex::new(scheme)),
             }),
         );
         // First buffered frame: cmdSettings (session-level, stream 0).
@@ -154,8 +155,10 @@ impl Session {
         let (rd, wr) = tokio::io::split(transport);
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::channel(CONTROL_CAP);
+        // The reader needs the shared scheme to apply a server `cmdUpdatePaddingScheme`.
+        let scheme = handshake.as_ref().map(|h| Arc::clone(&h.scheme));
         let writer = tokio::spawn(writer_task(wr, outbound_rx, handshake));
-        let reader = tokio::spawn(reader_task(FrameReader::new(rd), control_rx));
+        let reader = tokio::spawn(reader_task(FrameReader::new(rd), control_rx, scheme));
         Session {
             outbound: outbound_tx,
             control: control_tx,
@@ -300,7 +303,12 @@ async fn client_writer_inner<W: AsyncWrite + Unpin>(
                 let mut data = std::mem::take(&mut buffer);
                 f.encode(&mut data);
                 pkt += 1;
-                for rec in shape_records(&h.scheme, pkt, data.freeze(), &mut sampler) {
+                // Lock only to read the (possibly server-updated) scheme; shape_records is sync.
+                let records = {
+                    let scheme = h.scheme.lock().unwrap_or_else(|e| e.into_inner());
+                    shape_records(&scheme, pkt, data.freeze(), &mut sampler)
+                };
+                for rec in records {
                     wr.write_all(&rec).await?;
                 }
                 wr.flush().await?;
@@ -315,6 +323,7 @@ async fn client_writer_inner<W: AsyncWrite + Unpin>(
 async fn reader_task<R: AsyncRead + Unpin>(
     mut reader: FrameReader<R>,
     mut control: mpsc::Receiver<Control>,
+    scheme: Option<Arc<Mutex<PaddingScheme>>>,
 ) {
     let mut streams: HashMap<u32, mpsc::Sender<Bytes>> = HashMap::new();
     let mut control_open = true;
@@ -331,7 +340,7 @@ async fn reader_task<R: AsyncRead + Unpin>(
                 None => control_open = false,
             },
             frame = reader.next_frame() => match frame {
-                Ok(Some(f)) => route(f, &mut streams).await,
+                Ok(Some(f)) => route(f, &mut streams, scheme.as_deref()).await,
                 Ok(None) => break,  // clean EOF
                 Err(_) => break,    // I/O error or malformed frame → tear down
             },
@@ -339,8 +348,13 @@ async fn reader_task<R: AsyncRead + Unpin>(
     }
 }
 
-/// Route one inbound frame to its stream (or handle it at the session level).
-async fn route(frame: Frame, streams: &mut HashMap<u32, mpsc::Sender<Bytes>>) {
+/// Route one inbound frame to its stream (or handle it at the session level). `scheme` is the
+/// client's shared padding scheme, swappable on a server `cmdUpdatePaddingScheme`.
+async fn route(
+    frame: Frame,
+    streams: &mut HashMap<u32, mpsc::Sender<Bytes>>,
+    scheme: Option<&Mutex<PaddingScheme>>,
+) {
     match frame.command {
         Command::Psh => {
             if let Some(tx) = streams.get(&frame.stream_id) {
@@ -355,13 +369,28 @@ async fn route(frame: Frame, streams: &mut HashMap<u32, mpsc::Sender<Bytes>>) {
         Command::Fin => {
             streams.remove(&frame.stream_id);
         }
-        // Established-ack, server-role, and session-level frames are handled in later chunks
-        // (cmdUpdatePaddingScheme / cmdSYNACK error reporting are 4c refinements). Waste = padding.
-        Command::SynAck
-        | Command::Syn
+        // A non-empty SYNACK carries the server's error (the upstream dial failed); close the
+        // stream so its reader unblocks (an empty SYNACK is a success ack — nothing to do).
+        Command::SynAck => {
+            if !frame.payload.is_empty() {
+                streams.remove(&frame.stream_id);
+            }
+        }
+        // The server pushes a new padding scheme (its anti-blocklist lever); adopt it for future
+        // packets. A malformed scheme is ignored (keep the current one).
+        Command::UpdatePaddingScheme => {
+            if let Some(scheme) = scheme {
+                if let Ok(text) = std::str::from_utf8(&frame.payload) {
+                    if let Ok(updated) = PaddingScheme::parse(text) {
+                        *scheme.lock().unwrap_or_else(|e| e.into_inner()) = updated;
+                    }
+                }
+            }
+        }
+        // Server-role / session-level frames not yet acted on; Waste = padding (discard).
+        Command::Syn
         | Command::Settings
         | Command::ServerSettings
-        | Command::UpdatePaddingScheme
         | Command::Alert
         | Command::HeartRequest
         | Command::HeartResponse
@@ -390,6 +419,14 @@ impl Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
+        // FIN the stream if it wasn't already shut down (e.g. a dropped UDP association, whose
+        // split halves never call `poll_shutdown`) so the server releases it promptly instead of on
+        // idle timeout. A closed writer just drops the send.
+        if !self.write_closed {
+            let _ = self
+                .outbound
+                .send(Out::Frame(Frame::control(Command::Fin, self.stream_id)));
+        }
         self.streams.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -671,5 +708,52 @@ mod tests {
 
         drop(session);
         peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_padding_scheme_swaps_the_shared_scheme() {
+        let scheme = Mutex::new(PaddingScheme::default()); // stop=8
+        let mut streams = HashMap::new();
+        let frame = Frame::new(
+            Command::UpdatePaddingScheme,
+            0,
+            Bytes::from_static(b"stop=1\n0=5-5"),
+        )
+        .unwrap();
+        route(frame, &mut streams, Some(&scheme)).await;
+        assert_eq!(scheme.lock().unwrap().stop(), 1, "server scheme adopted");
+
+        // A malformed scheme is ignored (keep the current one).
+        let bad = Frame::new(
+            Command::UpdatePaddingScheme,
+            0,
+            Bytes::from_static(b"garbage"),
+        )
+        .unwrap();
+        route(bad, &mut streams, Some(&scheme)).await;
+        assert_eq!(scheme.lock().unwrap().stop(), 1, "malformed update ignored");
+    }
+
+    #[tokio::test]
+    async fn synack_error_closes_stream_but_success_ack_does_not() {
+        let mut streams = HashMap::new();
+        let (err_tx, _err_rx) = mpsc::channel(4);
+        let (ok_tx, _ok_rx) = mpsc::channel(4);
+        streams.insert(7u32, err_tx);
+        streams.insert(8u32, ok_tx);
+
+        // Non-empty SYNACK = the server's error → close the stream.
+        let err = Frame::new(
+            Command::SynAck,
+            7,
+            Bytes::from_static(b"connection refused"),
+        )
+        .unwrap();
+        route(err, &mut streams, None).await;
+        assert!(!streams.contains_key(&7), "error SYNACK closes the stream");
+
+        // Empty SYNACK = success ack → keep the stream.
+        route(Frame::control(Command::SynAck, 8), &mut streams, None).await;
+        assert!(streams.contains_key(&8), "success SYNACK keeps the stream");
     }
 }

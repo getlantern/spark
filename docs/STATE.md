@@ -239,8 +239,7 @@
   closed it (14→16 extensions). **Re-verified e2e still works** with the Chrome profile (productized
   `AnytlsTransport` → local anytls-go server → HTTP 200). clippy clean, 80 tests pass.
   **CI JA4-drift check:** the `/tmp/ja4-check` spike (boring connect → tls.peet.ws → assert JA4) is the
-  check to wire into CI (needs network). **Remaining follow-ups (non-blocking):** dynamic
-  cmdUpdatePaddingScheme; `cmdSYNACK` error reporting.
+  check to wire into CI (needs network).
 - **M11 AnyTLS idle-session pool + reconnect DONE 2026-06-16. ✅** `Session` gained `active_streams()`
   (an `Arc<AtomicUsize>` incremented in `open_stream`, decremented on `Stream` drop) and `is_alive()`
   (both bg tasks still running). `AnytlsTransport` replaced its single `OnceCell` with a
@@ -258,7 +257,16 @@
   `proxyOutboundUoT`). `AnytlsTransport` now impls `UdpTransport` too; `from_config` serves TCP+UDP
   from ONE pooled transport. **e2e verified:** a DNS query (A example.com) through the UoT path →
   local anytls-go server → 8.8.8.8:53 → valid response (id match, QR set, 2 answers). clippy clean.
-  Note: a UDP association close doesn't send cmdFIN (server reclaims via idle timeout) — minor.
+- **M11 AnyTLS protocol-robustness loose ends DONE 2026-06-16. ✅** (1) **dynamic
+  `cmdUpdatePaddingScheme`** — the writer's scheme is now `Arc<Mutex<PaddingScheme>>` shared with the
+  reader; on a server update the reader parses + swaps it (malformed → ignored), so the client honors
+  the server's anti-blocklist scheme rotation. (2) **`cmdSYNACK` error close** — a non-empty SYNACK
+  (the server's upstream-dial error) now removes the stream → its reader unblocks (was: hung). (3)
+  **`cmdFIN` on `Stream` drop** (when not already shut down) — closes UDP associations promptly
+  (split halves never call poll_shutdown) and hardens TCP. Unit tests for the scheme swap +
+  SYNACK-error close; 83 core tests pass; clippy clean. **STILL OUTSTANDING (non-blocking):** bounded
+  outbound backpressure (Stream `poll_write` is unbounded — needs `tokio-util` `PollSender`); wiring
+  the JA4-drift spike into CI; M10 iOS device gate.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
