@@ -174,19 +174,23 @@ adjudicated), and the expressiveness it buys is mostly unneeded. Instead:
   censor responses that are recombinations/parameter tweaks.
 - **Tier 2 — `wasmi` (interpreted WASM) as the full-logic escape hatch.** When recombination isn't
   enough (a genuinely new wire format / Turing-complete logic), load a WASM module run by **`wasmi`**
-  — a pure-Rust, no-JIT, iOS-safe interpreter. Transports are written in real Rust/Go (→`wasm32`)
-  with real libraries; bulk crypto/copy stays **native** via host functions (interpret only the
-  control path — §8.1 shows why this is mandatory). Capability surface as narrow as WATER's
-  (bytes-in/bytes-out + crypto/format host fns, no second egress). Run multiple modules in parallel
-  for flag-day-free upgrades (the Proteus lesson). **The §8.1 micro-bench picked this over the
-  alternatives on measured size + speed.**
-  - *A purpose-built bytecode VM / transport DSL* (Proteus/Marionette lineage) remains a fallback
-    **only if** you need to beat `wasmi`'s +0.84 MB or want a sandbox-by-construction parser you fully
-    own — but you'd design+maintain an ISA and cap expressiveness, and `wasmi` is already small.
-  - *Embedded scripting interpreters (Rhai/Rune)* are **dominated** for this use — measured larger
-    *and* slower than `wasmi`, and you'd write transports in a niche scripting language (§8.1).
-  - `wasmtime` (JIT, ~15–20 MB, iOS-dead) is never linked into the lean Rust core; getlantern's
-    Go/wazero WATER path stays an option only where a Go runtime already exists.
+  — a pure-Rust, no-JIT, iOS-safe interpreter, the measured leanest+fastest interpreted option (§8.1).
+  Bulk crypto/copy stays **native** via host functions (interpret only the control path — §8.1 shows
+  why this is mandatory). The **ABI** is a separate axis from the runtime (§8.2):
+  - **Path B — a spark-specific minimal ABI (PRIMARY, 2026-06-17).** The module is a pure
+    byte-transform; the **host owns both sockets** and the module imports only native-crypto/entropy
+    host fns — no WASI, no network capability (tightest sandbox, leanest: bare `wasmi` ~+0.84 MB,
+    11 KB modules). Chosen as primary because WATER-ecosystem compat (its only real advantage) was
+    de-prioritized (Go/WATER reuse is "nice-to-have, not widely used atm"). **Proven end-to-end —
+    §8.4.**
+  - *Path A — WATER-ABI-compatible host on `wasmi`* — **optional / deferred.** Fully de-risked
+    (mechanism proven §8.3; both v0+v1 WATMs load on wasmi §8.4) so the door is open cheaply if
+    Go-ecosystem reuse ever becomes a driver — but it pulls a WASI stack + the `_water_*`
+    choreography for compat we don't currently need.
+  - *A purpose-built bytecode VM / transport DSL* (Proteus/Marionette lineage): fallback only if you
+    need a sandbox-by-construction parser you fully own; `wasmi` is already small.
+  - *Embedded scripting interpreters (Rhai/Rune)* are **dominated** (measured larger + slower, §8.1).
+  - `wasmtime` (JIT, ~15–20 MB, iOS-dead) is never linked into the lean Rust core.
 
 Honest decoupling limits: tier 1 decouples *parameters + composition* from releases; tier 2 adds
 *novel wire formats*; neither decouples a genuinely new *primitive* (a new AEAD, a new substrate) —
@@ -243,8 +247,12 @@ spark lets the org author a transport *once* and run it on both clients instead 
 transport stacks. That's an ABI decision, fully independent of keeping the runtime lean (`wasmi`, not
 `wasmtime`).
 
-**Recommendation: target WATER ABI-compatibility on `wasmi`** — as a *focused fresh wasmi host*, not
-a port of water-rs. De-risks:
+**Recommendation (updated 2026-06-17): Path B is primary; WATER-ABI-compat (Path A) is optional/
+deferred.** The decisive input: Go/WATER-ecosystem reuse — Path A's *only* real advantage — is a
+nice-to-have, not a driver ("not used widely atm"). Without it, paying WATER's WASI stack +
+`_water_*` choreography buys little, so the lean, tight **Path B** wins. Path A is nonetheless fully
+de-risked below, so it can be added cheaply later if Go-ecosystem reuse ever becomes a driver. The
+Path A de-risk record (kept for that contingency):
 
 1. **water-rs runtime abstraction — RESOLVED (2026-06-17, inspected the clone).** *No abstraction* —
    `water-rs` is hard-wired to `wasmtime 17` (`wasmtime`/`wasmtime-wasi`/`wasi-common` 17.0.0, no
@@ -310,6 +318,40 @@ fd-3-by-convention, not WATER's `_water_dial`/`water_dial` host fns), nor async.
 (1) the WATER v1 ABI host fns → load a real WATM; (2) the `wasi-common` tokio variant for async I/O;
 (3) wire into spark's `Transport` (host pre-dials the protected upstream, inserts the fd) + Ed25519
 module signing. The PoC lives in `/tmp/wt-proto` (throwaway; the recipe above is the durable artifact).
+
+### 8.4 Path B prototype — PROVEN (2026-06-17, `/tmp/pathb-proto`); WATER ABIs enumerated
+
+**Both real WATMs load on wasmi.** Enumerated the real ecosystem modules from `water-rs/tests`:
+`plain.wasm` (v0; exports `_water_init`/`_water_dial`/`_water_worker`/`_water_v0`; imports
+`env::host_dial`/`host_defer`/`host_accept` + a WASI subset) and `echo_client.wasm` (v1; exports
+`_water_init`/`_water_dial`/`_water_read`/`_water_write`/`_water_set_inbound`/`_water_set_outbound`/
+`_water_v1`; imports `env::connect_tcp`/`create_listen` + WASI). wasmi parsed both → Path A's ABI is
+characterized and provably loadable.
+
+**Path B (the chosen primary) is proven end-to-end on bare `wasmi`.** An 11 KB no-WASI transform
+module: exports `alloc`/`transform_out`/`transform_in`, imports only `env::host_rand` (its entire
+capability surface — no WASI, no network). The host owns the sockets and shuttles bytes through the
+module; app → `transform_out` → wire (transformed, key-prefixed) → upstream echo → `transform_in` →
+recovered == app. **PASS.** This is leaner than WATER on every axis (11 KB vs 130 KB–2 MB modules;
+bare `wasmi` vs `wasmi`+`wasmi_wasi`+`wasi-common`+`cap-std`) and sandboxed by construction.
+
+Path B ABI recipe (the durable artifact; PoC is throwaway):
+```rust
+// guest (cdylib → wasm32-unknown-unknown — NO WASI):
+extern "C" { fn host_rand(ptr: *mut u8, len: usize); }   // the only capability it imports
+#[no_mangle] pub extern "C" fn alloc(len: usize) -> *mut u8 { /* leak a Vec, return ptr */ }
+#[no_mangle] pub extern "C" fn transform_out(ptr: *mut u8, len: usize) -> u64 { /* -> (out_ptr<<32)|out_len */ }
+#[no_mangle] pub extern "C" fn transform_in (ptr: *mut u8, len: usize) -> u64 { /* reverse */ }
+// host (bare wasmi = "=2.0.0-beta.2", no wasmi_wasi):
+let mut linker = Linker::<()>::new(&engine);
+linker.func_wrap("env","host_rand", |mut c: Caller<()>, ptr, len| { /* native CSPRNG -> mem.write */ })?;
+let inst = linker.instantiate_and_start(&mut store, &module)?;   // host owns both sockets;
+// host: alloc(n) -> mem.write(input) -> transform_*(ptr,n) -> read packed (ptr,len) from memory.
+```
+Real-transport shape: the module's `transform_out`/`in` carry the handshake/framing/padding state
+machine (control path); AEAD/hash/rand are native host fns; spark's `Transport::dial` owns the
+protected upstream + the netstack flow and pumps both through the module. Next: a richer ABI
+(handshake phase, host-fn crypto), Ed25519 module signing + delivery, and wiring into `Transport`.
 
 ## 9. Platform matrix
 

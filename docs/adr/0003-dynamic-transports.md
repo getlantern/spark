@@ -1,6 +1,10 @@
-# ADR 0003 — Dynamically-loaded transports: tiered, WATER-ABI-compatible on wasmi
+# ADR 0003 — Dynamically-loaded transports: tiered, a lean `wasmi` ABI (Path B)
 
-- **Status:** Accepted — 2026-06-17. Direction decided; staged (Tier 1 first, Tier 2 prototype next).
+- **Status:** Accepted — 2026-06-17. Direction decided; staged (Tier 1 first, Tier 2 next).
+- **Updated 2026-06-17:** Tier 2's ABI = **Path B (spark-specific, no WASI)** as primary; WATER-ABI
+  compat (Path A) is **optional/deferred** — Go/WATER-ecosystem reuse (Path A's only real advantage)
+  was de-prioritized as a nice-to-have. Both paths are de-risked and prototyped (design doc §8.3/§8.4);
+  the runtime choice (`wasmi`) is unchanged.
 - **Scope:** How spark delivers/updates transports independently of client releases. Adds no
   coupling to the proxy core — a dynamic transport is another impl behind the existing `Transport`
   seam.
@@ -34,11 +38,15 @@ data path ports to `wasmi` as adaptation, not reinvention.
      Rust blocks. Leanest (~0 added size), native speed, mobile-store-compliant, cleanest security
      (no foreign code). Extends what AnyTLS already does (server-pushed padding scheme). Covers the
      ~80% of censor responses that are recombinations/parameter tweaks. **Build this first.**
-   - **Tier 2 — a WATER-ABI-compatible host on `wasmi`** for genuinely novel wire formats. Write it
-     as a *focused fresh host* (the v1 dialer/stream ABI), not a port of `water-rs` (which is stale —
-     wasmtime 17 / 0.1.0 — and has no runtime abstraction). Engine maps 1:1 to `wasmi`; host fns via
-     `wasmi::Linker::func_wrap`; data path via `wasmi_wasi` `push_file` (tokio variant). ABI-compatible
-     → **a transport authored once runs on lantern's WATER *and* spark.**
+   - **Tier 2 — a `wasmi`-hosted WASM module** for genuinely novel wire formats. Runtime = `wasmi`
+     (pure-Rust, no-JIT, iOS-safe; measured leanest+fastest interpreter). **ABI = Path B (primary):**
+     the module is a pure byte-transform; the **host owns both sockets** and the module imports only
+     native crypto/entropy host fns — no WASI, no network capability (tightest sandbox, leanest: bare
+     `wasmi`, 11 KB modules). Proven end-to-end (design §8.4). **WATER-ABI compat (Path A) is
+     optional/deferred** — fully de-risked (mechanism proven on `wasmi`+`wasmi_wasi`; both v0+v1 WATMs
+     load), so it can be added cheaply *if* Go-ecosystem reuse ever becomes a driver, but it's not
+     built now (it pulls a WASI stack + the `_water_*` choreography for compat we don't currently
+     need).
 2. **`wasmi`, never `wasmtime`, in the lean Rust core.** wasmtime's 15–20 MB + iOS-JIT death rule it
    out; `wasmi` is pure-Rust, no-JIT (iOS-safe), and the measured leanest+fastest interpreted option.
 3. **Bulk crypto/copy stays native; interpret only the control path.** Measured: bytes-through-

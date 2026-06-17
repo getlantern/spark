@@ -366,9 +366,24 @@
   real TCP socket as guest fd 3 via `push_file`; a wasm32-wasip1 reactor did fd_write/fd_read on it;
   echo round-trip PASSED → WATER's data path runs on wasmi+wasmi_wasi (the working API recipe is in
   doc §8.3, the durable artifact). Scope: mechanism only (sync, custom `run` export + fd-3-by-
-  convention — NOT yet the full WATER v1 ABI, not async). **Next increments:** (1) WATER v1 ABI host
-  fns → load a real WATM; (2) wasi-common tokio variant for async; (3) wire into spark `Transport`
-  (host pre-dials protected upstream + inserts fd) + Ed25519 module signing.
+  convention — NOT yet the full WATER v1 ABI, not async). **PIVOT 2026-06-17 → Path B is primary
+  (user: Go/WATER-ecosystem reuse is "a lesser concern… not used widely atm").** Path A's *only* real
+  edge over Path B was write-once-run-on-lantern's-WATER, which is now de-prioritized — so spark
+  targets **Path B (spark-specific minimal ABI on bare `wasmi`, no WASI/network):** the module is a
+  pure byte-transform; the **host owns both sockets** and the module imports only native crypto/
+  entropy host fns. Leanest (~+0.84 MB, no WASI stack) and tightest sandbox (module can't reach the
+  network). **Path B PROTOTYPE PROVEN 2026-06-17 (`/tmp/pathb-proto`, throwaway):** guest cdylib →
+  `wasm32-unknown-unknown` exporting `alloc(len)→*mut u8` + `transform_out(ptr,len)→u64` (packs
+  `(out_ptr<<32)|out_len`) + `transform_in`, importing `env::host_rand`; host = bare `wasmi
+  =2.0.0-beta.2` (NO wasmi_wasi), `Linker::<()>::func_wrap("env","host_rand",…)`,
+  `instantiate_and_start`, drove the transform via alloc + linear-memory r/w; echo-server round-trip
+  PASSED with an 11 KB module (recipe captured in doc §8.4). **Path A (WATER-ABI-compat on wasmi)
+  stays fully de-risked but optional/deferred** — revivable cheaply (mechanism proven, §8.3) *if* Go
+  reuse ever becomes a driver. ADR 0003 + design doc §8 updated to record the pivot. **Next
+  increments (Path B):** (1) richer ABI — a handshake/negotiate phase + host-fn AEAD/hash beyond
+  `host_rand`; (2) wire into spark's `Transport` trait (host owns the protected upstream socket, feeds
+  bytes through `transform_out`/`transform_in`); (3) Ed25519 module signing + anti-rollback version
+  counter + out-of-band delivery.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
