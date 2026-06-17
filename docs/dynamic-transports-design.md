@@ -244,13 +244,31 @@ spark lets the org author a transport *once* and run it on both clients instead 
 transport stacks. That's an ABI decision, fully independent of keeping the runtime lean (`wasmi`, not
 `wasmtime`).
 
-**Recommendation: target WATER ABI-compatibility on `wasmi`**, gated on three de-risks before
-committing: (1) does `water-rs` abstract its runtime (→ contribute a `wasmi` backend upstream) or is
-it wasmtime-wired (→ write a thin fresh wasmi WATER host)? — needs fetching `water-rs` (not local);
-(2) `wasmi_wasi` (2.0.0-beta) maturity for the WASI subset WATMs use (`fd_read`/`fd_write`/`fd_close`/
-clocks/`random`); (3) scope capabilities via `InsertConn` (host pre-dials the *protected* upstream,
-hands the module one fd) rather than module-driven `water_dial(target)`. If any is too costly, fall
-back to **Path B**. (Aside: upgrading `water-rs` to wasmtime ≥30 + the Pulley interpreter also yields
+**Recommendation: target WATER ABI-compatibility on `wasmi`** — as a *focused fresh wasmi host*, not
+a port of water-rs. De-risks:
+
+1. **water-rs runtime abstraction — RESOLVED (2026-06-17, inspected the clone).** *No abstraction* —
+   `water-rs` is hard-wired to `wasmtime 17` (`wasmtime`/`wasmtime-wasi`/`wasi-common` 17.0.0, no
+   runtime feature). Its traits (`WATERStreamTrait`/`Listener`/`Relay`) abstract the *transport
+   role*, not the engine. But the `wasmtime::` coupling is localized to **4 files** — `core.rs`
+   (Engine/Store/Linker/Module + WASI setup, ~1:1 to wasmi) and `v0/v1/funcs.rs` (host fns via
+   `linker.func_wrap(... Caller<Host> ...)`, the same pattern wasmi has). Conclusion: **don't port
+   water-rs** (stale: wasmtime 17 / 0.1.0, carries v0+v1+listener+relay+threads spark doesn't need) —
+   **write a focused fresh wasmi host for just the v1 dialer/stream ABI**, ABI-compatible (loads the
+   same WATMs, preserves write-once-run-on-lantern) and small (`wasmi` +0.84 MB + `wasmi_wasi`).
+2. **THE crux — `wasmi_wasi` custom-fd insertion (next probe).** WATER's data path is
+   `wasmtime_wasi::net::Socket::from(tcp).into()` → `Box<dyn WasiFile>` → `ctx.push_file(...)` →
+   guest fd; the guest then `fd_read`/`fd_write`s it. The whole wasmtime lock-in *is* this `push_file`
+   mechanism (the engine ports trivially). So the single decisive question is: **can `wasmi_wasi`
+   (2.0.0-beta) insert a custom host socket as a WASI fd?** Yes → port is moderate; no → reimplement
+   the WASI fd subset (`fd_read`/`fd_write`/`fd_close`/`poll`) over a host-backed fd table
+   (significant). A ~10-minute check against the crate.
+3. **Capability scoping** via the host pre-dialing the *protected* upstream and inserting one fd
+   (the `InsertConn`/dialer path), rather than module-driven `water_dial(target)` — narrows WATER's
+   surface to spark's threat model.
+
+If (2) proves too costly, fall back to **Path B** (a spark-specific minimal ABI — no WASI, host fns
+only). (Aside: upgrading `water-rs` to wasmtime ≥30 + the Pulley interpreter also yields
 a no-JIT/iOS-safe WATER, but Pulley is an *addition* to wasmtime — it keeps the 15–20 MB and still
 fails the lean bar; `wasmi` is the only lean path, which is why the ABI must be ported to it.)
 

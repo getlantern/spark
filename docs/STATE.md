@@ -343,9 +343,16 @@
   `water_*` host imports + `_water_*` exports + WASI preview1). No wasmi-based WATER host exists
   (`water-rs`=wasmtime; both local `water` copies are Go/wazero), but `wasmi_wasi` (2.0.0-beta) gives
   the WASI layer. **Recommend targeting WATER ABI-compat ON wasmi** (so a transport authored once
-  runs on lantern's WATER *and* spark — the getlantern strategic win), gated on 3 de-risks: water-rs
-  runtime-abstraction (port vs fresh host), wasmi_wasi maturity, capability-scoping via `InsertConn`.
-  Fallback = a leaner spark-specific ABI. No code yet; promote a tier to an ADR when committed.
+  runs on lantern's WATER *and* spark — the getlantern strategic win). **water-rs runtime-abstraction
+  probe RESOLVED 2026-06-17 (cloned + inspected):** NO abstraction — hard-wired to wasmtime 17; its
+  traits abstract the transport *role*, not the engine; `wasmtime::` coupling localized to 4 files
+  (`core.rs` engine/WASI setup + `v0/v1/funcs.rs` host-fn `func_wrap`). → **don't port water-rs**
+  (stale: wasmtime 17 / 0.1.0); **write a focused fresh wasmi host for just the v1 dialer/stream
+  ABI** (ABI-compatible, small). **THE crux / next probe:** WATER's data path is wasmtime-wasi's
+  `Socket::from(tcp) → push_file → guest fd`; the only real wasmtime lock-in is that `push_file` —
+  so the decisive question is whether `wasmi_wasi` (2.0.0-beta) can insert a custom host socket as a
+  WASI fd (yes → moderate; no → reimplement the WASI fd subset). Fallback = a spark-specific minimal
+  ABI (no WASI). No code yet; promote a tier to an ADR when committed.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
