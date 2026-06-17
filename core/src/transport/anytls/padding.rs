@@ -18,9 +18,15 @@
 //!   `LO-HI` (the chunk's plaintext size is chosen uniformly in `[LO, HI]`; `X-X` is a fixed size)
 //!   or `c` ("check": if user data is exhausted at this point, stop padding this packet).
 //!
-//! This module is the **parser + model** only. The *engine* that applies a plan to an outgoing
-//! write — splitting/padding the bytes and emitting `cmdWaste` fill — and the `padding-md5`
-//! settings field are later chunks. Reference: `anytls/anytls-go` `docs/protocol.md`.
+//! Two pieces: the scheme [`PaddingScheme`] (parser/model) and the [`shape_records`] engine that
+//! applies a scheme to an outgoing write — splitting it into record-sized chunks and emitting
+//! `cmdWaste` fill — faithfully reproducing anytls-go's `session.writeConn`. (The `padding-md5`
+//! settings field is computed elsewhere; see [`super::settings`].) Reference:
+//! `anytls/anytls-go` `proxy/padding/padding.go` + `proxy/session/session.go`.
+
+use bytes::{BufMut, Bytes, BytesMut};
+
+use super::frame::{Command, HEADER_LEN, MAX_PAYLOAD};
 
 /// One element of a packet's padding plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +186,121 @@ pub enum PaddingError {
     },
 }
 
+/// Picks a concrete record size in `[lo, hi]` for a [`Seg::Size`] segment. Injected so the
+/// [`shape_records`] engine is deterministic in tests; production uses [`SystemSampler`].
+pub trait SizeSampler {
+    /// A size in `[lo, hi]` (callers guarantee `lo <= hi`).
+    fn sample(&mut self, lo: u32, hi: u32) -> u32;
+}
+
+/// Uniform sampling via the system CSPRNG (`ring`). A negligible modulo bias over a
+/// hundreds-wide range is irrelevant for traffic shaping; falls back to `lo` if the RNG errors.
+pub struct SystemSampler(ring::rand::SystemRandom);
+
+impl SystemSampler {
+    /// A new sampler.
+    pub fn new() -> Self {
+        SystemSampler(ring::rand::SystemRandom::new())
+    }
+}
+
+impl Default for SystemSampler {
+    fn default() -> Self {
+        SystemSampler::new()
+    }
+}
+
+impl SizeSampler for SystemSampler {
+    fn sample(&mut self, lo: u32, hi: u32) -> u32 {
+        use ring::rand::SecureRandom;
+        if hi <= lo {
+            return lo;
+        }
+        let span = (hi - lo) as u64 + 1;
+        let mut b = [0u8; 4];
+        match self.0.fill(&mut b) {
+            Ok(()) => lo + (u32::from_le_bytes(b) as u64 % span) as u32,
+            Err(_) => lo,
+        }
+    }
+}
+
+/// Append a `cmdWaste` frame carrying `data_len` zero bytes (clamped to the 2-byte length).
+fn push_waste(dst: &mut BytesMut, data_len: usize) {
+    let data_len = data_len.min(MAX_PAYLOAD);
+    dst.reserve(HEADER_LEN + data_len);
+    dst.put_u8(Command::Waste as u8);
+    dst.put_u32(0); // session-level, stream 0
+    dst.put_u16(data_len as u16);
+    dst.resize(dst.len() + data_len, 0); // zero padding, no separate allocation
+}
+
+/// Split the already-encoded outgoing bytes `data` for the `pkt`-th TLS write into record-sized
+/// chunks per `scheme`, inserting `cmdWaste` frames to fill — one returned [`Bytes`] per record
+/// (each is one transport write). Faithful to anytls-go `session.writeConn`:
+///
+/// - `pkt >= scheme.stop()` → no padding: the data is returned as a single record (or none if empty).
+/// - otherwise, for each sampled record size `l` in the packet's plan: emit `l` real bytes if at
+///   least that many remain; else emit the remaining real bytes plus a `cmdWaste` frame filling the
+///   record to `l` (only if the `> HEADER_LEN`-byte gap fits a frame); else emit a `cmdWaste` frame
+///   carrying `l` bytes. A [`Seg::Check`] reached with the payload exhausted stops padding the
+///   packet; any real bytes left after the plan are written directly.
+///
+/// `pkt` is 1-based to match the reference (the first non-buffered write is packet 1; the `0=` line
+/// is never consulted).
+pub fn shape_records(
+    scheme: &PaddingScheme,
+    pkt: usize,
+    data: Bytes,
+    sampler: &mut dyn SizeSampler,
+) -> Vec<Bytes> {
+    if pkt >= scheme.stop() {
+        return if data.is_empty() {
+            Vec::new()
+        } else {
+            vec![data]
+        };
+    }
+
+    let mut records = Vec::new();
+    let mut b = data;
+    for seg in scheme.plan(pkt) {
+        let l = match *seg {
+            Seg::Check => {
+                if b.is_empty() {
+                    return records; // payload exhausted at a check → stop padding this packet
+                }
+                continue;
+            }
+            Seg::Size { lo, hi } => sampler.sample(lo, hi) as usize,
+        };
+        if b.len() > l {
+            // A full record of real payload.
+            records.push(b.slice(..l));
+            b = b.slice(l..);
+        } else if !b.is_empty() {
+            // The last of the real payload, padded up to `l` with a waste frame if the gap fits.
+            let real = b.len();
+            let mut rec = BytesMut::with_capacity(l.max(real + HEADER_LEN));
+            rec.extend_from_slice(&b);
+            if l > real + HEADER_LEN {
+                push_waste(&mut rec, l - real - HEADER_LEN);
+            }
+            records.push(rec.freeze());
+            b = Bytes::new();
+        } else {
+            // A pure-padding record: a waste frame carrying `l` bytes (HEADER_LEN + l on the wire).
+            let mut rec = BytesMut::with_capacity(HEADER_LEN + l);
+            push_waste(&mut rec, l);
+            records.push(rec.freeze());
+        }
+    }
+    if !b.is_empty() {
+        records.push(b); // remainder after the plan → sent directly
+    }
+    records
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +385,88 @@ mod tests {
             PaddingScheme::parse("stop=1\n0=1000-500").err(),
             Some(PaddingError::InvalidRange { lo: 1000, hi: 500 })
         );
+    }
+
+    // ---- padding engine ----
+
+    /// Deterministic sampler: always the low end of a range.
+    struct MinSampler;
+    impl SizeSampler for MinSampler {
+        fn sample(&mut self, lo: u32, _hi: u32) -> u32 {
+            lo
+        }
+    }
+
+    #[test]
+    fn no_padding_at_or_beyond_stop() {
+        let scheme = PaddingScheme::default(); // stop=8
+        let data = Bytes::from_static(b"already-encoded frames");
+        assert_eq!(
+            shape_records(&scheme, 8, data.clone(), &mut MinSampler),
+            vec![data]
+        );
+        assert!(shape_records(&scheme, 9, Bytes::new(), &mut MinSampler).is_empty());
+    }
+
+    #[test]
+    fn real_payload_is_preserved_and_waste_is_separable() {
+        use crate::transport::anytls::frame::Frame;
+        // Two whole frames as the outgoing data.
+        let mut data = BytesMut::new();
+        Frame::new(Command::Psh, 1, Bytes::from_static(b"the target address"))
+            .unwrap()
+            .encode(&mut data);
+        Frame::new(Command::Psh, 1, Bytes::from_static(b"hello world payload"))
+            .unwrap()
+            .encode(&mut data);
+        let data = data.freeze();
+
+        // pkt 1 plan = [Size{100,400}]; MinSampler → 100, and 100 > data.len() so the record is the
+        // real bytes padded to 100 with a waste frame.
+        let recs = shape_records(&PaddingScheme::default(), 1, data.clone(), &mut MinSampler);
+
+        // Concatenate the records, parse the frame stream, drop waste, and re-encode the rest.
+        let mut joined = BytesMut::new();
+        for r in &recs {
+            joined.extend_from_slice(r);
+        }
+        let mut rebuilt = BytesMut::new();
+        while let Some(f) = Frame::decode(&mut joined).unwrap() {
+            if f.command != Command::Waste {
+                f.encode(&mut rebuilt);
+            }
+        }
+        assert_eq!(
+            rebuilt.freeze(),
+            data,
+            "real payload round-trips, waste removed"
+        );
+    }
+
+    #[test]
+    fn check_stops_padding_once_payload_is_exhausted() {
+        // pkt 2 = [400-500, c, 500-1000, c, ...]; MinSampler → first size 400. 50 bytes of payload
+        // fill one 400-byte record (real + waste), then the `c` with payload gone stops padding.
+        let recs = shape_records(
+            &PaddingScheme::default(),
+            2,
+            Bytes::from(vec![0xCDu8; 50]),
+            &mut MinSampler,
+        );
+        assert_eq!(recs.len(), 1, "check stops padding after payload exhausted");
+        assert_eq!(recs[0].len(), 400, "record padded up to the sampled size");
+    }
+
+    #[test]
+    fn payload_larger_than_plan_is_chunked_then_sent_directly() {
+        // pkt 1 = [Size{100,400}]; MinSampler → 100. 1000 bytes → one 100-byte record, then the
+        // 900-byte remainder sent directly. No waste (payload exceeds the plan).
+        let data = Bytes::from(vec![0xABu8; 1000]);
+        let recs = shape_records(&PaddingScheme::default(), 1, data.clone(), &mut MinSampler);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].len(), 100);
+        assert_eq!(recs[1].len(), 900);
+        let total: usize = recs.iter().map(Bytes::len).sum();
+        assert_eq!(total, 1000, "no waste added when payload exceeds the plan");
     }
 }

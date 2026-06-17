@@ -13,25 +13,31 @@
 //! ## Status (built vs. deferred)
 //!
 //! - [`frame`] — the session-frame codec ([`Command`], [`Frame`]). **Built.**
-//! - [`padding`] — the padding-scheme parser/model ([`PaddingScheme`]). **Built.**
+//! - [`padding`] — the padding-scheme parser/model + the [`padding::shape_records`] engine. **Built.**
 //! - [`io`] — async framed I/O ([`io::FrameReader`]/[`io::FrameWriter`]) over a byte stream. **Built.**
 //! - [`session`] — the client-side multiplexer ([`Session`]/[`Stream`]). **Built.**
-//! - Deferred to later chunks: the auth record (SHA-256) + `cmdSettings` (+ `padding-md5`, MD5);
-//!   the padding *engine* that applies a plan to outgoing writes; the idle-session **pool**; and
-//!   the [`super::Transport`] impl over a `btls` TLS stream (which also makes outbound backpressure
-//!   bounded — see [`session`]).
+//! - [`auth`] — the client auth record (SHA-256, via `ring`). **Built.**
+//! - [`settings`] — the `cmdSettings` builder/parser ([`Settings`]). **Built** (the `padding-md5`
+//!   value is computed and supplied by the caller; `ring` has no MD5).
+//! - Deferred to later chunks: the `padding-md5` hash source; the idle-session **pool**; and the
+//!   [`super::Transport`] impl over a `btls` TLS stream (which wires the engine into the writer and
+//!   makes outbound backpressure bounded — see [`session`]).
 //!
 //! Reference: the AnyTLS protocol spec (`anytls/anytls-go`, `docs/protocol.md`) and the
 //! `m11-transport-candidates-anytls-samizdat` memory.
 
+pub mod auth;
 pub mod frame;
 pub mod io;
 pub mod padding;
 pub mod session;
+pub mod settings;
 
+pub use auth::encode_auth;
 pub use frame::{Command, Frame, FrameError};
-pub use padding::{PaddingError, PaddingScheme, Seg};
+pub use padding::{shape_records, PaddingError, PaddingScheme, Seg, SizeSampler, SystemSampler};
 pub use session::{Session, Stream};
+pub use settings::Settings;
 
 /// The AnyTLS protocol version this implementation speaks (advertised in `cmdSettings` as `v=`).
 /// v2 adds `SynAck`, the heartbeat commands, and `ServerSettings`.

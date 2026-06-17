@@ -159,10 +159,25 @@
   (backpressure becomes bounded poll-reserve when wired to TLS in chunk 4); inbound is bounded but
   HOL-blocks across streams until per-stream flow control. **Idle-session pool moved to chunk 4**
   (it owns session *creation*, which needs the TLS factory).
-  **Next chunks (per ADR build order):** (3) auth record (SHA-256) + `cmdSettings`/padding-md5 + the
-  padding **engine** (applies a plan to writes, `cmdWaste` fill); (4) wire **`btls`/`tokio-btls`** TLS
-  + the idle-session **pool** + the `Transport` impl + config selection; then the live gate (same
-  curl/DNS gates as the TCP tunnel + CI JA4-drift green).
+  **Chunk 3 (2026-06-16): auth + settings + padding engine, green.** Added `ring` (locked-stack
+  crypto) to the workspace + core. `anytls/auth.rs`: `encode_auth` — the client record
+  `sha256(password)(32) | padding0 len(2) | padding0` (ring SHA-256; test vs the FIPS sha256("abc")
+  vector). `anytls/settings.rs`: `Settings` build/parse for `cmdSettings` (`v`/`client`/`padding-md5`,
+  unknown keys ignored). `anytls/padding.rs` (extended): the **engine** `shape_records(scheme, pkt,
+  data, sampler) -> Vec<Bytes>` + `SizeSampler` trait (`SystemSampler` = ring CSPRNG; injected so
+  tests are deterministic). **Verified against the actual anytls-go source** (fetched
+  `proxy/padding/padding.go` + `proxy/session/session.go`) rather than reconstructed: faithfully
+  reproduces `writeConn` — per sampled record size `l`, `len>l`→`l` real bytes; else+nonempty→remaining
+  real + a `cmdWaste` frame filling to `l` (only if the gap `> 7`); else→a `cmdWaste` of `l` bytes
+  (wire `7+l`); a `Check` with payload gone stops the packet; remainder after the plan sent direct.
+  `pkt` is 1-based (matches the reference; the `0=` line is never consulted). 77 core tests pass
+  (12 new); clippy clean. **MD5 deliberately deferred:** `ring` has no MD5, so `padding-md5` (a
+  non-security scheme identifier) is *passed into* `Settings`; its hash source is a chunk-4 dep
+  decision (likely the `md-5` crate — needs sign-off per the no-new-deps rule).
+  **Next chunk (per ADR build order): (4)** wire **`btls`/`tokio-btls`** TLS under the session (the
+  writer calls `shape_records`; outbound backpressure becomes bounded) + auth/settings handshake +
+  the idle-session **pool** + the `Transport`/config wiring + `padding-md5` (md5 dep); then the live
+  gate (same curl/DNS gates as the TCP tunnel + the CI JA4-drift check).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.

@@ -35,6 +35,10 @@ socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 thiserror = "2"
 anyhow = "1"
+# Crypto primitives (CLAUDE.md locked stack): used for the AnyTLS auth record's SHA-256 and,
+# later, the rustls ring backend. NOT for MD5 (ring omits it) — the AnyTLS padding-md5 hash is
+# handled separately.
+ring = "0.17"
 
 # Locked release profile (CLAUDE.md). Profiles only take effect from the workspace
 # root, so they live here, not in member manifests.
