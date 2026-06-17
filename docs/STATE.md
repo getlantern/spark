@@ -334,8 +334,11 @@
   prefix, systemStack)`; pass the same addr it gave `VpnService.Builder.addAddress(addr, prefix)`,
   with `prefix` covering addr+1 (the synthetic gateway), and `addDisallowedApplication(self)` so
   upstream dials bypass the tun (loop avoidance — no per-socket protect). **Remaining: on-device
-  gate** (needs a device + the VpnService app) — likely surfaces the same `rp_filter`/routing
-  wrinkles as the netns gate.
+  gate — SCOPED in `docs/android-system-stack-gate.md`** (runbook + pass criteria + reference Kotlin
+  `SparkBridge`/`VpnService` + risk register). Needs a device + the host app; not yet executed. Key
+  risks to watch: local delivery of the redirect + per-UID/fwmark routing (both de-risked by
+  sing-box doing the same on Android); `rp_filter` should pass strict naturally but an unrooted app
+  can't `sysctl` it if not.
 - **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
   target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
   request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]
