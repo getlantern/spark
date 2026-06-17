@@ -320,6 +320,21 @@
   just doesn't enable the `system-stack` feature yet (a choice). Android-specific work to enable it:
   turn on the feature for `platforms/android`, route the `VpnService` fd into `SystemNetstack`, and
   use `VpnService.protect()` for upstream-socket protection. Docs corrected (ADR 0002, design §7).
+- **Dynamic-transports design exploration 2026-06-17.** `docs/dynamic-transports-design.md`: how to
+  let transports be delivered/updated independently of client releases (the WATER idea). Grounded in
+  `getlantern/water` (Go/wazero) + `refraction-networking/water-rs` (Rust/wasmtime) + the corpus +
+  a research-agent synthesis. **Conclusion: full WASM via water-rs is the WRONG default for spark** —
+  wasmtime+Cranelift is ~15–20 MB (5–7× budget; the lean build can't load dynamically), wasmtime 17
+  has no interpreter so it won't run on iOS at all (no JIT for 3rd-party apps), and App-Store 2.5.2
+  is policy-grey for downloaded modules. WATER throughput 1.64 MB/s vs 15.3 native on localhost (but
+  only +3.5% over a real 37 ms link — fine for RTT-bound, brutal for throughput). lantern-water has
+  a real **integrity≠authenticity gap** (SHA-256 only, no signature). **Recommendation: two tiers —
+  (1) config-composition of native primitives (signed/versioned pipeline of uTLS fingerprint +
+  padding + framing + fragmentation; extends AnyTLS's server-pushed padding scheme; covers ~80% of
+  censor responses, ~0 size, mobile-compliant); (2) a small purpose-built transport DSL/bytecode VM
+  (Proteus/Marionette lineage) for novel wire formats, bulk crypto stays native.** WASM only as a
+  desktop/Android escape hatch (`wasmi` or Go/wazero), never wasmtime in the Rust core. No code yet;
+  promote a tier to an ADR when committed.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
