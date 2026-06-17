@@ -218,6 +218,42 @@ int-array marshalling (so its size + perf are upper bounds); these are fast-desk
 ranking and the sub-µs control-path latencies (negligible vs network RTT) hold on any platform. The
 delivered `.wasm` for a real transport is ~130–590 KB (research §1) — the over-the-wire payload, fine.
 
+### 8.2 Runtime vs ABI — WATER-compatible, or a new ABI? (a separate axis)
+
+Picking `wasmi` (§8.1) decides the *runtime*, not the *ABI*. They're orthogonal:
+
+- **wasm/WASI level:** any compliant `wasm32-wasi` module runs on `wasmi` + `wasmi_wasi` — independent
+  of WATER.
+- **"WATER-compatible"** means implementing WATER's **host ABI**: the module imports
+  `water_dial`/`water_accept`/`water_dial_fixed` and exports `_water_init`/`_water_dial`/
+  `_water_accept`/`_water_associate`/`_water_worker`/`_water_cancel_with`/`_water_v`, over WASI
+  preview1. `wasmi` gives the engine, **not** that ABI — and **no wasmi-based WATER host exists**
+  (`water-rs`'s host is wasmtime; `getlantern/water` + `refraction-networking/water` are both
+  Go/wazero — verified locally). So choosing `wasmi` means *either*:
+
+| | **Path A: WATER ABI on `wasmi`** | **Path B: a new spark ABI on `wasmi`** |
+|---|---|---|
+| load existing WATMs / use the `watm` guest SDKs | ✅ | ❌ (own SDK) |
+| **write a transport once, run it on lantern's WATER *and* spark** | ✅ (the strategic win for a getlantern project) | ❌ |
+| WASI dependency / capability surface | inherits WASI (`wasmi_wasi`, **beta**); wider, narrowable via `InsertConn` | none — expose only bytes-in/out + native crypto (tightest sandbox) |
+| host work | build/port a **wasmi WATER host** (none exists yet) | a thin bespoke host you fully own |
+
+The pull toward **Path A** isn't loading *existing* modules (spark's transports are spark's) — it's
+that spark is a getlantern project and **lantern already runs WATER (Go/wazero)**, so an ABI-compatible
+spark lets the org author a transport *once* and run it on both clients instead of maintaining two
+transport stacks. That's an ABI decision, fully independent of keeping the runtime lean (`wasmi`, not
+`wasmtime`).
+
+**Recommendation: target WATER ABI-compatibility on `wasmi`**, gated on three de-risks before
+committing: (1) does `water-rs` abstract its runtime (→ contribute a `wasmi` backend upstream) or is
+it wasmtime-wired (→ write a thin fresh wasmi WATER host)? — needs fetching `water-rs` (not local);
+(2) `wasmi_wasi` (2.0.0-beta) maturity for the WASI subset WATMs use (`fd_read`/`fd_write`/`fd_close`/
+clocks/`random`); (3) scope capabilities via `InsertConn` (host pre-dials the *protected* upstream,
+hands the module one fd) rather than module-driven `water_dial(target)`. If any is too costly, fall
+back to **Path B**. (Aside: upgrading `water-rs` to wasmtime ≥30 + the Pulley interpreter also yields
+a no-JIT/iOS-safe WATER, but Pulley is an *addition* to wasmtime — it keeps the 15–20 MB and still
+fails the lean bar; `wasmi` is the only lean path, which is why the ABI must be ported to it.)
+
 ## 9. Platform matrix
 
 | platform | tier 1 (config) | tier 2 (`wasmi`, interpreted WASM) |

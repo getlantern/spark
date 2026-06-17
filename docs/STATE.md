@@ -339,7 +339,13 @@
   dynamic-load runtime; the scripting-interpreter detour doesn't pay off; a bespoke DSL VM is a
   fallback only if <0.84 MB is needed. Record-through-interpreter (wasmi 28× slower than native,
   rhai/rune ~300×) makes "keep bulk native, interpret only the control path" a measured ABI rule.
-  No code yet; promote a tier to an ADR when committed.
+  **Runtime ≠ ABI (doc §8.2):** `wasmi` is the *runtime*; "WATER-compatible" is an *ABI* (the
+  `water_*` host imports + `_water_*` exports + WASI preview1). No wasmi-based WATER host exists
+  (`water-rs`=wasmtime; both local `water` copies are Go/wazero), but `wasmi_wasi` (2.0.0-beta) gives
+  the WASI layer. **Recommend targeting WATER ABI-compat ON wasmi** (so a transport authored once
+  runs on lantern's WATER *and* spark — the getlantern strategic win), gated on 3 de-risks: water-rs
+  runtime-abstraction (port vs fresh host), wasmi_wasi maturity, capability-scoping via `InsertConn`.
+  Fallback = a leaner spark-specific ABI. No code yet; promote a tier to an ADR when committed.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
