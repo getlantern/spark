@@ -35,7 +35,7 @@ async fn run_bridge(stack: netstack_smoltcp::Stack, mut tun: PacketSource) {
     tokio::join!(to_tun, to_stack);
 }
 
-/// Per-connection job. Real tool: dial a Shadowsocks-2022 stream to original_dst.
+/// Per-connection job. Real tool: dial a tunnel-transport stream to original_dst.
 /// Here: plain TCP connect (design doc milestone 1, same AsyncRead+AsyncWrite shape).
 async fn handle_conn(mut down: TcpStream, original_dst: SocketAddr) -> std::io::Result<()> {
     let mut up = tokio::net::TcpStream::connect(original_dst).await?;

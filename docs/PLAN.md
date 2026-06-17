@@ -86,19 +86,17 @@ keep each session bounded and resumable.
 These must exist before the milestones that depend on them. The agent should check STATE.md
 for them and **stop and request** them if a milestone needs one that's missing.
 
-- **Threat model (1 paragraph).** Who is the adversary, what do they observe (passive DPI
-  vs. active probing), and what fingerprint resistance is in scope. Determines whether/when
-  REALITY, uTLS ClientHello mimicry, or padding strategies are needed. Needed before any
-  anti-DPI/transport-obfuscation work (M11), not before the SS core. **Must also cover the
-  local IPC boundary** (the privileged service is a local-privilege-escalation target — who
-  is authorized to control it) and the **kill-switch policy (DECIDED: fail open, loud, with a
-  per-profile fail-closed override)** — see the process-architecture doc §5. These drive M7.
-- **Crypto review process.** Every line of crypto (M3) gets human review against the
-  SS-2022 spec, plus a known-answer-test (KAT) suite cross-checked against
-  `shadowsocks-rust` test vectors. The agent writes the KATs; a human signs off on the
-  crypto before it's trusted.
-- **Test server.** A `sing-box` SS-2022 server via docker-compose, reachable from the dev
-  box, for M3+ integration tests. Minimal compose in Appendix B. Needed at M3.
+- **IPC authorization policy.** Who is authorized to control the privileged service over the
+  local control channel (the privileged service is a local-privilege-escalation target — see
+  the process-architecture doc §3), and the **kill-switch policy (DECIDED: fail open, loud,
+  with a per-profile fail-closed override)** — see the process-architecture doc §5. These
+  drive M7.
+- **TLS review (if used).** If a transport wraps its relay in TLS, use `rustls` (already in
+  the locked stack) rather than hand-rolling crypto; a human confirms the `rustls` client
+  config (verification, roots) before it's trusted. The plain TCP tunnel needs no bespoke
+  crypto.
+- **Test server.** A simple TCP relay/echo server reachable from the dev box, for M3+
+  integration tests. Minimal setup in Appendix B. Needed at M3.
 
 ---
 
@@ -109,8 +107,8 @@ Sessions · Checkpoint**. The gate is the definition of done for that milestone.
 report" at every checkpoint.
 
 > Build-order principle (from the design doc, do not violate): validate the **netstack
-> pipeline with no crypto first** (M2), then build the **SS client in isolation** (M3),
-> then **wire them together** (M4). Crypto bugs and netstack bugs are externally
+> pipeline with no tunnel first** (M2), then build the **tunnel transport in isolation** (M3),
+> then **wire them together** (M4). Transport bugs and netstack bugs are externally
 > indistinguishable; keeping them apart until each is independently proven saves days.
 
 ### M0 — Toolchain + netstack compile gate
@@ -138,13 +136,13 @@ report" at every checkpoint.
 - **Sessions:** 1.
 - **Checkpoint:** Note macOS `utun`/Windows WinTun naming/driver caveats discovered.
 
-### M2 — Plain TCP forwarder through the netstack (NO CRYPTO)
-- **Goal:** Validate the full TUN→netstack→upstream→back pipeline with zero crypto.
+### M2 — Plain TCP forwarder through the netstack (DIRECT DIAL — no tunnel)
+- **Goal:** Validate the full TUN→netstack→upstream→back pipeline with no tunnel transport.
 - **In:** Bridge TUN ↔ `netstack-smoltcp` Stack (Stream/Sink of packets); spawn the runner;
   accept TCP flows from the `TcpListener` stream; for each, dial
   `tokio::net::TcpStream::connect(original_dst)` and `copy_bidirectional`. Wrap behind the
   `Netstack`/`TcpFlow` trait. Routing setup documented in README.
-- **Out:** Shadowsocks, UDP, config niceties.
+- **Out:** the tunnel transport, UDP, config niceties.
 - **Deliverables:** `core/src/netstack/` (the trait + the netstack-smoltcp impl),
   `core/src/proxy/tcp.rs` (plain forwarder), routing docs.
 - **Gate:** With the device up and a route installed, `curl --interface <tun>
@@ -153,54 +151,54 @@ report" at every checkpoint.
   curl gate).
 - **Checkpoint:** Record the exact routing commands and the poll-tick/latency behavior.
 
-### M3 — Shadowsocks-2022 client in isolation (NO TUN)
-- **Goal:** A correct, tested SS-2022 client as a standalone `AsyncRead+AsyncWrite` stream.
-- **Build against the docker `sing-box` SS-2022 server (Appendix B).**
+### M3 — TCP tunnel transport in isolation (NO TUN)
+- **Goal:** A correct, tested TCP tunnel client as a standalone `AsyncRead+AsyncWrite` stream.
+- **Build against the simple TCP relay/echo server (Appendix B).**
 - **Sub-steps (one per session):**
-  - **M3a — Crypto primitives + KATs.** BLAKE3 session-subkey derivation; AES-128/256-GCM
-    AEAD; nonce management. Known-answer tests cross-checked vs `shadowsocks-rust` vectors.
-    *Gate:* `cargo test` KATs pass. **Human crypto review required before M3b is trusted.**
-  - **M3b — Wire format + header.** SOCKS5-style address codec (ATYP v4/domain/v6);
-    request/response header with salt, type, timestamp, padding. *Gate:* round-trip
-    encode/decode unit tests; header bytes match a captured sing-box header in a KAT.
-  - **M3c — Stream framing + integration.** Per-chunk `[len+tag][payload+tag]` AEAD framing
-    with partial-read buffering; the `ShadowsocksStream`. *Gate:* integration test connects
-    through the docker sing-box server and echoes a payload correctly both directions.
+  - **M3a — Address codec + header.** SOCKS5-style address codec (ATYP v4/domain/v6);
+    the request header that names the target `(host, port)`. *Gate:* round-trip
+    encode/decode unit tests cover IPv4, domain, and IPv6.
+  - **M3b — Relay stream + integration.** The `TunnelStream` that sends the header then
+    relays bytes transparently in both directions, with partial-read buffering. Optionally
+    wrap the connection in TLS via `rustls`. *Gate:* integration test connects through the
+    relay server (Appendix B) and echoes a payload correctly both directions.
 - **Out:** TUN wiring (that's M4), UDP (M5).
-- **Deliverables:** `core/src/transport/shadowsocks/` (`crypto`, `header`, `stream`,
-  `client`), KATs in `tests/`.
-- **Sessions:** 3 (one per sub-step; M3a may take 2 if KATs are fiddly).
-- **Checkpoint:** After each sub-step. Do not proceed past M3a without human crypto sign-off.
+- **Deliverables:** `core/src/transport/tcp_tunnel/` (`header`, `stream`, `client`),
+  tests in `tests/`.
+- **Sessions:** 2 (one per sub-step).
+- **Checkpoint:** After each sub-step. If TLS-wrapping the relay, confirm the `rustls`
+  client config (verification + roots) before trusting it.
 
-### M4 — Integrate SS + netstack
-- **Goal:** Route real tunneled traffic through the SS server.
-- **In:** Define the `Transport` trait; make the SS client implement it; swap M2's plain
-  upstream dial for `transport.dial(original_dst)`.
+### M4 — Integrate the tunnel transport + netstack
+- **Goal:** Route real tunneled traffic through the tunnel server.
+- **In:** Define the `Transport` trait; make the TCP tunnel client implement it; swap M2's
+  plain upstream dial for `transport.dial(original_dst)`.
 - **Out:** UDP, additional protocols.
 - **Deliverables:** `core/src/transport/mod.rs` (trait), wiring in `proxy/tcp.rs`.
-- **Gate:** The same `curl --interface <tun> https://1.1.1.1` now flows through the SS
+- **Gate:** The same `curl --interface <tun> https://1.1.1.1` now flows through the tunnel
   server (verify on the server side it saw the connection).
 - **Sessions:** 1.
 - **Checkpoint:** Confirm log hygiene: default logs contain no destination addresses.
 
 ### M5 — UDP path
 - **Goal:** UDP through the tunnel, including DNS.
-- **In:** netstack UDP socket; SS-2022 UDP packet framing (per-packet AEAD); NAT
-  association table keyed by `(client_src, original_dst)` with idle timeout; DNS strategy
-  decision implemented (proxy-through-SS by default unless STATE.md says otherwise).
+- **In:** netstack UDP socket; per-packet UDP framing in the transport (length + target
+  address); NAT association table keyed by `(client_src, original_dst)` with idle timeout;
+  DNS strategy decision implemented (proxy-through-tunnel by default unless STATE.md says
+  otherwise).
 - **Out:** Additional protocols.
-- **Deliverables:** `core/src/proxy/udp.rs`, SS UDP framing in the transport.
-- **Gate:** A DNS query (UDP/53) and a UDP echo both resolve/round-trip through the tunnel
-  via SS; idle associations are reclaimed.
+- **Deliverables:** `core/src/proxy/udp.rs`, UDP framing in the transport.
+- **Gate:** A DNS query (UDP/53) and a UDP echo both resolve/round-trip through the tunnel;
+  idle associations are reclaimed.
 - **Sessions:** 2 (session 1: framing + association table compiling; session 2: green DNS gate).
 - **Checkpoint:** Record the chosen DNS strategy and idle-timeout value.
 
 ### M6 — Config, CLI, log-hygiene hardening
-- **Goal:** Production-shaped configuration and safety properties.
+- **Goal:** Production-shaped configuration and privacy properties.
 - **In:** TOML config schema (`serde`); `clap` surface; `tracing` redaction layer
   (addresses redacted unless `--debug`); graceful shutdown; structured errors at module
   boundaries.
-- **Out:** SS URI / sing-box JSON config (defer).
+- **Out:** alternate config import formats (defer).
 - **Deliverables:** `core/src/config/`, redaction in the logging init, shutdown handling.
 - **Gate:** A test asserts default-level logs contain no IPs/hostnames; config round-trips;
   `SIGINT` tears down the device cleanly.
@@ -275,22 +273,28 @@ report" at every checkpoint.
 - **Checkpoint:** Record the FFI strategy (uniffi vs cbindgen) and measured peak memory.
 
 ### M11 — Additional transports (open-ended)
-- **Goal:** Prove the transport trait by adding at least one more protocol; layer anti-DPI
-  per the threat model.
-- **In:** Each new transport implements `Transport`; obfuscation/fingerprint work guided by
-  the human-owned threat model.
-- **Gate:** New transport passes the same curl/DNS gates as SS, selectable via config.
+- **Goal:** Prove the transport trait by adding at least one more protocol behind it.
+- **In:** Each new transport implements `Transport` (e.g. a TLS-wrapped tunnel, or another
+  relay protocol), selectable via config.
+- **Gate:** New transport passes the same curl/DNS gates as the TCP tunnel, selectable via config.
 - **Sessions:** Open-ended; one transport per arc.
 - **Checkpoint:** Per transport.
+- **Delivered:**
+  - **AnyTLS (2026-06-16). ✅** TCP + UDP (UoT v2) behind the `anytls` cargo feature, selected via
+    `[transport.anytls]`. Defeats TLS-in-TLS fingerprinting via a Chrome-mimicking BoringSSL
+    ClientHello (JA4 matches real Chrome exactly) plus a server-pushable record-padding scheme;
+    pooled, reconnecting sessions. e2e verified against a real anytls-go server on DigitalOcean
+    (full `spark run tun` gate → HTTP 301; DNS over the UoT path → valid response). See ADR
+    `docs/adr/0001-chrome-mimicry-tls-backend.md` and the STATE.md M11 entries for detail.
 
 ---
 
 ## 5. Definition of done (whole project)
 
-All of: M0–M7 green (desktop end-to-end TCP+UDP through SS, within size budget, log-hygiene
-test passing); M8 and M9 green (mobile shims tunnel on real targets); M10 demonstrates at
-least one additional transport behind the trait. Crypto has human sign-off and a passing
-KAT suite. No stubs, no unapproved TODOs, no destinations in default logs.
+All of: M0–M7 green (desktop end-to-end TCP+UDP through the tunnel, within size budget,
+log-hygiene test passing); M8 and M9 green (mobile shims tunnel on real targets); M10
+demonstrates at least one additional transport behind the trait. No stubs, no unapproved
+TODOs, no destinations in default logs.
 
 ---
 
@@ -311,58 +315,43 @@ The agent creates `STATE.md` at the end of M0 and maintains it every session the
   Bridge + accept loop already compile; only routing + the end-to-end test remain.
 
 ## Blockers / waiting on human
-- None.  (e.g. "Need docker sing-box server before M3" / "Need crypto sign-off for M3a")
+- None.  (e.g. "Need the relay test server before M3" / "Need rustls config sign-off if TLS-wrapping")
 
 ## Verified API facts (don't re-verify)
 - netstack-smoltcp 0.2.x: TcpListener Stream item is (TcpStream, SocketAddr, SocketAddr)
-  = (stream, local_addr=original_dst, remote_addr=src). TcpStream: AsyncRead+AsyncWrite.
+  = (stream, local_addr=src, remote_addr=original_dst) — naming is INVERTED vs the usual
+  server-socket sense; DIAL the 3rd element. TcpStream: AsyncRead+AsyncWrite.
 - StackBuilder has .mtu(n) in 0.2.x. build() -> io::Result<(Stack, Option<Runner>,
   Option<UdpSocket>, Option<TcpListener>)>.
 
 ## Decisions log (append-only)
-- <date> DNS strategy: proxy-through-SS.
+- <date> DNS strategy: proxy-through-tunnel.
 - <date> FFI: uniffi-rs.
 
 ## Milestone checklist
-- [x] M0  [x] M1  [ ] M2  [ ] M3a [ ] M3b [ ] M3c [ ] M4 [ ] M5 [ ] M6
+- [x] M0  [x] M1  [ ] M2  [ ] M3a [ ] M3b [ ] M4 [ ] M5 [ ] M6
 - [ ] M7 (IPC/service split)  [ ] M8 (packaging)  [ ] M9 (Android)  [ ] M10 (Apple)  [ ] M11 (transports)
 ```
 
 ---
 
-## Appendix B — Minimal sing-box SS-2022 test server
+## Appendix B — Minimal TCP relay test server
 
-`docker-compose.yml` for M3+ integration tests (human stands this up). Generate the PSK
-with `openssl rand -base64 16` for `2022-blake3-aes-128-gcm` and put it in both the server
-config and the client test config.
+For M3+ integration tests you just need something that accepts the tunnel client's address
+header and relays bytes to the named target. Two easy options:
 
-```yaml
-services:
-  singbox:
-    image: ghcr.io/sagernet/sing-box:latest
-    command: run -c /etc/sing-box/config.json
-    ports:
-      - "8388:8388/tcp"
-      - "8388:8388/udp"
-    volumes:
-      - ./singbox-config.json:/etc/sing-box/config.json:ro
-```
+1. **A tiny in-test relay** (preferred — no external process): a `tokio` listener spawned in
+   the test harness that reads the SOCKS5-style header, dials the target, and
+   `copy_bidirectional`s. Lives in `tests/` so the integration test is self-contained.
 
-```json
-{
-  "inbounds": [
-    {
-      "type": "shadowsocks",
-      "listen": "0.0.0.0",
-      "listen_port": 8388,
-      "method": "2022-blake3-aes-128-gcm",
-      "password": "<BASE64_16_BYTE_PSK>"
-    }
-  ],
-  "outbounds": [{ "type": "direct" }]
-}
-```
+2. **`socat` for a plain echo target**, if you want to exercise just the relay-stream
+   buffering without a full server:
 
-Integration tests target `127.0.0.1:8388` with the matching method/PSK. Verify the exact
-config schema against the sing-box version pulled, since its config format changes across
-releases.
+   ```bash
+   # echo server on :9000 — the tunnel client relays to this as its "target"
+   socat -v TCP-LISTEN:9000,reuseaddr,fork EXEC:'cat'
+   ```
+
+Integration tests target `127.0.0.1` with the relay's port. If a transport TLS-wraps the
+relay, stand up the server side with a `rustls` self-signed cert and pin it in the test
+client config.

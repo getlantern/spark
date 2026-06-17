@@ -130,7 +130,7 @@ user), so the channel is a privilege boundary and a local-privilege-escalation (
   authz here.
 
 ### Secret handling across the boundary
-Proxy credentials (SS-2022 PSKs, keys) live in the **privileged side's** storage — a
+Proxy/transport credentials (keys, tokens) live in the **privileged side's** storage — a
 root-owned `0600` file or the OS keychain/credential store — and are **never echoed back**
 to clients over IPC. The UI submits a user-entered secret once (over the authenticated
 channel); the service persists it. With multiple local users, scope secrets per-uid so one
@@ -202,12 +202,12 @@ user can't exfiltrate another's via the daemon.
   `KeepAlive` / OS-managed for extensions).
 - **Route restoration / kill-switch — DECIDED: fail open (loud).** On crash or shutdown the
   service must restore the routing table so the machine isn't left with a black-holed default
-  route. The product default is **fail open**: restore direct routing on a crash, because the
-  circumvention use case is about access and failing closed mostly looks like a broken app.
+  route. The product default is **fail open**: restore direct routing on a crash, because
+  for most users failing closed just looks like a broken network connection.
   Critically, fail-open must be **loud** — surface the drop prominently (status change +
   notification) so the user knows they are now connecting directly, never silently. Provide a
-  **per-profile override** to fail *closed* (block traffic) for high-risk users who prefer
-  exposure-prevention over availability; this does not change the global default.
+  **per-profile override** to fail *closed* (block traffic) for users who prefer to block
+  all traffic over connecting directly; this does not change the global default.
 - Service and UI version independently → the `ipc/` version handshake (§2) is mandatory, not
   optional.
 

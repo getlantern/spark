@@ -5,9 +5,9 @@
 
 ## Mission
 
-Build a from-scratch, multi-protocol censorship-circumvention VPN/proxy tool in Rust.
+Build a from-scratch, multi-protocol VPN/proxy tunnel in Rust.
 It runs a local TUN tunnel, terminates connections in a userspace netstack, and forwards
-them through pluggable circumvention transports (first: Shadowsocks-2022). Performance
+them through pluggable tunnel transports (first: a plain TCP tunnel). Performance
 and small binary size are first-class constraints. Targets: Linux/macOS/Windows desktop,
 plus Android and iOS via platform tunnel shims over a shared Rust core.
 
@@ -16,7 +16,7 @@ plus Android and iOS via platform tunnel shims over a shared Rust core.
 - **Pure-Rust, small binary.** No C dependencies. Release binary stays within the size
   budget in PLAN.md. No dependency added without it being in the locked stack or approved.
 - **Log hygiene.** Never log destination IPs/hostnames by default. Redact unless `--debug`.
-  This is a safety property of the product, not a nicety.
+  This is a user-privacy property of the product, not a nicety.
 - **No fake work.** No stub functions returning `Ok(())`, no `todo!()`/`unimplemented!()`
   left in a "done" milestone, no TODO comments without approval. If you can't implement
   it, stop and ask.
@@ -29,10 +29,10 @@ plus Android and iOS via platform tunnel shims over a shared Rust core.
 
 ## Definition of done (whole project)
 
-A user on a restrictive network can run the tool on desktop (and via the mobile shims),
-route traffic through a configured Shadowsocks-2022 server, and reach the open internet —
-with TCP and UDP (incl. DNS) working, logs free of destinations by default, and the binary
-within budget. At least one additional transport is pluggable behind the transport trait.
+A user can run the tool on desktop (and via the mobile shims), route traffic through a
+configured tunnel server, and reach the internet — with TCP and UDP (incl. DNS) working,
+logs free of destinations by default, and the binary within budget. At least one additional
+transport is pluggable behind the transport trait.
 
 ## Where things live
 
@@ -42,8 +42,8 @@ within budget. At least one additional transport is pluggable behind the transpo
 - **STATE.md** — cross-session memory: what's done, what's next, open blockers. You
   maintain this. Read it at session start, update it at session end. (Template in PLAN.md.)
 - **CLAUDE.md (repo root)** — code standards, locked stack, patterns/anti-patterns.
-- **tun-to-shadowsocks-design.md** — the architecture reference (netstack, SS wire format,
-  the verified API surface). Consult the relevant section; don't re-derive it.
+- **tun-to-proxy-design.md** — the architecture reference (netstack, tunnel-transport wire
+  format, the verified API surface). Consult the relevant section; don't re-derive it.
 - **process-architecture-and-ipc.md** — the multi-process model: privileged tunnel process
   vs. unprivileged client, the control-plane IPC, and cross-user permissions per platform.
   Consult before any `service/`, `ipc/`, or platform-shim work.

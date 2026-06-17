@@ -1,14 +1,14 @@
-# CLAUDE.md — Standing Instructions (Censorship Circumvention Tool)
+# CLAUDE.md — Standing Instructions (Multi-Protocol VPN/Proxy Tunnel)
 
 > This file is loaded automatically every session. It is the *how to write code here*
 > reference. **Read order each session:** `docs/GOAL.md` (north star) → `docs/PLAN.md` §2
 > (session protocol) → `docs/STATE.md` (current position) → the current milestone in
-> `docs/PLAN.md` §4 → this file for code standards → `docs/tun-to-shadowsocks-design.md` and
+> `docs/PLAN.md` §4 → this file for code standards → `docs/tun-to-proxy-design.md` and
 > `docs/process-architecture-and-ipc.md` for architecture as needed. `PLAN.md` governs *what
 > to build and how to pace it*. Work one bounded chunk per session and leave the tree green
 > (see `docs/PLAN.md` §2).
 
-You are building a from-scratch VPN/proxy tool that supports multiple censorship circumvention protocols. Performance and binary size are critical (target: <3 MB stripped). The deployment audience is end users in restrictive network environments, so reliability, fingerprint resistance, and minimal runtime overhead matter more than feature breadth.
+You are building a from-scratch, multi-protocol VPN/proxy tunnel tool in Rust. Performance and binary size are critical (target: <3 MB stripped). Reliability, performance, and minimal runtime overhead matter more than feature breadth.
 
 Follow every constraint in this document. When a choice isn't covered here, ask before introducing new dependencies or architectural patterns.
 
@@ -25,7 +25,7 @@ Follow every constraint in this document. When a choice isn't covered here, ask 
   with a governance split across two GitHub repos, so we fork it into the workspace
   under `vendor/netstack-smoltcp/` and depend on it by `path`. This lets us bump
   `smoltcp` ourselves if upstream is slow, and it is part of our attack surface
-  (it parses hostile packets) so it must be audited regardless. Pin `smoltcp`
+  (it parses untrusted packets) so it must be audited regardless. Pin `smoltcp`
   explicitly in the vendored `Cargo.toml`. Note the builder API differs across minor
   versions (`.mtu()` exists in 0.2.x, not 0.1.x); we target the 0.2.x API.
   Access the netstack ONLY through our own `Netstack`/`Flow` trait (see below) so the
@@ -69,7 +69,7 @@ After each milestone, build with `cargo build --release` and report the binary s
 
 1. **Connection halves**: Use `TcpStream::into_split()` for owned independent read/write halves. Do NOT use `tokio::io::split()` — the owned variant is simpler to move into separate tasks and avoids the internal lock.
 
-2. **Protocol state machines**: For protocol cores (handshakes, framing, obfuscation layers), prefer explicit `enum`-based state machines over deeply nested `async fn` flows. This avoids `Pin`/self-referential struct issues and makes state inspection trivial for debugging.
+2. **Protocol state machines**: For protocol cores (handshakes, framing, encoding layers), prefer explicit `enum`-based state machines over deeply nested `async fn` flows. This avoids `Pin`/self-referential struct issues and makes state inspection trivial for debugging.
 
 3. **Pluggable transports**: Define a trait like:
    ```rust
@@ -157,14 +157,14 @@ to a single module.
 ## Milestones
 
 The full milestone ladder (M0 toolchain gate → M1 TUN scaffold → M2 plain forwarder →
-M3 SS client → M4 integrate → M5 UDP → M6 config/log-hygiene → M7 packaging → M8 Android →
+M3 tunnel transport → M4 integrate → M5 UDP → M6 config/log-hygiene → M7 packaging → M8 Android →
 M9 Apple → M10 more transports), with exact binary pass/fail gates and per-session scoping,
 lives in **PLAN.md §4**. Do not duplicate or reorder it here. Find your current milestone in
 STATE.md and execute one bounded chunk per the session protocol (PLAN.md §2).
 
-Non-negotiable build order: prove the netstack pipeline with **no crypto** (M2) before
-building the SS client in isolation (M3) before wiring them together (M4). Crypto bugs and
-netstack bugs look identical from the outside; keep them separated until each is proven.
+Non-negotiable build order: prove the netstack pipeline with **no transport** (M2) before
+building the tunnel transport in isolation (M3) before wiring them together (M4). Transport
+bugs and netstack bugs look identical from the outside; keep them separated until each is proven.
 
 Ask before starting if anything in the locked stack or these standards conflicts with what
 `tun-rs`/`netstack-smoltcp` actually support on the pinned toolchain.
