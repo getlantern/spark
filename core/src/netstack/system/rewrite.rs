@@ -6,14 +6,17 @@
 //! surgery — parsing just enough of the IPv4/IPv6 + TCP headers to read the endpoints and to set
 //! new ones, then recomputing the affected checksums.
 //!
-//! Only TCP is handled here (the system stack's reason to exist); UDP/ICMP take other paths. IPv6
-//! is handled only when the TCP header follows the fixed 40-byte base header directly (no extension
-//! headers) — the common case; anything else is rejected so the caller can fall back.
+//! Handles TCP (the redirect: parse + in-place 4-tuple rewrite) and UDP (parse + build a fresh
+//! packet, for the mixed stack's datagram path). IPv6 is handled only when the L4 header follows the
+//! fixed 40-byte base header directly (no extension headers) — the common case; anything else is
+//! rejected so the caller can fall back.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Protocol number for TCP in the IPv4 `protocol` / IPv6 `next header` field.
 const PROTO_TCP: u8 = 6;
+/// Protocol number for UDP.
+const PROTO_UDP: u8 = 17;
 
 /// TCP `FIN` flag (the connection's sender is done) in the flags byte.
 pub const TCP_FIN: u8 = 0x01;
@@ -30,6 +33,8 @@ pub enum RewriteError {
     NotIp,
     /// Not a TCP packet.
     NotTcp,
+    /// Not a UDP packet.
+    NotUdp,
     /// IPv6 with extension headers (next header is not TCP) — unsupported.
     Ipv6Extension,
     /// The replacement address family didn't match the packet's.
@@ -152,9 +157,111 @@ pub fn rewrite_tcp(
     let tcp_len = pkt.len() - l.tcp;
     pkt[l.tcp + 16] = 0;
     pkt[l.tcp + 17] = 0;
-    let pseudo = pseudo_header_sum(&new_src.ip(), &new_dst.ip(), tcp_len);
+    let pseudo = pseudo_header_sum(&new_src.ip(), &new_dst.ip(), PROTO_TCP, tcp_len);
     let csum = checksum(&pkt[l.tcp..], pseudo);
     pkt[l.tcp + 16..l.tcp + 18].copy_from_slice(&csum.to_be_bytes());
+    Ok(())
+}
+
+/// The IP protocol / next-header byte of `pkt` (`6` = TCP, `17` = UDP), or `None` if not IPv4/IPv6.
+/// Cheap classifier so the pump can route a packet to the TCP or UDP path before full parsing.
+pub fn ip_protocol(pkt: &[u8]) -> Option<u8> {
+    match pkt.first()? >> 4 {
+        4 => pkt.get(9).copied(),
+        6 => pkt.get(6).copied(),
+        _ => None,
+    }
+}
+
+/// Parse an IPv4/IPv6 UDP packet: returns `(source, destination, payload_offset)` where
+/// `payload_offset` is the byte index of the UDP payload (`pkt[payload_offset..]`). IPv6 is only
+/// handled when UDP follows the base header directly (no extension headers).
+pub fn udp_endpoints(pkt: &[u8]) -> Result<(SocketAddr, SocketAddr, usize), RewriteError> {
+    let first = *pkt.first().ok_or(RewriteError::Truncated)?;
+    let (ip_src, ip_dst, addr_len, l4) = match first >> 4 {
+        4 => {
+            let ihl = (first & 0x0f) as usize * 4;
+            if ihl < 20 || pkt.len() < ihl + 8 {
+                return Err(RewriteError::Truncated);
+            }
+            if pkt[9] != PROTO_UDP {
+                return Err(RewriteError::NotUdp);
+            }
+            (12usize, 16usize, 4usize, ihl)
+        }
+        6 => {
+            if pkt.len() < 40 + 8 {
+                return Err(RewriteError::Truncated);
+            }
+            if pkt[6] != PROTO_UDP {
+                return Err(RewriteError::NotUdp);
+            }
+            (8usize, 24usize, 16usize, 40usize)
+        }
+        _ => return Err(RewriteError::NotIp),
+    };
+    let src = SocketAddr::new(
+        read_ip(pkt, ip_src, addr_len),
+        u16::from_be_bytes([pkt[l4], pkt[l4 + 1]]),
+    );
+    let dst = SocketAddr::new(
+        read_ip(pkt, ip_dst, addr_len),
+        u16::from_be_bytes([pkt[l4 + 2], pkt[l4 + 3]]),
+    );
+    Ok((src, dst, l4 + 8))
+}
+
+/// Build a complete IPv4/IPv6 UDP packet `src -> dst` carrying `payload` into `out` (cleared first),
+/// with valid IP (v4) and UDP checksums. Used to inject a UDP reply back onto the TUN. Both
+/// addresses must share a family.
+pub fn build_udp(
+    src: SocketAddr,
+    dst: SocketAddr,
+    payload: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), RewriteError> {
+    if src.is_ipv6() != dst.is_ipv6() {
+        return Err(RewriteError::FamilyMismatch);
+    }
+    let udp_len = 8 + payload.len();
+    out.clear();
+    let l4 = match (src.ip(), dst.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let total = 20 + udp_len;
+            out.resize(total, 0);
+            out[0] = 0x45; // v4, IHL=5
+            out[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+            out[8] = 64; // TTL
+            out[9] = PROTO_UDP;
+            out[12..16].copy_from_slice(&s.octets());
+            out[16..20].copy_from_slice(&d.octets());
+            let ipc = checksum(&out[..20], 0);
+            out[10..12].copy_from_slice(&ipc.to_be_bytes());
+            20
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            let total = 40 + udp_len;
+            out.resize(total, 0);
+            out[0] = 0x60; // v6
+            out[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes()); // payload length
+            out[6] = PROTO_UDP; // next header
+            out[7] = 64; // hop limit
+            out[8..24].copy_from_slice(&s.octets());
+            out[24..40].copy_from_slice(&d.octets());
+            40
+        }
+        _ => return Err(RewriteError::FamilyMismatch),
+    };
+    // UDP header + payload.
+    out[l4..l4 + 2].copy_from_slice(&src.port().to_be_bytes());
+    out[l4 + 2..l4 + 4].copy_from_slice(&dst.port().to_be_bytes());
+    out[l4 + 4..l4 + 6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    out[l4 + 8..].copy_from_slice(payload);
+    // UDP checksum (mandatory for IPv6; we always set it). 0 is encoded as 0xFFFF.
+    let pseudo = pseudo_header_sum(&src.ip(), &dst.ip(), PROTO_UDP, udp_len);
+    let csum = checksum(&out[l4..], pseudo);
+    let csum = if csum == 0 { 0xFFFF } else { csum };
+    out[l4 + 6..l4 + 8].copy_from_slice(&csum.to_be_bytes());
     Ok(())
 }
 
@@ -181,8 +288,8 @@ fn write_ip(pkt: &mut [u8], off: usize, ip: &IpAddr) {
 }
 
 /// The TCP/UDP pseudo-header contribution to the checksum: source addr, dest addr, the protocol,
-/// and the TCP length. Returned as an unfolded accumulator to seed [`checksum`].
-fn pseudo_header_sum(src: &IpAddr, dst: &IpAddr, tcp_len: usize) -> u32 {
+/// and the L4 length. Returned as an unfolded accumulator to seed [`checksum`].
+fn pseudo_header_sum(src: &IpAddr, dst: &IpAddr, proto: u8, l4_len: usize) -> u32 {
     let mut acc = 0u32;
     match (src, dst) {
         (IpAddr::V4(s), IpAddr::V4(d)) => {
@@ -195,8 +302,8 @@ fn pseudo_header_sum(src: &IpAddr, dst: &IpAddr, tcp_len: usize) -> u32 {
         }
         _ => {}
     }
-    acc += PROTO_TCP as u32;
-    acc += tcp_len as u32;
+    acc += proto as u32;
+    acc += l4_len as u32;
     acc
 }
 
@@ -254,6 +361,7 @@ mod tests {
         let pseudo = pseudo_header_sum(
             &IpAddr::V4(*src.ip()),
             &IpAddr::V4(*dst.ip()),
+            PROTO_TCP,
             20 + payload.len(),
         );
         let tc = checksum(&p[20..], pseudo);
@@ -264,7 +372,12 @@ mod tests {
     /// A correctly-formed packet's checksums verify to zero (sum of all words incl. checksum == FFFF).
     fn ipv4_checksums_ok(p: &[u8]) -> bool {
         let ip_ok = checksum(&p[..20], 0) == 0;
-        let pseudo = pseudo_header_sum(&read_ip(p, 12, 4), &read_ip(p, 16, 4), p.len() - 20);
+        let pseudo = pseudo_header_sum(
+            &read_ip(p, 12, 4),
+            &read_ip(p, 16, 4),
+            PROTO_TCP,
+            p.len() - 20,
+        );
         let tcp_ok = checksum(&p[20..], pseudo) == 0;
         ip_ok && tcp_ok
     }
@@ -333,6 +446,50 @@ mod tests {
             rewrite_tcp(&mut p, v6, "1.1.1.1:1".parse().unwrap()),
             Err(RewriteError::FamilyMismatch)
         );
+    }
+
+    #[test]
+    fn build_udp_round_trips_through_udp_endpoints() {
+        for (src, dst, payload) in [
+            ("10.0.0.1:51000", "8.8.8.8:53", &b"dns query"[..]),
+            (
+                "[2001:db8::1]:51000",
+                "[2606:4700:4700::1111]:53",
+                &b"odd!"[..],
+            ),
+            ("10.0.0.1:1", "1.2.3.4:5", &b""[..]),
+        ] {
+            let src: SocketAddr = src.parse().unwrap();
+            let dst: SocketAddr = dst.parse().unwrap();
+            let mut out = Vec::new();
+            build_udp(src, dst, payload, &mut out).unwrap();
+
+            assert_eq!(ip_protocol(&out), Some(PROTO_UDP));
+            let (s, d, off) = udp_endpoints(&out).unwrap();
+            assert_eq!((s, d), (src, dst));
+            assert_eq!(&out[off..], payload);
+
+            // UDP checksum verifies to zero over the segment (with pseudo-header).
+            let l4 = if src.is_ipv6() { 40 } else { 20 };
+            let pseudo = pseudo_header_sum(&src.ip(), &dst.ip(), PROTO_UDP, out.len() - l4);
+            assert_eq!(checksum(&out[l4..], pseudo), 0, "udp checksum invalid");
+        }
+    }
+
+    #[test]
+    fn ip_protocol_classifies_tcp_vs_udp() {
+        let tcp = ipv4_tcp(v4("10.0.0.1:1"), v4("1.1.1.1:1"), b"");
+        assert_eq!(ip_protocol(&tcp), Some(6));
+        let mut out = Vec::new();
+        build_udp(
+            "10.0.0.1:1".parse().unwrap(),
+            "1.1.1.1:1".parse().unwrap(),
+            b"",
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(ip_protocol(&out), Some(17));
+        assert_eq!(udp_endpoints(&tcp), Err(RewriteError::NotUdp));
     }
 
     #[test]

@@ -14,10 +14,12 @@
 //! - [`rewrite`] — in-place TCP/IP header rewrite + checksum recompute. **Built.**
 //! - [`pump`] — the [`Gateway`](pump::Gateway): classify + rewrite each packet (app→listener,
 //!   listener→app) and resolve accepted connections back to their original endpoints. **Built.**
-//! - [`stack`] — [`SystemNetstack`](stack::SystemNetstack): the live wiring (TUN pump loop +
-//!   kernel listener accept loop + reaper) implementing [`Netstack`](super::Netstack). **Built.**
+//! - [`stack`] — [`SystemNetstack`]: the live wiring (TUN pump loop +
+//!   kernel listener accept loop + reaper) implementing [`Netstack`](super::Netstack). **Built +
+//!   live-gated; eliminates the concurrent-download collapse (see `docs/system-stack-design.md`).**
 //! - `[tun] stack = "system"` config knob + selection in [`build`](super::build). **Built.**
-//! - Live netns gate + the system-vs-userspace A/B benchmark — *next chunk*.
+//! - NAT lifecycle (FIN/RST removal) + the **mixed stack** (UDP via the proxy's datagram path, so
+//!   DNS works). **Built.** Remaining: pump parallelism / GSO for single-stream peak; IPv6.
 //!
 //! Feature-gated behind `system-stack` (off by default; desktop-only — Linux/macOS). The proxy core
 //! and transports are untouched: a system-stack flow is a kernel `TcpStream` surfaced as the same

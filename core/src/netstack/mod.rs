@@ -76,7 +76,7 @@ pub struct UdpDatagram {
 pub type UdpSurface = (mpsc::Receiver<UdpDatagram>, mpsc::Sender<UdpDatagram>);
 
 /// The netstack surface our proxy depends on. `netstack-smoltcp` is one impl; the kernel-TCP
-/// [`system`] stack is another, selected by config (see [`build`]).
+/// `system` stack is another, selected by config (see [`build`]).
 #[async_trait]
 pub trait Netstack: Send {
     /// Yield the next accepted TCP flow, or `None` once the netstack has shut down.
@@ -94,8 +94,8 @@ impl Netstack for Box<dyn Netstack> {
 }
 
 /// Build the configured netstack over `tun`: the userspace smoltcp stack (default) or the kernel
-/// [`system`] stack. Returns the TCP netstack plus the UDP surface to drive the UDP proxy — `None`
-/// for the system stack, which is TCP-only for now (UDP/ICMP is a later chunk).
+/// `system` stack. Returns the TCP netstack plus the UDP surface that drives the UDP proxy (both
+/// stacks supply one — the system stack's is the "mixed" datagram path).
 pub fn build(
     tun: Arc<Tun>,
     config: &crate::config::Config,
@@ -117,8 +117,9 @@ fn build_system(
     config: &crate::config::Config,
 ) -> io::Result<(Box<dyn Netstack>, Option<UdpSurface>)> {
     // IPv4 only for now; the tun's configured address is the listener/server address.
-    let ns = system::SystemNetstack::new(tun, Some(config.tun.addr), None)?;
-    Ok((Box::new(ns), None))
+    let mut ns = system::SystemNetstack::new(tun, Some(config.tun.addr), None)?;
+    let udp = ns.take_udp(); // the "mixed" stack: kernel TCP + the proxy's UDP datagram path
+    Ok((Box::new(ns), udp))
 }
 
 /// Without the feature, selecting `stack = system` is a hard error rather than a silent fallback.

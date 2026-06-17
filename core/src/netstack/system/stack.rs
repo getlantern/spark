@@ -2,9 +2,9 @@
 //! TUN + a kernel TCP listener.
 //!
 //! Three tasks share the [`Gateway`] (behind a fast, never-held-across-`.await` `std::sync::Mutex`):
-//! - **pump** — reads each IP packet from the TUN, runs [`Gateway::process_tcp`], writes the
-//!   rewritten packet back. Non-TCP packets are dropped for now (TCP-only; UDP/ICMP — i.e. the
-//!   "mixed" stack — is a later chunk, so DNS over this stack won't resolve yet).
+//! - **pump** — reads each IP packet from the TUN and, by protocol: TCP → [`Gateway::process_tcp`]
+//!   rewrite + write back; UDP → extract a `UdpDatagram` to the proxy's UDP loop and inject its
+//!   replies (the "mixed" stack, so DNS works). ICMP/other are dropped.
 //! - **accept loop** (one per bound listener) — `accept()`s a kernel `TcpStream`, resolves its peer
 //!   (`gateway:natPort`) back to the original `(client, target)` via [`Gateway::resolve_accept`],
 //!   and surfaces it as a [`TcpFlow`] for the proxy. The stream *is* a real kernel socket.
@@ -27,11 +27,15 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use super::pump::{Gateway, PumpAction};
-use crate::netstack::{Netstack, TcpFlow};
+use super::rewrite;
+use crate::netstack::{Netstack, TcpFlow, UdpDatagram, UdpSurface};
 use crate::tun::Tun;
 
 /// Accepted flows buffered for the proxy before the accept loop backpressures.
 const ACCEPT_CHANNEL_DEPTH: usize = 256;
+/// Depth of the UDP datagram channels (inbound to the proxy, and replies back). UDP is lossy, so a
+/// full inbound channel drops rather than blocking the pump.
+const UDP_CHANNEL_DEPTH: usize = 1024;
 /// How often the idle-NAT reaper runs.
 const REAPER_INTERVAL: Duration = Duration::from_secs(300);
 /// Evict an *active* NAT mapping after this much silence. Generous: evicting a live (but quiet)
@@ -45,6 +49,8 @@ const NAT_CLOSING_TIMEOUT: Duration = Duration::from_secs(60);
 /// A [`Netstack`] in which the host kernel owns TCP; see the module docs.
 pub struct SystemNetstack {
     accept_rx: mpsc::Receiver<TcpFlow>,
+    /// The UDP surface for the proxy's UDP loop, taken once via [`Self::take_udp`].
+    udp: Option<UdpSurface>,
     /// pump + accept loop(s) + reaper. Aborted on drop.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -85,11 +91,18 @@ impl SystemNetstack {
         }
 
         let gateway = Arc::new(Mutex::new(Gateway::new(v4, v6)));
+        // UDP surface: the pump extracts inbound datagrams into `udp_in_tx` (proxy reads
+        // `udp_in_rx`); the proxy's replies arrive on `udp_reply_rx` for the pump to inject.
+        let (udp_in_tx, udp_in_rx) = mpsc::channel::<UdpDatagram>(UDP_CHANNEL_DEPTH);
+        let (udp_reply_tx, udp_reply_rx) = mpsc::channel::<UdpDatagram>(UDP_CHANNEL_DEPTH);
+
         let mut tasks = Vec::with_capacity(listeners.len() + 2);
         tasks.push(tokio::spawn(pump_loop(
             Arc::clone(&tun),
             Arc::clone(&gateway),
             mtu,
+            udp_in_tx,
+            udp_reply_rx,
         )));
         for listener in listeners {
             tasks.push(tokio::spawn(accept_loop(
@@ -100,7 +113,19 @@ impl SystemNetstack {
         }
         tasks.push(tokio::spawn(reaper_loop(Arc::clone(&gateway))));
 
-        Ok(Self { accept_rx, tasks })
+        Ok(Self {
+            accept_rx,
+            udp: Some((udp_in_rx, udp_reply_tx)),
+            tasks,
+        })
+    }
+
+    /// Take the UDP surface (inbound datagram receiver + reply sender) for the proxy's UDP loop.
+    /// Returns `Some` only the first time, mirroring [`SmoltcpNetstack::take_udp`].
+    ///
+    /// [`SmoltcpNetstack::take_udp`]: crate::netstack::SmoltcpNetstack::take_udp
+    pub fn take_udp(&mut self) -> Option<UdpSurface> {
+        self.udp.take()
     }
 }
 
@@ -133,29 +158,74 @@ fn lock(gateway: &Mutex<Gateway>) -> std::sync::MutexGuard<'_, Gateway> {
     gateway.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Read → rewrite → write back. The lock is taken only for the synchronous `process_tcp`, never
-/// across the TUN `.await`s.
-async fn pump_loop(tun: Arc<Tun>, gateway: Arc<Mutex<Gateway>>, mtu: usize) {
+/// The TUN ↔ kernel pump. Reads each IP packet and, by protocol: TCP → rewrite via the gateway and
+/// write back; UDP → extract a [`UdpDatagram`] to the proxy (the "mixed" stack). Concurrently
+/// injects UDP replies from the proxy as fresh UDP packets onto the TUN. The gateway lock is taken
+/// only for the synchronous classify/rewrite, never across a TUN `.await`.
+async fn pump_loop(
+    tun: Arc<Tun>,
+    gateway: Arc<Mutex<Gateway>>,
+    mtu: usize,
+    udp_in: mpsc::Sender<UdpDatagram>,
+    mut udp_reply_rx: mpsc::Receiver<UdpDatagram>,
+) {
     let mut buf = vec![0u8; mtu.max(1500)];
+    let mut reply_buf = Vec::with_capacity(mtu.max(1500));
     loop {
-        let n = match tun.recv(&mut buf).await {
-            Ok(0) => continue,
-            Ok(n) => n,
-            Err(e) => {
-                warn!(error = %e, "system stack: TUN recv failed; stopping pump");
-                break;
+        tokio::select! {
+            r = tun.recv(&mut buf) => {
+                let n = match r {
+                    Ok(0) => continue,
+                    Ok(n) => n,
+                    Err(e) => {
+                        warn!(error = %e, "system stack: TUN recv failed; stopping pump");
+                        break;
+                    }
+                };
+                match rewrite::ip_protocol(&buf[..n]) {
+                    Some(6) => {
+                        let action = lock(&gateway).process_tcp(&mut buf[..n], Instant::now());
+                        if action == PumpAction::WriteBack {
+                            if let Err(e) = tun.send(&buf[..n]).await {
+                                warn!(error = %e, "system stack: TUN send failed; stopping pump");
+                                break;
+                            }
+                        }
+                    }
+                    Some(17) => extract_udp(&buf[..n], &gateway, &udp_in),
+                    _ => {} // ICMP/other: not handled by the system stack — dropped.
+                }
             }
-        };
-        let action = lock(&gateway).process_tcp(&mut buf[..n], Instant::now());
-        if action == PumpAction::WriteBack {
-            if let Err(e) = tun.send(&buf[..n]).await {
-                warn!(error = %e, "system stack: TUN send failed; stopping pump");
-                break;
+            reply = udp_reply_rx.recv() => {
+                let Some(reply) = reply else { break }; // proxy gone
+                // Inject as src = the dialed target, dst = the app — the reply the app expects.
+                if rewrite::build_udp(reply.original_dst, reply.client_src, &reply.payload, &mut reply_buf).is_ok() {
+                    if let Err(e) = tun.send(&reply_buf).await {
+                        warn!(error = %e, "system stack: TUN send (udp reply) failed; stopping pump");
+                        break;
+                    }
+                }
             }
         }
-        // Passthrough/Drop: dropped. UDP/ICMP over the system stack is a later chunk.
     }
     debug!("system stack: pump ended");
+}
+
+/// Parse an inbound UDP packet and, if it targets a routable destination, hand it to the proxy's UDP
+/// loop. Lossy by design: a full inbound channel drops the datagram rather than blocking the pump.
+fn extract_udp(pkt: &[u8], gateway: &Mutex<Gateway>, udp_in: &mpsc::Sender<UdpDatagram>) {
+    let Ok((src, dst, payload_off)) = rewrite::udp_endpoints(pkt) else {
+        return;
+    };
+    if !lock(gateway).intercept_udp(src, dst) {
+        return; // not a routable proxy target — drop
+    }
+    let datagram = UdpDatagram {
+        client_src: src,
+        original_dst: dst,
+        payload: pkt[payload_off..].to_vec(),
+    };
+    let _ = udp_in.try_send(datagram); // drop if full/closed (UDP is lossy)
 }
 
 /// Accept kernel connections and surface each as a [`TcpFlow`], resolving the original endpoints

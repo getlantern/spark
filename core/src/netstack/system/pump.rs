@@ -132,6 +132,23 @@ impl Gateway {
         }
     }
 
+    /// Whether a UDP packet `src -> dst` should be intercepted and proxied (vs. passed through):
+    /// we serve `src`'s family and `dst` is a routable target that isn't one of our own addresses.
+    /// UDP needs no NAT entry here — the proxy's UDP path keys flows by `(client, target)`.
+    pub fn intercept_udp(&self, src: SocketAddr, dst: SocketAddr) -> bool {
+        let fg = if src.is_ipv6() {
+            self.v6.as_ref()
+        } else {
+            self.v4.as_ref()
+        };
+        match fg {
+            Some(fg) => {
+                is_routable_target(dst.ip()) && dst.ip() != fg.server && dst.ip() != fg.gateway
+            }
+            None => false,
+        }
+    }
+
     /// Resolve an accepted connection's peer address to its original `(client, target)`. The accept
     /// loop calls this with the kernel `TcpStream`'s peer (`gateway:natPort`) to learn the upstream
     /// to dial and the client to attribute the flow to.
