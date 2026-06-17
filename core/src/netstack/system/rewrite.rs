@@ -128,8 +128,10 @@ pub fn tcp_endpoints(pkt: &[u8]) -> Result<(SocketAddr, SocketAddr), RewriteErro
     tcp_header(pkt).map(|(s, d, _)| (s, d))
 }
 
-/// Rewrite `pkt`'s TCP 4-tuple to `new_src`/`new_dst` in place and recompute the IPv4 (if any) and
-/// TCP checksums. Both replacement addresses must match the packet's family.
+/// Rewrite `pkt`'s TCP 4-tuple to `new_src`/`new_dst` in place, **incrementally** fixing the IPv4
+/// (if any) and TCP checksums (RFC 1624) — O(1) in the changed fields rather than O(payload), since
+/// only the addresses + ports change. Requires the packet's existing checksums to be valid (true
+/// for non-offloaded packets read from a TUN). Both replacement addresses must match the family.
 pub fn rewrite_tcp(
     pkt: &mut [u8],
     new_src: SocketAddr,
@@ -140,26 +142,49 @@ pub fn rewrite_tcp(
         return Err(RewriteError::FamilyMismatch);
     }
 
+    // Snapshot the old fields, then write the new ones; the checksum deltas use old vs. new bytes.
+    let mut old_src = [0u8; 16];
+    let mut old_dst = [0u8; 16];
+    old_src[..l.addr_len].copy_from_slice(&pkt[l.ip_src..l.ip_src + l.addr_len]);
+    old_dst[..l.addr_len].copy_from_slice(&pkt[l.ip_dst..l.ip_dst + l.addr_len]);
+    let old_sport = [pkt[l.tcp], pkt[l.tcp + 1]];
+    let old_dport = [pkt[l.tcp + 2], pkt[l.tcp + 3]];
+
     write_ip(pkt, l.ip_src, &new_src.ip());
     write_ip(pkt, l.ip_dst, &new_dst.ip());
-    pkt[l.tcp..l.tcp + 2].copy_from_slice(&new_src.port().to_be_bytes());
-    pkt[l.tcp + 2..l.tcp + 4].copy_from_slice(&new_dst.port().to_be_bytes());
+    let new_sport = new_src.port().to_be_bytes();
+    let new_dport = new_dst.port().to_be_bytes();
+    pkt[l.tcp..l.tcp + 2].copy_from_slice(&new_sport);
+    pkt[l.tcp + 2..l.tcp + 4].copy_from_slice(&new_dport);
 
-    // IPv4 header checksum (covers the addresses we just changed). IPv6 has none.
+    let (a, n) = (l.ip_src, l.addr_len);
+    let new_src_b = {
+        let mut b = [0u8; 16];
+        b[..n].copy_from_slice(&pkt[a..a + n]);
+        b
+    };
+    let new_dst_b = {
+        let mut b = [0u8; 16];
+        b[..n].copy_from_slice(&pkt[l.ip_dst..l.ip_dst + n]);
+        b
+    };
+
+    // IPv4 header checksum covers the addresses only (not ports). IPv6 has no header checksum.
     if let Some(off) = l.ip_checksum {
-        pkt[off] = 0;
-        pkt[off + 1] = 0;
-        let csum = checksum(&pkt[..l.tcp], 0);
-        pkt[off..off + 2].copy_from_slice(&csum.to_be_bytes());
+        let mut c = u16::from_be_bytes([pkt[off], pkt[off + 1]]);
+        c = csum_replace(c, &old_src[..n], &new_src_b[..n]);
+        c = csum_replace(c, &old_dst[..n], &new_dst_b[..n]);
+        pkt[off..off + 2].copy_from_slice(&c.to_be_bytes());
     }
 
-    // TCP checksum: pseudo-header (addresses + protocol + TCP length) over the TCP segment.
-    let tcp_len = pkt.len() - l.tcp;
-    pkt[l.tcp + 16] = 0;
-    pkt[l.tcp + 17] = 0;
-    let pseudo = pseudo_header_sum(&new_src.ip(), &new_dst.ip(), PROTO_TCP, tcp_len);
-    let csum = checksum(&pkt[l.tcp..], pseudo);
-    pkt[l.tcp + 16..l.tcp + 18].copy_from_slice(&csum.to_be_bytes());
+    // TCP checksum covers the pseudo-header (addresses) + the ports; payload is unchanged.
+    let toff = l.tcp + 16;
+    let mut c = u16::from_be_bytes([pkt[toff], pkt[toff + 1]]);
+    c = csum_replace(c, &old_src[..n], &new_src_b[..n]);
+    c = csum_replace(c, &old_dst[..n], &new_dst_b[..n]);
+    c = csum_replace(c, &old_sport, &new_sport);
+    c = csum_replace(c, &old_dport, &new_dport);
+    pkt[toff..toff + 2].copy_from_slice(&c.to_be_bytes());
     Ok(())
 }
 
@@ -334,6 +359,25 @@ fn fold(mut acc: u32) -> u16 {
     acc as u16
 }
 
+/// RFC 1624 incremental checksum update for one 16-bit word changing `old` → `new`:
+/// `HC' = ~(~HC + ~old + new)` in one's-complement 16-bit arithmetic.
+fn csum_replace_word(csum: u16, old: u16, new: u16) -> u16 {
+    !fold((!csum as u32) + (!old as u32) + (new as u32))
+}
+
+/// Apply [`csum_replace_word`] across an even-length field changing `old` → `new` (e.g. a 4/16-byte
+/// address or a 2-byte port), threading the running checksum word by word.
+fn csum_replace(mut csum: u16, old: &[u8], new: &[u8]) -> u16 {
+    for (o, n) in old.chunks_exact(2).zip(new.chunks_exact(2)) {
+        csum = csum_replace_word(
+            csum,
+            u16::from_be_bytes([o[0], o[1]]),
+            u16::from_be_bytes([n[0], n[1]]),
+        );
+    }
+    csum
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +452,25 @@ mod tests {
         assert!(
             ipv4_checksums_ok(&p),
             "checksums must still verify after rewrite"
+        );
+    }
+
+    #[test]
+    fn incremental_rewrite_matches_full_recompute() {
+        // `ipv4_tcp` builds checksums by full recompute; `rewrite_tcp` fixes them incrementally.
+        // Rewriting A's tuple to B's must yield exactly the packet a fresh full build of B produces.
+        let payload = b"some bytes here, odd?";
+        let mut a = ipv4_tcp(v4("10.0.0.2:51000"), v4("93.184.216.34:443"), payload);
+        rewrite_tcp(
+            &mut a,
+            "5.6.7.8:1234".parse().unwrap(),
+            "9.10.11.12:5678".parse().unwrap(),
+        )
+        .unwrap();
+        let b = ipv4_tcp(v4("5.6.7.8:1234"), v4("9.10.11.12:5678"), payload);
+        assert_eq!(
+            a, b,
+            "incremental rewrite must equal a from-scratch full recompute"
         );
     }
 
