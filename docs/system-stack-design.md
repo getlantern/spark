@@ -274,11 +274,27 @@ download becomes symmetric with upload. Confirms the thesis: independent kernel 
 poll loop, so the single-dispatch pathology cannot occur.
 
 The tradeoff: single-stream *upload* peak is lower (system ~1.2 vs userspace ~1.67) because the
-single pump task rewrites every packet — the pump is itself a serialization point (a future
-optimization: multiple pump tasks, or GSO on the pump). CPU is comparable (~130–140%). For real
-workloads (browsers open many concurrent downloads) the stable, collapse-free profile is the better
-trade. Caveats confirmed live: needs `rp_filter=0` on the redirected path, and NAT cleanup is still
-idle-eviction-only (no FIN/RST). TCP-only (UDP/DNS not yet over this stack).
+single pump task rewrites every packet — the pump is itself a serialization point. CPU is comparable
+(~130–140%). For real workloads (browsers open many concurrent downloads) the stable, collapse-free
+profile is the better trade.
+
+### Where the single-stream peak goes (2026-06-17)
+
+Chased the per-packet cost. Switched the pump's TCP checksum from full recompute (O(payload)) to an
+**incremental update** (RFC 1624, O(1) in the changed fields) and A/B'd it on one box, system stack:
+full-recompute 1.39/1.27 vs incremental 1.46/1.33 Gb/s (up, 1/4 streams) — **within run-to-run
+noise, CPU unchanged**. So the checksum was *not* the bottleneck; the **per-packet syscall overhead
+is** (`tun.recv` + `tun.send` per packet on the single pump task). The lever for the single-stream
+peak is therefore **syscall batching**:
+- **GSO/GRO via `IFF_VNET_HDR`** (Linux): the kernel hands/accepts large TSO super-buffers, so the
+  pump does one rewrite + one syscall per *batch* of segments. This is the right place for GSO (the
+  system-stack bottleneck is at the boundary GSO batches, unlike the userspace stack — §9 above).
+  The incremental checksum is kept because the vnet-header/csum-offload path *requires* incremental
+  pseudo-header adjustment (you can't full-recompute an offloaded checksum).
+- **Multiple pump tasks** (shard flows across N tasks) — orthogonal, also lifts the peak.
+
+Caveats confirmed live: needs `rp_filter=0` on the redirected path; NAT cleanup now handles FIN/RST;
+UDP/DNS work via the mixed stack.
 
 ## 10. Tradeoffs & alternatives
 

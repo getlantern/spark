@@ -297,9 +297,17 @@
   via `take_udp`), so DNS/UDP work over the kernel-TCP stack. **Live-gated on a netns droplet:** a
   socat UDP echo round-trips through the system stack ('SPARK-UDP-PING' returned), TCP sanity
   1494 Mbps. (3) **ADR `docs/adr/0002-system-netstack.md`** records the decision. 106 core tests
-  with `--features system-stack`; workspace + rustdoc green. **Remaining (non-blocking):** pump
-  parallelism / GSO-on-pump to lift the single-stream peak (~1.2 vs userspace ~1.67); IPv6 in the
-  selection path; `rp_filter` handling in production routing.
+  with `--features system-stack`; workspace + rustdoc green.
+- **System stack — incremental checksum + single-stream-peak finding 2026-06-17.** Switched the
+  pump's TCP checksum from full recompute to **incremental (RFC 1624)** — proven byte-equal to full
+  recompute (107 core tests). **On-box A/B (system stack):** full-recompute 1.39/1.27 vs incremental
+  1.46/1.33 Gb/s up (1/4 streams) — **within noise, CPU unchanged**, so the checksum was NOT the
+  bottleneck: **per-packet syscall overhead (`tun.recv`+`tun.send`) is.** The single-stream-peak
+  lever is therefore **syscall batching: GSO via `IFF_VNET_HDR` (Linux)** — and the system stack is
+  the *right* place for GSO (its bottleneck is at the boundary GSO batches; the userspace stack's
+  isn't). Incremental is kept as the GSO prerequisite (offloaded checksums must be adjusted
+  incrementally). See `docs/system-stack-design.md` §9. **Remaining (non-blocking):** GSO/vnet-header
+  (Linux) or multi-pump for the single-stream peak; IPv6 in the selection path; production `rp_filter`.
 - **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
   target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
   request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]
