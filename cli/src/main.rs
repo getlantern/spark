@@ -161,12 +161,16 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
     let name = tun.name().context("reading TUN device name")?;
     let mtu = tun.mtu();
 
-    match &config.transport.server {
-        Some(server) => {
-            info!(device = %name, mtu, addr = %config.tun.addr, %server, "TUN up — tunneling TCP+UDP through server; Ctrl-C to stop")
-        }
-        None => {
-            info!(device = %name, mtu, addr = %config.tun.addr, "TUN up — forwarding TCP+UDP directly (no tunnel); Ctrl-C to stop")
+    if let Some(anytls) = &config.transport.anytls {
+        info!(device = %name, mtu, addr = %config.tun.addr, server = %anytls.server, "TUN up — tunneling TCP through AnyTLS; Ctrl-C to stop")
+    } else {
+        match &config.transport.server {
+            Some(server) => {
+                info!(device = %name, mtu, addr = %config.tun.addr, %server, "TUN up — tunneling TCP+UDP through server; Ctrl-C to stop")
+            }
+            None => {
+                info!(device = %name, mtu, addr = %config.tun.addr, "TUN up — forwarding TCP+UDP directly (no tunnel); Ctrl-C to stop")
+            }
         }
     }
     let (tcp_transport, udp_transport) =

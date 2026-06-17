@@ -219,11 +219,19 @@
   spike AND via the productized `AnytlsTransport::dial` (dialing a resolved IP as the netstack would).
   Local interop (anytls-go server on 127.0.0.1) also green. The full protocol stack (frame/mux/
   padding-engine/auth/settings/handshake/boring-TLS) interops with the canonical Go implementation.
-  **Remaining: (a)** the full `sudo spark run` tun gate (tun→netstack→AnyTLS→DO→internet) — built +
-  config-ready; needs interactive sudo (handoff script `/tmp/spark-anytls-gate.sh`). **(b)** Chrome
-  fingerprint profile on the boring connector + CI JA4-drift check. **(c)** idle-session pool +
-  reconnect; UDP-over-AnyTLS (sing UoT v2); dynamic cmdUpdatePaddingScheme. **Cleanup:** destroy DO
-  droplet 578209897 after the gate (`doctl compute droplet delete 578209897`).
+  **FULL `sudo spark run` TUN GATE PASSED 2026-06-16. ✅** `curl https://1.1.1.1` → spark TUN
+  (utun14) → netstack (`dst=1.1.1.1:443`) → `AnytlsTransport` → DO server (159.89.39.6) →
+  1.1.1.1:443 → TLS → **HTTP 301** (Cloudflare's genuine redirect; a 301 *received* means the inner
+  TLS completed through the relay — a leak/failure would be a curl error, not a real status). The
+  spark product tunnels real TLS traffic through AnyTLS to a remote DO server, live-verified. Gate
+  script `/tmp/spark-anytls-gate.sh` (writes config with the detected egress, routes one dst into the
+  tun, curls, cleans up). Also fixed a cosmetic cli log ("no tunnel" while tunneling AnyTLS).
+  **M11 AnyTLS is functionally complete + live-gated end-to-end.** Follow-ups (not blockers): **(b)**
+  Chrome fingerprint profile on the boring connector (port a wreq-util-style profile) + CI JA4-drift
+  check — this is the ADR's anti-fingerprinting goal (current connector is vanilla boring = works but
+  identifiable). **(c)** idle-session pool + reconnect; UDP-over-AnyTLS (sing UoT v2); dynamic
+  cmdUpdatePaddingScheme; `cmdSYNACK` error reporting. **DO droplet 578209897** kept running for the
+  Chrome-profile gate; destroy when done (`doctl compute droplet delete 578209897`).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
