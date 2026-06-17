@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 
+use super::padding::PaddingScheme;
+
 /// Parsed/!built AnyTLS session settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -42,6 +44,12 @@ impl Settings {
     pub fn with_padding_md5(mut self, md5: impl Into<String>) -> Self {
         self.padding_md5 = Some(md5.into());
         self
+    }
+
+    /// Settings for `version`/`client` with `padding-md5` set from `scheme`'s md5 — the form the
+    /// client sends at session start.
+    pub fn for_scheme(version: u8, client: impl Into<String>, scheme: &PaddingScheme) -> Self {
+        Settings::new(version, client).with_padding_md5(scheme.md5())
     }
 
     /// Encode as the `cmdSettings` payload (`key=value` lines, `\n`-separated, no trailing newline).
@@ -133,6 +141,15 @@ mod tests {
         assert_eq!(s.version, 2);
         assert_eq!(s.client, "anytls/0.0.1");
         assert_eq!(s.padding_md5, None);
+    }
+
+    #[test]
+    fn for_scheme_sets_padding_md5_from_the_scheme() {
+        let scheme = PaddingScheme::default();
+        let s = Settings::for_scheme(2, "spark/0.1.0", &scheme);
+        assert_eq!(s.padding_md5.as_deref(), Some(scheme.md5().as_str()));
+        // The encoded payload carries it.
+        assert!(Settings::parse(&s.encode()).unwrap().padding_md5.is_some());
     }
 
     #[test]

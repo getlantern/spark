@@ -25,6 +25,7 @@
 //! `anytls/anytls-go` `proxy/padding/padding.go` + `proxy/session/session.go`.
 
 use bytes::{BufMut, Bytes, BytesMut};
+use md5::{Digest, Md5};
 
 use super::frame::{Command, HEADER_LEN, MAX_PAYLOAD};
 
@@ -114,6 +115,16 @@ impl PaddingScheme {
     /// The verbatim source text (for the `padding-md5` settings field).
     pub fn raw(&self) -> &str {
         &self.raw
+    }
+
+    /// MD5 of the raw scheme as lowercase hex — the `padding-md5` value in `cmdSettings`
+    /// (`fmt.Sprintf("%x", md5.Sum(rawScheme))` in anytls-go). Non-security: just lets the peer
+    /// detect a scheme mismatch and push a `cmdUpdatePaddingScheme`.
+    pub fn md5(&self) -> String {
+        Md5::digest(self.raw.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 }
 
@@ -468,5 +479,18 @@ mod tests {
         assert_eq!(recs[1].len(), 900);
         let total: usize = recs.iter().map(Bytes::len).sum();
         assert_eq!(total, 1000, "no waste added when payload exceeds the plan");
+    }
+
+    #[test]
+    fn md5_is_hex_deterministic_and_scheme_specific() {
+        let a = PaddingScheme::default().md5();
+        assert_eq!(a.len(), 32, "md5 is 32 hex chars");
+        assert!(a
+            .bytes()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        // Deterministic, and distinct from a different scheme (so the peer can detect a mismatch).
+        assert_eq!(a, PaddingScheme::default().md5());
+        let other = PaddingScheme::parse("stop=1\n0=1-1").unwrap().md5();
+        assert_ne!(a, other);
     }
 }

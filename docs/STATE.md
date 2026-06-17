@@ -174,10 +174,29 @@
   (12 new); clippy clean. **MD5 deliberately deferred:** `ring` has no MD5, so `padding-md5` (a
   non-security scheme identifier) is *passed into* `Settings`; its hash source is a chunk-4 dep
   decision (likely the `md-5` crate — needs sign-off per the no-new-deps rule).
-  **Next chunk (per ADR build order): (4)** wire **`btls`/`tokio-btls`** TLS under the session (the
-  writer calls `shape_records`; outbound backpressure becomes bounded) + auth/settings handshake +
-  the idle-session **pool** + the `Transport`/config wiring + `padding-md5` (md5 dep); then the live
-  gate (same curl/DNS gates as the TCP tunnel + the CI JA4-drift check).
+  **Chunk 4 STARTED 2026-06-16 — 4a (md5 plumbing) done, green.** Added `md-5` (RustCrypto, tiny,
+  pure-Rust; for the NON-security `padding-md5` identifier `ring` omits) to workspace+core.
+  `PaddingScheme::md5()` (lowercase-hex md5 of the raw scheme, = anytls-go `fmt.Sprintf("%x",
+  md5.Sum(raw))`) + `Settings::for_scheme(v, client, &scheme)`. 79 core tests pass (2 new); clippy
+  clean. **VERIFIED the full client handshake against anytls-go source** (`cmd/client/myclient.go`
+  `createOutboundConnection`, `main.go`, `proxy/session/{client,session}.go`) so 4b is de-risked:
+  (1) **auth record** is written by the *dialer* right after TLS connect — `sha256(password)(32) |
+  u16(paddingLen) | zeros(paddingLen)` where `paddingLen = GenerateRecordPayloadSizes(0)[0]` (the
+  packet-0 scheme size; default `0=30-30`→30) — THIS is why the `0=` line exists and the session
+  pktCounter starts at 1; (2) client `Session.Run`: buffering=true, send `cmdSettings`
+  {v,client,padding-md5} (buffered); (3) `OpenStream` sends `cmdSYN` (buffered), buffering=false;
+  (4) the consumer writes the **SOCKS5 target address** (`M.SocksaddrSerializer`, == spark's existing
+  `tcp_tunnel/header.rs::Address` grammar) as the stream's first bytes → flushes settings+syn+addr as
+  **packet 1** (shaped); (5) later writes = packets 2.. shaped while `pkt<stop`, then unpadded.
+  Idle-session pool: `NewClient(..., idleCheck=30s, idleTimeout=30s, minIdleSession)`; reuse newest
+  (`SkipList` keyed `MaxUint64-seq`), sweep on a timer.
+  **Remaining (per ADR): 4b** = the client-session handshake + the padding-applied writer (write auth,
+  buffer settings/SYN, route the writer through `shape_records` with the pktCounter/sendPadding-off-
+  at-stop), still generic over the byte stream → testable with a mock-server duplex. **4c** = the
+  **`btls`/`tokio-btls`** TLS connector with a Chrome profile (verify the btls SslConnector API +
+  the wreq-util-style profile; the big C/cmake dep — confirm build/CI/size impact) + the idle-session
+  **pool** + the `Transport`/`UdpTransport` impls + config selection. Then the **live gate** (same
+  curl/DNS gates as the TCP tunnel + the CI JA4-drift check).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.

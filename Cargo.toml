@@ -36,9 +36,11 @@ libc = "0.2"
 thiserror = "2"
 anyhow = "1"
 # Crypto primitives (CLAUDE.md locked stack): used for the AnyTLS auth record's SHA-256 and,
-# later, the rustls ring backend. NOT for MD5 (ring omits it) — the AnyTLS padding-md5 hash is
-# handled separately.
+# later, the rustls ring backend.
 ring = "0.17"
+# MD5 for the AnyTLS `padding-md5` settings field — a NON-security scheme identifier that `ring`
+# (intentionally) omits. RustCrypto's pure-Rust crate; not used for anything security-relevant.
+md-5 = "0.10"
 
 # Locked release profile (CLAUDE.md). Profiles only take effect from the workspace
 # root, so they live here, not in member manifests.
