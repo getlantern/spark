@@ -15,11 +15,26 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-/// A live NAT mapping: the original endpoints, plus when the flow was last seen (for idle eviction).
+/// FIN seen from the application (`app → target`) direction.
+const FIN_APP: u8 = 0b01;
+/// FIN seen from the peer (`target → app`, i.e. via the kernel listener) direction.
+const FIN_PEER: u8 = 0b10;
+
+/// A live NAT mapping: the original endpoints, when the flow was last seen (for idle eviction), and
+/// which directions have sent a FIN (so a gracefully-closing connection is reaped on a short
+/// timeout rather than the long idle one).
 struct Session {
     source: SocketAddr,
     destination: SocketAddr,
     last_seen: Instant,
+    fin: u8,
+}
+
+impl Session {
+    /// A connection that has FINed in both directions is closing — reclaim it on the short timeout.
+    fn is_closing(&self) -> bool {
+        self.fin == (FIN_APP | FIN_PEER)
+    }
 }
 
 /// Bidirectional source⇄natPort NAT table. Not thread-safe by itself; the netstack owns it behind
@@ -86,6 +101,7 @@ impl TcpNat {
                 source,
                 destination,
                 last_seen: now,
+                fin: 0,
             },
         );
         Some(port)
@@ -99,19 +115,42 @@ impl TcpNat {
         Some((s.source, s.destination))
     }
 
-    /// Drop the mapping for a synthetic `port` (e.g. on observed FIN/RST). No-op if absent.
+    /// Drop the mapping for a synthetic `port` (e.g. on an observed RST — the connection is
+    /// aborted). No-op if absent.
     pub fn remove(&mut self, port: u16) {
         if let Some(s) = self.by_port.remove(&port) {
             self.by_source.remove(&s.source);
         }
     }
 
-    /// Evict every mapping idle for at least `timeout`. Returns how many were removed.
-    pub fn evict_idle(&mut self, now: Instant, timeout: Duration) -> usize {
+    /// Record a FIN for a `port`'s session in the given direction, refreshing `last_seen`. Once both
+    /// directions have FINed the mapping becomes "closing" and is reaped on the short timeout.
+    pub fn note_fin(&mut self, port: u16, from_app: bool, now: Instant) {
+        if let Some(s) = self.by_port.get_mut(&port) {
+            s.fin |= if from_app { FIN_APP } else { FIN_PEER };
+            s.last_seen = now;
+        }
+    }
+
+    /// Evict mappings idle past their timeout: `closing` (both-FIN) sessions use the shorter
+    /// `closing_timeout`, all others the longer `active_timeout`. Returns how many were removed.
+    pub fn evict_idle(
+        &mut self,
+        now: Instant,
+        active_timeout: Duration,
+        closing_timeout: Duration,
+    ) -> usize {
         let stale: Vec<(u16, SocketAddr)> = self
             .by_port
             .iter()
-            .filter(|(_, s)| now.duration_since(s.last_seen) >= timeout)
+            .filter(|(_, s)| {
+                let timeout = if s.is_closing() {
+                    closing_timeout
+                } else {
+                    active_timeout
+                };
+                now.duration_since(s.last_seen) >= timeout
+            })
             .map(|(&port, s)| (port, s.source))
             .collect();
         for (port, source) in &stale {
@@ -214,7 +253,7 @@ mod tests {
 
         // At t0+90s: `old` (idle 90s) evicts; `fresh` (idle 60s) is exactly at the threshold too.
         let evict_at = t0 + Duration::from_secs(90);
-        let removed = nat.evict_idle(evict_at, timeout);
+        let removed = nat.evict_idle(evict_at, timeout, timeout);
         assert_eq!(removed, 2);
         assert!(nat.is_empty());
         let _ = (old, fresh);
@@ -230,8 +269,43 @@ mod tests {
             .unwrap();
         // Touch it at t0+50s, then evict at t0+90s: idle is only 40s → survives.
         nat.lookup_back(p, t0 + Duration::from_secs(50));
-        assert_eq!(nat.evict_idle(t0 + Duration::from_secs(90), timeout), 0);
+        assert_eq!(
+            nat.evict_idle(t0 + Duration::from_secs(90), timeout, timeout),
+            0
+        );
         assert_eq!(nat.len(), 1);
+    }
+
+    #[test]
+    fn both_fins_make_a_session_closing_and_reaped_early() {
+        let mut nat = TcpNat::new();
+        let t0 = Instant::now();
+        let active = Duration::from_secs(7200);
+        let closing = Duration::from_secs(60);
+        let p = nat
+            .lookup(sa("10.0.0.2:5000"), sa("1.1.1.1:443"), t0)
+            .unwrap();
+
+        // One FIN: not closing yet → still on the long active timeout, survives at +120s.
+        nat.note_fin(p, true, t0);
+        assert_eq!(
+            nat.evict_idle(t0 + Duration::from_secs(120), active, closing),
+            0
+        );
+
+        // Both FINs: now closing → reaped once idle past the short closing timeout.
+        nat.note_fin(p, false, t0 + Duration::from_secs(1));
+        assert_eq!(
+            nat.evict_idle(t0 + Duration::from_secs(30), active, closing),
+            0,
+            "still within the closing grace"
+        );
+        assert_eq!(
+            nat.evict_idle(t0 + Duration::from_secs(120), active, closing),
+            1,
+            "reaped after the closing timeout"
+        );
+        assert!(nat.is_empty());
     }
 
     #[test]

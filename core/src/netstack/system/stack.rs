@@ -10,9 +10,10 @@
 //!   and surfaces it as a [`TcpFlow`] for the proxy. The stream *is* a real kernel socket.
 //! - **reaper** — periodically evicts idle NAT mappings.
 //!
-//! Caveat for the live gate: redirected packets re-enter the host on the TUN destined to a local
-//! address; Linux reverse-path filtering (`rp_filter`) may drop them, and FIN/RST-driven NAT
-//! removal isn't implemented yet (idle eviction only). Both are addressed when this is gated.
+//! NAT lifecycle: the pump removes a mapping on RST and marks both-FIN connections "closing" so the
+//! reaper reclaims them on a short timeout (with a long idle timeout as the safety net). Caveat
+//! confirmed at the live gate: redirected packets re-enter the host on the TUN destined to a local
+//! address, so Linux reverse-path filtering (`rp_filter`) must be relaxed on that path.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -33,9 +34,13 @@ use crate::tun::Tun;
 const ACCEPT_CHANNEL_DEPTH: usize = 256;
 /// How often the idle-NAT reaper runs.
 const REAPER_INTERVAL: Duration = Duration::from_secs(300);
-/// Evict a NAT mapping after this much silence. Generous: evicting a live (but quiet) connection's
-/// mapping breaks it, and FIN/RST-driven removal isn't implemented yet.
+/// Evict an *active* NAT mapping after this much silence. Generous: evicting a live (but quiet)
+/// connection's mapping breaks it. RST removes immediately and a both-FIN close uses the shorter
+/// timeout below, so this is just the safety net for connections that vanish without a clean close.
 const NAT_IDLE_TIMEOUT: Duration = Duration::from_secs(7200);
+/// Evict a gracefully-closing (both-FIN) mapping after this much silence — short, to reclaim the
+/// synthetic port promptly while still covering any final ACK/retransmit.
+const NAT_CLOSING_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A [`Netstack`] in which the host kernel owns TCP; see the module docs.
 pub struct SystemNetstack {
@@ -192,7 +197,8 @@ async fn reaper_loop(gateway: Arc<Mutex<Gateway>>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let removed = lock(&gateway).evict_idle(Instant::now(), NAT_IDLE_TIMEOUT);
+        let removed =
+            lock(&gateway).evict_idle(Instant::now(), NAT_IDLE_TIMEOUT, NAT_CLOSING_TIMEOUT);
         if removed > 0 {
             debug!(removed, "system stack: evicted idle NAT mappings");
         }

@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use super::nat::TcpNat;
-use super::rewrite::{rewrite_tcp, tcp_endpoints};
+use super::rewrite::{rewrite_tcp, tcp_header, TCP_FIN, TCP_RST};
 
 /// What the caller (the TUN loop) should do with a packet after [`Gateway::process_tcp`].
 #[derive(Debug, PartialEq, Eq)]
@@ -84,18 +84,28 @@ impl Gateway {
     ///   and rewrite to `src = gateway:natPort`, `dst = server:listener_port` so the kernel routes
     ///   it to the local listener (whose `accept()` peer port is the `natPort`).
     pub fn process_tcp(&mut self, pkt: &mut [u8], now: Instant) -> PumpAction {
-        let Ok((src, dst)) = tcp_endpoints(pkt) else {
+        let Ok((src, dst, flags)) = tcp_header(pkt) else {
             return PumpAction::Passthrough; // not TCP / unparseable
         };
         let Some(fg) = self.family_mut(src.is_ipv6()) else {
             return PumpAction::Passthrough; // family we don't serve
         };
+        let (rst, fin) = (flags & TCP_RST != 0, flags & TCP_FIN != 0);
 
         if src.ip() == fg.server && src.port() == fg.listener_port {
             // listener → app: dst is gateway:natPort.
-            match fg.nat.lookup_back(dst.port(), now) {
+            let nat_port = dst.port();
+            match fg.nat.lookup_back(nat_port, now) {
                 Some((client, target)) => {
                     let _ = rewrite_tcp(pkt, target, client);
+                    // Connection lifecycle: RST aborts (drop the mapping now); FIN (from the peer
+                    // side) marks half of a graceful close. Done after the rewrite so the packet
+                    // still gets forwarded.
+                    if rst {
+                        fg.nat.remove(nat_port);
+                    } else if fin {
+                        fg.nat.note_fin(nat_port, false, now);
+                    }
                     PumpAction::WriteBack
                 }
                 None => PumpAction::Drop, // stale/unknown mapping
@@ -110,6 +120,11 @@ impl Gateway {
                     let new_src = SocketAddr::new(fg.gateway, nat_port);
                     let new_dst = SocketAddr::new(fg.server, fg.listener_port);
                     let _ = rewrite_tcp(pkt, new_src, new_dst);
+                    if rst {
+                        fg.nat.remove(nat_port);
+                    } else if fin {
+                        fg.nat.note_fin(nat_port, true, now);
+                    }
                     PumpAction::WriteBack
                 }
                 None => PumpAction::Drop, // port space exhausted
@@ -130,14 +145,20 @@ impl Gateway {
             .lookup_back(peer.port(), now)
     }
 
-    /// Evict idle NAT mappings across both families; returns the number removed.
-    pub fn evict_idle(&mut self, now: Instant, timeout: Duration) -> usize {
+    /// Evict idle NAT mappings across both families (closing sessions on the shorter
+    /// `closing_timeout`); returns the number removed.
+    pub fn evict_idle(
+        &mut self,
+        now: Instant,
+        active_timeout: Duration,
+        closing_timeout: Duration,
+    ) -> usize {
         let mut n = 0;
         if let Some(fg) = self.v4.as_mut() {
-            n += fg.nat.evict_idle(now, timeout);
+            n += fg.nat.evict_idle(now, active_timeout, closing_timeout);
         }
         if let Some(fg) = self.v6.as_mut() {
-            n += fg.nat.evict_idle(now, timeout);
+            n += fg.nat.evict_idle(now, active_timeout, closing_timeout);
         }
         n
     }
@@ -174,6 +195,7 @@ fn is_routable_target(ip: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::rewrite::tcp_endpoints;
     use super::*;
 
     const PROTO_TCP: u8 = 6;
@@ -273,6 +295,26 @@ mod tests {
         );
         g.process_tcp(&mut back, now);
         assert_eq!(tcp_endpoints(&back).unwrap(), (target, client));
+    }
+
+    #[test]
+    fn rst_drops_the_mapping_after_forwarding() {
+        let mut g = gw();
+        let now = Instant::now();
+        let client = sa("10.0.0.1:50000");
+        let target = sa("93.184.216.34:443");
+
+        let mut syn = ipv4_tcp(client, target, b"");
+        g.process_tcp(&mut syn, now);
+        let nat_port = tcp_endpoints(&syn).unwrap().0.port();
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), nat_port);
+        assert!(g.resolve_accept(peer, now).is_some());
+
+        // An RST from the app: still rewritten/forwarded, but the mapping is gone afterward.
+        let mut rst = ipv4_tcp(client, target, b"");
+        rst[33] = 0x04; // RST
+        assert_eq!(g.process_tcp(&mut rst, now), PumpAction::WriteBack);
+        assert_eq!(g.resolve_accept(peer, now), None, "RST removed the mapping");
     }
 
     #[test]

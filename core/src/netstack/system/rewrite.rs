@@ -15,6 +15,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 /// Protocol number for TCP in the IPv4 `protocol` / IPv6 `next header` field.
 const PROTO_TCP: u8 = 6;
 
+/// TCP `FIN` flag (the connection's sender is done) in the flags byte.
+pub const TCP_FIN: u8 = 0x01;
+/// TCP `RST` flag (the connection is being aborted).
+pub const TCP_RST: u8 = 0x04;
+
 /// Why a packet could not be parsed/rewritten as TCP — the caller treats any of these as "not a
 /// rewritable TCP packet" and handles it on another path.
 #[derive(Debug, PartialEq, Eq)]
@@ -96,18 +101,26 @@ impl Layout {
     }
 }
 
-/// Read the TCP source and destination endpoints of `pkt` (for classification), or the reason it
-/// isn't a rewritable TCP packet.
-pub fn tcp_endpoints(pkt: &[u8]) -> Result<(SocketAddr, SocketAddr), RewriteError> {
+/// Read the TCP source, destination, and flags byte of `pkt` (for classification + connection
+/// lifecycle), or the reason it isn't a rewritable TCP packet. The flags byte carries
+/// [`TCP_FIN`]/[`TCP_RST`] etc.
+pub fn tcp_header(pkt: &[u8]) -> Result<(SocketAddr, SocketAddr, u8), RewriteError> {
     let l = Layout::parse(pkt)?;
     let src_ip = read_ip(pkt, l.ip_src, l.addr_len);
     let dst_ip = read_ip(pkt, l.ip_dst, l.addr_len);
     let src_port = u16::from_be_bytes([pkt[l.tcp], pkt[l.tcp + 1]]);
     let dst_port = u16::from_be_bytes([pkt[l.tcp + 2], pkt[l.tcp + 3]]);
+    let flags = pkt[l.tcp + 13]; // TCP flags byte
     Ok((
         SocketAddr::new(src_ip, src_port),
         SocketAddr::new(dst_ip, dst_port),
+        flags,
     ))
+}
+
+/// Read just the TCP endpoints of `pkt` (classification), discarding the flags.
+pub fn tcp_endpoints(pkt: &[u8]) -> Result<(SocketAddr, SocketAddr), RewriteError> {
+    tcp_header(pkt).map(|(s, d, _)| (s, d))
 }
 
 /// Rewrite `pkt`'s TCP 4-tuple to `new_src`/`new_dst` in place and recompute the IPv4 (if any) and
