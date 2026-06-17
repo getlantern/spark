@@ -17,6 +17,15 @@ prefix = 24
 protect_interface = "en0"
 # server = "203.0.113.1:8388"   # tunnel through a server; omit to dial destinations directly
 
+# AnyTLS transport (requires a build with the `anytls` feature). When set, it takes precedence
+# over the plain `server` tunnel above and carries both TCP and UDP (UDP-over-TCP v2). It defeats
+# TLS-in-TLS fingerprinting with a Chrome-mimicking BoringSSL ClientHello plus a server-pushable
+# record-padding scheme. Point it at an anytls-go server.
+# [transport.anytls]
+# server = "203.0.113.1:8443"   # the AnyTLS server's host:port
+# password = "your-shared-secret"
+# sni = "www.example.com"       # TLS SNI; omit to use the server IP (set this to a real-looking host)
+
 [udp]
 idle_timeout_secs = 60   # reclaim a UDP NAT association after this much silence
 
