@@ -278,6 +278,39 @@ only). (Aside: upgrading `water-rs` to wasmtime ≥30 + the Pulley interpreter a
 a no-JIT/iOS-safe WATER, but Pulley is an *addition* to wasmtime — it keeps the 15–20 MB and still
 fails the lean bar; `wasmi` is the only lean path, which is why the ABI must be ported to it.)
 
+### 8.3 Prototype — PROVEN end-to-end (2026-06-17, `/tmp/wt-proto`)
+
+A minimal `wasmi` + `wasmi_wasi` host inserted a real host TCP socket as a guest WASI **fd 3**; a
+`wasm32-wasip1` reactor guest did `fd_write`+`fd_read` on it; the host's echo server received the
+bytes and the guest read them back → **PASS**. This makes the de-risked mechanism (WATER's "host owns
+the socket, guest does WASI fd I/O on it") *empirical* on the lean runtime — not just inferred.
+
+The working API recipe (pin `wasmi`/`cap-std` to `wasmi_wasi`'s exact versions — shared engine +
+cap-std types):
+```rust
+// host (wasmi = wasmi_wasi = "=2.0.0-beta.2", cap-std = "=3.4.5"):
+let mut linker: Linker<WasiCtx> = Linker::new(&engine);
+wasmi_wasi::add_to_linker(&mut linker, |ctx: &mut WasiCtx| ctx)?;     // = add_wasi_snapshot_preview1
+let wasi = wasmi_wasi::sync::WasiCtxBuilder::new().inherit_stdio().build();
+let cap = cap_std::net::TcpStream::from_std(upstream_tcp);            // the protected upstream dial
+let fd  = wasi.push_file(Box::new(wasmi_wasi::sync::net::TcpStream::from_cap_std(cap)),
+                         wasmi_wasi::wasi_common::file::FileAccessMode::all())?;  // -> guest fd 3
+let inst = linker.instantiate_and_start(&mut store, &module)?;        // reactor: no start section
+inst.get_typed_func::<(),()>(&store, "_initialize").ok().map(|f| f.call(&mut store, ()));
+let code = inst.get_typed_func::<(),i32>(&store, "run")?.call(&mut store, ())?;
+```
+```rust
+// guest (cdylib, wasm32-wasip1): a reactor exporting run() that does fd I/O on the inserted fd.
+#[no_mangle] pub extern "C" fn run() -> i32 { /* File::from_raw_fd(3); write/read */ }
+```
+
+Scope of the proof + what's next: this validates the **mechanism** (socket-as-guest-fd on
+wasmi+wasmi_wasi, sync). It is **not yet** the full WATER v1 ABI (it uses a custom `run` export +
+fd-3-by-convention, not WATER's `_water_dial`/`water_dial` host fns), nor async. Next increments:
+(1) the WATER v1 ABI host fns → load a real WATM; (2) the `wasi-common` tokio variant for async I/O;
+(3) wire into spark's `Transport` (host pre-dials the protected upstream, inserts the fd) + Ed25519
+module signing. The PoC lives in `/tmp/wt-proto` (throwaway; the recipe above is the durable artifact).
+
 ## 9. Platform matrix
 
 | platform | tier 1 (config) | tier 2 (`wasmi`, interpreted WASM) |

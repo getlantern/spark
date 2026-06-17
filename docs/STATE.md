@@ -360,7 +360,15 @@
   `wasi-common` 17→36 API drift + `wasmi_wasi` is beta. **Path A (WATER-ABI-compat on wasmi) is
   de-risked.** Size caveat: bare wasmi was +0.84 MB but Path A adds the WASI stack
   (wasmi_wasi+wasi-common+cap-std+wiggle) → several MB, still ≪ wasmtime's 15-20 MB; a no-WASI Path B
-  stays near +0.84 MB. No code yet; promote to an ADR when committed.
+  stays near +0.84 MB. **Decision recorded: ADR 0003** (`docs/adr/0003-dynamic-transports.md`,
+  Accepted) — Tier 1 config-composition first, Tier 2 WATER-ABI-compat on wasmi. Pushed to origin.
+  **PROTOTYPE PROVEN 2026-06-17 (`/tmp/wt-proto`, throwaway):** a wasmi + wasmi_wasi host inserted a
+  real TCP socket as guest fd 3 via `push_file`; a wasm32-wasip1 reactor did fd_write/fd_read on it;
+  echo round-trip PASSED → WATER's data path runs on wasmi+wasmi_wasi (the working API recipe is in
+  doc §8.3, the durable artifact). Scope: mechanism only (sync, custom `run` export + fd-3-by-
+  convention — NOT yet the full WATER v1 ABI, not async). **Next increments:** (1) WATER v1 ABI host
+  fns → load a real WATM; (2) wasi-common tokio variant for async; (3) wire into spark `Transport`
+  (host pre-dials protected upstream + inserts fd) + Ed25519 module signing.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
