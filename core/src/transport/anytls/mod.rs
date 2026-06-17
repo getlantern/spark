@@ -32,12 +32,19 @@ pub mod io;
 pub mod padding;
 pub mod session;
 pub mod settings;
+// The BoringSSL TLS connector + the `Transport` impl are behind the `anytls` feature (the C build).
+#[cfg(feature = "anytls")]
+pub mod tls;
+#[cfg(feature = "anytls")]
+pub mod transport;
 
 pub use auth::encode_auth;
 pub use frame::{Command, Frame, FrameError};
 pub use padding::{shape_records, PaddingError, PaddingScheme, Seg, SizeSampler, SystemSampler};
 pub use session::{Session, Stream};
 pub use settings::Settings;
+#[cfg(feature = "anytls")]
+pub use transport::AnytlsTransport;
 
 /// The AnyTLS protocol version this implementation speaks (advertised in `cmdSettings` as `v=`).
 /// v2 adds `SynAck`, the heartbeat commands, and `ServerSettings`.

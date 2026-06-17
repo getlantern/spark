@@ -105,6 +105,24 @@ pub struct TransportConfig {
     /// `None` leaves sockets on the default route.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protect_interface: Option<String>,
+    /// AnyTLS transport (ADR 0001): when set, flows tunnel through this AnyTLS server over TLS,
+    /// authenticated by the password. Takes precedence over the plain `server` tunnel. Requires
+    /// the `anytls` build feature to take effect (else `from_config` errors).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anytls: Option<AnytlsConfig>,
+}
+
+/// AnyTLS transport configuration (ADR 0001).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnytlsConfig {
+    /// The AnyTLS server address.
+    pub server: SocketAddr,
+    /// The shared password — the auth secret (sent `sha256`'d on the wire).
+    pub password: String,
+    /// TLS SNI to present; defaults to the server's IP literal when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
 }
 
 /// UDP forwarding settings.
@@ -234,6 +252,7 @@ mod tests {
                 transport: TransportConfig {
                     server: Some("[2001:db8::1]:443".parse().unwrap()),
                     protect_interface: Some("en0".into()),
+                    anytls: None,
                 },
                 udp: UdpConfig {
                     idle_timeout_secs: 30,

@@ -24,3 +24,11 @@ toml.workspace = true
 thiserror.workspace = true
 ring.workspace = true
 md-5.workspace = true
+# AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
+boring2 = { workspace = true, optional = true }
+tokio-boring2 = { workspace = true, optional = true }
+
+[features]
+# AnyTLS-over-BoringSSL transport (ADR 0001). Off by default so the base build stays rustls/ring-only
+# and free of the C/cmake BoringSSL build.
+anytls = ["dep:boring2", "dep:tokio-boring2"]

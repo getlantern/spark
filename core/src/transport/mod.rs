@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
-use crate::config::Config;
+use crate::config::{AnytlsConfig, Config};
 use crate::net::SocketProtector;
 use crate::BoxedStream;
 
@@ -79,6 +79,10 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
         Some(name) => Some(SocketProtector::for_interface(name)?),
         None => None,
     };
+    // AnyTLS takes precedence over the plain `server` tunnel when configured.
+    if let Some(anytls) = &config.transport.anytls {
+        return anytls_transport(anytls, protector);
+    }
     Ok(match config.transport.server {
         Some(server) => {
             let mut client = tcp_tunnel::client::TunnelClient::new(server);
@@ -99,6 +103,39 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
             )
         }
     })
+}
+
+/// Build the AnyTLS TCP transport (feature `anytls`). UDP-over-AnyTLS (sing UoT v2) is a follow-up,
+/// so the UDP side is direct for now (DNS etc. bypass the AnyTLS tunnel).
+#[cfg(feature = "anytls")]
+fn anytls_transport(
+    cfg: &AnytlsConfig,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let sni = cfg
+        .sni
+        .clone()
+        .unwrap_or_else(|| cfg.server.ip().to_string());
+    let tcp = Arc::new(anytls::AnytlsTransport::new(
+        cfg.server,
+        cfg.password.clone(),
+        sni,
+        protector.clone(),
+    ));
+    let udp = Arc::new(DirectTransport::new(protector));
+    Ok((tcp as Arc<dyn Transport>, udp as Arc<dyn UdpTransport>))
+}
+
+/// Without the `anytls` feature, a configured AnyTLS transport is a hard error rather than a silent
+/// fallback (the user asked for AnyTLS but the binary can't provide it).
+#[cfg(not(feature = "anytls"))]
+fn anytls_transport(
+    _cfg: &AnytlsConfig,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.anytls is configured but spark was built without the `anytls` feature",
+    ))
 }
 
 /// A way to obtain a bidirectional byte stream to a target address.

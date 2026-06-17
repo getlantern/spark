@@ -90,6 +90,8 @@ impl RunArgs {
             transport: config::TransportConfig {
                 server: self.server,
                 protect_interface: self.protect_interface.clone(),
+                // AnyTLS is configured via a TOML file (`run --config`), not the bare flags.
+                anytls: None,
             },
             udp: config::UdpConfig::default(),
             routing: config::RoutingConfig::default(),

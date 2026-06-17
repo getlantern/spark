@@ -41,6 +41,10 @@ ring = "0.17"
 # MD5 for the AnyTLS `padding-md5` settings field — a NON-security scheme identifier that `ring`
 # (intentionally) omits. RustCrypto's pure-Rust crate; not used for anything security-relevant.
 md-5 = "0.10"
+# BoringSSL (the AnyTLS mimicry TLS backend, ADR 0001) — pulled ONLY by the `anytls` feature, so
+# default builds stay rustls/ring-only. boring2/tokio-boring2 is the maintained impersonation fork.
+boring2 = "4.15"
+tokio-boring2 = "4.15"
 
 # Locked release profile (CLAUDE.md). Profiles only take effect from the workspace
 # root, so they live here, not in member manifests.

@@ -204,11 +204,26 @@
   (chunk-2 raw-mux tests still green). clippy clean. Deferred (in-code): dynamic
   `cmdUpdatePaddingScheme`, `cmdSYNACK` error reporting (client sends optimistically), bounded
   outbound backpressure.
-  **Remaining: 4c** = the **`btls`/`tokio-btls`** TLS connector with a Chrome profile (verify the
-  btls `SslConnector` API + the wreq-util-style profile; the big C/cmake dep — confirm build/CI/size
-  impact) + the idle-session **pool** + the `Transport`/`UdpTransport` impls + config selection +
-  reuse `tcp_tunnel/header.rs::Address` for the SOCKS5 target. Then the **live gate** (same curl/DNS
-  gates as the TCP tunnel + the CI JA4-drift check).
+  **Chunk 4c (2026-06-16): AnyTLS transport productized + VERIFIED END-TO-END AGAINST A REMOTE
+  DIGITALOCEAN SERVER. ✅** Added `boring2`/`tokio-boring2` (BoringSSL) behind a new core `anytls`
+  **feature** (off by default → base build stays rustls/ring-only, no C build). `anytls/tls.rs`:
+  `connect(TcpStream, sni) -> SslStream` (vanilla boring, cert-verify NONE — AnyTLS auth is the
+  password; Chrome-profile is a follow-up). `anytls/transport.rs`: `AnytlsTransport` impl `Transport`
+  — a single lazily-established shared `Session` (`OnceCell`), `dial(target)` opens a stream + writes
+  the SOCKS5 target via `tcp_tunnel::header::Address` (idle-pool + reconnect deferred). `config`:
+  `AnytlsConfig{server,password,sni}` + `TransportConfig.anytls`; `from_config` builds it (errors if
+  the feature is off). cli: `anytls` feature passthrough; builds with and without.
+  **E2E proof:** stood up the `anytls-go` reference server (built from source) on a **DO droplet
+  (159.89.39.6:8443, ID 578209897, systemd `anytls.service`, password in /tmp not the repo)**; spark's
+  Rust client reached `example.com` through it → **HTTP 200**, both via the raw `Session::client`
+  spike AND via the productized `AnytlsTransport::dial` (dialing a resolved IP as the netstack would).
+  Local interop (anytls-go server on 127.0.0.1) also green. The full protocol stack (frame/mux/
+  padding-engine/auth/settings/handshake/boring-TLS) interops with the canonical Go implementation.
+  **Remaining: (a)** the full `sudo spark run` tun gate (tun→netstack→AnyTLS→DO→internet) — built +
+  config-ready; needs interactive sudo (handoff script `/tmp/spark-anytls-gate.sh`). **(b)** Chrome
+  fingerprint profile on the boring connector + CI JA4-drift check. **(c)** idle-session pool +
+  reconnect; UDP-over-AnyTLS (sing UoT v2); dynamic cmdUpdatePaddingScheme. **Cleanup:** destroy DO
+  droplet 578209897 after the gate (`doctl compute droplet delete 578209897`).
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.
