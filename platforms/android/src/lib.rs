@@ -12,7 +12,11 @@
 // Kotlin side (package org.getlantern.spark):
 //   object SparkBridge {
 //       init { System.loadLibrary("spark_android") }
-//       external fun nativeRun(fd: Int, mtu: Int): Int   // blocks until nativeStop / exit
+//       // addr = the tun IPv4 packed big-endian into an Int (e.g. 10.0.0.1 -> 0x0A000001);
+//       // it must equal the address passed to VpnService.Builder.addAddress(addr, prefix), and
+//       // `prefix` must cover addr+1 (the system stack's synthetic gateway). systemStack: 1 = the
+//       // kernel-TCP "system" stack, 0 = the userspace (smoltcp) stack.
+//       external fun nativeRun(fd: Int, mtu: Int, addr: Int, prefix: Int, systemStack: Int): Int
 //       external fun nativeStop()
 //   }
 #[cfg(target_os = "android")]
@@ -22,21 +26,43 @@ mod jni {
     /// JNI `jint`.
     type JInt = i32;
 
-    /// `SparkBridge.nativeRun(fd, mtu)` — adopt the `VpnService` TUN `fd` and run the tunnel,
-    /// blocking the calling thread until [`nativeStop`] (or the data path exits). Returns 0 on a
-    /// clean stop, -1 on error.
+    /// `SparkBridge.nativeRun(fd, mtu, addr, prefix, systemStack)` — adopt the `VpnService` TUN `fd`
+    /// and run the tunnel with the chosen netstack, blocking the calling thread until [`nativeStop`]
+    /// (or the data path exits). Returns 0 on a clean stop, -1 on error.
+    ///
+    /// `addr` is the tun IPv4 address packed big-endian into a `jint`; the system stack binds its
+    /// kernel listener there and derives its gateway as `addr + 1` (so `prefix` must include it).
     #[no_mangle]
     pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeRun(
         _env: *mut c_void,
         _class: *mut c_void,
         fd: JInt,
         mtu: JInt,
+        addr: JInt,
+        prefix: JInt,
+        system_stack: JInt,
     ) -> JInt {
         crate::logcat::init();
-        match spark_core::fd_tunnel::run_tunnel(fd, mtu as u16) {
+        let config = config(addr, prefix, system_stack);
+        match spark_core::fd_tunnel::run_tunnel_with_config(fd, mtu as u16, config) {
             Ok(()) => 0,
             Err(_) => -1,
         }
+    }
+
+    /// Build the run config from the JNI primitives: direct forwarding (Android excludes the app's
+    /// own UID from the tun, so upstream dials bypass it) with the tun address + chosen stack.
+    fn config(addr: JInt, prefix: JInt, system_stack: JInt) -> spark_core::config::Config {
+        use spark_core::config::{Config, StackKind};
+        let mut config = Config::default();
+        config.tun.addr = std::net::Ipv4Addr::from(addr as u32);
+        config.tun.prefix = prefix as u8;
+        config.tun.stack = if system_stack != 0 {
+            StackKind::System
+        } else {
+            StackKind::Userspace
+        };
+        config
     }
 
     /// `SparkBridge.nativeStop()` — signal the running tunnel to stop (from `onDestroy`).

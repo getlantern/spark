@@ -320,6 +320,22 @@
   just doesn't enable the `system-stack` feature yet (a choice). Android-specific work to enable it:
   turn on the feature for `platforms/android`, route the `VpnService` fd into `SystemNetstack`, and
   use `VpnService.protect()` for upstream-socket protection. Docs corrected (ADR 0002, design §7).
+- **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
+  so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
+  `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
+  mtu, Config)`; (2) the JNI `nativeRun` extended to `(fd, mtu, addr, prefix, systemStack)` — `addr`
+  is the tun IPv4 packed big-endian into a `jint` (primitive-only bridge, no `jni` crate), and it
+  builds a `Config` selecting `StackKind::System` when `systemStack != 0`; (3) `system-stack`
+  feature **target-gated** to android in `platforms/android/Cargo.toml` (`cargo tree` confirms
+  non-android builds stay free of it). **Validated:** `cargo ndk -t arm64-v8a check/clippy -p
+  spark-android` clean (full aarch64 build incl. ring's C cross-compile + the system module + the
+  JNI mod); macOS workspace unregressed (84 default / 107 system-stack core tests). **Caller
+  contract (Android app, separate repo):** Kotlin must update `external fun nativeRun(fd, mtu, addr,
+  prefix, systemStack)`; pass the same addr it gave `VpnService.Builder.addAddress(addr, prefix)`,
+  with `prefix` covering addr+1 (the synthetic gateway), and `addDisallowedApplication(self)` so
+  upstream dials bypass the tun (loop avoidance — no per-socket protect). **Remaining: on-device
+  gate** (needs a device + the VpnService app) — likely surfaces the same `rp_filter`/routing
+  wrinkles as the netns gate.
 - **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
   target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
   request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]

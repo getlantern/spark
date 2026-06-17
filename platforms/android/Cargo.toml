@@ -17,8 +17,12 @@ path = "src/lib.rs"
 [dependencies]
 spark-core = { path = "../../core" }
 
-# Android-only: route the core's `tracing` events to logcat (otherwise they vanish — an Android
-# app's stdout isn't logcat). `__android_log_write` is in the NDK's liblog.
+# Android-only deps. `tracing`/`tracing-subscriber` route the core's events to logcat (otherwise they
+# vanish — an Android app's stdout isn't logcat); `__android_log_write` is in the NDK's liblog.
+# The `system-stack` feature is enabled here (Android-only): Android's VpnService hands us a Linux
+# tun fd, so the kernel-TCP redirect stack works there (sing-box ships `stack: system` on Android the
+# same way). Target-gated so non-Android workspace builds stay free of it.
 [target.'cfg(target_os = "android")'.dependencies]
+spark-core = { path = "../../core", features = ["system-stack"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

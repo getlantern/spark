@@ -33,9 +33,18 @@ fn shutdown() -> &'static Notify {
     SHUTDOWN.get_or_init(Notify::new)
 }
 
-/// Run the tunnel on `fd` (owned) with `mtu`, blocking the calling thread on a private tokio
-/// runtime until [`stop`] is called or the data path exits. Returns once torn down.
+/// Run the tunnel on `fd` (owned) with `mtu` and the default (direct, userspace-stack) config,
+/// blocking the calling thread on a private tokio runtime until [`stop`] is called or the data path
+/// exits. Returns once torn down.
 pub fn run_tunnel(fd: i32, mtu: u16) -> std::io::Result<()> {
+    run_tunnel_with_config(fd, mtu, Config::default())
+}
+
+/// Like [`run_tunnel`] but with an explicit [`Config`], so a host can select the netstack
+/// (`config.tun.stack`) and supply the tun address the **system** stack binds its listener to (the
+/// userspace stack ignores it). `mtu` is applied to the adopted fd; `config.tun.mtu` is unused on
+/// the fd path. Loop avoidance remains the host's job (e.g. Android `addDisallowedApplication`).
+pub fn run_tunnel_with_config(fd: i32, mtu: u16, config: Config) -> std::io::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -46,7 +55,6 @@ pub fn run_tunnel(fd: i32, mtu: u16) -> std::io::Result<()> {
             unsafe { Tun::from_fd(fd, mtu) }.map_err(|e| std::io::Error::other(e.to_string()))?,
         );
 
-        let config = Config::default();
         let (tcp_transport, udp_transport) = transport::from_config(&config)?;
         let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
         let idle = Duration::from_secs(config.udp.idle_timeout_secs);
