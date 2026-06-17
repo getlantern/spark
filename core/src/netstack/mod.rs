@@ -27,6 +27,18 @@ use crate::BoxedStream;
 /// Channel depth for the netstack UDP surface (inbound datagrams and pending replies).
 const UDP_CHANNEL_DEPTH: usize = 1024;
 
+/// Depth of the netstack's IP-packet channels between the smoltcp stack and the TUN bridge (each
+/// direction). The vendored default (1024) is too shallow for the egress burst of a multi-flow
+/// download: the channel saturates and throughput nearly stalls. Deeper channels are a **partial
+/// mitigation** — they raise the concurrent-download floor ~14× (measured 0.03 → 0.42 Gb/s at 4
+/// streams, `bench/`) but do NOT cure the underlying collapse, which is a single-dispatch-task
+/// pathology in netstack-smoltcp (see `docs/system-stack-design.md` §9). The tokio mpsc bound does
+/// not preallocate, so this is a worst-case cap, not resident cost — but tune it down for the iOS
+/// Packet-Tunnel memory cap (frames are MTU-sized).
+const STACK_BUFFER_SIZE: usize = 16384;
+/// Depth of the per-direction TCP IP-packet channel inside the stack.
+const TCP_BUFFER_SIZE: usize = 8192;
+
 /// A surfaced L4 TCP flow, independent of the netstack implementation.
 pub struct TcpFlow {
     /// The address the application originally dialed — i.e. the upstream to connect to.
@@ -97,6 +109,8 @@ impl SmoltcpNetstack {
             .enable_tcp(true)
             .enable_udp(true)
             .enable_icmp(true)
+            .stack_buffer_size(STACK_BUFFER_SIZE)
+            .tcp_buffer_size(TCP_BUFFER_SIZE)
             .mtu(mtu)
             .build()?;
 

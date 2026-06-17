@@ -250,6 +250,22 @@
   `MIN_IDLE_SESSIONS=1` warm spare. Verified: unit test (counter inc/dec on stream drop, liveness) +
   a 2-dial e2e vs a local anytls-go server (both HTTP 200, 2nd reuses the pooled session). 81 core
   tests pass; clippy clean.
+- **Perf arc (data path) 2026-06-17.** Benchmarked the userspace (smoltcp) data path on a throwaway
+  DO droplet via Linux netns (`bench/netns-throughput.sh`; single-box macOS e2e is impossible — the
+  kernel hairpins local IPs past the route table). Three findings: **(1) opt-level fix — DONE.**
+  Release profile was `opt-level="z"` (size); it ~halved data-path throughput. Switched to
+  `opt-level=3` (`Cargo.toml`): ~2× (0.81→1.61 Gb/s up single-stream) for +540 KB (base 1.26→1.80 MB,
+  still < the old 3 MB target). **(2) Download-concurrency collapse — characterized, partial
+  mitigation, full fix deferred.** ≥2 concurrent download streams collapse to ~0.2 Gb/s aggregate
+  (upload fine). Root-caused to netstack-smoltcp's single dispatch task being super-linearly
+  inefficient at servicing multiple concurrently-*sending* sockets; ruled out buffer depth, park
+  pacing, ingress/egress coupling, retransmit storm, and congestion control (it's `None`). Bumped
+  `stack_buffer_size`/`tcp_buffer_size` in `core/src/netstack/mod.rs` as a partial mitigation (raises
+  the collapsed floor ~14×, 0.03→0.42 Gb/s @ 4 streams; doesn't cure it). The structural fix is the
+  system stack (independent kernel sockets) or a netstack per-flow rework — see
+  `docs/system-stack-design.md` §9. **(3) GSO prototype — NEXT.** **TODO: tune the bumped buffer
+  sizes down / make configurable for the iOS Packet-Tunnel memory cap.** CLAUDE.md's documented
+  release profile still says `opt-level="z"` and should be updated to `3`.
 - **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
   target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
   request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]

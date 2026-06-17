@@ -84,9 +84,11 @@ cleanup() {
 trap cleanup EXIT
 
 # parse iperf3 -J: bits/sec for the receiver (sum_received), the meaningful end-to-end number.
-bps_received() {
-  if [[ -n "$JQ" ]]; then jq -r '.end.sum_received.bits_per_second // 0' "$1"
-  else "$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["end"]["sum_received"]["bits_per_second"])' "$1"; fi
+bps_received() {  # robust to empty/invalid JSON (a timed-out run) → 0
+  if [[ -n "$JQ" ]]; then jq -r '.end.sum_received.bits_per_second // 0' "$1" 2>/dev/null || echo 0
+  else "$PY" -c 'import json,sys
+try: print(json.load(open(sys.argv[1]))["end"]["sum_received"]["bits_per_second"])
+except Exception: print(0)' "$1" 2>/dev/null || echo 0; fi
 }
 gbps() { awk -v b="$1" 'BEGIN{printf "%.2f", b/1e9}'; }
 
@@ -110,7 +112,12 @@ sleep 0.5
 
 # ---- baseline: kernel TCP straight over the veth ----------------------------
 run_iperf() {  # $1=outfile  $2=extra-args(e.g. -R)
-  ip netns exec "$NS_CLI" iperf3 -c "$SRV_IP" -p "$PORT" -t "$DURATION" -P "$STREAMS" -J ${2:-} > "$1"
+  # Guard with `timeout`: a stalled tunnel direction must not hang the whole run (the smoltcp
+  # download path can stall — see docs/system-stack-design.md §9). A timeout yields empty JSON,
+  # which bps_received reads as 0 (i.e. "stalled"), and the run continues.
+  timeout "$((DURATION + 25))s" \
+    ip netns exec "$NS_CLI" iperf3 -c "$SRV_IP" -p "$PORT" -t "$DURATION" -P "$STREAMS" -J ${2:-} > "$1" \
+    || echo "(iperf timed out or errored — treating as stalled)" >&2
 }
 echo "==> baseline (kernel TCP, no tunnel): up + down, ${DURATION}s x ${STREAMS} stream(s)"
 B_UP=$(mktemp); B_DN=$(mktemp)

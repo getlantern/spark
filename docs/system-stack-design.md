@@ -218,10 +218,40 @@ Findings:
 
 Implication: the userspace stack is a real throughput/CPU ceiling *and* has a concerning download
 fragility + zero multi-flow scaling — all of which a kernel/system stack (each flow a real kernel
-socket, kernel congestion control, no single poll loop) would address. **But three cheaper things
-come first:** (a) the `opt-level` fix (free ~2×); (b) **investigate the download stall/collapse — it
-may be a bug, not an inherent cost**, and fixing it could change this picture materially; (c) prototype
-GSO on the bridge and re-run. Decide on the system stack only after those.
+socket, kernel congestion control, no single poll loop) would address.
+
+### Download-collapse investigation (2026-06-17)
+
+The concurrent-download collapse was chased to root cause. Reproduction: with **≥2 concurrent
+download streams** (`iperf3 -R -P N`), aggregate download throughput collapses to **~0.2 Gb/s** (vs
+~1.5 single-stream), while upload is unaffected. The diagnostic (`iperf3 -J`): download starts
+~290 Mb/s then settles to a steady ~100 Mb/s/flow with **low retransmits (21)** and 0 on upload — a
+low *equilibrium*, not a loss/RTO storm.
+
+Hypotheses tested and **ruled out** (each built + benchmarked on the netns droplet):
+- **Channel buffer depth** — bumping `stack_buffer_size` 1024→16384 raised the collapsed floor ~14×
+  (0.03→0.42 Gb/s at 4 streams) but did **not** restore full throughput. Kept as a partial
+  mitigation (`core/src/netstack/mod.rs`).
+- **Poll-loop park pacing** — capping the `poll_delay` park to 500 µs: no change.
+- **Ingress/egress coupling** — `VirtualDevice::receive` refusing inbound packets when the egress
+  channel is full (a real latent issue) decoupled: no change to the collapse (reverted for hygiene —
+  no measured benefit, and it touches untrusted-packet code).
+- **Congestion control** — N/A: the vendored crate enables neither `socket-tcp-cubic` nor
+  `-reno`, so smoltcp runs `CongestionControl::None` (pure window-based).
+
+Conclusion: the collapse is a **single-dispatch-task pathology** in netstack-smoltcp — one task runs
+`iface.poll()` + per-socket buffer shuffling for *all* flows, and servicing multiple concurrently
+*sending* sockets is super-linearly less efficient (1→2 download flows drops aggregate ~8×). This is
+not a quick tunable; it is the structural limit the design doc predicts, and it is exactly what a
+kernel/system stack avoids (independent kernel sockets, no shared poll loop). A complete userspace
+fix means reworking the netstack's per-flow scheduling — comparable effort to the system stack, with
+less upside.
+
+**Order of operations going forward:** (a) `opt-level` fix — **done** (free ~2×). (b) Download
+collapse — **characterized; partial mitigation landed; full fix deferred** (system stack or a
+netstack per-flow rework). (c) GSO on the bridge — prototype next; it batches segments across the
+TUN boundary and may *also* relieve the per-packet loop overhead behind the collapse. Decide on the
+system stack after (c).
 
 ## 10. Tradeoffs & alternatives
 
