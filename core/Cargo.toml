@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 netstack-smoltcp.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 futures.workspace = true
 tun-rs.workspace = true
 async-trait.workspace = true

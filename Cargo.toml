@@ -16,6 +16,10 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 netstack-smoltcp = { path = "vendor/netstack-smoltcp" }
 tokio = { version = "1", features = ["full"] }
+# `sync` (ungated) gives `PollSender`, which bridges a bounded mpsc into a `poll_*` write path so a
+# `Stream`'s `poll_write` can backpressure instead of buffering unboundedly. Already in the tree
+# transitively (tun-rs/netstack-smoltcp); declaring it direct promotes the locked 0.7.x, no churn.
+tokio-util = "0.7"
 futures = "0.3"
 # tun-rs 2.8.x: `async` pulls the tokio-backed AsyncDevice. The framed Stream/Sink
 # (`async_framed`) is added at M2 when we bridge the TUN into the netstack.

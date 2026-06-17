@@ -29,11 +29,14 @@
 //! on a non-empty `cmdSYNACK` (the server's upstream-dial error). A [`Session`] must **outlive** the
 //! [`Stream`]s it opens; when it drops, both tasks abort.
 //!
-//! ## Backpressure (current state)
+//! ## Backpressure
 //! - **Inbound** (peer → stream) is a *bounded* channel; the reader `.await`s on a full one, which
 //!   backpressures the peer but head-of-line-blocks other streams until per-stream flow control.
-//! - **Outbound** (stream → writer) is *unbounded* for now, so [`Stream`] writes never block. It
-//!   becomes a bounded poll-reserve channel when wired to the real TLS transport.
+//! - **Outbound** (stream → writer) is a *bounded* channel (`OUTBOUND_CAP`); [`Stream::poll_write`]
+//!   drives it through a [`PollSender`] and returns `Pending` when full, so a slow transport
+//!   backpressures the writer instead of buffering without limit. Control frames (`cmdSYN`/`cmdFIN`/
+//!   `cmdSettings`) use the plain bounded sender; a `cmdFIN` sent from `Drop` is best-effort
+//!   (`try_send`) since `Drop` has no waker.
 
 use std::collections::HashMap;
 use std::io;
@@ -46,6 +49,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::PollSender;
 
 use super::auth::encode_auth;
 use super::frame::{Command, Frame, MAX_PAYLOAD};
@@ -58,6 +62,10 @@ use super::PROTOCOL_VERSION;
 const CONTROL_CAP: usize = 16;
 /// Per-stream inbound queue depth (frames buffered for a stream before the reader backpressures).
 const STREAM_INBOUND_CAP: usize = 32;
+/// Depth of the session's shared outbound frame channel (all streams + control). Bounds how many
+/// frames the writer can fall behind by before [`Stream::poll_write`] backpressures — caps buffered
+/// memory at roughly `OUTBOUND_CAP × frame` instead of growing without limit on a slow transport.
+const OUTBOUND_CAP: usize = 64;
 /// The `client=` identifier sent in `cmdSettings`.
 const CLIENT_ID: &str = concat!("spark/", env!("CARGO_PKG_VERSION"));
 
@@ -89,7 +97,7 @@ struct Handshake {
 /// A multiplexed AnyTLS session over one byte transport. Cheap to hold; spawns two background
 /// tasks (reader/writer) that are aborted when the `Session` is dropped.
 pub struct Session {
-    outbound: mpsc::UnboundedSender<Out>,
+    outbound: mpsc::Sender<Out>,
     control: mpsc::Sender<Control>,
     next_id: AtomicU32,
     /// Count of currently-open [`Stream`]s (incremented in `open_stream`, decremented on
@@ -139,8 +147,9 @@ impl Session {
                 scheme: Arc::new(Mutex::new(scheme)),
             }),
         );
-        // First buffered frame: cmdSettings (session-level, stream 0).
-        let _ = session.outbound.send(Out::Frame(Frame {
+        // First buffered frame: cmdSettings (session-level, stream 0). The channel is freshly
+        // created and empty here, so `try_send` always has room — it can't drop the handshake.
+        let _ = session.outbound.try_send(Out::Frame(Frame {
             command: Command::Settings,
             stream_id: 0,
             payload: settings,
@@ -153,7 +162,7 @@ impl Session {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (rd, wr) = tokio::io::split(transport);
-        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CAP);
         let (control_tx, control_rx) = mpsc::channel(CONTROL_CAP);
         // The reader needs the shared scheme to apply a server `cmdUpdatePaddingScheme`.
         let scheme = handshake.as_ref().map(|h| Arc::clone(&h.scheme));
@@ -200,14 +209,18 @@ impl Session {
         ack_rx.await.map_err(|_| session_gone("reader"))?;
         self.outbound
             .send(Out::Frame(Frame::control(Command::Syn, stream_id)))
+            .await
             .map_err(|_| session_gone("writer"))?;
         // End the client's initial buffering phase (a no-op for a raw session, and idempotent for
         // later streams since buffering is already off).
-        let _ = self.outbound.send(Out::EndBuffering);
+        let _ = self.outbound.send(Out::EndBuffering).await;
         self.streams.fetch_add(1, Ordering::Relaxed);
         Ok(Stream {
             stream_id,
-            outbound: self.outbound.clone(),
+            // Data writes go through a PollSender so `poll_write` backpressures when the shared
+            // outbound channel is full; control frames (FIN) use a plain clone of the same sender.
+            outbound: PollSender::new(self.outbound.clone()),
+            control: self.outbound.clone(),
             inbound: inbound_rx,
             read_rem: Bytes::new(),
             write_closed: false,
@@ -234,7 +247,7 @@ fn session_gone(which: &str) -> io::Error {
 /// The writer task: client mode (auth + buffering + padding) or raw mode (frames as-is).
 async fn writer_task<W: AsyncWrite + Unpin>(
     wr: W,
-    outbound: mpsc::UnboundedReceiver<Out>,
+    outbound: mpsc::Receiver<Out>,
     handshake: Option<Handshake>,
 ) {
     match handshake {
@@ -245,14 +258,14 @@ async fn writer_task<W: AsyncWrite + Unpin>(
 
 /// Raw mode: encode and write each frame, coalescing a burst before flushing. `EndBuffering` is a
 /// no-op here.
-async fn raw_writer<W: AsyncWrite + Unpin>(mut wr: W, mut outbound: mpsc::UnboundedReceiver<Out>) {
+async fn raw_writer<W: AsyncWrite + Unpin>(mut wr: W, mut outbound: mpsc::Receiver<Out>) {
     let _ = raw_writer_inner(&mut wr, &mut outbound).await;
     let _ = wr.shutdown().await;
 }
 
 async fn raw_writer_inner<W: AsyncWrite + Unpin>(
     wr: &mut W,
-    outbound: &mut mpsc::UnboundedReceiver<Out>,
+    outbound: &mut mpsc::Receiver<Out>,
 ) -> io::Result<()> {
     let mut buf = BytesMut::new();
     while let Some(item) = outbound.recv().await {
@@ -274,7 +287,7 @@ async fn raw_writer_inner<W: AsyncWrite + Unpin>(
 /// each write into padded records via [`shape_records`]. Each non-buffered frame is one packet.
 async fn client_writer<W: AsyncWrite + Unpin>(
     mut wr: W,
-    mut outbound: mpsc::UnboundedReceiver<Out>,
+    mut outbound: mpsc::Receiver<Out>,
     h: Handshake,
 ) {
     let _ = client_writer_inner(&mut wr, &mut outbound, h).await;
@@ -283,7 +296,7 @@ async fn client_writer<W: AsyncWrite + Unpin>(
 
 async fn client_writer_inner<W: AsyncWrite + Unpin>(
     wr: &mut W,
-    outbound: &mut mpsc::UnboundedReceiver<Out>,
+    outbound: &mut mpsc::Receiver<Out>,
     h: Handshake,
 ) -> io::Result<()> {
     let mut sampler = SystemSampler::new();
@@ -401,7 +414,12 @@ async fn route(
 /// One multiplexed logical stream: an `AsyncRead + AsyncWrite` byte channel over a `stream_id`.
 pub struct Stream {
     stream_id: u32,
-    outbound: mpsc::UnboundedSender<Out>,
+    /// Data path (`cmdPSH`): a [`PollSender`] over the session's bounded outbound channel, so
+    /// `poll_write` backpressures when full instead of buffering.
+    outbound: PollSender<Out>,
+    /// Control path (`cmdFIN`): a plain clone of the same sender, for the best-effort `try_send` in
+    /// `poll_shutdown`/`Drop` (where a backpressured `poll_write` would be wrong / impossible).
+    control: mpsc::Sender<Out>,
     inbound: mpsc::Receiver<Bytes>,
     /// Leftover from an inbound frame that didn't fit the caller's read buffer.
     read_rem: Bytes,
@@ -421,11 +439,12 @@ impl Drop for Stream {
     fn drop(&mut self) {
         // FIN the stream if it wasn't already shut down (e.g. a dropped UDP association, whose
         // split halves never call `poll_shutdown`) so the server releases it promptly instead of on
-        // idle timeout. A closed writer just drops the send.
+        // idle timeout. Best-effort: `Drop` has no waker, so a full channel just drops the FIN (the
+        // server then reclaims on idle timeout). A closed channel drops it too.
         if !self.write_closed {
             let _ = self
-                .outbound
-                .send(Out::Frame(Frame::control(Command::Fin, self.stream_id)));
+                .control
+                .try_send(Out::Frame(Frame::control(Command::Fin, self.stream_id)));
         }
         self.streams.fetch_sub(1, Ordering::Relaxed);
     }
@@ -458,30 +477,37 @@ impl AsyncRead for Stream {
 impl AsyncWrite for Stream {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         if data.is_empty() {
             return Poll::Ready(Ok(0));
         }
         let this = self.get_mut();
-        let n = std::cmp::min(data.len(), MAX_PAYLOAD);
-        // Fields are bounded by construction (n <= MAX_PAYLOAD), so build the frame directly —
-        // no fallible `Frame::new`, no `expect` on the data path.
-        let frame = Frame {
-            command: Command::Psh,
-            stream_id: this.stream_id,
-            payload: Bytes::copy_from_slice(&data[..n]),
-        };
-        match this.outbound.send(Out::Frame(frame)) {
-            Ok(()) => Poll::Ready(Ok(n)),
-            Err(_) => Poll::Ready(Err(session_gone("writer"))),
+        // Reserve a slot first; `Pending` here is the backpressure signal (channel full → the
+        // writer is behind). Only build the frame (a copy) once we know it will be accepted.
+        match this.outbound.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => {
+                let n = std::cmp::min(data.len(), MAX_PAYLOAD);
+                // Fields are bounded by construction (n <= MAX_PAYLOAD), so build the frame directly.
+                let frame = Frame {
+                    command: Command::Psh,
+                    stream_id: this.stream_id,
+                    payload: Bytes::copy_from_slice(&data[..n]),
+                };
+                match this.outbound.send_item(Out::Frame(frame)) {
+                    Ok(()) => Poll::Ready(Ok(n)),
+                    Err(_) => Poll::Ready(Err(session_gone("writer"))),
+                }
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(session_gone("writer"))),
+            Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // The writer task flushes the transport after draining queued frames; the unbounded
-        // outbound channel exposes no buffer to flush here.
+        // The writer task flushes the transport after draining queued frames; the outbound channel
+        // exposes no further buffer to flush here.
         Poll::Ready(Ok(()))
     }
 
@@ -489,9 +515,11 @@ impl AsyncWrite for Stream {
         let this = self.get_mut();
         if !this.write_closed {
             this.write_closed = true;
+            // FIN over the control sender (best-effort, like `Drop`): a clean shutdown rarely
+            // coincides with a full channel, and a lost FIN just defers reclaim to the idle timeout.
             let _ = this
-                .outbound
-                .send(Out::Frame(Frame::control(Command::Fin, this.stream_id)));
+                .control
+                .try_send(Out::Frame(Frame::control(Command::Fin, this.stream_id)));
         }
         Poll::Ready(Ok(()))
     }
@@ -569,6 +597,47 @@ mod tests {
 
         drop((a, b, session));
         peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn poll_write_backpressures_when_outbound_is_full() {
+        // A tiny transport buffer that we never drain: the writer task blocks on its first
+        // `write_all`, so the bounded outbound channel fills and stops accepting frames.
+        // `_server_io` is kept (not dropped) so the duplex backpressures rather than erroring.
+        let (client_io, _server_io) = tokio::io::duplex(16);
+        let session = Session::new(client_io);
+        let mut stream = session.open_stream().await.unwrap();
+
+        // Each accepted `poll_write` enqueues one frame. Once the channel (plus the writer's one
+        // in-flight frame) is full, a further `poll_write` must report `Pending` — the backpressure
+        // signal — instead of buffering without bound. Cap the loop well above OUTBOUND_CAP so a
+        // missing signal fails the test rather than looping forever.
+        let mut accepted = 0usize;
+        let mut saw_pending = false;
+        for _ in 0..(OUTBOUND_CAP * 4) {
+            let poll = std::future::poll_fn(|cx| {
+                Poll::Ready(Pin::new(&mut stream).poll_write(cx, b"some-bytes"))
+            })
+            .await;
+            match poll {
+                Poll::Ready(Ok(_)) => accepted += 1,
+                Poll::Pending => {
+                    saw_pending = true;
+                    break;
+                }
+                Poll::Ready(Err(e)) => panic!("unexpected write error: {e}"),
+            }
+        }
+        assert!(
+            saw_pending,
+            "poll_write should backpressure once the outbound channel fills (accepted {accepted})"
+        );
+        // It backpressured at the bound, not immediately: it accepted roughly a channel's worth
+        // (a couple fewer — one frame is in-flight in the blocked writer, one permit is reserved).
+        assert!(
+            accepted >= OUTBOUND_CAP - 8,
+            "should accept ~OUTBOUND_CAP frames before blocking (accepted {accepted})"
+        );
     }
 
     #[tokio::test]

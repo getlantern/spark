@@ -264,9 +264,18 @@
   (the server's upstream-dial error) now removes the stream → its reader unblocks (was: hung). (3)
   **`cmdFIN` on `Stream` drop** (when not already shut down) — closes UDP associations promptly
   (split halves never call poll_shutdown) and hardens TCP. Unit tests for the scheme swap +
-  SYNACK-error close; 83 core tests pass; clippy clean. **STILL OUTSTANDING (non-blocking):** bounded
-  outbound backpressure (Stream `poll_write` is unbounded — needs `tokio-util` `PollSender`); wiring
-  the JA4-drift spike into CI; M10 iOS device gate.
+  SYNACK-error close; 83 core tests pass; clippy clean.
+- **M11 AnyTLS outbound backpressure DONE 2026-06-16. ✅** The session's shared outbound frame
+  channel is now **bounded** (`OUTBOUND_CAP = 64`, was unbounded). `Stream::poll_write` drives it
+  through `tokio_util::sync::PollSender` (`poll_reserve` → `send_item`), so a slow transport makes
+  writes return `Pending` (backpressure) instead of buffering without limit; control frames
+  (SYN/EndBuffering/Settings) use the plain bounded sender (`.await`/`try_send` on a fresh channel),
+  and `cmdFIN` from `poll_shutdown`/`Drop` is best-effort `try_send` (no waker in `Drop`).
+  `tokio-util` promoted to a direct `core` dep (already in the tree transitively — no version churn).
+  New unit test asserts `poll_write` backpressures once the channel fills (accepts ~`OUTBOUND_CAP`
+  then `Pending`); 84 core tests pass, clippy + rustdoc clean both feature configs. **STILL
+  OUTSTANDING (non-blocking):** per-stream flow control (one shared channel = HOL across streams
+  under backpressure); wiring the JA4-drift spike into CI; M10 iOS device gate.
 - **M2 live curl gate PASSED on macOS 2026-06-15** (with `--protect-interface`): curl → tun →
   netstack → forwarder → socket-protected dial → upstream → back. Direct TCP data path verified
   end-to-end.

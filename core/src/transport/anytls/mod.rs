@@ -25,8 +25,9 @@
 //!   reconnecting TLS sessions (feature `anytls`).
 //! - `udp` — UDP-over-TCP v2 (sing-box UoT) over a session stream (feature `anytls`).
 //!
-//! Remaining (non-blocking): the [`Stream`] write path's outbound channel is still unbounded, so a
-//! slow transport buffers rather than backpressuring the writer — see [`session`].
+//! Remaining (non-blocking): the session has a single bounded outbound channel shared by all
+//! streams, so a slow transport backpressures all of them together (head-of-line) rather than
+//! per-stream — full per-stream flow control is future work. See [`session`].
 //!
 //! Reference: the AnyTLS protocol spec (`anytls/anytls-go`, `docs/protocol.md`) and the
 //! `m11-transport-candidates-anytls-samizdat` memory.

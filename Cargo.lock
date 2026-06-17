@@ -1584,6 +1584,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-boring2",
+ "tokio-util",
  "toml",
  "tracing",
  "tun-rs",
