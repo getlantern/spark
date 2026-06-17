@@ -12,8 +12,10 @@
 //! ## Status (built incrementally)
 //! - [`nat`] — the source⇄natPort [`TcpNat`] table. **Built.**
 //! - [`rewrite`] — in-place TCP/IP header rewrite + checksum recompute. **Built.**
-//! - The pump (TUN read → classify → rewrite → write), the accept loop (listener → [`TcpFlow`]),
-//!   the idle reaper, and the [`Netstack`] impl — *next chunks*.
+//! - [`pump`] — the [`Gateway`](pump::Gateway): classify + rewrite each packet (app→listener,
+//!   listener→app) and resolve accepted connections back to their original endpoints. **Built.**
+//! - The async TUN read/write loop driving the pump, the accept loop (listener → [`TcpFlow`]), the
+//!   idle reaper, and the [`Netstack`] impl — *next chunks*.
 //!
 //! Feature-gated behind `system-stack` (off by default; desktop-only — Linux/macOS). The proxy core
 //! and transports are untouched: a system-stack flow is a kernel `TcpStream` surfaced as the same
@@ -23,4 +25,5 @@
 //! [`TcpNat`]: nat::TcpNat
 
 pub mod nat;
+pub mod pump;
 pub mod rewrite;
