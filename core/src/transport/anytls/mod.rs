@@ -10,18 +10,23 @@
 //! session [`frame`]s. Multiple logical streams are multiplexed over one session by `stream_id`;
 //! idle sessions are pooled and reused so new requests rarely produce a fresh visible handshake.
 //!
-//! ## Status (built vs. deferred)
+//! ## Status
 //!
-//! - [`frame`] — the session-frame codec ([`Command`], [`Frame`]). **Built.**
-//! - [`padding`] — the padding-scheme parser/model + the [`padding::shape_records`] engine. **Built.**
-//! - [`io`] — async framed I/O ([`io::FrameReader`]/[`io::FrameWriter`]) over a byte stream. **Built.**
-//! - [`session`] — the client-side multiplexer ([`Session`]/[`Stream`]). **Built.**
-//! - [`auth`] — the client auth record (SHA-256, via `ring`). **Built.**
-//! - [`settings`] — the `cmdSettings` builder/parser ([`Settings`]). **Built** (the `padding-md5`
-//!   value is computed and supplied by the caller; `ring` has no MD5).
-//! - Deferred to later chunks: the `padding-md5` hash source; the idle-session **pool**; and the
-//!   [`super::Transport`] impl over a `btls` TLS stream (which wires the engine into the writer and
-//!   makes outbound backpressure bounded — see [`session`]).
+//! - [`frame`] — the session-frame codec ([`Command`], [`Frame`]).
+//! - [`padding`] — the padding-scheme parser/model + the [`padding::shape_records`] engine.
+//! - [`io`] — async framed I/O ([`io::FrameReader`]/[`io::FrameWriter`]) over a byte stream.
+//! - [`session`] — the client-side multiplexer ([`Session`]/[`Stream`]); adopts a server
+//!   `cmdUpdatePaddingScheme` and closes a stream on a `cmdSYNACK` error.
+//! - [`auth`] — the client auth record (SHA-256, via `ring`).
+//! - [`settings`] — the `cmdSettings` builder/parser ([`Settings`]) (the `padding-md5` value is
+//!   computed via the `md-5` crate; `ring` has no MD5).
+//! - `tls` — the Chrome-mimicking BoringSSL connector (feature `anytls`).
+//! - `transport` — the [`super::Transport`]/[`super::UdpTransport`] impl over a pool of
+//!   reconnecting TLS sessions (feature `anytls`).
+//! - `udp` — UDP-over-TCP v2 (sing-box UoT) over a session stream (feature `anytls`).
+//!
+//! Remaining (non-blocking): the [`Stream`] write path's outbound channel is still unbounded, so a
+//! slow transport buffers rather than backpressuring the writer — see [`session`].
 //!
 //! Reference: the AnyTLS protocol spec (`anytls/anytls-go`, `docs/protocol.md`) and the
 //! `m11-transport-candidates-anytls-samizdat` memory.
