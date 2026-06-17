@@ -173,29 +173,58 @@ adjudicated), and the expressiveness it buys is mostly unneeded. Instead:
   extension of what spark *already does* (AnyTLS adopts a server-pushed padding scheme via
   `cmdUpdatePaddingScheme`, carries a Chrome fingerprint profile). This covers the ~80% of real
   censor responses that are recombinations/parameter tweaks.
-- **Tier 2 — a small, purpose-built transport DSL / bytecode VM (for genuinely new wire formats).**
-  The Proteus/Marionette lesson: a safety-bounded spec is enough for handshakes + framing + mimicry
-  state machines, is tiny and sandboxed-by-construction, keeps bulk crypto native (interpret only the
-  control path), and is the *most iOS-defensible* of the delivered-logic options (spec-as-data, no
-  JIT). Run multiple specs in parallel for flag-day-free upgrades (Proteus). We own and audit the
-  parser/VM.
-- **WASM stays a desktop/Android-only escape hatch, not the Rust core.** If a transport genuinely
-  needs Turing-complete logic, the realistic Rust option is `wasmi` (pure-Rust interpreter, no C, no
-  JIT, iOS-safe) accepting interpreter speed — *or* reuse getlantern's Go/wazero WATER path on the
-  platforms where a Go runtime already exists. Do **not** link wasmtime into the lean Rust binary.
+- **Tier 2 — `wasmi` (interpreted WASM) as the full-logic escape hatch.** When recombination isn't
+  enough (a genuinely new wire format / Turing-complete logic), load a WASM module run by **`wasmi`**
+  — a pure-Rust, no-JIT, iOS-safe interpreter. Transports are written in real Rust/Go (→`wasm32`)
+  with real libraries; bulk crypto/copy stays **native** via host functions (interpret only the
+  control path — §8.1 shows why this is mandatory). Capability surface as narrow as WATER's
+  (bytes-in/bytes-out + crypto/format host fns, no second egress). Run multiple modules in parallel
+  for flag-day-free upgrades (the Proteus lesson). **The §8.1 micro-bench picked this over the
+  alternatives on measured size + speed.**
+  - *A purpose-built bytecode VM / transport DSL* (Proteus/Marionette lineage) remains a fallback
+    **only if** you need to beat `wasmi`'s +0.84 MB or want a sandbox-by-construction parser you fully
+    own — but you'd design+maintain an ISA and cap expressiveness, and `wasmi` is already small.
+  - *Embedded scripting interpreters (Rhai/Rune)* are **dominated** for this use — measured larger
+    *and* slower than `wasmi`, and you'd write transports in a niche scripting language (§8.1).
+  - `wasmtime` (JIT, ~15–20 MB, iOS-dead) is never linked into the lean Rust core; getlantern's
+    Go/wazero WATER path stays an option only where a Go runtime already exists.
 
 Honest decoupling limits: tier 1 decouples *parameters + composition* from releases; tier 2 adds
 *novel wire formats*; neither decouples a genuinely new *primitive* (a new AEAD, a new substrate) —
 that still needs a client release. That's an acceptable line: empirically, new primitives are rare
 and new *compositions/formats* are the norm.
 
+### 8.1 Measured: tier-2 runtime micro-bench (2026-06-17)
+
+Throwaway spike (`/tmp/tr-spike`, M-series mac, spark's release profile: `opt-level=3`/fat-LTO/
+strip/panic=abort). A framing op (`[u16 BE len][bytes ^ key]`) run in each runtime vs a native
+baseline. "Control-op" = an 8-byte header (representative — a few per connection); "record" = a
+1500-byte buffer pushed *through* the interpreter (the anti-pattern, shown to quantify it).
+
+| runtime | binary-size contribution | control-op latency | record (bytes-through-interp) |
+|---|---|---|---|
+| native baseline | — | 3 ns | 2823 MB/s |
+| **`wasmi`** | **+0.84 MB** | **103 ns** | 99 MB/s |
+| `rhai` | +1.55 MB | 1840 ns | 7.3 MB/s |
+| `rune` | +2.19 MB | 1367 ns | 9.0 MB/s |
+
+Conclusions: **`wasmi` is both the leanest and the fastest interpreted option** (~13–18× quicker
+control-path than the scripting languages, and the smallest by ~0.7–1.4 MB) — and ~1/20th of
+`wasmtime`'s 15–20 MB. All three are single-MB-class, so any fits the relaxed budget; `wasmi` simply
+wins. The record column makes the design rule **measured, not asserted**: even `wasmi` is 28× slower
+than native for bulk bytes (rhai/rune ~300×) → **never run bulk data through the interpreter; keep
+crypto/copy native and interpret only control logic.** Caveats: Rune used `with_default_modules` +
+int-array marshalling (so its size + perf are upper bounds); these are fast-desktop numbers, but the
+ranking and the sub-µs control-path latencies (negligible vs network RTT) hold on any platform. The
+delivered `.wasm` for a real transport is ~130–590 KB (research §1) — the over-the-wire payload, fine.
+
 ## 9. Platform matrix
 
-| platform | tier 1 (config) | tier 2 (DSL VM) | WASM |
-|---|---|---|---|
-| Linux/macOS desktop | ✅ | ✅ | escape hatch (`wasmi` or Go/wazero) |
-| Android | ✅ | ✅ | plausible (Play interpreter carve-out, bundled runtime) |
-| iOS | ✅ | ✅ (spec-as-data, no JIT) | ❌ no JIT; 2.5.2-grey for downloaded modules — bundle, don't download |
+| platform | tier 1 (config) | tier 2 (`wasmi`, interpreted WASM) |
+|---|---|---|
+| Linux/macOS desktop | ✅ | ✅ download + run |
+| Android | ✅ | ✅ download + run (Play interpreter carve-out + bundled runtime) |
+| iOS | ✅ | runs (pure interpreter, **no JIT**), but **bundle modules** — *downloading* a new module that adds a protocol is App-Store 2.5.2-grey |
 
 ## 10. Open questions / what to prototype first
 
@@ -205,10 +234,12 @@ and new *compositions/formats* are the norm.
 2. **Signing + delivery**: Ed25519 detached sig + pinned key + version counter, over spark's config
    channel (reuse fronted/kindling); decide HTTPS-only vs adding a magnet/fronted fallback like
    lantern-water.
-3. **Tier-2 ISA**: the minimal opcode/primitive set (read N / write / branch-on-byte / XOR / AEAD /
-   append-prefix / TLS-record-frame / random-pad / sleep) — expressive enough for Noise-class
-   handshakes, no Turing-completeness, no second egress. Evaluate `wasmi` as the alternative before
-   committing to a bespoke VM.
+3. **Tier-2 host-function ABI** (runtime decided: `wasmi`, per §8.1). Design the narrow capability
+   surface the module imports — `read`/`write` on the single host-chosen upstream fd, native crypto
+   (AEAD/hash/`rand`), framing/format helpers, `sleep` — and *nothing* that reaches a second egress
+   or the filesystem (mirror WATER's surface). The bytes-through-interpreter penalty (§8.1) makes
+   "bulk via native host fns, control-path in wasm" a hard ABI requirement, not a guideline. A
+   bespoke bytecode VM is revisited only if `wasmi`'s +0.84 MB ever becomes the binding constraint.
 4. **Probe resistance is part of the delivered spec** (Proteus's lesson) — normalized errors /
    fail-open-to-a-real-service must be expressible and tested, not assumed.
 

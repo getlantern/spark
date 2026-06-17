@@ -331,10 +331,15 @@
   a real **integrity≠authenticity gap** (SHA-256 only, no signature). **Recommendation: two tiers —
   (1) config-composition of native primitives (signed/versioned pipeline of uTLS fingerprint +
   padding + framing + fragmentation; extends AnyTLS's server-pushed padding scheme; covers ~80% of
-  censor responses, ~0 size, mobile-compliant); (2) a small purpose-built transport DSL/bytecode VM
-  (Proteus/Marionette lineage) for novel wire formats, bulk crypto stays native.** WASM only as a
-  desktop/Android escape hatch (`wasmi` or Go/wazero), never wasmtime in the Rust core. No code yet;
-  promote a tier to an ADR when committed.
+  censor responses, ~0 size, mobile-compliant); (2) `wasmi` (interpreted WASM) as the full-logic
+  escape hatch for novel wire formats, bulk crypto stays native.** wasmtime never in the Rust core
+  (15-20MB, iOS-dead). **Tier-2 runtime micro-bench (`/tmp/tr-spike`, 2026-06-17, doc §8.1): `wasmi`
+  +0.84 MB / 103 ns control-op BEATS rhai (+1.55 MB / 1840 ns) and rune (+2.19 MB / 1367 ns) on BOTH
+  size and speed** — so the practical "interpreted Rust" (Rust→wasm→wasmi) is the leanest+fastest
+  dynamic-load runtime; the scripting-interpreter detour doesn't pay off; a bespoke DSL VM is a
+  fallback only if <0.84 MB is needed. Record-through-interpreter (wasmi 28× slower than native,
+  rhai/rune ~300×) makes "keep bulk native, interpret only the control path" a measured ABI rule.
+  No code yet; promote a tier to an ADR when committed.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
