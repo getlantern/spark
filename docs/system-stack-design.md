@@ -2,8 +2,9 @@
 
 - **Status:** **Built + live-gated (TCP) — 2026-06-17.** Implemented behind the `system-stack`
   feature (`core/src/netstack/system/`), selected via `[tun] stack = "system"`. The netns A/B
-  (below, §9 "Validated") confirms it eliminates the concurrent-download collapse. TCP-only so far
-  (UDP/ICMP = the "mixed" stack — still future). Worth promoting to an ADR now that it's proven.
+  (below, §9 "Validated") confirms it eliminates the concurrent-download collapse. TCP + UDP (mixed
+  stack). The decision is recorded in `docs/adr/0002-system-netstack.md`; this doc is the design +
+  measurements behind it.
 - **Scope:** A second implementation of the existing `core::netstack::Netstack` trait that lets the
   **host kernel** own the TCP state machine, as an alternative to the userspace `SmoltcpNetstack`.
   Mirrors sing-box's `stack = system` option. Does **not** change the proxy core, the transports
