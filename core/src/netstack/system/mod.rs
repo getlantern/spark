@@ -14,8 +14,9 @@
 //! - [`rewrite`] — in-place TCP/IP header rewrite + checksum recompute. **Built.**
 //! - [`pump`] — the [`Gateway`](pump::Gateway): classify + rewrite each packet (app→listener,
 //!   listener→app) and resolve accepted connections back to their original endpoints. **Built.**
-//! - The async TUN read/write loop driving the pump, the accept loop (listener → [`TcpFlow`]), the
-//!   idle reaper, and the [`Netstack`] impl — *next chunks*.
+//! - [`stack`] — [`SystemNetstack`](stack::SystemNetstack): the live wiring (TUN pump loop +
+//!   kernel listener accept loop + reaper) implementing [`Netstack`](super::Netstack). **Built.**
+//! - `[tun] stack = "system"` config knob — *next chunk*.
 //!
 //! Feature-gated behind `system-stack` (off by default; desktop-only — Linux/macOS). The proxy core
 //! and transports are untouched: a system-stack flow is a kernel `TcpStream` surfaced as the same
@@ -27,3 +28,6 @@
 pub mod nat;
 pub mod pump;
 pub mod rewrite;
+pub mod stack;
+
+pub use stack::SystemNetstack;
