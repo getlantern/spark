@@ -24,6 +24,11 @@ use tracing::{debug, warn};
 use crate::tun::Tun;
 use crate::BoxedStream;
 
+// The system (kernel-TCP) netstack — a second `Netstack` impl behind the `system-stack` feature
+// (off by default; desktop-only). See `docs/system-stack-design.md`.
+#[cfg(feature = "system-stack")]
+pub mod system;
+
 /// Channel depth for the netstack UDP surface (inbound datagrams and pending replies).
 const UDP_CHANNEL_DEPTH: usize = 1024;
 

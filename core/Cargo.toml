@@ -35,3 +35,6 @@ tokio-boring2 = { workspace = true, optional = true }
 # AnyTLS-over-BoringSSL transport (ADR 0001). Off by default so the base build stays rustls/ring-only
 # and free of the C/cmake BoringSSL build.
 anytls = ["dep:boring2", "dep:tokio-boring2"]
+# System (kernel-TCP) netstack — a second Netstack impl (NAT redirect gateway to a kernel listener).
+# Off by default; desktop-only (Linux/macOS). See docs/system-stack-design.md.
+system-stack = []
