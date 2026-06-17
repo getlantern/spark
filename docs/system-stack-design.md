@@ -1,0 +1,264 @@
+# Design: System (kernel-TCP) Netstack — a second `Netstack` behind the trait
+
+- **Status:** Proposed / draft — 2026-06-17. No code yet. Promote to an ADR (`docs/adr/`) when we
+  commit to building it; this doc is the exploration that ADR would reference.
+- **Scope:** A second implementation of the existing `core::netstack::Netstack` trait that lets the
+  **host kernel** own the TCP state machine, as an alternative to the userspace `SmoltcpNetstack`.
+  Mirrors sing-box's `stack = system` option. Does **not** change the proxy core, the transports
+  (including the M11 AnyTLS one), or the UDP path.
+
+## 1. Motivation
+
+Today spark has exactly one netstack: `SmoltcpNetstack` (`core/src/netstack/mod.rs:74`), a *userspace*
+TCP/IP stack. In sing-box terms that is the **gVisor** stack — the application's TCP connections are
+terminated and reassembled by a TCP state machine running inside our process (smoltcp, where sing-box
+uses gVisor's netstack).
+
+sing-box also offers a **system** stack, where the **host kernel** runs the TCP state machine and the
+tool is reduced to a packet-rewriting NAT gateway. The question this doc answers: *can spark offer the
+same choice, and what would it cost?*
+
+Why it's attractive:
+- **Mature TCP**: kernel CUBIC/BBR, SACK, window scaling, PMTU discovery, ECN, and segmentation
+  offload — all battle-tested, none of which a small userspace stack matches.
+- **CPU / throughput**: no userspace reassembly; the kernel does the heavy lifting.
+- **Smaller attack surface in *our* binary**: the TCP state machine (which parses fully untrusted
+  segment streams) moves into the hardened kernel. We keep only a header-rewriting layer.
+
+## 2. What "system stack" actually is (verified against `sing-tun@v0.7.11`)
+
+The three sing-box stacks (`sing-tun/stack.go:39-58`) differ almost entirely in **how TCP is
+handled**. UDP is a userspace flow-NAT in *every* mode.
+
+### gvisor (`stack_gvisor.go`)
+Full userspace TCP/IP. spark's `SmoltcpNetstack` is the direct equivalent.
+
+### system (`stack_system.go`) — kernel TCP via a NAT redirect gateway
+There is **no userspace TCP state machine**. The mechanism:
+
+1. **Local listener.** On start it opens real kernel `net.Listener`s on the tun's gateway address
+   (`stack_system.go:128-158`, v4 + v6) and remembers their ports (`tcpPort`/`tcpPort6`).
+2. **NAT table.** A `TCPNat` (`stack_system_nat.go`) maps an original **source** `addr:port` → an
+   allocated synthetic port (`addrMap map[netip.AddrPort]uint16`, `:18`). `Lookup(source, destination)`
+   (`:83`) allocates on first sight and stores a `TCPSession{source, destination}` keyed by that port.
+3. **Outbound rewrite.** An app SYN/segment `(src=clientSrc, dst=target)` is rewritten so the **kernel
+   routes it to the local listener** — destination becomes the listener, source becomes
+   `gateway:natPort` — and checksums are fixed. The kernel's own TCP stack now drives the connection.
+4. **Accept + recover.** `acceptLoop` (`:319`) does `listener.Accept()` — a genuine kernel `TCPConn` —
+   then `tcpNat.LookupBack(connPort)` (`:326`, `stack_system_nat.go:69`) recovers
+   `(clientSrc, target)` from the synthetic port.
+5. **Reply rewrite.** Packets from the listener are rewritten back to `(src=target, dst=clientSrc)`
+   (`LookupBack` again at `:391` / `:486`), checksums fixed, written to the TUN.
+6. **UDP** is *not* kernel-accepted (no connectionless `Accept`); it's a userspace UDP NAT
+   (`udpnat2`, `:161`) that still dials real kernel UDP sockets upstream.
+
+### mixed (`stack_mixed.go`)
+Embeds `*System` for TCP (`:18`) and bolts a **gVisor UDP forwarder** on top
+(`SetTransportProtocolHandler(udp.ProtocolNumber, …)`, `:47`). So: system TCP + gVisor UDP.
+
+> **Key reframe.** The "stack" choice is really *"who owns the TCP state machine — our process or the
+> kernel?"* For UDP there is no real choice: it's a flow-NAT to kernel sockets either way. **spark's
+> UDP path already works exactly like the system stack's** — `DirectPacketSink` is a kernel
+> `UdpSocket` and smoltcp only demuxes the TUN side — so a spark "system stack" is almost entirely a
+> *TCP* feature, and combining it with our existing UDP path gives us sing-box's "mixed" for free.
+
+## 3. Why spark fits this cleanly
+
+The `Netstack` trait was put in this seam deliberately (CLAUDE.md; `core/src/netstack/mod.rs:8-11`).
+The proxy core consumes only:
+
+```rust
+// core/src/netstack/mod.rs
+pub struct TcpFlow {
+    pub original_dst: SocketAddr,   // upstream to dial
+    pub src: SocketAddr,            // app's source inside the tunnel
+    pub stream: BoxedStream,        // Box<dyn AsyncReadWrite + Unpin + Send>
+}
+
+#[async_trait]
+pub trait Netstack: Send {
+    async fn accept_tcp(&mut self) -> Option<TcpFlow>;
+}
+```
+
+The accept loop in `core/src/proxy/tcp.rs:27` is `while let Some(flow) = netstack.accept_tcp().await`.
+A system-stack impl yields `TcpFlow`s where `stream` is a real kernel `tokio::net::TcpStream` — which
+already `impl`s `AsyncRead + AsyncWrite`, hence `AsyncReadWrite` (`core/src/lib.rs:30`). So:
+
+**The proxy core, every forwarder, and every transport — including the M11 AnyTLS transport — stay
+byte-for-byte unchanged.** That is the entire payoff of the abstraction.
+
+What we already own that this needs: raw TUN read/write (`tun-rs`, via `core::tun::Tun`), the routing
+/ kill-switch manager, and — critically — `SocketProtector` / `protect_interface` for loop avoidance
+(see §6).
+
+## 4. Proposed implementation: `SystemNetstack`
+
+A new module `core/src/netstack/system/` implementing `Netstack`. Sketch (illustrative, not final):
+
+```rust
+pub struct SystemNetstack {
+    accept_rx: mpsc::Receiver<TcpFlow>, // fed by the accept loop
+    tasks: Vec<JoinHandle<()>>,         // packet pump + accept loop + NAT reaper; aborted on drop
+}
+
+#[async_trait]
+impl Netstack for SystemNetstack {
+    async fn accept_tcp(&mut self) -> Option<TcpFlow> {
+        self.accept_rx.recv().await
+    }
+}
+```
+
+Three cooperating tasks (all `JoinHandle`s stored, per CLAUDE.md):
+
+1. **Packet pump** — owns `Arc<Tun>`. Reads IP packets; for TCP it rewrites headers per §2 and writes
+   them back to the TUN so the kernel routes them to/from the local listener; for UDP/ICMP it forwards
+   to the existing paths. The only genuinely new, fiddly code:
+   - a **`TcpNat`** (bidirectional `source ⇆ natPort`, with a session record holding `src` +
+     `original_dst`, and idle reaping);
+   - **header rewrite + incremental IP/TCP checksum fixup** (RFC 1624 style — adjust, don't recompute
+     from scratch on the hot path).
+2. **Accept loop** — owns the kernel `TcpListener`(s) bound to the gateway address:
+   ```rust
+   let (stream, peer) = listener.accept().await?;
+   let session = nat.lookup_back(peer.port())?;       // recover (src, original_dst)
+   accept_tx.send(TcpFlow {
+       original_dst: session.original_dst,
+       src: session.src,
+       stream: Box::new(stream),                       // kernel TcpStream ⇒ AsyncReadWrite
+   }).await;
+   ```
+3. **NAT reaper** — evicts stale entries (FIN/RST observed, or idle timeout), mirroring sing-tun's
+   timeout-driven cleanup.
+
+**UDP**: reuse spark's existing netstack UDP surface unchanged (this is our "mixed"). We can keep
+smoltcp purely for UDP demux while TCP goes through the kernel, or port UDP to its own NAT later — the
+trait already separates the two surfaces.
+
+## 5. Configuration surface
+
+Mirror sing-box. A single knob on the TUN config:
+
+```toml
+[tun]
+stack = "userspace"   # default — SmoltcpNetstack (cross-platform, already gate-passing)
+# stack = "system"    # kernel TCP via the NAT gateway (desktop; see platform matrix)
+```
+
+`from_config`-style wiring picks the `Netstack` impl; everything downstream is trait-generic. (A
+`"mixed"` value can be added if we ever want to be explicit, but our default UDP path already makes
+`"system"` behave as mixed.)
+
+## 6. Loop avoidance (the load-bearing correctness concern)
+
+A NAT gateway that leans on the kernel must guarantee kernel-originated packets don't re-enter the
+TUN and recurse. spark already solves the analogous problem for upstream dials with `SocketProtector`
+/ `protect_interface` (the macOS-required, Linux-recommended pin to the egress NIC). For the system
+stack:
+
+- The **local listener** lives on the tun gateway address; its accepted sockets' traffic is what the
+  packet pump rewrites — that loop is intentional and bounded by the NAT table.
+- The **upstream dials** (made by the proxy after `accept_tcp`) must bypass the tunnel route — already
+  handled by `protect_interface`.
+- The **rewrite must never produce a packet whose routing sends it back through the TUN** except the
+  intended listener delivery. This is the part to test adversarially.
+
+## 7. Platform matrix
+
+| Platform | Feasibility | Notes |
+|---|---|---|
+| **Linux** | Good | The userspace-NAT approach needs no `TPROXY`/iptables (sing-tun does the rewrite itself). Runs in the privileged tunnel process. |
+| **macOS** | Good | utun + userspace NAT; runs in the M10 system extension that owns the utun. |
+| **Windows** | More work | sing-tun keeps a *separate* `stack_system_windows.go` — bind/socket semantics differ. |
+| **iOS / Android** | Keep userspace | The local-listener + NAT model fights the mobile sandbox/routing model; sing-box itself runs gVisor on iOS with shrunken TCP buffers (`stack_gvisor_tcpbuf_ios.go`). System stack should be **desktop-only**; smoltcp stays the mobile path. |
+
+## 8. Security / attack surface
+
+- **Removed from our binary:** the TCP state machine — the component that parses fully untrusted,
+  adversarially-ordered segment streams. It moves into the kernel.
+- **Added to our binary:** a header-parse-and-rewrite layer. Still untrusted-input-facing, but
+  strictly *smaller* than a state machine — it inspects/edits IP+TCP headers and recomputes
+  checksums, nothing more.
+- Net: plausibly a **reduction** in our exposure, contingent on the checksum/rewrite code being
+  correct (fuzz the rewrite path).
+
+## 9. Performance — read this before claiming "system is faster"
+
+The historical "system ≫ gVisor" throughput gap has **narrowed** because sing-tun added
+**segmentation offload (GSO/GRO)** to the TUN path itself (`tun_offload.go`, `tun_linux.go:148-193`),
+batching packets across the TUN boundary for *any* stack. So:
+
+- The durable wins of system stack are **CPU efficiency**, **congestion-control maturity**, and
+  **attack-surface reduction** — not a guaranteed headline throughput multiple.
+- If raw throughput is the goal, **adding GSO to our existing smoltcp TUN bridge may be the
+  cheaper lever** than a whole second stack. Worth benchmarking *before* committing to this design.
+
+### Measured (2026-06-17, `bench/netns-throughput.sh`)
+
+A throwaway 2-vCPU DigitalOcean droplet (Ubuntu 24.04, kernel 6.8), single TCP stream, 15s/direction.
+The kernel baseline is veth/loopback-class (~20 Gb/s, no real NIC) — read the **absolute** spark
+numbers and CPU, not the %.
+
+| build | up (Gb/s) | down (Gb/s) | spark CPU |
+|---|---|---|---|
+| kernel baseline (veth) | ~20 | ~20 | — |
+| spark smoltcp, `opt-level="z"` (ship profile) | 0.81 | 0.68 | ~130% |
+| spark smoltcp, `opt-level=3` (speed) | 1.61 | 1.37 | ~121% |
+
+Findings:
+1. **The ship profile (`opt-level="z"`, for the <3 MB goal) costs ~2× throughput.** A speed build
+   nearly doubled it. This is a free, low-risk lever independent of the stack question (use a speed
+   profile for desktop, or `opt-level=3` on `core` only).
+2. **No multi-flow scaling — a single serialized netstack pipeline.** At 4 parallel streams, upload
+   *fell* to 1.27 Gb/s (below the 1.61 single-stream) and download collapsed to ~0.06 Gb/s; the
+   download path also intermittently stalls outright. Parallelism adds contention on the one smoltcp
+   poll-loop / bridge, it doesn't add throughput.
+3. **Userspace ceiling ≈ 1.5 Gb/s single-stream at >1 core** (speed-built).
+
+Implication: the userspace stack is a real throughput/CPU ceiling *and* has a concerning download
+fragility + zero multi-flow scaling — all of which a kernel/system stack (each flow a real kernel
+socket, kernel congestion control, no single poll loop) would address. **But three cheaper things
+come first:** (a) the `opt-level` fix (free ~2×); (b) **investigate the download stall/collapse — it
+may be a bug, not an inherent cost**, and fixing it could change this picture materially; (c) prototype
+GSO on the bridge and re-run. Decide on the system stack only after those.
+
+## 10. Tradeoffs & alternatives
+
+**For:** kernel TCP maturity/CPU; smaller in-binary attack surface; the trait makes it a drop-in
+second impl with zero core/transport churn; UDP reuse gives "mixed" for free.
+
+**Against:** real new code (NAT table + checksum-correct header rewriting + listener lifecycle +
+reaper); per-platform divergence (Windows especially); a new rewrite layer to fuzz; loop-avoidance
+must be airtight; mobile won't use it, so we maintain *both* stacks indefinitely.
+
+**Alternatives considered:**
+- *Do nothing* — smoltcp is cross-platform and already passes the live gates. Lowest risk.
+- *GSO on smoltcp* (§9) — likely the bigger throughput win per unit effort; orthogonal and could ship
+  first.
+- *Adopt `ipstack` or another userspace netstack* — still userspace; doesn't get kernel TCP.
+
+## 11. Recommendation & open questions
+
+**Recommendation:** treat this as a future-milestone effort (an M11-adjacent or post-M11 "transport/
+datapath" arc), gated on a benchmark. Before building, measure: (a) smoltcp throughput/CPU today, and
+(b) the same with GSO added to the existing bridge. If GSO closes the gap, the system stack's case
+rests on CPU + attack-surface + congestion control alone — still real, but no longer urgent.
+
+**Open questions:**
+1. Exact gateway-address / synthetic-port scheme for the rewrite (copy sing-tun's, or simpler since
+   we control both ends?).
+2. Do we want true `"mixed"` semantics, or is "system TCP + our existing UDP" sufficient (probably
+   yes)?
+3. Windows: worth the separate code path, or desktop = Linux/macOS only at first?
+4. Where does this sit relative to the remaining M11 transport work and the deferred per-stream
+   flow-control item?
+
+## References
+
+- sing-tun (`@v0.7.11`): `stack.go:39-58` (selection), `stack_system.go` (system stack),
+  `stack_system_nat.go` (TCPNat), `stack_mixed.go` (mixed), `stack_gvisor*.go`, `tun_offload*.go` /
+  `tun_linux.go` (GSO/GRO).
+- spark: `core/src/netstack/mod.rs` (`Netstack`, `TcpFlow`, `SmoltcpNetstack`),
+  `core/src/proxy/tcp.rs:27` (accept loop), `core/src/lib.rs:30` (`AsyncReadWrite`),
+  `docs/tun-to-proxy-design.md` (the userspace-stack decision this complements).
