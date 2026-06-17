@@ -266,6 +266,21 @@
   `docs/system-stack-design.md` §9. **(3) GSO prototype — NEXT.** **TODO: tune the bumped buffer
   sizes down / make configurable for the iOS Packet-Tunnel memory cap.** CLAUDE.md's documented
   release profile still says `opt-level="z"` and should be updated to `3`.
+- **System (kernel-TCP) netstack — chunks 1–4 BUILT 2026-06-17 (behind `system-stack` feature, off
+  by default; TCP-only so far).** A second `Netstack` impl (NAT redirect gateway → kernel listener;
+  sing-box's `stack=system`) under `core/src/netstack/system/`: `nat.rs` (source⇄natPort table),
+  `rewrite.rs` (in-place TCP/IP 4-tuple rewrite + checksum recompute), `pump.rs` (`Gateway`:
+  classify + rewrite both directions, resolve accepts), `stack.rs` (`SystemNetstack`: TUN pump loop
+  + per-family kernel listener accept loop + idle reaper, impls `Netstack`). Selected via
+  `[tun] stack = "userspace"|"system"` (`config::StackKind`) routed through `netstack::build(...)`
+  (all 3 construction sites — cli/fd_tunnel/service); a blanket `impl Netstack for Box<dyn Netstack>`
+  keeps `proxy::tcp::run` generic. 102 core tests pass with `--features system-stack`; workspace
+  green default. **NEXT = chunk 5: live netns gate + system-vs-userspace throughput A/B on a
+  droplet** (this is the proof it fixes the concurrent-download collapse). **Known caveats to handle
+  at the gate:** Linux `rp_filter` may drop redirected packets re-entering on the TUN; NAT cleanup
+  is idle-eviction-only (no FIN/RST tracking); system stack is TCP-only (UDP/ICMP unhandled → no DNS
+  over it yet — the "mixed" stack is a later chunk). Design + measured rationale:
+  `docs/system-stack-design.md`.
 - **M11 AnyTLS UDP-over-AnyTLS (sing UoT v2) DONE 2026-06-16. ✅** `anytls/udp.rs`: `associate(stream,
   target)` opens a stream, writes the UoT magic SOCKS5 addr (`sp.v2.udp-over-tcp.arpa:0`) + the UoT
   request `IsConnect=1 | Destination(SOCKS5)`, then frames datagrams connected-mode `[u16 BE len]
