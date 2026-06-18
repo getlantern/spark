@@ -300,8 +300,8 @@ mod tests {
         )
         .await;
 
-        // Connect yields both an Ack and (because we subscribed) a StateChanged push, in some
-        // order; collect two frames and assert we saw each.
+        // Connect yields an Ack plus (because we subscribed) the Connecting then Connected
+        // StateChanged pushes, interleaved in some order; collect three frames and assert each.
         spark_ipc::write_frame(
             &mut client,
             &Request {
@@ -313,8 +313,9 @@ mod tests {
         .unwrap();
 
         let mut got_ack = false;
-        let mut got_push = false;
-        for _ in 0..2 {
+        let mut got_connecting = false;
+        let mut got_connected = false;
+        for _ in 0..3 {
             match spark_ipc::read_frame::<_, ServerMessage>(&mut client)
                 .await
                 .unwrap()
@@ -325,12 +326,18 @@ mod tests {
                     payload: ResponsePayload::Ack,
                 }) => got_ack = true,
                 ServerMessage::Push(Push::Event(TunnelEvent::StateChanged(
+                    TunnelState::Connecting,
+                ))) => got_connecting = true,
+                ServerMessage::Push(Push::Event(TunnelEvent::StateChanged(
                     TunnelState::Connected,
-                ))) => got_push = true,
+                ))) => got_connected = true,
                 other => panic!("unexpected server message: {other:?}"),
             }
         }
-        assert!(got_ack && got_push, "ack={got_ack} push={got_push}");
+        assert!(
+            got_ack && got_connecting && got_connected,
+            "ack={got_ack} connecting={got_connecting} connected={got_connected}"
+        );
     }
 
     #[tokio::test]

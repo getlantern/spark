@@ -631,7 +631,7 @@
   clippy `-D warnings` (incl. the bin w/ feature) + fmt, windows cross-clippy, `cargo check --workspace`
   — all clean. **Landed `b0c45eb`.** **Remaining spark-ffi out-of-scope:** desktop GUI,
   JSON-RPC/web facade, standalone-AAR gradle wrapper.
-  **DATA-PATH SHIM UNIFICATION + RECONNECT RESYNC EVENT 2026-06-18 (commit pending).**
+  **DATA-PATH SHIM UNIFICATION + RECONNECT RESYNC EVENT 2026-06-18.**
   (1) **Shim unification:** the Android JNI + Apple C-ABI shims duplicated the `Result` → `0/-1`
   status-code convention, and the config-from-primitives builder lived only in the Android shim.
   Both now live in `core::fd_tunnel`: `fd_config(addr, prefix, system_stack) -> Config` (the shared
@@ -657,7 +657,25 @@
   `#[cfg(unix)]` since only the unix reconnect test uses it — else dead-code on Windows). Exported FFI
   surface changed (+1 enum variant) → bindings regenerate (confirmed `StreamReconnected` in the Swift
   output; they're gitignored/regenerated at packaging). **Gate green:** 3 spark-ffi tests + host/bin
-  clippy + fmt + windows cross-clippy.
+  clippy + fmt + windows cross-clippy. **Landed `3546afc`.**
+  **CONTROL-PLANE CORRECTNESS 2026-06-18 (commit pending).** From the external (codex) review — two
+  of the cheap, high-value items it flagged in `service/`. (1) **Honor `Subscribe { events, logs }`:**
+  the actor discarded the flags (`Subscribe { .. }`) and registered a full subscriber. `Subscriber`
+  now carries `events`/`logs`; `broadcast` filters by push kind (`wants`: `Push::Event` needs
+  `events`, `Push::Log` needs `logs`, `Push::Dropped` always passes — it's per-subscriber delivery
+  metadata, never broadcast). So a logs-only client stops getting state spam, forward-compatible for
+  when log production lands. (2) **Transitional states:** `Connect` now emits `Connecting` *before*
+  `engine.start` (so a UI shows "Connecting…" during the slow bring-up) → `Connected`/`Failed`;
+  `Disconnect` emits `Disconnecting` before `engine.stop` → `Disconnected` (skipped when already
+  `Disconnected` so a defensive disconnect stays a quiet no-op — `transition` is idempotent and the
+  `direct_fallback` reset still runs). `TunnelState::Connecting`/`Disconnecting` already existed in
+  the protocol, just unused; `spark-ffi`'s mirror already carries them, so no FFI change. Updated the
+  `conn.rs` integration test (Connect now yields Ack + Connecting + Connected = 3 frames, not 2) + 2
+  new `service.rs` tests (flag filtering; Connect/Disconnect transitional sequence via `run_service`
+  + `FakeEngine`). **NOT done (deferred, own chunk):** actual log *streaming* — `Push::Log(LogLine)`
+  exists but is never produced; wiring it needs a `tracing` layer → actor channel + redaction
+  (`core::redact`) + touches `main.rs`/`run_service` signature. **Gate green:** `cargo test --workspace
+  --all-features` 174 pass (spark-service 19, +2), clippy `-D warnings` + fmt clean.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
