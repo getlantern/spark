@@ -7,22 +7,35 @@
 
 use spark_ffi::BackendError;
 
-/// `From<spark_ipc::ErrorCode>` maps service error categories to typed `BackendError`s (pure; no
-/// socket needed, runs on every platform).
+/// The FFI `BackendError` mirrors `spark_backend::BackendError` 1:1, passing the `Internal`/
+/// `Transport` messages through unchanged (pure; no socket needed, runs on every platform). The
+/// `ErrorCode → BackendError` mapping itself is tested in `spark-backend`.
 #[test]
-fn error_codes_map_to_typed_errors() {
-    use spark_ipc::ErrorCode;
+fn backend_errors_mirror_one_to_one() {
+    use spark_backend::BackendError as Be;
     assert!(matches!(
-        BackendError::from(ErrorCode::NotConnected),
+        BackendError::from(Be::NotConnected),
         BackendError::NotConnected
     ));
     assert!(matches!(
-        BackendError::from(ErrorCode::Unauthorized),
+        BackendError::from(Be::Unauthorized),
         BackendError::Unauthorized
     ));
     assert!(matches!(
-        BackendError::from(ErrorCode::Internal),
-        BackendError::Internal { .. }
+        BackendError::from(Be::UnsupportedVersion),
+        BackendError::UnsupportedVersion
+    ));
+    assert!(matches!(
+        BackendError::from(Be::InvalidRequest),
+        BackendError::InvalidRequest
+    ));
+    assert!(matches!(
+        BackendError::from(Be::Internal { message: "boom".to_owned() }),
+        BackendError::Internal { message } if message == "boom"
+    ));
+    assert!(matches!(
+        BackendError::from(Be::Transport { message: "eof".to_owned() }),
+        BackendError::Transport { message } if message == "eof"
     ));
 }
 

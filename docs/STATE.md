@@ -858,6 +858,32 @@
   in-process `flutter_rust_bridge` backend. **Next:** real frb desktop backend; ios/android +
   platform-channel backend; richer screens (capabilities/details/metrics/logs/profiles) off the
   ADR-0004 contract.
+  **GUI-AGNOSTIC BACKEND — `spark-backend` extracted 2026-06-18 (commit pending).** Made the whole
+  control backend Flutter-/binding-agnostic so any GUI can swap in (the user's explicit ask). New
+  workspace crate **`spark-backend/`**: a typed async `Backend` over `spark_ipc::Client` —
+  `connect`/`disconnect`/`status`/`capabilities`/`details`/`metrics`, the profile CRUD, and a
+  reconnecting `run_subscription(on_event: impl FnMut(BackendEvent))` — that **returns plain
+  `spark-ipc` types, carries NO binding annotations, and owns NO runtime**. It's `Clone` (just the
+  endpoint path, no connection) so a binding clones it into its own spawned task and drives the
+  `async fn`s on whatever executor it has. `BackendEvent` (`Event`/`Log`/`Reconnected`) is the
+  binding-agnostic stream item; `BackendError` keeps the typed `ErrorCode` categories plus a
+  `Transport` bucket (with the `From<ErrorCode>` mapping that used to live in `spark-ffi`).
+  **`spark-ffi` is now a thin UniFFI binding over it**: it keeps the `#[derive(uniffi::*)]` mirror
+  types + `From<spark_ipc::*>` conversions, owns the tokio runtime the foreign calls are driven on,
+  and each method `clone()`s the inner backend and `spawn`s the delegated call (`spawn<T,F>` helper
+  → `JoinError` ⇒ `Transport`, the backend's error ⇒ `From`); `subscribe` maps `BackendEvent` to the
+  `EventListener` callbacks (`Reconnected` ⇒ `TunnelEvent::StreamReconnected`). All the reconnect /
+  per-call-connection / wire logic moved *down* into `spark-backend`; the binding holds none of it.
+  **Litmus test holds:** dependency arrows point INTO `spark-backend` (`spark-ffi`, and later a
+  `flutter_rust_bridge` bridge / Tauri / Dioxus / CLI all depend on it; it depends on nothing
+  binding-shaped). **Gate green:** `cargo test --workspace --all-features` (spark-ffi's e2e
+  roundtrip + reconnect tests pass unchanged — the UniFFI `Backend` public API is byte-for-byte
+  preserved; new `spark-backend` unit tests + a rewritten `spark-ffi` 1:1-mirror test); host clippy
+  `--all-targets --all-features -D warnings` + **spark-ffi Windows cross-clippy** + fmt all clean;
+  **Swift + Kotlin bindings regenerate with the full 14-method `Backend` surface intact**. **Next
+  (deferred):** the real `flutter_rust_bridge` desktop backend — a thin bridge crate over
+  `spark-backend` + a Dart `FrbBackend implements SparkBackend` (note: `flutter_rust_bridge_codegen`
+  is not yet installed).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

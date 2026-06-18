@@ -17,11 +17,18 @@ name = "spark_ffi"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
-# The control-plane protocol + async client (the `stream` feature pulls the tokio `Client`).
-spark-ipc = { path = "../ipc", features = ["stream"] }
+# The GUI-agnostic backend (the typed control logic); this crate is just its UniFFI binding.
+spark-backend = { path = "../spark-backend" }
+# The wire types this binding mirrors into UniFFI records/enums (the `From<spark_ipc::*>` impls).
+spark-ipc = { path = "../ipc" }
 uniffi.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# The control e2e test mints `spark_backend::BackendError`s to check the 1:1 `From` mirror, and
+# drives the mock service over `spark-ipc`'s wire helpers directly.
+spark-backend = { path = "../spark-backend" }
 
 [features]
 # Pulls UniFFI's bindgen CLI for the `uniffi-bindgen` bin only — kept off the default lib build so

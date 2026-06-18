@@ -1,0 +1,16 @@
+# `spark-backend` — the GUI-agnostic control-plane backend. A typed async `Backend` over
+# `spark-ipc`'s `Client`, returning `spark-ipc` types, with no GUI/FFI coupling and no owned
+# runtime. Every frontend is a thin layer over this: `spark-ffi` (UniFFI, mobile), a
+# flutter_rust_bridge bridge (Flutter desktop), Tauri/Dioxus/CLI directly.
+[package]
+name = "spark-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The control-plane protocol + async client (the `stream` feature pulls the tokio `Client`).
+spark-ipc = { path = "../ipc", features = ["stream"] }
+tokio.workspace = true
+thiserror.workspace = true

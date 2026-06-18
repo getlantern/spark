@@ -1772,6 +1772,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spark-backend"
+version = "0.1.0"
+dependencies = [
+ "spark-ipc",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "spark-cli"
 version = "0.1.0"
 dependencies = [
@@ -1814,6 +1823,7 @@ dependencies = [
 name = "spark-ffi"
 version = "0.1.0"
 dependencies = [
+ "spark-backend",
  "spark-ipc",
  "thiserror",
  "tokio",
