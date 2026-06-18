@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'frb_backend.dart';
+import 'ne_backend.dart';
 import 'spark_backend.dart';
 
 Future<void> main() async {
@@ -11,10 +13,15 @@ Future<void> main() async {
   runApp(SparkApp(backend: await _desktopBackend()));
 }
 
-/// The desktop backend: the in-process Rust bridge ([FrbBackend], no subprocess → works under the
-/// macOS App Sandbox). Falls back to [CliBackend] if the Rust library can't be loaded/initialized,
-/// so the app always launches (degraded to driving the `spark` CLI).
+/// Pick the platform's backend (Model A/B per ADR 0005):
+/// - **macOS** → [NEBackend]: drives the Network Extension system extension (the OS owns the
+///   privileged tunnel; no daemon). This is the macOS *product* path.
+/// - **Linux/Windows** → the in-process Rust bridge [FrbBackend] over `spark-service`, falling back
+///   to [CliBackend] if the Rust library can't initialize, so the app always launches.
 Future<SparkBackend> _desktopBackend() async {
+  if (Platform.isMacOS) {
+    return NEBackend();
+  }
   try {
     return await FrbBackend.create();
   } catch (e) {

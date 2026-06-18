@@ -985,6 +985,28 @@
   block it. `dist/` gitignored. CI job is **not yet run** (needs the repo secrets/var). **Follow-up:**
   the controlling app is still the `platforms/apple` SwiftUI harness; making the Flutter `gui/` app the
   controlling app (embed the sysext + a NE platform-channel backend) is the ADR-0005 integration.
+  **NOTARIZATION PROVEN + FLUTTER-AS-CONTROLLING-APP (slice 1) 2026-06-18 (commit pending).**
+  (1) **Notarization works:** `AC_USERNAME`/`AC_PASSWORD` are set in the env (same convention as
+  lantern's Makefile, team ACZRKC3LQ9). Ran `notarytool submit` on the existing signed DMG → **status
+  Accepted**, `stapler staple` + `validate` OK, `spctl --assess` → **"accepted, source=Notarized
+  Developer ID"**. So `build-dmg.sh` produces a genuinely notarized DMG end-to-end (proven on the
+  SwiftUI-harness app). (2) **Flutter is now the macOS controlling app (Model A):** the `gui/` app's
+  bundle id → **`org.getlantern.spark`** (reuses the "Spark macOS App" Developer-ID profile + the
+  `group.org.getlantern.spark` App Group + NE entitlements); `Release`/`DebugProfile.entitlements`
+  mirror `platforms/apple` (NE `packet-tunnel-provider-systemextension` + `system-extension.install` +
+  app-group, unsandboxed); `AppInfo.xcconfig` + the Runner pbxproj configs set **manual Developer-ID
+  signing** (style Manual, identity "Developer ID Application", profile "Spark macOS App", hardened
+  runtime). New `macos/Runner/SparkVPN.swift` = the NE control (lifted from `SparkApp.swift`:
+  `OSSystemExtensionRequest` activation + `NETunnelProviderManager` start/stop/status) behind a
+  `MethodChannel("spark/ne")`; new Dart `gui/lib/ne_backend.dart` (`NEBackend implements
+  SparkBackend`); `main.dart` selects `NEBackend` on macOS, `FrbBackend`/`CliBackend` elsewhere.
+  **Verified:** `flutter build macos --release` → `spark_gui.app` (45 MB — the Flutter engine, vs
+  <1 MB SwiftUI) **signed Developer-ID as org.getlantern.spark with the NE entitlements**; `flutter
+  analyze` + `flutter test` clean. (`get-task-allow=true` is present — the known `flutter build`
+  non-archive quirk; the packaging re-sign strips it for notarization.) **REMAINING (slice 2):** embed
+  the `SparkTunnel.systemextension` into the Flutter app bundle + re-sign inside-out + DMG + notarize
+  (the packaging step for the Flutter app); then the live gate (activate sysext + connect). Also: the
+  unused `spark_bridge` framework still builds into the macOS app (bloat) — exclude it from macOS later.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

@@ -10,6 +10,9 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
+    // macOS controlling-app backend (Model A): the "spark/ne" channel driving the NE system extension.
+    SparkNeChannel.register(with: flutterViewController.registrar(forPlugin: "SparkNeChannel"))
+
     super.awakeFromNib()
   }
 }

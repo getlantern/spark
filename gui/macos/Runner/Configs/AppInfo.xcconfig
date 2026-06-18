@@ -7,8 +7,21 @@
 // The application's name. By default this is also the title of the Flutter window.
 PRODUCT_NAME = spark_gui
 
-// The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = org.getlantern.sparkGui
+// The application's bundle identifier. This is THE spark macOS app (Model A, ADR 0005): it reuses
+// the org.getlantern.spark App ID so the existing "Spark macOS App" Developer-ID profile + the
+// group.org.getlantern.spark App Group + the NE/system-extension entitlements all apply, and it
+// activates the org.getlantern.spark.tunnel system extension.
+PRODUCT_BUNDLE_IDENTIFIER = org.getlantern.spark
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 org.getlantern. All rights reserved.
+
+// Manual Developer-ID signing (mirrors platforms/apple/project.yml). The NE
+// packet-tunnel-provider-systemextension entitlement is distribution-only — automatic signing can't
+// mint it — so both Debug and Release sign manually with the Developer ID Application identity + the
+// portal "Spark macOS App" profile. Hardened runtime is required for notarization.
+ENABLE_HARDENED_RUNTIME = YES
+CODE_SIGN_STYLE = Manual
+DEVELOPMENT_TEAM = ACZRKC3LQ9
+CODE_SIGN_IDENTITY[sdk=macosx*] = Developer ID Application
+PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*] = Spark macOS App
