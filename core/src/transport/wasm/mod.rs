@@ -652,6 +652,21 @@ pub(crate) mod testutil {
         let wasm = wat::parse_str(XOR_WAT).expect("assemble fixture");
         TransformModule::load(&wasm).expect("load module")
     }
+
+    /// PKCS#8 of the **development** module-signing keypair — the private half of
+    /// `signing::DEV_MODULE_PUBKEY`. Test-only (this never compiles into a shipped binary), so tests
+    /// can produce artifacts that `ModuleVerifier::pinned()` accepts when no production key is pinned.
+    pub const DEV_MODULE_PKCS8: &[u8] = &[
+        48, 81, 2, 1, 1, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 47, 96, 208, 79, 38, 102, 119,
+        122, 12, 75, 231, 119, 191, 58, 165, 37, 216, 16, 180, 152, 96, 30, 105, 41, 180, 223, 163,
+        204, 55, 11, 100, 103, 129, 33, 0, 114, 43, 155, 15, 166, 26, 80, 178, 3, 21, 71, 211, 20,
+        223, 38, 197, 127, 114, 13, 201, 119, 147, 135, 224, 208, 160, 39, 52, 129, 224, 249, 213,
+    ];
+
+    /// The development signing keypair (see [`DEV_MODULE_PKCS8`]).
+    pub fn dev_keypair() -> ring::signature::Ed25519KeyPair {
+        ring::signature::Ed25519KeyPair::from_pkcs8(DEV_MODULE_PKCS8).expect("dev pkcs8")
+    }
 }
 
 #[cfg(test)]

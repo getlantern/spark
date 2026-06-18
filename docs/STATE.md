@@ -506,11 +506,21 @@
   a verified transport; rejects rollback via min_version; rejects wrong pinned key; persisted floor
   enforced+bumped — install v5 then reject v4). Also fixed `cli/main.rs`'s explicit `TransportConfig`
   literal (+`wasm: None`). Debug 112 lib / release 25 wasm tests green; clippy(feature+default)+fmt+
-  workspace clean. **Remaining (lower priority):** the network-delivery half of (c) — actually
-  *fetch* the artifact over the config/fronting channel and write it to `module` path (the verify/
-  load/floor logic is done; this is a client/service+fronting integration); (d) pin a real Ed25519
-  pubkey const at build time (verifier/`WasmConfig.public_key` is the interim source); v0 ABI niceties
-  (`dealloc`/arena-reset, AAD param on the AEAD host fns, UDP-source per-call-buffering caveat).
+  workspace clean.
+  **PINNED SIGNING KEY BUILT 2026-06-17 (chunk 9 = item d).** The verification key is now pinned in
+  the binary, not config. `signing.rs`: `const SPARK_MODULE_PUBKEY: [u8;32] = match
+  option_env!("SPARK_MODULE_PUBKEY_HEX") { Some(h) => parse_pubkey_hex(h) /* const-fn, malformed →
+  compile error */, None => DEV_MODULE_PUBKEY }` — release builds inject the real key at build time;
+  the dev fallback's private half (`testutil::DEV_MODULE_PKCS8`/`dev_keypair()`) is `#[cfg(test)]`
+  only, never shipped. `ModuleVerifier::pinned()` uses it; `from_config` now verifies via `pinned()`
+  and `WasmConfig.public_key` is REMOVED (config can't swap the trusted key). Tests sign with the dev
+  key; a cross-check test (`pinned_verifier_accepts_a_dev_signed_module`) proves the baked pubkey
+  const matches the baked pkcs8; from_config tests updated (happy/rollback/floor sign with dev,
+  not-pinned-key rejection signs random). Debug 29 / release 31 wasm tests green; clippy(feature+
+  default)+fmt+workspace clean. **Remaining (lower priority):** the network-delivery half of (c) —
+  actually *fetch* the artifact over the config/fronting channel into `module` (verify/load/floor is
+  done; a client/service+fronting integration, out of `core`); v0 ABI niceties (`dealloc`/arena-reset,
+  AAD param on the AEAD host fns, UDP-source per-call-buffering caveat) — **doing the ABI niceties next.**
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

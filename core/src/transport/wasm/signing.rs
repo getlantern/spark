@@ -33,6 +33,51 @@ const PUBKEY_LEN: usize = 32;
 /// and empty wasm, plus the trailing signature.
 const MIN_ARTIFACT_LEN: usize = 4 + 4 + 2 + 4 + SIG_LEN;
 
+/// The **development** module-signing public key — the fallback when no production key is pinned at
+/// build time. Its private half lives only in tests/tooling, never in a shipped binary, so it must
+/// not be relied on for production trust. Production builds inject the real key via the
+/// `SPARK_MODULE_PUBKEY_HEX` build-time environment variable (see [`SPARK_MODULE_PUBKEY`]).
+const DEV_MODULE_PUBKEY: [u8; PUBKEY_LEN] = [
+    114, 43, 155, 15, 166, 26, 80, 178, 3, 21, 71, 211, 20, 223, 38, 197, 127, 114, 13, 201, 119,
+    147, 135, 224, 208, 160, 39, 52, 129, 224, 249, 213,
+];
+
+/// The Ed25519 public key signed transform modules are verified against, **pinned at build time**
+/// (ADR 0003). A release build injects the real key via `SPARK_MODULE_PUBKEY_HEX` (64 hex chars);
+/// the private half never enters this repo. When that env var is unset, this falls back to
+/// [`DEV_MODULE_PUBKEY`]. A malformed override is a compile error (const-eval panic).
+const SPARK_MODULE_PUBKEY: [u8; PUBKEY_LEN] = match option_env!("SPARK_MODULE_PUBKEY_HEX") {
+    Some(hex) => parse_pubkey_hex(hex),
+    None => DEV_MODULE_PUBKEY,
+};
+
+/// Const-eval parse of a 64-char hex string into the 32-byte pinned key. Panics (→ compile error)
+/// on a wrong length or a non-hex digit, so a bad `SPARK_MODULE_PUBKEY_HEX` fails the build loudly.
+const fn parse_pubkey_hex(s: &str) -> [u8; PUBKEY_LEN] {
+    let bytes = s.as_bytes();
+    assert!(
+        bytes.len() == PUBKEY_LEN * 2,
+        "SPARK_MODULE_PUBKEY_HEX must be 64 hex characters"
+    );
+    let mut out = [0u8; PUBKEY_LEN];
+    let mut i = 0;
+    while i < PUBKEY_LEN {
+        out[i] = (hex_nibble(bytes[2 * i]) << 4) | hex_nibble(bytes[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+/// One hex digit → its value, or a compile-time panic on a non-hex byte.
+const fn hex_nibble(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => panic!("SPARK_MODULE_PUBKEY_HEX contains a non-hex digit"),
+    }
+}
+
 /// Errors from verifying or loading a signed module artifact.
 #[derive(Debug, thiserror::Error)]
 pub enum ModuleError {
@@ -94,18 +139,24 @@ impl SignedModule {
     }
 }
 
-/// Verifies delivered module artifacts against an Ed25519 public key pinned at build time.
+/// Verifies delivered module artifacts against an Ed25519 public key.
 ///
-/// In production the key is a compile-time constant baked into the signed binary; pass it to
-/// [`ModuleVerifier::new`]. The verifier holds only the public key — never a private key.
+/// Production uses [`ModuleVerifier::pinned`], whose key is a compile-time constant baked into the
+/// signed binary ([`SPARK_MODULE_PUBKEY`]); [`ModuleVerifier::new`] takes an explicit key (tests,
+/// tooling). The verifier holds only the public key — never a private key.
 pub struct ModuleVerifier {
     public_key: [u8; PUBKEY_LEN],
 }
 
 impl ModuleVerifier {
-    /// Create a verifier for the given pinned Ed25519 public key (raw 32 bytes).
+    /// Create a verifier for the given Ed25519 public key (raw 32 bytes).
     pub fn new(public_key: [u8; PUBKEY_LEN]) -> Self {
         Self { public_key }
+    }
+
+    /// A verifier using the key [`pinned at build time`](SPARK_MODULE_PUBKEY) — the production path.
+    pub fn pinned() -> Self {
+        Self::new(SPARK_MODULE_PUBKEY)
     }
 
     /// Verify, parse, and compile a signed module `artifact`.
@@ -252,6 +303,22 @@ mod tests {
         let mut t = signed.module().instantiate().expect("instantiate");
         let wire = t.transform_out(b"hi there").expect("out");
         assert_eq!(t.transform_in(&wire).expect("in"), b"hi there");
+    }
+
+    #[test]
+    fn pinned_verifier_accepts_a_dev_signed_module() {
+        // Cross-checks that the baked `DEV_MODULE_PUBKEY` const is the public half of the baked
+        // `DEV_MODULE_PKCS8`: an artifact signed by the dev key must verify under `pinned()`.
+        let artifact = sign(
+            &crate::transport::wasm::testutil::dev_keypair(),
+            "obfs",
+            1,
+            &xor_wasm(),
+        );
+        let signed = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("pinned() must accept a dev-signed module");
+        assert_eq!(signed.name(), "obfs");
     }
 
     #[test]

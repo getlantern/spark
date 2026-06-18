@@ -135,7 +135,9 @@ pub struct TransportConfig {
     pub wasm: Option<WasmConfig>,
 }
 
-/// Dynamic wasm transport configuration (ADR 0003).
+/// Dynamic wasm transport configuration (ADR 0003). The Ed25519 key that artifacts are verified
+/// against is **pinned in the binary** at build time (not configured here), so a tampered config
+/// can't swap in an attacker's signing key.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WasmConfig {
@@ -143,9 +145,6 @@ pub struct WasmConfig {
     pub server: SocketAddr,
     /// Path to the signed module artifact (delivered out of band; see `wasm::ModuleVerifier`).
     pub module: PathBuf,
-    /// Hex-encoded Ed25519 public key (32 bytes / 64 hex chars) the artifact is verified against.
-    /// Interim: production pins this key in the signed binary rather than trusting config (ADR 0003).
-    pub public_key: String,
     /// Anti-rollback floor — reject a module whose version is below this. Default `0`.
     #[serde(default)]
     pub min_version: u32,
@@ -304,9 +303,6 @@ mod tests {
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
-                        public_key:
-                            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-                                .into(),
                         min_version: 7,
                         init_config: Some("deadbeef".into()),
                         floor_path: Some(PathBuf::from("/var/lib/spark/floors.toml")),
@@ -333,7 +329,6 @@ mod tests {
             [transport.wasm]
             server = "192.0.2.1:443"
             module = "/etc/spark/obfs.spkw"
-            public_key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
             min_version = 9
         "#,
         )

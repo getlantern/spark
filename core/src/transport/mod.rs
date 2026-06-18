@@ -153,9 +153,6 @@ fn wasm_transport(
     cfg: &WasmConfig,
     protector: Option<SocketProtector>,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
-    let key: [u8; 32] = decode_hex(&cfg.public_key)
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| io::Error::other("transport.wasm.public_key must be 32 bytes of hex"))?;
     let init_config = match &cfg.init_config {
         Some(hex) => decode_hex(hex)
             .ok_or_else(|| io::Error::other("transport.wasm.init_config invalid hex"))?,
@@ -168,8 +165,9 @@ fn wasm_transport(
         ))
     })?;
 
-    // Authenticate first (this also enforces the config floor); the name is trusted only afterwards.
-    let signed = wasm::ModuleVerifier::new(key)
+    // Verify against the key pinned in the binary (not config), authenticating before the module
+    // name is trusted; this also enforces the config anti-rollback floor.
+    let signed = wasm::ModuleVerifier::pinned()
         .verify(&artifact, cfg.min_version)
         .map_err(|e| io::Error::other(format!("transport.wasm: {e}")))?;
 
@@ -366,19 +364,16 @@ mod wasm_config_tests {
     use super::*;
     use crate::config::{Config, TransportConfig, WasmConfig};
     use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use ring::signature::Ed25519KeyPair;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use wasm::testutil::dev_keypair;
 
-    fn keypair() -> Ed25519KeyPair {
+    fn random_keypair() -> Ed25519KeyPair {
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("generate key");
         Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("parse key")
     }
 
-    fn to_hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    /// Sign the XOR fixture as `(name, version)` and return the artifact bytes.
+    /// Sign the XOR fixture as `(name, version)` with `kp` and return the artifact bytes.
     fn xor_artifact(kp: &Ed25519KeyPair, name: &str, version: u32) -> Vec<u8> {
         let wasm = wat::parse_str(wasm::testutil::XOR_WAT).expect("assemble fixture");
         let sig = kp.sign(&wasm::signing_payload(name, version, &wasm));
@@ -407,11 +402,10 @@ mod wasm_config_tests {
         }
     }
 
-    fn base_cfg(module: std::path::PathBuf, public_key: String, min_version: u32) -> WasmConfig {
+    fn base_cfg(module: std::path::PathBuf, min_version: u32) -> WasmConfig {
         WasmConfig {
             server: "192.0.2.1:443".parse().unwrap(),
             module,
-            public_key,
             min_version,
             init_config: None,
             floor_path: None,
@@ -420,61 +414,52 @@ mod wasm_config_tests {
 
     #[test]
     fn from_config_builds_a_verified_wasm_transport() {
-        let kp = keypair();
+        // Signed by the dev key the binary pins (ModuleVerifier::pinned), so it verifies.
         let path = temp_path("ok");
-        std::fs::write(&path, xor_artifact(&kp, "obfs", 5)).expect("write artifact");
-        let cfg = config_with(base_cfg(path.clone(), to_hex(kp.public_key().as_ref()), 0));
-        // Builds a transport (which serves both TCP and UDP) from the verified module.
+        std::fs::write(&path, xor_artifact(&dev_keypair(), "obfs", 5)).expect("write artifact");
+        let cfg = config_with(base_cfg(path.clone(), 0));
         from_config(&cfg).expect("from_config should build the wasm transport");
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn from_config_rejects_a_rollback() {
-        let kp = keypair();
         let path = temp_path("rollback");
-        std::fs::write(&path, xor_artifact(&kp, "obfs", 3)).expect("write artifact");
+        std::fs::write(&path, xor_artifact(&dev_keypair(), "obfs", 3)).expect("write artifact");
         // Config floor 5 is above the artifact's version 3.
-        let cfg = config_with(base_cfg(path.clone(), to_hex(kp.public_key().as_ref()), 5));
+        let cfg = config_with(base_cfg(path.clone(), 5));
         assert!(from_config(&cfg).is_err(), "a rollback must be rejected");
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn from_config_rejects_a_wrong_pinned_key() {
-        let signer = keypair();
-        let attacker = keypair();
+    fn from_config_rejects_a_module_not_signed_by_the_pinned_key() {
+        // Signed by a random key, not the pinned one, so verification fails.
         let path = temp_path("wrongkey");
-        std::fs::write(&path, xor_artifact(&signer, "obfs", 1)).expect("write artifact");
-        let cfg = config_with(base_cfg(
-            path.clone(),
-            to_hex(attacker.public_key().as_ref()),
-            0,
-        ));
+        std::fs::write(&path, xor_artifact(&random_keypair(), "obfs", 1)).expect("write artifact");
+        let cfg = config_with(base_cfg(path.clone(), 0));
         assert!(
             from_config(&cfg).is_err(),
-            "a wrong pinned key must be rejected"
+            "a module not signed by the pinned key must be rejected"
         );
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn persisted_floor_is_enforced_and_bumped() {
-        let kp = keypair();
-        let pubkey = to_hex(kp.public_key().as_ref());
         let floor_path = temp_path("floor");
 
         // Installing v5 succeeds and bumps the persisted floor to 5.
         let p5 = temp_path("art5");
-        std::fs::write(&p5, xor_artifact(&kp, "obfs", 5)).expect("write");
-        let mut cfg5 = base_cfg(p5.clone(), pubkey.clone(), 0);
+        std::fs::write(&p5, xor_artifact(&dev_keypair(), "obfs", 5)).expect("write");
+        let mut cfg5 = base_cfg(p5.clone(), 0);
         cfg5.floor_path = Some(floor_path.clone());
         from_config(&config_with(cfg5)).expect("v5 installs");
 
         // A v4 artifact now clears the config floor (0) but not the persisted floor (5).
         let p4 = temp_path("art4");
-        std::fs::write(&p4, xor_artifact(&kp, "obfs", 4)).expect("write");
-        let mut cfg4 = base_cfg(p4.clone(), pubkey, 0);
+        std::fs::write(&p4, xor_artifact(&dev_keypair(), "obfs", 4)).expect("write");
+        let mut cfg4 = base_cfg(p4.clone(), 0);
         cfg4.floor_path = Some(floor_path.clone());
         assert!(
             from_config(&config_with(cfg4)).is_err(),
