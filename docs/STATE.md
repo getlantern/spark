@@ -940,6 +940,14 @@
   server, but the test executed + passed.) **STILL pending = the *successful*-connect path:** launch
   against a running `spark-service` (needs the daemon + sandbox disabled / a socket entitlement for
   `/var/run/spark.sock`). The `FrbBackend.create()` → `CliBackend` fallback de-risks a bad load.
+  **Fonts bundled (privacy) 2026-06-18 (commit pending).** A first `flutter run` showed `google_fonts`
+  throwing on every launch trying to fetch Sora/JetBrains Mono from `fonts.gstatic.com` (App Sandbox
+  blocks it — `errno=1`), and for a privacy/VPN tool the GUI must not beacon to Google regardless.
+  Bundled the 5 static TTFs (Sora Regular/SemiBold/Bold + JetBrains Mono Regular/SemiBold, SIL OFL 1.1,
+  licenses alongside) under `gui/assets/fonts/`; `google_fonts` 6.3.3 checks the asset bundle before
+  fetching (`_findFamilyWithVariantAssetPath` matches the `<Family>-<Variant>` filename), so the
+  `GoogleFonts.*` calls are unchanged and there's now **zero runtime network fetch** for fonts (works
+  offline + sandboxed). Verified bundled into `spark_gui.app`; analyze + widget test clean.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

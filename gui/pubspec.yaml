@@ -73,6 +73,12 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # Sora + JetBrains Mono bundled as assets (SIL OFL 1.1; licenses alongside). `google_fonts` finds
+  # them in the asset bundle and skips its runtime fetch from fonts.gstatic.com — so the UI renders
+  # the right typefaces offline and, critically for a privacy/VPN tool, never beacons to Google.
+  assets:
+    - assets/fonts/
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg
