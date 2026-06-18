@@ -717,6 +717,19 @@
   build}`, `Store::limiter`, `ResourceLimiter`). **Gate green:** `cargo test --workspace --all-features`
   182 pass (+1), clippy `--all-features -D warnings` + fmt clean. **Still open from the review:** log
   streaming; backend contract (richer IPC/FFI + handle); domain-target preservation (`Target` + DNS).
+  **BACKEND CONTRACT — ADR 0004 (Proposed) 2026-06-18 (commit pending).** Review item #2/#5 design:
+  the control plane is launch-time-config + 4 verbs (service loads one `Config` at start, never
+  mutates; `spark-ffi` mirrors connect/disconnect/status/subscribe) — a surface gap, not structural.
+  `docs/adr/0004-backend-contract.md` records the decision: grow `spark-ipc` + `spark-ffi` into a
+  versioned product backend contract, **additive + version-negotiated** (append enum variants —
+  postcard encodes by index so v1 decoding is preserved; bump `PROTOCOL_VERSION → 2`; never emit a v2
+  frame to a v1-negotiated peer), **profiles in the privileged store with write-only secrets** (the
+  config tree holds `AnytlsConfig.password` + wasm `init_config`; never echoed — redacted reads,
+  write-only sets, per CLAUDE.md), **counters stay in-process** (atomics → snapshots, no per-packet
+  IPC), and a **`TunnelHandle`** replacing `fd_tunnel`'s process-global stop for the embedded path.
+  **Slices (each shippable):** 1 capabilities+richer-status (read-only, start), 2 metrics, 3 profiles
+  (CRUD + connect-by-profile, the big one), 4 log streaming (folds in review item B), 5 embedded
+  handle model. Approved direction; building 1 then 2.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
