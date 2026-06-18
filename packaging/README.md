@@ -33,7 +33,8 @@ the GitHub Release:
 
 | Platform | Artifact | Built by |
 | --- | --- | --- |
-| macOS (arm64 + x86_64) | `spark-<ver>-<target>.tar.gz` (+ `.sha256`) | `tar` in the workflow |
+| macOS (arm64 + x86_64) | `spark-<ver>-<target>.tar.gz` (+ `.sha256`) — the CLI/daemon binaries | `tar` in the workflow |
+| **macOS app (arm64)** | `spark-<ver>-macos-arm64.dmg` — notarized GUI app + embedded NE system extension | `packaging/macos/build-dmg.sh` (gated CI job) |
 | Linux (x86_64) | `spark_<ver>_amd64.deb` + tarball | `packaging/debian/build-deb.sh` (hand-rolled `dpkg-deb`) |
 | Windows (x86_64) | `spark-<ver>-<target>.zip` (binaries + example config) | `Compress-Archive` in the workflow |
 
@@ -45,6 +46,43 @@ root launchd service.
 **Debian:** `build-deb.sh` lays out `/usr/bin/spark`, `/usr/sbin/spark-service`, the systemd
 unit, and `/etc/spark/config.toml` (a conffile), with `postinst`/`prerm` that reload systemd
 and stop/disable on removal. It deliberately avoids `cargo-deb` so the layout is fully explicit.
+
+## macOS app — notarized DMG (Model A, ADR 0005)
+
+The macOS *product* ships as a notarized DMG of the controlling app with the **Network Extension
+system extension embedded** (`platforms/apple`), drag-installed to `/Applications` — see
+[ADR 0005](../docs/adr/0005-macos-distribution-and-privileged-component.md). The CLI/daemon tarball
+(above) remains the Homebrew/enterprise channel.
+
+`packaging/macos/build-dmg.sh` is the source of truth (the CI job calls it): build the
+`SparkCore.xcframework` → `xcodegen` → `xcodebuild archive` → `-exportArchive` with the Developer-ID
+`platforms/apple/ExportOptions.plist` → notarize + staple the `.app` → build the DMG (`hdiutil`,
+drag-to-`/Applications` layout) → sign + notarize + staple the DMG → verify (`codesign`/`spctl`/
+`stapler`).
+
+```bash
+# Local dry run — build + sign + DMG + verify, NO notarization (no Apple creds needed):
+SKIP_NOTARIZE=1 packaging/macos/build-dmg.sh            # -> dist/spark-<ver>-macos-arm64.dmg
+
+# Full run — notarize + staple (pick ONE credential source):
+NOTARY_PROFILE=<notarytool-keychain-profile> VERSION=0.1.0 packaging/macos/build-dmg.sh
+AC_USERNAME=<apple-id> AC_PASSWORD=<app-specific-pw> VERSION=0.1.0 packaging/macos/build-dmg.sh
+```
+
+**One-time prerequisites** (human; see `platforms/apple/README.md`): the *Developer ID Application*
+cert + private key in the keychain, and the portal Developer-ID provisioning profiles **Spark macOS
+App** + **Spark macOS Tunnel** installed. The signing identity is resolved to a SHA-1 hash
+automatically (override with `SIGN_IDENTITY=<sha1>` if several Developer-ID certs share the keychain).
+
+**CI:** the `package-macos-app` job in `release.yml` runs this on a tag, but is **gated behind the
+repo variable `MACOS_APP_PACKAGING=true`** so releases work before signing is set up. Enable it after
+adding the repo secrets `MACOS_CERT_P12`/`MACOS_CERT_PASSWORD` (base64 `.p12` + password),
+`MACOS_PROFILE_APP`/`MACOS_PROFILE_TUNNEL` (base64 profiles), and `AC_USERNAME`/`AC_PASSWORD`
+(notarytool). The job uploads the DMG to the same GitHub Release.
+
+> **Follow-up:** today the controlling app is the `platforms/apple` SwiftUI harness. Making the
+> Flutter `gui/` app the controlling app (embedding the same sysext, driving it via a
+> NetworkExtension platform-channel backend) is the integration tracked in ADR 0005.
 
 ## Linux — systemd
 

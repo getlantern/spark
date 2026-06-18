@@ -2,4 +2,7 @@
 /target
 **/*.rs.bk
 
+# Release packaging output (DMGs, tarballs, etc. — built by packaging/ scripts + CI)
+/dist
+
 # Cargo.lock is intentionally tracked: this workspace ships binaries, not just a library.

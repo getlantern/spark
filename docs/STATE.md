@@ -966,6 +966,25 @@
   Dart seam makes that swap clean; `FrbBackend` stays the Linux/Windows path. **Awaiting the user's
   pick before building the `packaging/macos/` notarize pipeline** (decided inputs already: script
   called by CI; unsandboxed + hardened runtime).
+  **macOS DMG notarize pipeline BUILT (Model A chosen) 2026-06-18 (commit pending).** User picked
+  Model A (NE sysext + DMG). Built **`packaging/macos/build-dmg.sh`** (source of truth, CI calls it):
+  `build-xcframework.sh` → `xcodegen` → `xcodebuild archive` (Developer-ID, manual) → `-exportArchive`
+  with `platforms/apple/ExportOptions.plist` → notarize+staple the `.app` → `hdiutil` DMG
+  (drag-to-`/Applications`) → sign+notarize+staple the DMG → verify (`codesign`/`spctl`/`stapler`).
+  Creds: `NOTARY_PROFILE` *or* `AC_USERNAME`+`AC_PASSWORD`; `SKIP_NOTARIZE=1` for a no-creds dry run.
+  **Validated end-to-end locally** (sandbox off so codesign reaches `timestamp.apple.com`): archive +
+  export SUCCEEDED, DMG built with the embedded `org.getlantern.spark.tunnel.systemextension`, `.app`
+  passes `codesign --verify --deep` with **hardened runtime + secure timestamp + Team ACZRKC3LQ9**;
+  only the `notarytool` submit is unrun here (needs the user's Apple creds — none stored on this box).
+  **Bug found+fixed during validation:** signing the DMG by the identity *name* was ambiguous (3
+  same-named Developer-ID certs in the keychain) → resolve to the SHA-1 hash and sign by that
+  (`SIGN_IDENTITY` override). **CI:** `release.yml` gains a `package-macos-app` job (macos runner,
+  imports cert + profiles from secrets, runs the script, uploads the DMG to the Release), **gated by
+  repo var `MACOS_APP_PACKAGING=true`** so releases work before signing is configured; `publish` now
+  `needs: [build, package-macos-app]` with `always() && build success` so a skipped app job doesn't
+  block it. `dist/` gitignored. CI job is **not yet run** (needs the repo secrets/var). **Follow-up:**
+  the controlling app is still the `platforms/apple` SwiftUI harness; making the Flutter `gui/` app the
+  controlling app (embed the sysext + a NE platform-channel backend) is the ADR-0005 integration.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
