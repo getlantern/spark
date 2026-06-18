@@ -629,8 +629,35 @@
   with an explicit `[ -f … ]` host-lib check. **All generated outputs gitignored** (xcframework, Swift
   glue, jniLibs, Kotlin); tracked = the scripts/manifests/READMEs only. **Gate green:** 3 tests, host
   clippy `-D warnings` (incl. the bin w/ feature) + fmt, windows cross-clippy, `cargo check --workspace`
-  — all clean. **Remaining spark-ffi out-of-scope:** desktop GUI, JSON-RPC/web facade, data-path shim
-  unification, standalone-AAR gradle wrapper, the synthetic "reconnected" event.
+  — all clean. **Landed `b0c45eb`.** **Remaining spark-ffi out-of-scope:** desktop GUI,
+  JSON-RPC/web facade, standalone-AAR gradle wrapper.
+  **DATA-PATH SHIM UNIFICATION + RECONNECT RESYNC EVENT 2026-06-18 (commit pending).**
+  (1) **Shim unification:** the Android JNI + Apple C-ABI shims duplicated the `Result` → `0/-1`
+  status-code convention, and the config-from-primitives builder lived only in the Android shim.
+  Both now live in `core::fd_tunnel`: `fd_config(addr, prefix, system_stack) -> Config` (the shared
+  builder; `StackKind::System` is always present — only its *use* needs the `system-stack` feature,
+  erroring at startup otherwise — so this compiles on Apple where the feature is off) and
+  `run_fd(fd, mtu, config) -> i32` (the single home of the status-code convention). The shims are now
+  pure marshalling: Apple `spark_tunnel_run` = `run_fd(fd, mtu, Config::default())` (NE always uses
+  the userspace stack — `system` is Android-only — so default is right; 2-arg C ABI **unchanged**, no
+  Swift/`spark.h` edit, no risk to the live-gated macOS NE), Android `nativeRun` = `run_fd(fd, mtu,
+  fd_config(addr, prefix, system_stack))`. Removed the now-redundant `run_tunnel` (2-arg default) and
+  the Android-local `config()`; fixed a stale `[`spark_core::android`]` doc link → `fd_tunnel`. New
+  `fd_config` unit test. **Verified:** `cargo test -p spark-core` (fd_config) + workspace check + host
+  clippy (core+apple, macOS compiles the Apple shim) + **`cargo ndk -t arm64-v8a clippy -p
+  spark-android` clean** (Android shim cross-compiles with `system-stack`). Behavior-identical refactor
+  (macOS NE live gate not re-run — no host capability — but `run_fd(.., default)` ≡ old
+  `run_tunnel`). (2) **Reconnect resync event:** `spark-ffi`'s `TunnelEvent` gains a binding-only
+  variant `StreamReconnected` (the `From<spark_ipc::TunnelEvent>` mapping is unchanged — the variant
+  is synthesized, never sent by the service). `subscription_loop` tracks `established_before` and
+  passes `emit_reconnect` to `run_subscription_session`, which fires `StreamReconnected` to the
+  listener the moment a subscription **re**-establishes (NOT the first connect, even after connect
+  retries), before pumping — so a UI knows there was a gap and re-queries `status()`. Reconnect test
+  now asserts a `StreamReconnected` arrives (via a new `harness::wait_for` predicate waiter,
+  `#[cfg(unix)]` since only the unix reconnect test uses it — else dead-code on Windows). Exported FFI
+  surface changed (+1 enum variant) → bindings regenerate (confirmed `StreamReconnected` in the Swift
+  output; they're gitignored/regenerated at packaging). **Gate green:** 3 spark-ffi tests + host/bin
+  clippy + fmt + windows cross-clippy.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

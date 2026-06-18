@@ -106,6 +106,22 @@ mod harness {
         events.lock().unwrap().len()
     }
 
+    /// Poll `events` until one matches `pred` (or give up). Returns whether one was seen.
+    // Only the unix-only reconnect test uses this; without the gate it's dead code on Windows.
+    #[cfg(unix)]
+    pub(crate) async fn wait_for(
+        events: &Arc<Mutex<Vec<TunnelEvent>>>,
+        pred: impl Fn(&TunnelEvent) -> bool,
+    ) -> bool {
+        for _ in 0..400 {
+            if events.lock().unwrap().iter().any(&pred) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
     /// Drive a `Backend` bound to `endpoint` (a mock responder must already be accepting there):
     /// connect → status(Connected) → subscribe(receives the pushed event) → disconnect.
     pub(crate) async fn drive_backend(endpoint: String) {
@@ -188,15 +204,23 @@ mod unix_e2e {
             events: Arc::clone(&events),
         }));
 
-        // Each session yields exactly one event then the mock closes, so ≥2 events proves the
-        // subscription reconnected at least once on its own.
-        let got = harness::wait_for_count(&events, 2).await;
-        assert!(got >= 2, "expected ≥2 events across reconnects, got {got}");
+        // Each session delivers one StateChanged then the mock closes; a *re*-established session
+        // emits StreamReconnected first. Seeing a StreamReconnected proves the subscription
+        // reconnected on its own AND surfaced the post-gap resync signal.
+        let reconnected =
+            harness::wait_for(&events, |e| matches!(e, TunnelEvent::StreamReconnected)).await;
+        assert!(
+            reconnected,
+            "expected a StreamReconnected event after the stream dropped; got {:?}",
+            *events.lock().unwrap()
+        );
+        // The first session's push still arrives as a normal StateChanged (no synthetic reconnect
+        // on the initial connect).
         assert!(events
             .lock()
             .unwrap()
             .iter()
-            .all(|e| matches!(e, TunnelEvent::StateChanged { .. })));
+            .any(|e| matches!(e, TunnelEvent::StateChanged { .. })));
 
         backend.unsubscribe();
         tokio::task::spawn_blocking(move || drop(backend))

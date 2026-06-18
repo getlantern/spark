@@ -4,7 +4,8 @@
 //! The bridge is deliberately primitive-only (fd + mtu as `jint`), so it needs no `jni` crate:
 //! the `VpnService` establishes the tunnel, configures routing, and excludes the app's own
 //! sockets (`addDisallowedApplication`), then hands the TUN fd here to run the data path. Stop
-//! is signalled from `onDestroy`. The actual run/stop logic lives in [`spark_core::android`].
+//! is signalled from `onDestroy`. The run/config/stop logic lives in [`spark_core::fd_tunnel`],
+//! shared with the Apple C-ABI shim.
 //!
 //! On non-Android targets these symbols are `cfg`-d out, so the crate builds as an empty cdylib
 //! and stays in the workspace's green-checked set without affecting desktop builds.
@@ -43,26 +44,15 @@ mod jni {
         system_stack: JInt,
     ) -> JInt {
         crate::logcat::init();
-        let config = config(addr, prefix, system_stack);
-        match spark_core::fd_tunnel::run_tunnel_with_config(fd, mtu as u16, config) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
-    }
-
-    /// Build the run config from the JNI primitives: direct forwarding (Android excludes the app's
-    /// own UID from the tun, so upstream dials bypass it) with the tun address + chosen stack.
-    fn config(addr: JInt, prefix: JInt, system_stack: JInt) -> spark_core::config::Config {
-        use spark_core::config::{Config, StackKind};
-        let mut config = Config::default();
-        config.tun.addr = std::net::Ipv4Addr::from(addr as u32);
-        config.tun.prefix = prefix as u8;
-        config.tun.stack = if system_stack != 0 {
-            StackKind::System
-        } else {
-            StackKind::Userspace
-        };
-        config
+        // Direct forwarding (Android excludes the app's own UID from the tun, so upstream dials
+        // bypass it) with the tun address + chosen stack; the config/run/status-code logic is
+        // shared with the Apple shim in core.
+        let config = spark_core::fd_tunnel::fd_config(
+            std::net::Ipv4Addr::from(addr as u32),
+            prefix as u8,
+            system_stack != 0,
+        );
+        spark_core::fd_tunnel::run_fd(fd, mtu as u16, config)
     }
 
     /// `SparkBridge.nativeStop()` — signal the running tunnel to stop (from `onDestroy`).

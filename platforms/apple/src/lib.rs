@@ -23,10 +23,9 @@ mod ffi {
     /// lifetime; the core closes it on stop.
     #[no_mangle]
     pub extern "C" fn spark_tunnel_run(fd: c_int, mtu: c_int) -> c_int {
-        match spark_core::fd_tunnel::run_tunnel(fd, mtu as u16) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
+        // The NE always uses the cross-platform userspace stack (the `system` stack is Android-only),
+        // so the default config is right; `run_fd` is the shared run + status-code convention.
+        spark_core::fd_tunnel::run_fd(fd, mtu as u16, spark_core::config::Config::default())
     }
 
     /// Signal a running [`spark_tunnel_run`] to stop (from `stopTunnel`).

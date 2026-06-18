@@ -65,11 +65,18 @@ impl From<spark_ipc::TunnelStatus> for TunnelStatus {
     }
 }
 
-/// Mirror of [`spark_ipc::TunnelEvent`] — the item type of the event stream.
+/// The item type of the event stream: the service's [`spark_ipc::TunnelEvent`]s plus one
+/// binding-only variant the reconnect loop synthesizes ([`TunnelEvent::StreamReconnected`]).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum TunnelEvent {
-    StateChanged { state: TunnelState },
+    StateChanged {
+        state: TunnelState,
+    },
     FellOpenToDirect,
+    /// The event stream dropped and the subscription re-established (a service restart or a control
+    /// connection blip). Events during the gap were missed, so the state you hold may be stale —
+    /// re-query [`Backend::status`] on this. Synthesized by `spark-ffi`, never sent by the service.
+    StreamReconnected,
 }
 
 impl From<spark_ipc::TunnelEvent> for TunnelEvent {
@@ -187,8 +194,9 @@ impl Backend {
     ///
     /// The task auto-reconnects with capped exponential backoff, so it survives a service restart
     /// or a dropped control connection. Events that occur while disconnected are missed (this is a
-    /// state-event stream, not a log); after a gap the caller can re-query [`Backend::status`] for
-    /// the authoritative state.
+    /// state-event stream, not a log); on each reconnect the listener gets a
+    /// [`TunnelEvent::StreamReconnected`], on which it should re-query [`Backend::status`] for the
+    /// authoritative state.
     pub fn subscribe(&self, listener: Box<dyn EventListener>) {
         self.unsubscribe();
         let path = self.socket_path.clone();
@@ -237,12 +245,20 @@ async fn round_trip(
 /// reconnecting. Backoff resets to the floor once a session is established and grows (capped) while
 /// the service is unreachable. `sleep` and `next_push` are the only await points, so an abort tears
 /// the task down cleanly. No jitter — this is a single client, not a thundering herd.
+///
+/// Every *re*-establishment (not the first connect) emits [`TunnelEvent::StreamReconnected`] before
+/// pumping, so the listener knows there was a gap and can re-query `status()`.
 async fn subscription_loop(path: String, listener: Box<dyn EventListener>) {
     const MIN_BACKOFF: Duration = Duration::from_millis(250);
     const MAX_BACKOFF: Duration = Duration::from_secs(30);
     let mut backoff = MIN_BACKOFF;
+    let mut established_before = false;
     loop {
-        let established = run_subscription_session(&path, listener.as_ref()).await;
+        // Emit the resync signal only on a *re*-establishment — the first successful connect (even
+        // after connect retries) isn't a gap the listener needs to recover from.
+        let established =
+            run_subscription_session(&path, listener.as_ref(), established_before).await;
+        established_before |= established;
         backoff = if established {
             MIN_BACKOFF
         } else {
@@ -255,7 +271,13 @@ async fn subscription_loop(path: String, listener: Box<dyn EventListener>) {
 /// Open one control connection, handshake, `Subscribe`, and pump `Push(Event)`s to `listener` until
 /// the stream ends or errors. Returns whether the subscription was *established* (handshake +
 /// `Subscribe` both succeeded) so [`subscription_loop`] can decide whether to reset its backoff.
-async fn run_subscription_session(path: &str, listener: &dyn EventListener) -> bool {
+/// When `emit_reconnect` is set, fires [`TunnelEvent::StreamReconnected`] the moment the
+/// subscription is (re)established, before any pushes.
+async fn run_subscription_session(
+    path: &str,
+    listener: &dyn EventListener,
+    emit_reconnect: bool,
+) -> bool {
     let stream = match connect_control(Path::new(path)).await {
         Ok(s) => s,
         Err(_) => return false,
@@ -273,6 +295,9 @@ async fn run_subscription_session(path: &str, listener: &dyn EventListener) -> b
         .is_err()
     {
         return false;
+    }
+    if emit_reconnect {
+        listener.on_event(TunnelEvent::StreamReconnected);
     }
     loop {
         match client.next_push().await {
