@@ -82,18 +82,18 @@ mod unix_e2e {
         }
     }
 
-    fn wait_for_first(events: &Arc<Mutex<Vec<TunnelEvent>>>) -> Option<TunnelEvent> {
+    async fn wait_for_first(events: &Arc<Mutex<Vec<TunnelEvent>>>) -> Option<TunnelEvent> {
         for _ in 0..200 {
             if let Some(e) = events.lock().unwrap().first().cloned() {
                 return Some(e);
             }
-            std::thread::sleep(Duration::from_millis(10));
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         None
     }
 
-    #[test]
-    fn control_roundtrips_over_a_real_socket() {
+    #[tokio::test]
+    async fn control_roundtrips_over_a_real_socket() {
         let sock = std::env::temp_dir().join(format!("spk-ffi-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         // Bind here (std, no runtime) so the socket exists before `Backend` connects.
@@ -117,9 +117,9 @@ mod unix_e2e {
 
         let backend = Backend::new(sock.to_string_lossy().into_owned()).expect("backend");
 
-        backend.connect().expect("connect");
+        backend.connect().await.expect("connect");
         assert_eq!(
-            backend.status().expect("status").state,
+            backend.status().await.expect("status").state,
             TunnelState::Connected
         );
 
@@ -128,16 +128,22 @@ mod unix_e2e {
             events: Arc::clone(&events),
         }));
         assert_eq!(
-            wait_for_first(&events),
+            wait_for_first(&events).await,
             Some(TunnelEvent::StateChanged {
                 state: TunnelState::Connected
             }),
             "subscribe must deliver the pushed event"
         );
 
-        backend.disconnect().expect("disconnect");
+        backend.disconnect().await.expect("disconnect");
         backend.unsubscribe();
-        drop(backend);
+        // Backend owns a tokio runtime; dropping it does a blocking worker-thread join, which
+        // tokio forbids inside another runtime (here, `#[tokio::test]`'s). Foreign callers drop
+        // Backend on an ordinary off-runtime thread and never hit this, so drop on a blocking
+        // thread to mirror that.
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .expect("drop backend off-runtime");
         let _ = std::fs::remove_file(&sock);
     }
 }

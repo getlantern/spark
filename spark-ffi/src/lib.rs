@@ -6,10 +6,14 @@
 //! **control** surface only; the data path stays in the platform shims (`platforms/android`,
 //! `platforms/apple`), which run the core in-process on an OS-provided fd.
 //!
-//! `Backend` owns a tokio runtime: the control methods are synchronous (`block_on` a single
-//! request/response round-trip per call, mirroring the CLI), and [`Backend::subscribe`] spawns a
-//! task that streams server pushes to a foreign [`EventListener`]. Foreign callers should invoke
-//! the blocking methods off their UI thread.
+//! `Backend` owns a tokio runtime. The control methods are `async` — they generate Swift `async` /
+//! Kotlin `suspend` bindings, so foreign callers `await` them directly without managing threads.
+//! Each runs one request/response round-trip on the owned runtime: the work is `spawn`ed there and
+//! the method awaits its `JoinHandle`, so the tokio IO has a reactor no matter which foreign thread
+//! UniFFI polls the future from (we drive the future ourselves rather than via `async_runtime =
+//! "tokio"` / `async-compat`'s global runtime, keeping one runtime for both calls and the
+//! subscription). [`Backend::subscribe`] spawns a long-lived task on that same runtime that streams
+//! server pushes to a foreign [`EventListener`].
 
 use std::path::Path;
 use std::sync::Arc;
@@ -152,11 +156,8 @@ impl Backend {
     }
 
     /// Bring the tunnel up.
-    pub fn connect(&self) -> Result<(), BackendError> {
-        match self
-            .runtime
-            .block_on(self.round_trip(RequestPayload::Connect))?
-        {
+    pub async fn connect(&self) -> Result<(), BackendError> {
+        match self.call(RequestPayload::Connect).await? {
             ResponsePayload::Ack => Ok(()),
             ResponsePayload::Error { code, .. } => Err(code.into()),
             other => Err(unexpected("connect", &other)),
@@ -164,11 +165,8 @@ impl Backend {
     }
 
     /// Tear the tunnel down.
-    pub fn disconnect(&self) -> Result<(), BackendError> {
-        match self
-            .runtime
-            .block_on(self.round_trip(RequestPayload::Disconnect))?
-        {
+    pub async fn disconnect(&self) -> Result<(), BackendError> {
+        match self.call(RequestPayload::Disconnect).await? {
             ResponsePayload::Ack => Ok(()),
             ResponsePayload::Error { code, .. } => Err(code.into()),
             other => Err(unexpected("disconnect", &other)),
@@ -176,11 +174,8 @@ impl Backend {
     }
 
     /// Fetch the current tunnel status.
-    pub fn status(&self) -> Result<TunnelStatus, BackendError> {
-        match self
-            .runtime
-            .block_on(self.round_trip(RequestPayload::GetStatus))?
-        {
+    pub async fn status(&self) -> Result<TunnelStatus, BackendError> {
+        match self.call(RequestPayload::GetStatus).await? {
             ResponsePayload::Status(s) => Ok(s.into()),
             ResponsePayload::Error { code, .. } => Err(code.into()),
             other => Err(unexpected("status", &other)),
@@ -231,16 +226,31 @@ impl Backend {
 }
 
 impl Backend {
-    /// Open a fresh control connection, handshake, and run one request → response. Per-call
-    /// connections match the CLI and keep the client stateless (control ops are infrequent).
-    async fn round_trip(&self, payload: RequestPayload) -> Result<ResponsePayload, BackendError> {
-        let stream = connect_control(Path::new(&self.socket_path))
+    /// Run one request → response on the owned runtime. The round-trip is `spawn`ed onto the
+    /// runtime — so its tokio IO has a reactor regardless of which foreign thread polls this
+    /// future — and we await the resulting `JoinHandle`. A `JoinError` (the task panicked or was
+    /// cancelled) surfaces as a `Transport` error.
+    async fn call(&self, payload: RequestPayload) -> Result<ResponsePayload, BackendError> {
+        let path = self.socket_path.clone();
+        self.runtime
+            .spawn(async move { round_trip(&path, payload).await })
             .await
-            .map_err(transport)?;
-        let mut client = Client::new(stream);
-        client.handshake().await.map_err(transport)?;
-        client.request(payload).await.map_err(transport)
+            .map_err(transport)?
     }
+}
+
+/// Open a fresh control connection, handshake, and run one request → response. Per-call
+/// connections match the CLI and keep the client stateless (control ops are infrequent).
+async fn round_trip(
+    socket_path: &str,
+    payload: RequestPayload,
+) -> Result<ResponsePayload, BackendError> {
+    let stream = connect_control(Path::new(socket_path))
+        .await
+        .map_err(transport)?;
+    let mut client = Client::new(stream);
+    client.handshake().await.map_err(transport)?;
+    client.request(payload).await.map_err(transport)
 }
 
 impl Drop for Backend {

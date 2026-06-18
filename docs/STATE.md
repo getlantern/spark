@@ -562,9 +562,23 @@
   `fmt` + `cargo check --workspace` clean. **Test gotcha:** `tokio::net::UnixListener::from_std` panics on
   a blocking fd → `set_nonblocking(true)` before adopting the std listener. **Out of scope (noted):**
   packaging integration (xcframework/cargo-ndk bundling the cdylib + bindings), the desktop GUI, the
-  JSON-RPC/web facade, a Windows named-pipe test, event-stream auto-reconnect, async-exported methods
-  (Swift `async`/Kotlin `suspend` — proven in the spike, an ergonomic refinement), and data-path shim
-  unification. **Uncommitted** (awaiting the user's commit/push call).
+  JSON-RPC/web facade, a Windows named-pipe test, event-stream auto-reconnect, and data-path shim
+  unification. **Landed `d2e4789`** (`bindings/` gitignored — regenerated during packaging).
+  **ASYNC EXPORTS 2026-06-18 (commit pending).** Converted `connect`/`disconnect`/`status` from sync
+  `block_on` to `async fn` → Swift `func … async throws` / Kotlin `suspend fun` (verified in the
+  regenerated bindings); `subscribe`/`unsubscribe`/`new` stay sync. **Chose the single-owned-runtime
+  model over `#[uniffi::export(async_runtime = "tokio")]`:** verified against the uniffi-macros 0.31.2
+  source that the tokio attribute wraps the future in `::uniffi::deps::async_compat::Compat` — a HIDDEN
+  global runtime entered at poll time. That's fine for request/response but `subscribe`'s long-lived
+  push task wants an explicit, cancellable home, so instead each async method `runtime.spawn`s its
+  round-trip and awaits the `JoinHandle` (works from any foreign polling thread — `Runtime::spawn` and
+  `JoinHandle` poll need no ambient context — so the IO still has a reactor), and the subscription
+  shares that same one runtime; no `async_compat`, no second runtime, no attribute. `round_trip` is now
+  a free fn; new private `Backend::call` does the spawn+join (a `JoinError` → `Transport`). Test is
+  `#[tokio::test]`, awaits the calls, and drops `Backend` via `spawn_blocking` — dropping its owned
+  runtime inside another runtime panics (a TEST-only artifact; foreign callers drop on an off-runtime
+  thread). Gate green: `cargo test -p spark-ffi` 2 pass, clippy `-D warnings` + fmt + `cargo check
+  --workspace` clean.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
