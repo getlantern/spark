@@ -12,12 +12,13 @@
 //! the method awaits its `JoinHandle`, so the tokio IO has a reactor no matter which foreign thread
 //! UniFFI polls the future from (we drive the future ourselves rather than via `async_runtime =
 //! "tokio"` / `async-compat`'s global runtime, keeping one runtime for both calls and the
-//! subscription). [`Backend::subscribe`] spawns a long-lived task on that same runtime that streams
-//! server pushes to a foreign [`EventListener`].
+//! subscription). [`Backend::subscribe`] spawns a long-lived, auto-reconnecting task on that same
+//! runtime that streams server pushes to a foreign [`EventListener`].
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use spark_ipc::{Client, Push, RequestPayload, ResponsePayload};
 use tokio::task::AbortHandle;
@@ -183,37 +184,15 @@ impl Backend {
     }
 
     /// Stream tunnel events to `listener` on a background task. Replaces any prior subscription.
+    ///
+    /// The task auto-reconnects with capped exponential backoff, so it survives a service restart
+    /// or a dropped control connection. Events that occur while disconnected are missed (this is a
+    /// state-event stream, not a log); after a gap the caller can re-query [`Backend::status`] for
+    /// the authoritative state.
     pub fn subscribe(&self, listener: Box<dyn EventListener>) {
         self.unsubscribe();
         let path = self.socket_path.clone();
-        let task = self.runtime.spawn(async move {
-            let stream = match connect_control(Path::new(&path)).await {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let mut client = Client::new(stream);
-            if client.handshake().await.is_err() {
-                return;
-            }
-            if client
-                .request(RequestPayload::Subscribe {
-                    events: true,
-                    logs: false,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-            loop {
-                match client.next_push().await {
-                    Ok(Some(Push::Event(event))) => listener.on_event(event.into()),
-                    // The service only pushes events here (logs disabled); ignore anything else.
-                    Ok(Some(_)) => {}
-                    Ok(None) | Err(_) => break,
-                }
-            }
-        });
+        let task = self.runtime.spawn(subscription_loop(path, listener));
         *self.subscription.lock().unwrap() = Some(task.abort_handle());
     }
 
@@ -251,6 +230,59 @@ async fn round_trip(
     let mut client = Client::new(stream);
     client.handshake().await.map_err(transport)?;
     client.request(payload).await.map_err(transport)
+}
+
+/// The reconnecting event-subscription loop backing [`Backend::subscribe`]. Runs until the task is
+/// aborted (`unsubscribe`/`Drop`): each iteration runs one subscription session, then waits before
+/// reconnecting. Backoff resets to the floor once a session is established and grows (capped) while
+/// the service is unreachable. `sleep` and `next_push` are the only await points, so an abort tears
+/// the task down cleanly. No jitter — this is a single client, not a thundering herd.
+async fn subscription_loop(path: String, listener: Box<dyn EventListener>) {
+    const MIN_BACKOFF: Duration = Duration::from_millis(250);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+    let mut backoff = MIN_BACKOFF;
+    loop {
+        let established = run_subscription_session(&path, listener.as_ref()).await;
+        backoff = if established {
+            MIN_BACKOFF
+        } else {
+            (backoff * 2).min(MAX_BACKOFF)
+        };
+        tokio::time::sleep(backoff).await;
+    }
+}
+
+/// Open one control connection, handshake, `Subscribe`, and pump `Push(Event)`s to `listener` until
+/// the stream ends or errors. Returns whether the subscription was *established* (handshake +
+/// `Subscribe` both succeeded) so [`subscription_loop`] can decide whether to reset its backoff.
+async fn run_subscription_session(path: &str, listener: &dyn EventListener) -> bool {
+    let stream = match connect_control(Path::new(path)).await {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let mut client = Client::new(stream);
+    if client.handshake().await.is_err() {
+        return false;
+    }
+    if client
+        .request(RequestPayload::Subscribe {
+            events: true,
+            logs: false,
+        })
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    loop {
+        match client.next_push().await {
+            Ok(Some(Push::Event(event))) => listener.on_event(event.into()),
+            // The service only pushes events here (logs disabled); ignore anything else.
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    true
 }
 
 impl Drop for Backend {

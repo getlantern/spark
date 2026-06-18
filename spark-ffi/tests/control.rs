@@ -1,9 +1,11 @@
-//! End-to-end control test: drives the real `Backend` against a mock `spark-service` responder
-//! that speaks the actual `spark-ipc` wire protocol over a unix socket. No dependency on
-//! `spark-service` — the mock answers the handshake + commands directly with `read_frame`/
-//! `write_frame`, so this exercises `Backend` ↔ `ipc::Client` over a real transport.
+//! End-to-end control tests: drive the real `Backend` against a mock `spark-service` responder
+//! that speaks the actual `spark-ipc` wire protocol. No dependency on `spark-service` — the mock
+//! answers the handshake + commands directly with `read_frame`/`write_frame`, so this exercises
+//! `Backend` ↔ `ipc::Client` over a real transport (a unix-domain socket on unix, a named pipe on
+//! Windows). The mock responder is generic over `AsyncRead + AsyncWrite`, so one implementation
+//! serves both transports.
 
-use spark_ffi::{BackendError, TunnelEvent, TunnelState};
+use spark_ffi::BackendError;
 
 /// `From<spark_ipc::ErrorCode>` maps service error categories to typed `BackendError`s (pure; no
 /// socket needed, runs on every platform).
@@ -24,20 +26,22 @@ fn error_codes_map_to_typed_errors() {
     ));
 }
 
-#[cfg(unix)]
-mod unix_e2e {
-    use super::*;
-    use spark_ffi::{Backend, EventListener};
+/// Transport-agnostic mock service + `Backend` driver, shared by the unix-socket and named-pipe
+/// e2e tests below.
+#[cfg(any(unix, windows))]
+mod harness {
+    use spark_ffi::{Backend, EventListener, TunnelEvent, TunnelState};
     use spark_ipc::{
         read_frame, write_frame, Push, Request, RequestPayload, Response, ResponsePayload,
         ServerMessage, TunnelStatus as IpcStatus, PROTOCOL_VERSION,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::io::{AsyncRead, AsyncWrite};
 
     /// A test event sink that records what it's pushed.
-    struct Recorder {
-        events: Arc<Mutex<Vec<TunnelEvent>>>,
+    pub(crate) struct Recorder {
+        pub(crate) events: Arc<Mutex<Vec<TunnelEvent>>>,
     }
     impl EventListener for Recorder {
         fn on_event(&self, event: TunnelEvent) {
@@ -45,9 +49,14 @@ mod unix_e2e {
         }
     }
 
-    /// Mock service: handshake, then `Connect`/`Disconnect`→Ack, `GetStatus`→Connected,
-    /// `Subscribe`→Ack then push one `StateChanged(Connected)` event.
-    async fn handle_conn(mut stream: tokio::net::UnixStream) {
+    /// Mock service over any byte stream: handshake, then `Connect`/`Disconnect`→Ack,
+    /// `GetStatus`→Connected, `Subscribe`→Ack then push one `StateChanged(Connected)` event. When
+    /// `close_after_subscribe` is set, the connection drops right after that push — which lets the
+    /// reconnect test treat each delivered event as evidence of a fresh session.
+    pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
+        mut stream: S,
+        close_after_subscribe: bool,
+    ) {
         while let Ok(Some(req)) = read_frame::<_, Request>(&mut stream).await {
             let req_id = req.req_id;
             let resp = match req.payload {
@@ -78,44 +87,29 @@ mod unix_e2e {
             if subscribed {
                 let event = spark_ipc::TunnelEvent::StateChanged(spark_ipc::TunnelState::Connected);
                 let _ = write_frame(&mut stream, &ServerMessage::Push(Push::Event(event))).await;
+                if close_after_subscribe {
+                    return;
+                }
             }
         }
     }
 
-    async fn wait_for_first(events: &Arc<Mutex<Vec<TunnelEvent>>>) -> Option<TunnelEvent> {
-        for _ in 0..200 {
-            if let Some(e) = events.lock().unwrap().first().cloned() {
-                return Some(e);
+    /// Poll `events` until at least `n` have arrived (or give up). Returns the count seen.
+    pub(crate) async fn wait_for_count(events: &Arc<Mutex<Vec<TunnelEvent>>>, n: usize) -> usize {
+        for _ in 0..400 {
+            let len = events.lock().unwrap().len();
+            if len >= n {
+                return len;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        None
+        events.lock().unwrap().len()
     }
 
-    #[tokio::test]
-    async fn control_roundtrips_over_a_real_socket() {
-        let sock = std::env::temp_dir().join(format!("spk-ffi-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&sock);
-        // Bind here (std, no runtime) so the socket exists before `Backend` connects.
-        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
-        // tokio requires a non-blocking fd when adopting a std listener.
-        listener.set_nonblocking(true).expect("nonblocking");
-
-        // Run the mock service on its own thread + runtime.
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                let listener = tokio::net::UnixListener::from_std(listener).unwrap();
-                while let Ok((stream, _)) = listener.accept().await {
-                    tokio::spawn(handle_conn(stream));
-                }
-            });
-        });
-
-        let backend = Backend::new(sock.to_string_lossy().into_owned()).expect("backend");
+    /// Drive a `Backend` bound to `endpoint` (a mock responder must already be accepting there):
+    /// connect → status(Connected) → subscribe(receives the pushed event) → disconnect.
+    pub(crate) async fn drive_backend(endpoint: String) {
+        let backend = Backend::new(endpoint).expect("backend");
 
         backend.connect().await.expect("connect");
         assert_eq!(
@@ -128,11 +122,15 @@ mod unix_e2e {
             events: Arc::clone(&events),
         }));
         assert_eq!(
-            wait_for_first(&events).await,
-            Some(TunnelEvent::StateChanged {
-                state: TunnelState::Connected
-            }),
+            wait_for_count(&events, 1).await,
+            1,
             "subscribe must deliver the pushed event"
+        );
+        assert_eq!(
+            events.lock().unwrap()[0],
+            TunnelEvent::StateChanged {
+                state: TunnelState::Connected
+            }
         );
 
         backend.disconnect().await.expect("disconnect");
@@ -144,6 +142,99 @@ mod unix_e2e {
         tokio::task::spawn_blocking(move || drop(backend))
             .await
             .expect("drop backend off-runtime");
+    }
+}
+
+#[cfg(unix)]
+mod unix_e2e {
+    use super::harness;
+    use spark_ffi::{Backend, TunnelEvent};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn control_roundtrips_over_a_real_socket() {
+        let sock = std::env::temp_dir().join(format!("spk-ffi-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
+        // tokio's `bind` listens immediately and registers with this test's runtime, so the socket
+        // exists before `Backend` (on its own runtime) connects.
+        let listener = tokio::net::UnixListener::bind(&sock).expect("bind");
+        tokio::spawn(async move {
+            // Each control op opens a fresh connection.
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(harness::handle_conn(stream, false));
+            }
+        });
+
+        harness::drive_backend(sock.to_string_lossy().into_owned()).await;
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn subscribe_reconnects_after_the_stream_drops() {
+        let sock =
+            std::env::temp_dir().join(format!("spk-ffi-reconnect-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = tokio::net::UnixListener::bind(&sock).expect("bind");
+        // Every accepted connection delivers one Subscribe event then closes.
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(harness::handle_conn(stream, true));
+            }
+        });
+
+        let backend = Backend::new(sock.to_string_lossy().into_owned()).expect("backend");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        backend.subscribe(Box::new(harness::Recorder {
+            events: Arc::clone(&events),
+        }));
+
+        // Each session yields exactly one event then the mock closes, so ≥2 events proves the
+        // subscription reconnected at least once on its own.
+        let got = harness::wait_for_count(&events, 2).await;
+        assert!(got >= 2, "expected ≥2 events across reconnects, got {got}");
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| matches!(e, TunnelEvent::StateChanged { .. })));
+
+        backend.unsubscribe();
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .expect("drop backend off-runtime");
+        let _ = std::fs::remove_file(&sock);
+    }
+}
+
+#[cfg(windows)]
+mod windows_e2e {
+    use super::harness;
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    #[tokio::test]
+    async fn control_roundtrips_over_a_named_pipe() {
+        let name = format!(r"\\.\pipe\spk-ffi-{}", std::process::id());
+        // The first instance must exist before the client opens it (avoids a FILE_NOT_FOUND race).
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .expect("create first pipe instance");
+        let accept_name = name.clone();
+        tokio::spawn(async move {
+            loop {
+                if server.connect().await.is_err() {
+                    return;
+                }
+                let connected = server;
+                // Pre-create the next instance so the next control op finds a free pipe.
+                server = match ServerOptions::new().create(&accept_name) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                tokio::spawn(harness::handle_conn(connected, false));
+            }
+        });
+
+        harness::drive_backend(name).await;
     }
 }

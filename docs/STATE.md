@@ -578,7 +578,28 @@
   `#[tokio::test]`, awaits the calls, and drops `Backend` via `spawn_blocking` — dropping its owned
   runtime inside another runtime panics (a TEST-only artifact; foreign callers drop on an off-runtime
   thread). Gate green: `cargo test -p spark-ffi` 2 pass, clippy `-D warnings` + fmt + `cargo check
-  --workspace` clean.
+  --workspace` clean. **Landed `51122d1`.**
+  **WINDOWS TEST + EVENT-STREAM RECONNECT 2026-06-18 (commit pending).** (1) **Auto-reconnect:**
+  `subscribe`'s task no longer `return`s on the first error — it's now a `subscription_loop` with
+  capped exponential backoff (`run_subscription_session` per attempt; `MIN 250ms` … `MAX 30s`, doubles
+  while unreachable, resets to the floor once a session is *established* = handshake + `Subscribe`
+  succeeded). So it survives a service restart / dropped control connection. `sleep` + `next_push` are
+  the only await points → an abort (`unsubscribe`/`Drop`) still tears it down cleanly. Events during a
+  gap are MISSED (state-event stream, not a log) — documented; after a gap the caller can re-query
+  `status()`. No synthetic "reconnected" signal added (would mean a binding-only `TunnelEvent` variant
+  — left as a possible follow-up). The exported FFI surface is unchanged (`subscribe`/`unsubscribe`
+  sigs identical) → bindings need no regen. (2) **Windows named-pipe test:** refactored
+  `tests/control.rs` — the mock responder + `Backend` driver moved to a transport-agnostic `mod harness`
+  (the responder is generic `handle_conn<S: AsyncRead + AsyncWrite + Unpin>`, so it serves a
+  `UnixStream` or a `NamedPipeServer` unchanged). `#[cfg(unix)] mod unix_e2e` (now tokio-`bind` +
+  `tokio::spawn` accept loop, no std-listener/`from_std`/`set_nonblocking` dance) + a new
+  `subscribe_reconnects_after_the_stream_drops` test (mock pushes one event per connection then closes;
+  ≥2 events ⇒ it reconnected). `#[cfg(windows)] mod windows_e2e::control_roundtrips_over_a_named_pipe`
+  (`ServerOptions::first_pipe_instance(true).create` before the client opens, pre-create the next
+  instance after each `connect().await`). **Gate green:** 3 unix tests pass; host clippy `-D warnings`
+  + fmt clean; **`cargo clippy -p spark-ffi --all-targets --target x86_64-pc-windows-msvc -D warnings`
+  clean** (the named-pipe test type-checks + lints; runs live only in CI on Windows — no host here);
+  `cargo check --workspace` clean.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
