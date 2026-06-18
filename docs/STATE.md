@@ -521,6 +521,22 @@
   actually *fetch* the artifact over the config/fronting channel into `module` (verify/load/floor is
   done; a client/service+fronting integration, out of `core`); v0 ABI niceties (`dealloc`/arena-reset,
   AAD param on the AEAD host fns, UDP-source per-call-buffering caveat) — **doing the ABI niceties next.**
+  **ABI NICETIES BUILT 2026-06-17 (chunk 10).** (1) **`reset()` arena management** — optional export;
+  the host calls it after each transform (and after `init`) so a module can rewind a per-call scratch
+  arena without growing memory, while state in globals survives (reset only rewinds the bump pointer).
+  `Transform.reset: Option<TypedFunc<(),()>>`, fuel-covered, errors via `classify_call`. Replaces the
+  v0 "host never frees → modules must self-limit" caveat. Test: a 1-page module does 5000 transforms
+  (would overflow the arena after ~1000 without reset) — passes. (2) **AAD on the AEAD host fns** —
+  `host_aead_seal`/`host_aead_open` gained `aad_ptr, aad_len` (now 7-arg; wasmi `func_wrap` handles
+  it), passed to ring `Aad::from`; lets a transport bind a frame header/counter to the ciphertext.
+  `AEAD_WAT` fixture updated to a non-empty 4-byte AAD (round-trip proves the path); bench fixture
+  updated to 7-arg (host-AEAD still ~11–14 Gb/s). (3) **UDP-source caveat** documented on `WasmUdpSink`:
+  the UDP path assumes the module emits a datagram's wire bytes per `transform_out` call (true for
+  stream-cipher/per-call-AEAD shapes; a cross-call-buffering module is unfit for UDP — TCP has no such
+  constraint). Debug 30 / release 32 wasm tests green; clippy(feature+default)+fmt+workspace clean.
+  **PATH B COMPLETE in-`core`.** Only out-of-core work remains: the network-delivery half of (c) —
+  *fetch* the artifact over the config/fronting channel into `module` (a client/service+fronting
+  integration; verify/load/floor is done).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

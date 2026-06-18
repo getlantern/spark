@@ -17,24 +17,26 @@
 //! - `transform_in(ptr: i32, len: i32) -> i64` — the inverse (wire → application), same packing.
 //! - `init(config_ptr: i32, config_len: i32)` — *optional*; called once after instantiation to
 //!   deliver per-deployment configuration (e.g. a key or seed). See [`TransformModule::instantiate_with_config`].
+//! - `reset()` — *optional*; called by the host after each transform (and after `init`) so a module
+//!   can rewind a per-call scratch arena without growing memory; persistent state in globals survives.
 //!
 //! The module **imports** (host functions, under module `env`) — this is its entire capability
 //! surface:
 //! - `host_rand(ptr, len)` — fill `len` bytes with cryptographically secure random bytes.
 //! - `host_hash(in_ptr, in_len, out_ptr)` — SHA-256, writing 32 bytes.
-//! - `host_aead_seal(key_ptr, nonce_ptr, in_ptr, in_len, out_ptr) -> i64` — ChaCha20-Poly1305 seal
-//!   (returns `in_len + 16`).
-//! - `host_aead_open(key_ptr, nonce_ptr, in_ptr, in_len, out_ptr) -> i64` — the inverse; returns the
-//!   plaintext length, or `-1` on authentication failure.
+//! - `host_aead_seal(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64` —
+//!   ChaCha20-Poly1305 seal (returns `in_len + 16`; `aad_len` may be 0).
+//! - `host_aead_open(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64` — the
+//!   inverse; returns the plaintext length, or `-1` on authentication failure.
 //!
 //! Bulk per-byte crypto runs **natively** through these host functions, not in the interpreter — the
 //! module interprets only its control/framing logic. (Measured: bulk work in the interpreter caps a
 //! flow at <1 Gb/s, whereas sealing via the native AEAD host fn runs >10 Gb/s.)
 //!
 //! Each `transform_*` call is self-contained: the host calls `alloc`, writes the input, calls the
-//! transform, then reads the packed output. **Limitation:** the host does not free guest buffers, so
-//! a module must avoid unbounded memory growth across calls (e.g. reset an internal arena at the
-//! start of each transform). A future ABI revision negotiates explicit `dealloc`/arena reset.
+//! transform, reads the packed output, then calls `reset` (if exported). A module that exports
+//! `reset` can allocate per-call scratch freely; one that does not must avoid unbounded memory growth
+//! across calls itself (e.g. reuse a fixed scratch region).
 
 use std::sync::Arc;
 
@@ -55,9 +57,9 @@ const HOST_MODULE: &str = "env";
 const HOST_RAND: &str = "host_rand";
 /// Import: SHA-256 (`host_hash(in_ptr, in_len, out_ptr)` → 32 bytes).
 const HOST_HASH: &str = "host_hash";
-/// Import: ChaCha20-Poly1305 seal (`host_aead_seal(key_ptr, nonce_ptr, in_ptr, in_len, out_ptr)`).
+/// Import: ChaCha20-Poly1305 seal (`host_aead_seal(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr)`).
 const HOST_AEAD_SEAL: &str = "host_aead_seal";
-/// Import: ChaCha20-Poly1305 open (`host_aead_open(key_ptr, nonce_ptr, in_ptr, in_len, out_ptr)`).
+/// Import: ChaCha20-Poly1305 open (`host_aead_open(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr)`).
 const HOST_AEAD_OPEN: &str = "host_aead_open";
 
 /// Export: the module's linear memory.
@@ -65,6 +67,10 @@ const EXPORT_MEMORY: &str = "memory";
 /// Export (optional): `init(config_ptr, config_len)` — called once after instantiation to deliver
 /// per-deployment configuration (e.g. a key or seed).
 const EXPORT_INIT: &str = "init";
+/// Export (optional): `reset()` — rewinds the module's per-call scratch arena, called by the host
+/// after each transform (and after `init`). Lets a module reclaim per-call buffers without growing
+/// memory, while keeping its persistent state (in globals/fixed memory) intact.
+const EXPORT_RESET: &str = "reset";
 /// Export: `alloc(len) -> ptr`.
 const EXPORT_ALLOC: &str = "alloc";
 /// Export: `transform_out(ptr, len) -> packed`.
@@ -201,6 +207,8 @@ pub struct Transform {
     alloc: TypedFunc<i32, i32>,
     transform_out: TypedFunc<(i32, i32), i64>,
     transform_in: TypedFunc<(i32, i32), i64>,
+    /// Optional `reset()` — rewinds the module's scratch arena after each transform.
+    reset: Option<TypedFunc<(), ()>>,
 }
 
 /// Which direction a [`Transform::run`] applies.
@@ -262,6 +270,8 @@ impl Transform {
         let transform_in = instance
             .get_typed_func::<(i32, i32), i64>(&store, EXPORT_TRANSFORM_IN)
             .map_err(|_| WasmError::MissingExport(EXPORT_TRANSFORM_IN))?;
+        // Optional `reset()` — arena management; absent for modules that manage memory themselves.
+        let reset = instance.get_typed_func::<(), ()>(&store, EXPORT_RESET).ok();
 
         // Optional `init` config hook. If the module exports `init`, hand it the config bytes; if it
         // does not and config was supplied, the configuration can't be delivered, so reject it.
@@ -284,6 +294,15 @@ impl Transform {
                 if let Some(msg) = store.data_mut().fault.take() {
                     return Err(WasmError::HostFault(msg));
                 }
+                // Reclaim the config scratch (and anything `init` allocated) before the first transform.
+                if let Some(reset) = reset {
+                    reset
+                        .call(&mut store, ())
+                        .map_err(|source| WasmError::Call {
+                            func: EXPORT_RESET,
+                            source,
+                        })?;
+                }
             }
             Err(_) if !config.is_empty() => return Err(WasmError::MissingExport(EXPORT_INIT)),
             Err(_) => {}
@@ -295,6 +314,7 @@ impl Transform {
             alloc,
             transform_out,
             transform_in,
+            reset,
         })
     }
 
@@ -357,6 +377,14 @@ impl Transform {
         memory
             .read(&self.store, out_ptr, &mut out)
             .map_err(|e| WasmError::Memory(e.to_string()))?;
+
+        // Output is copied out, so reclaim the module's per-call scratch arena (if it has one). State
+        // the module keeps in globals/fixed memory survives — `reset` only rewinds the bump arena.
+        if let Some(reset) = self.reset {
+            reset
+                .call(&mut self.store, ())
+                .map_err(|source| classify_call(EXPORT_RESET, source))?;
+        }
         Ok(out)
     }
 
@@ -448,14 +476,18 @@ fn host_hash(mut caller: Caller<HostState>, in_ptr: i32, in_len: i32, out_ptr: i
     }
 }
 
-/// The `host_aead_seal(key_ptr, nonce_ptr, in_ptr, in_len, out_ptr) -> i64` import: ChaCha20-Poly1305
-/// seal of `in_len` plaintext bytes under the 32-byte key at `key_ptr` and 12-byte nonce at
-/// `nonce_ptr`, writing `in_len + 16` (ciphertext+tag) bytes to `out_ptr`. Returns the output length,
-/// or `-1` with a recorded fault. (AAD is empty in v0.)
+/// The `host_aead_seal(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64` import:
+/// ChaCha20-Poly1305 seal of `in_len` plaintext bytes under the 32-byte key at `key_ptr` and 12-byte
+/// nonce at `nonce_ptr`, binding `aad_len` associated-data bytes at `aad_ptr` (use length 0 for none),
+/// writing `in_len + 16` (ciphertext+tag) bytes to `out_ptr`. Returns the output length, or `-1` with
+/// a recorded fault.
+#[allow(clippy::too_many_arguments)]
 fn host_aead_seal(
     mut caller: Caller<HostState>,
     key_ptr: i32,
     nonce_ptr: i32,
+    aad_ptr: i32,
+    aad_len: i32,
     in_ptr: i32,
     in_len: i32,
     out_ptr: i32,
@@ -463,7 +495,9 @@ fn host_aead_seal(
     if caller.data().fault.is_some() {
         return -1;
     }
-    let sealed = match aead_seal(&caller, key_ptr, nonce_ptr, in_ptr, in_len) {
+    let sealed = match aead_seal(
+        &caller, key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len,
+    ) {
         Ok(s) => s,
         Err(msg) => {
             caller.data_mut().fault = Some(format!("host_aead_seal: {msg}"));
@@ -479,14 +513,17 @@ fn host_aead_seal(
     }
 }
 
-/// The `host_aead_open(key_ptr, nonce_ptr, in_ptr, in_len, out_ptr) -> i64` import: the inverse of
-/// [`host_aead_seal`]. Reads `in_len` ciphertext+tag bytes, writes `in_len - 16` plaintext bytes to
-/// `out_ptr`, and returns the plaintext length. On authentication failure (or any error) it returns
-/// `-1` and records a fault — a tampered or forged frame fails closed.
+/// The `host_aead_open(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64` import:
+/// the inverse of [`host_aead_seal`]. Reads `in_len` ciphertext+tag bytes (with the same AAD), writes
+/// `in_len - 16` plaintext bytes to `out_ptr`, and returns the plaintext length. On authentication
+/// failure (or any error) it returns `-1` and records a fault — a tampered or forged frame fails closed.
+#[allow(clippy::too_many_arguments)]
 fn host_aead_open(
     mut caller: Caller<HostState>,
     key_ptr: i32,
     nonce_ptr: i32,
+    aad_ptr: i32,
+    aad_len: i32,
     in_ptr: i32,
     in_len: i32,
     out_ptr: i32,
@@ -494,7 +531,9 @@ fn host_aead_open(
     if caller.data().fault.is_some() {
         return -1;
     }
-    let plaintext = match aead_open(&caller, key_ptr, nonce_ptr, in_ptr, in_len) {
+    let plaintext = match aead_open(
+        &caller, key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len,
+    ) {
         Ok(p) => p,
         Err(msg) => {
             caller.data_mut().fault = Some(format!("host_aead_open: {msg}"));
@@ -510,39 +549,47 @@ fn host_aead_open(
     }
 }
 
-/// ChaCha20-Poly1305 seal, reading key/nonce/plaintext from guest memory. Returns ciphertext+tag.
+/// ChaCha20-Poly1305 seal, reading key/nonce/aad/plaintext from guest memory. Returns ciphertext+tag.
+#[allow(clippy::too_many_arguments)]
 fn aead_seal(
     caller: &Caller<HostState>,
     key_ptr: i32,
     nonce_ptr: i32,
+    aad_ptr: i32,
+    aad_len: i32,
     in_ptr: i32,
     in_len: i32,
 ) -> Result<Vec<u8>, String> {
     let key = read_guest_array::<AEAD_KEY_LEN>(caller, key_ptr)?;
     let nonce = read_guest_array::<AEAD_NONCE_LEN>(caller, nonce_ptr)?;
+    let aad = read_guest(caller, aad_ptr, aad_len)?;
     let mut buf = read_guest(caller, in_ptr, in_len)?;
     let key = aead::LessSafeKey::new(
         aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &key).map_err(|_| "bad key")?,
     );
     key.seal_in_place_append_tag(
         aead::Nonce::assume_unique_for_key(nonce),
-        aead::Aad::empty(),
+        aead::Aad::from(aad.as_slice()),
         &mut buf,
     )
     .map_err(|_| "seal failed")?;
     Ok(buf)
 }
 
-/// ChaCha20-Poly1305 open, reading key/nonce/ciphertext+tag from guest memory. Returns plaintext.
+/// ChaCha20-Poly1305 open, reading key/nonce/aad/ciphertext+tag from guest memory. Returns plaintext.
+#[allow(clippy::too_many_arguments)]
 fn aead_open(
     caller: &Caller<HostState>,
     key_ptr: i32,
     nonce_ptr: i32,
+    aad_ptr: i32,
+    aad_len: i32,
     in_ptr: i32,
     in_len: i32,
 ) -> Result<Vec<u8>, String> {
     let key = read_guest_array::<AEAD_KEY_LEN>(caller, key_ptr)?;
     let nonce = read_guest_array::<AEAD_NONCE_LEN>(caller, nonce_ptr)?;
+    let aad = read_guest(caller, aad_ptr, aad_len)?;
     let mut buf = read_guest(caller, in_ptr, in_len)?;
     if buf.len() < AEAD_TAG_LEN {
         return Err("ciphertext shorter than the tag".to_string());
@@ -553,7 +600,7 @@ fn aead_open(
     let plaintext = key
         .open_in_place(
             aead::Nonce::assume_unique_for_key(nonce),
-            aead::Aad::empty(),
+            aead::Aad::from(aad.as_slice()),
             &mut buf,
         )
         .map_err(|_| "authentication failed")?;
@@ -766,12 +813,13 @@ mod tests {
         // an encrypting transport — contrast the XOR-in-interpreter number above.
         const AEAD_BENCH_WAT: &str = r#"
 (module
-  (import "env" "host_aead_seal" (func $seal (param i32 i32 i32 i32 i32) (result i64)))
+  (import "env" "host_aead_seal" (func $seal (param i32 i32 i32 i32 i32 i32 i32) (result i64)))
   (memory (export "memory") 64)
   (func (export "alloc") (param i32) (result i32) (i32.const 1024))
   (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
     (local $n i64)
-    (local.set $n (call $seal (i32.const 0) (i32.const 32) (local.get $ptr) (local.get $len) (i32.const 524288)))
+    ;; seal(key=0, nonce=32, aad=0 len 0, in=ptr len, out=524288)
+    (local.set $n (call $seal (i32.const 0) (i32.const 32) (i32.const 0) (i32.const 0) (local.get $ptr) (local.get $len) (i32.const 524288)))
     (i64.or (i64.shl (i64.const 524288) (i64.const 32)) (local.get $n)))
   (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
 "#;
@@ -882,21 +930,22 @@ mod tests {
         }
     }
 
-    /// An AEAD round-trip module: `transform_out` seals and `transform_in` opens, both with the key
-    /// at offset 0 (32 zero bytes from zero-init memory) and nonce at offset 32 (12 zero bytes).
+    /// An AEAD round-trip module: `transform_out` seals and `transform_in` opens, with the key at
+    /// offset 0 (32 zero bytes from zero-init memory), nonce at offset 32 (12 zeros), and a 4-byte
+    /// AAD at offset 48 — both directions bind the same AAD, exercising the non-empty AAD path.
     const AEAD_WAT: &str = r#"
 (module
-  (import "env" "host_aead_seal" (func $seal (param i32 i32 i32 i32 i32) (result i64)))
-  (import "env" "host_aead_open" (func $open (param i32 i32 i32 i32 i32) (result i64)))
+  (import "env" "host_aead_seal" (func $seal (param i32 i32 i32 i32 i32 i32 i32) (result i64)))
+  (import "env" "host_aead_open" (func $open (param i32 i32 i32 i32 i32 i32 i32) (result i64)))
   (memory (export "memory") 4)
   (func (export "alloc") (param i32) (result i32) (i32.const 1024))
   (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
     (local $n i64)
-    (local.set $n (call $seal (i32.const 0) (i32.const 32) (local.get $ptr) (local.get $len) (i32.const 8192)))
+    (local.set $n (call $seal (i32.const 0) (i32.const 32) (i32.const 48) (i32.const 4) (local.get $ptr) (local.get $len) (i32.const 8192)))
     (i64.or (i64.shl (i64.const 8192) (i64.const 32)) (local.get $n)))
   (func (export "transform_in") (param $ptr i32) (param $len i32) (result i64)
     (local $n i64)
-    (local.set $n (call $open (i32.const 0) (i32.const 32) (local.get $ptr) (local.get $len) (i32.const 8192)))
+    (local.set $n (call $open (i32.const 0) (i32.const 32) (i32.const 48) (i32.const 4) (local.get $ptr) (local.get $len) (i32.const 8192)))
     (i64.or (i64.shl (i64.const 8192) (i64.const 32)) (local.get $n))))
 "#;
 
@@ -960,6 +1009,45 @@ mod tests {
             matches!(t.transform_in(&wire), Err(WasmError::HostFault(_))),
             "a tampered frame must fail authentication"
         );
+    }
+
+    #[test]
+    fn reset_reclaims_the_arena_across_many_calls() {
+        // A 1-page (64 KiB) module whose `alloc` bumps an arena and whose `reset` rewinds it. Without
+        // `reset` the arena would overflow after ~1000 un-freed 64-byte allocations; because the host
+        // calls `reset` after each transform, thousands of calls stay within one page.
+        const RESET_WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (global $arena (mut i32) (i32.const 1024))
+  (func (export "alloc") (param $len i32) (result i32)
+    (local $p i32)
+    (local.set $p (global.get $arena))
+    (global.set $arena (i32.add (global.get $arena) (local.get $len)))
+    (local.get $p))
+  (func (export "reset") (global.set $arena (i32.const 1024)))
+  (func $xor (param $ptr i32) (param $len i32)
+    (local $i i32)
+    (block $done (loop $loop
+      (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+      (i32.store8 (i32.add (local.get $ptr) (local.get $i))
+        (i32.xor (i32.load8_u (i32.add (local.get $ptr) (local.get $i))) (i32.const 0x5a)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $loop))))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (call $xor (local.get $ptr) (local.get $len))
+    (i64.or (i64.shl (i64.extend_i32_u (local.get $ptr)) (i64.const 32)) (i64.extend_i32_u (local.get $len))))
+  (func (export "transform_in") (param $ptr i32) (param $len i32) (result i64)
+    (call $xor (local.get $ptr) (local.get $len))
+    (i64.or (i64.shl (i64.extend_i32_u (local.get $ptr)) (i64.const 32)) (i64.extend_i32_u (local.get $len)))))
+"#;
+        let module =
+            TransformModule::load(&wat::parse_str(RESET_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let input = [0xABu8; 64];
+        for _ in 0..5000 {
+            assert_eq!(t.transform_out(&input).expect("transform_out").len(), 64);
+        }
     }
 
     #[test]

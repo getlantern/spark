@@ -171,6 +171,11 @@ impl UdpTransport for WasmTransport {
 
 /// Connect-mode UDP send half: frame each datagram as `[u16 BE len][payload]`, obfuscate it through
 /// the shared transform, and write it to the connection.
+///
+/// Caveat: this assumes the module emits a datagram's wire bytes from the same `transform_out` call
+/// (true for a stream cipher / per-call AEAD — the expected shapes). A module that *buffers* input
+/// across calls before emitting could stall a datagram until the next `send`; such a module is unfit
+/// for the UDP path. (TCP, a pure byte stream, has no such constraint.)
 struct WasmUdpSink {
     write: OwnedWriteHalf,
     transform: Arc<Mutex<Transform>>,
