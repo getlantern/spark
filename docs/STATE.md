@@ -884,6 +884,32 @@
   (deferred):** the real `flutter_rust_bridge` desktop backend — a thin bridge crate over
   `spark-backend` + a Dart `FrbBackend implements SparkBackend` (note: `flutter_rust_bridge_codegen`
   is not yet installed).
+  **DESKTOP FLUTTER BACKEND — `spark-bridge` (flutter_rust_bridge) 2026-06-18 (commit pending).** The
+  real desktop binding, a thin **`flutter_rust_bridge`** layer over `spark-backend` (the deferred
+  follow-up from the agnostic extraction). New workspace crate **`spark-bridge/`**: an opaque
+  `SparkBridge` frb object (cdylib + lib) that owns a tokio runtime and `block_on`s the delegated
+  `spark-backend` calls (same owned-runtime model as `spark-ffi`, so it never touches frb's own async
+  executor — frb runs the blocking methods on its worker pool and Dart still gets `Future`s); mirror
+  types `BridgeState`/`BridgeStatus`/`BridgeError` (`From<spark_ipc::*>`/`From<spark_backend::*>`, 1:1)
+  keep the generated Dart small. **Toolchain:** installed `flutter_rust_bridge_codegen` **2.12.0** —
+  pinned to EXACTLY match the `flutter_rust_bridge` crate (`=2.12.0`, added to workspace deps,
+  spark-bridge-only) and the Dart `flutter_rust_bridge` package (added to `gui/pubspec.yaml` with
+  `freezed`/`build_runner`); all three must agree. Config `flutter_rust_bridge.yaml` (repo root) scans
+  `spark-bridge::api` → emits Dart into `gui/lib/src/rust/`; the generated Dart + Rust glue
+  (`spark-bridge/src/frb_generated.rs`) are **checked in** (so a build needs no codegen tool — `frb`'s
+  `cfg(frb_expand)` declared via a `check-cfg` lint so `-D warnings` stays clean). **Dart side:**
+  `gui/lib/frb_backend.dart` — `FrbBackend implements SparkBackend` (`FrbBackend.create()` inits
+  `RustLib` once, binds the socket), remapping the generated sealed `BridgeError` to the UI's
+  `SparkException` via an **exhaustive `switch`** (a new Rust error variant fails Dart analysis until
+  handled). **Gate green:** `cargo test --workspace --all-features` (+3 spark-bridge mapping tests),
+  host clippy `--all-targets --all-features -D warnings` (incl. the generated glue) + fmt,
+  `flutter analyze` clean + `flutter test` passes. **REMAINING (deferred, like other live gates):**
+  the **native build integration** (cargokit / `rust_builder`) so `flutter build macos` compiles +
+  bundles `libspark_bridge.dylib` and `RustLib`'s loader finds it (the generated default
+  `ioDirectory` assumes a per-crate `target/`, not the workspace `target/`); then swap `FrbBackend` in
+  as the default desktop backend (it needs no subprocess → works under the App Sandbox, unlike
+  `CliBackend`) and run a live gate against a running `spark-service`. `flutter_rust_bridge` is linked
+  ONLY by `spark-bridge` — never core/cli/service.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

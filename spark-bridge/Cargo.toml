@@ -1,0 +1,32 @@
+# `spark-bridge` — the desktop Flutter binding. A thin `flutter_rust_bridge` layer over
+# `spark-backend`: it exposes the typed control `Backend` to Dart so the `gui/` Flutter app drives a
+# running `spark-service` directly, superseding the v1 `CliBackend` that shells out to the `spark`
+# CLI. Control surface only (the data path lives in the platform shims). Like `spark-ffi` for mobile,
+# this crate is the *only* place `flutter_rust_bridge` is linked — never into `core`/`cli`/`service`.
+[package]
+name = "spark-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "spark_bridge"
+# `cdylib` is what the Flutter app loads at runtime; `lib` so the frb-generated glue (and any Rust
+# test) can link the crate.
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# The GUI-agnostic backend (the typed control logic); this crate is just its Flutter binding.
+spark-backend = { path = "../spark-backend" }
+# The wire types this binding mirrors into frb records/enums (the `From<spark_ipc::*>` impls).
+spark-ipc = { path = "../ipc" }
+flutter_rust_bridge.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+# frb's `#[frb(...)]` macro references `cfg(frb_expand)`, a cfg set only during the codegen's
+# `cargo expand` pass. Declare it expected so the `unexpected_cfgs` lint stays quiet under
+# `-D warnings` (frb's documented fix).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

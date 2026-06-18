@@ -1,0 +1,7 @@
+# flutter_rust_bridge codegen config for the desktop Flutter binding.
+# Regenerate with: flutter_rust_bridge_codegen generate
+# Scans the `spark-bridge` crate's `crate::api` module and emits Dart into the `gui/` Flutter app.
+rust_input: crate::api
+rust_root: spark-bridge/
+dart_output: gui/lib/src/rust
+dart_root: gui/

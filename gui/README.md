@@ -10,13 +10,24 @@ The UI talks only to an abstract **`SparkBackend`** (`lib/spark_backend.dart`) �
 as `spark-ffi`'s `Backend` (`status` / `connect` / `disconnect`). That seam is the point: the UI
 never changes as the binding underneath it does.
 
-- **Desktop v1 — `CliBackend`** (current): shells out to the `spark` CLI (`spark connect|disconnect|
-  status`), which already speaks `spark-ipc` to a running `spark-service`. Zero FFI, works today.
-- **Desktop (real)** — a `flutter_rust_bridge` backend wrapping `spark_ipc::Client` directly (no
-  subprocess). *Follow-up.*
+- **Desktop v1 — `CliBackend`** (current default): shells out to the `spark` CLI (`spark connect|
+  disconnect|status`), which already speaks `spark-ipc` to a running `spark-service`. Zero FFI, works
+  today.
+- **Desktop (real) — `FrbBackend`** (`lib/frb_backend.dart`, BUILT): an in-process
+  `flutter_rust_bridge` binding over the `spark-bridge` crate → `spark-backend` → `spark-ipc` — **no
+  subprocess**, so it isn't blocked by the App Sandbox. The Rust + Dart sides are generated and green;
+  the **remaining wiring is the native build** (cargokit / `rust_builder`) so `flutter build` compiles
+  and bundles `libspark_bridge.dylib`, plus pointing `RustLib`'s loader at the workspace
+  `target/`. Until that lands, `CliBackend` stays the default.
 - **Mobile** — a platform-channel backend to the native VpnService/NE layer, which runs the tunnel
   via the `platforms/{android,apple}` shims and the UniFFI Kotlin/Swift bindings from `spark-ffi`.
   *Follow-up* (ios/android targets not yet scaffolded here).
+
+### Regenerating the frb bindings
+
+The Dart (`lib/src/rust/`) and Rust (`spark-bridge/src/frb_generated.rs`) bridge code is generated
+and checked in (so a build needs no codegen tool). After changing the `spark-bridge` API, regenerate
+from the repo root with `flutter_rust_bridge_codegen generate` (config: `flutter_rust_bridge.yaml`).
 
 ## Run (macOS dev)
 
@@ -46,6 +57,7 @@ constructor args if you need to point elsewhere.
 
 ## Next
 
-Real `flutter_rust_bridge` desktop backend; ios/android targets + the platform-channel/native
-backend; richer screens (capabilities, details, live metrics, the log stream, profile management)
-off the ADR-0004 backend contract the service already exposes.
+Wire the `FrbBackend` native build (cargokit / `rust_builder`) so `flutter build` bundles the
+`spark-bridge` dylib, then make it the default desktop backend; ios/android targets + the
+platform-channel/native backend; richer screens (capabilities, details, live metrics, the log stream,
+profile management) off the ADR-0004 backend contract the service already exposes.

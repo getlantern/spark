@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi"]
+members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "spark-bridge"]
 # Kept out of the workspace on purpose:
 #  - vendor/netstack-smoltcp: depended on by `path`, but its examples/tests/dev-deps
 #    (tun2, structopt, socket2-ext, …) should not be built as part of our workspace.
@@ -63,6 +63,11 @@ wat = "1"
 # `uniffi-bindgen` feature, and the owned-runtime model doesn't use `async_runtime = "tokio"`, so
 # the `tokio` feature (its `async-compat` global runtime) is omitted too.
 uniffi = { version = "0.31" }
+# flutter_rust_bridge: generates the Dart<->Rust bridge for the desktop Flutter GUI (`gui/`). Used
+# ONLY by `spark-bridge`; never linked into core/cli/service. Pinned to EXACTLY match the codegen CLI
+# (`flutter_rust_bridge_codegen`) and the Dart `flutter_rust_bridge` package — all three must be the
+# same version or the generated glue mismatches the runtime at load time (not a compile error).
+flutter_rust_bridge = "=2.12.0"
 
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed
