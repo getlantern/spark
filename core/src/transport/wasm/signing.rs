@@ -37,6 +37,9 @@ const MIN_ARTIFACT_LEN: usize = 4 + 4 + 2 + 4 + SIG_LEN;
 /// build time. Its private half lives only in tests/tooling, never in a shipped binary, so it must
 /// not be relied on for production trust. Production builds inject the real key via the
 /// `SPARK_MODULE_PUBKEY_HEX` build-time environment variable (see [`SPARK_MODULE_PUBKEY`]).
+// In a release build that pins a real key, this dev fallback is unreferenced (the `None` arm panics
+// at compile time instead) — that's expected, not dead weight.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 const DEV_MODULE_PUBKEY: [u8; PUBKEY_LEN] = [
     114, 43, 155, 15, 166, 26, 80, 178, 3, 21, 71, 211, 20, 223, 38, 197, 127, 114, 13, 201, 119,
     147, 135, 224, 208, 160, 39, 52, 129, 224, 249, 213,
@@ -44,11 +47,20 @@ const DEV_MODULE_PUBKEY: [u8; PUBKEY_LEN] = [
 
 /// The Ed25519 public key signed transform modules are verified against, **pinned at build time**
 /// (ADR 0003). A release build injects the real key via `SPARK_MODULE_PUBKEY_HEX` (64 hex chars);
-/// the private half never enters this repo. When that env var is unset, this falls back to
-/// [`DEV_MODULE_PUBKEY`]. A malformed override is a compile error (const-eval panic).
+/// the private half never enters this repo. A malformed override is a compile error (const-eval
+/// panic). When the env var is unset, a **debug/test** build falls back to [`DEV_MODULE_PUBKEY`] for
+/// convenience, but a **release** build *fails to compile* — shipping a binary that trusts the
+/// repo-published dev key (whose private half lives in the test tree) would be fail-open, so we
+/// refuse rather than silently degrade.
 const SPARK_MODULE_PUBKEY: [u8; PUBKEY_LEN] = match option_env!("SPARK_MODULE_PUBKEY_HEX") {
     Some(hex) => parse_pubkey_hex(hex),
+    #[cfg(debug_assertions)]
     None => DEV_MODULE_PUBKEY,
+    #[cfg(not(debug_assertions))]
+    None => panic!(
+        "SPARK_MODULE_PUBKEY_HEX must be set for a release build with the `wasm-transport` feature: \
+         refusing to fall back to the public development module-signing key"
+    ),
 };
 
 /// Const-eval parse of a 64-char hex string into the 32-byte pinned key. Panics (→ compile error)

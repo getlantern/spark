@@ -677,7 +677,7 @@
   (`core::redact`) + touches `main.rs`/`run_service` signature. **Gate green:** `cargo test --workspace
   --all-features` 174 pass (spark-service 19, +2), clippy `-D warnings` + fmt clean. **Landed
   `09e9968`.**
-  **SYSTEM-STACK PROPERTY/FUZZ HARDENING 2026-06-18 (commit pending).** From the codex review —
+  **SYSTEM-STACK PROPERTY/FUZZ HARDENING 2026-06-18.** From the codex review —
   test-only hardening of the novel kernel-TCP rewrite/NAT code (no production change). Deterministic
   splitmix64 PRNG in each test mod (reproducible; no proptest dep, per the no-new-deps rule).
   **`netstack/system/rewrite.rs`** (+4 tests): `prop_v4_rewrite_matches_full_recompute_and_round_trips`
@@ -696,8 +696,27 @@
   `port_space_exhaustion_returns_none_without_aliasing` (fill all 1..=65535, graceful `None`, no
   aliasing/port-0/infinite scan). **Gate green:** `cargo test --workspace --all-features` 181 pass
   (+7; 30 in the system module), `clippy --features system-stack` + `--all-features` `-D warnings` +
-  fmt clean. **Still open from the review:** WASM signing fail-closed + memory cap; log streaming;
-  backend contract (richer IPC/FFI + handle); domain-target preservation (`Target` enum + DNS capture).
+  fmt clean. **Landed `ebcddbb`.**
+  **WASM SIGNING FAIL-CLOSED + MEMORY CAP 2026-06-18 (commit pending).** Review item A — closes the
+  one confirmed fail-OPEN gap + a resource-limit gap, both in the `wasm-transport` path.
+  (1) **Signing fail-closed:** `signing.rs` fell back to `DEV_MODULE_PUBKEY` when
+  `SPARK_MODULE_PUBKEY_HEX` was unset — but the dev key's private half is in the test tree
+  (`testutil::DEV_MODULE_PKCS8`), so a *release* binary built without the env var would trust a
+  repo-published key anyone could sign with. Now the `None` arm is cfg-split: `#[cfg(debug_assertions)]`
+  keeps the dev fallback (tests/dev), `#[cfg(not(debug_assertions))]` is a const-eval `panic!` → a
+  **release build with `wasm-transport` and no pinned key fails to compile** (`error[E0080]:
+  evaluation panicked: SPARK_MODULE_PUBKEY_HEX must be set …`). Verified all 3: debug-no-key compiles
+  (dev fallback), `cargo check --release …` no-key FAILS, release WITH key compiles. CI unaffected —
+  `ci.yml` runs `--all-features` in debug (dev fallback) and `release.yml` builds only spark/spark-
+  service without wasm-transport. (2) **Memory/table cap:** fuel bounds compute, not allocation — a
+  module could `memory.grow` to exhaust host RAM cheaply. Added a `wasmi` `StoreLimits` (16 MiB
+  linear memory, 4096 table elements, `trap_on_grow_failure(true)`) on `HostState`, wired via
+  `store.limiter(…)` in `Transform::new`. New test `memory_grow_beyond_the_cap_is_denied` (a module
+  growing ~64 MiB on transform_out traps instead of allocating). wasmi 2.0.0-beta.2 API verified
+  against the vendored source (`StoreLimitsBuilder::{memory_size,table_elements,trap_on_grow_failure,
+  build}`, `Store::limiter`, `ResourceLimiter`). **Gate green:** `cargo test --workspace --all-features`
+  182 pass (+1), clippy `--all-features -D warnings` + fmt clean. **Still open from the review:** log
+  streaming; backend contract (richer IPC/FFI + handle); domain-target preservation (`Target` + DNS).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

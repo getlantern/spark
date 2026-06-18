@@ -42,7 +42,10 @@ use std::sync::Arc;
 
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::{aead, digest};
-use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, Module, Store, TypedFunc};
+use wasmi::{
+    Caller, Config, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
+    TypedFunc,
+};
 
 mod signing;
 mod stream;
@@ -82,6 +85,15 @@ const EXPORT_TRANSFORM_IN: &str = "transform_in";
 /// can drive the host to touch or allocate — the module is untrusted, so every length crossing the
 /// boundary is checked against this before any allocation.
 const MAX_TRANSFORM_LEN: usize = 1 << 20; // 1 MiB
+
+/// Cap on a guest's linear memory. Fuel bounds *compute*, not *allocation* — a module could
+/// `memory.grow` to exhaust host RAM without spending much fuel. 16 MiB is far above what a byte
+/// transform needs (a 1 MiB `MAX_TRANSFORM_LEN` chunk in + out + scratch arena) while bounding a
+/// runaway. Enforced per-store via `wasmi`'s [`StoreLimits`]; an over-cap grow traps the call.
+const MAX_WASM_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+/// Cap on a guest's table size (function/extern references). A byte transform needs few or none;
+/// this bounds a `table.grow` runaway the same way the memory cap bounds `memory.grow`.
+const MAX_WASM_TABLE_ELEMENTS: usize = 4096;
 
 /// ChaCha20-Poly1305 key length (the AEAD the crypto host fns expose).
 const AEAD_KEY_LEN: usize = 32;
@@ -196,6 +208,9 @@ struct HostState {
     rng: SystemRandom,
     fault: Option<String>,
     rand_bytes: u64,
+    /// Caps the guest's linear-memory + table growth (fuel bounds compute, not allocation). Read by
+    /// the store limiter wired up in [`Transform::new`].
+    limits: StoreLimits,
 }
 
 /// One instantiated transform session: owns the guest instance + linear memory and drives the byte
@@ -231,8 +246,16 @@ impl Transform {
                 rng: SystemRandom::new(),
                 fault: None,
                 rand_bytes: 0,
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(MAX_WASM_MEMORY_BYTES)
+                    .table_elements(MAX_WASM_TABLE_ELEMENTS)
+                    // Trap on an over-cap grow rather than handing the guest a -1 it may ignore.
+                    .trap_on_grow_failure(true)
+                    .build(),
             },
         );
+        // Bound guest allocation (linear memory + tables): fuel meters compute, not `memory.grow`.
+        store.limiter(|state| &mut state.limits as &mut dyn wasmi::ResourceLimiter);
         // Fuel metering is on, so the store starts empty; grant a budget that covers the module's
         // `start` function (if any) and the `init` hook below. Per-transform calls refill in `run`.
         set_fuel(&mut store, fuel_for(config.len()))?;
@@ -1153,6 +1176,33 @@ mod tests {
                 Err(WasmError::Compile(_))
             ),
             "non-wasm bytes must fail to compile"
+        );
+    }
+
+    #[test]
+    fn memory_grow_beyond_the_cap_is_denied() {
+        // A module that tries to grow ~64 MiB (1000 pages) on transform_out. Fuel wouldn't stop it
+        // (one instruction), but the 16 MiB store limit denies the grow and traps the call — so a
+        // runaway can't exhaust host RAM. Confirms the limiter is wired, not just configured.
+        const BOMB_WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param $len i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (drop (memory.grow (i32.const 1000)))
+    (i64.or
+      (i64.shl (i64.extend_i32_u (local.get $ptr)) (i64.const 32))
+      (i64.extend_i32_u (local.get $len))))
+  (func (export "transform_in") (param $ptr i32) (param $len i32) (result i64)
+    (i64.or
+      (i64.shl (i64.extend_i32_u (local.get $ptr)) (i64.const 32))
+      (i64.extend_i32_u (local.get $len)))))
+"#;
+        let module = TransformModule::load(&wat::parse_str(BOMB_WAT).expect("wat")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        assert!(
+            t.transform_out(b"x").is_err(),
+            "an over-cap memory.grow must be denied (trap), not allowed to exhaust host memory"
         );
     }
 
