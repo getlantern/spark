@@ -567,4 +567,171 @@ mod tests {
         .unwrap();
         assert!(ipv4_checksums_ok(&p));
     }
+
+    // ---- property + fuzz tests (system-stack hardening pass) ----
+
+    /// A tiny deterministic PRNG (splitmix64) so the property sweeps are reproducible without
+    /// pulling in a proptest dependency.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed)
+        }
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn port(&mut self) -> u16 {
+            (self.next() % 65535) as u16 + 1 // 1..=65535
+        }
+        fn v4(&mut self) -> SocketAddrV4 {
+            SocketAddrV4::new(Ipv4Addr::from(self.next() as u32), self.port())
+        }
+        fn v6_addr(&mut self) -> Ipv6Addr {
+            let mut b = [0u8; 16];
+            b[..8].copy_from_slice(&self.next().to_be_bytes());
+            b[8..].copy_from_slice(&self.next().to_be_bytes());
+            Ipv6Addr::from(b)
+        }
+        fn payload(&mut self) -> Vec<u8> {
+            let len = (self.next() % 41) as usize; // 0..=40, incl. odd lengths (sum16 tail)
+            (0..len).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    /// Build a minimal IPv6 TCP packet `src -> dst` with `payload` and a valid TCP checksum (IPv6
+    /// has no IP-header checksum).
+    fn ipv6_tcp(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Vec<u8> {
+        let (sip, dip) = match (src.ip(), dst.ip()) {
+            (IpAddr::V6(s), IpAddr::V6(d)) => (s, d),
+            _ => panic!("ipv6_tcp needs v6 addresses"),
+        };
+        let mut p = vec![0u8; 40 + 20 + payload.len()];
+        p[0] = 0x60; // v6
+        p[4..6].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes()); // payload length
+        p[6] = PROTO_TCP; // next header
+        p[7] = 64; // hop limit
+        p[8..24].copy_from_slice(&sip.octets());
+        p[24..40].copy_from_slice(&dip.octets());
+        p[40..42].copy_from_slice(&src.port().to_be_bytes());
+        p[42..44].copy_from_slice(&dst.port().to_be_bytes());
+        p[40 + 12] = 0x50; // data offset = 5
+        p[40 + 13] = 0x10; // ACK
+        p[40 + 20..].copy_from_slice(payload);
+        let pseudo = pseudo_header_sum(&src.ip(), &dst.ip(), PROTO_TCP, 20 + payload.len());
+        let tc = checksum(&p[40..], pseudo);
+        p[40 + 16..40 + 18].copy_from_slice(&tc.to_be_bytes());
+        p
+    }
+
+    /// The IPv6 TCP checksum folds to zero (valid).
+    fn ipv6_tcp_checksum_ok(p: &[u8]) -> bool {
+        let pseudo = pseudo_header_sum(
+            &read_ip(p, 8, 16),
+            &read_ip(p, 24, 16),
+            PROTO_TCP,
+            p.len() - 40,
+        );
+        checksum(&p[40..], pseudo) == 0
+    }
+
+    #[test]
+    fn prop_v4_rewrite_matches_full_recompute_and_round_trips() {
+        let mut rng = Rng::new(0x5061_726B_5F76_3401);
+        for _ in 0..2000 {
+            let (s0, d0) = (rng.v4(), rng.v4());
+            let payload = rng.payload();
+            let orig = ipv4_tcp(s0, d0, &payload);
+
+            let (s1, d1) = (rng.v4(), rng.v4());
+            let mut p = orig.clone();
+            rewrite_tcp(&mut p, SocketAddr::V4(s1), SocketAddr::V4(d1)).unwrap();
+
+            // Incremental (RFC 1624) rewrite must equal a from-scratch full rebuild, and verify.
+            assert_eq!(
+                p,
+                ipv4_tcp(s1, d1, &payload),
+                "incremental != full recompute"
+            );
+            assert!(ipv4_checksums_ok(&p));
+            assert_eq!(
+                tcp_endpoints(&p).unwrap(),
+                (SocketAddr::V4(s1), SocketAddr::V4(d1))
+            );
+
+            // Rewriting back to the original tuple reproduces the original bytes exactly.
+            rewrite_tcp(&mut p, SocketAddr::V4(s0), SocketAddr::V4(d0)).unwrap();
+            assert_eq!(p, orig, "round-trip must reproduce the original packet");
+        }
+    }
+
+    #[test]
+    fn prop_v6_rewrite_round_trips_and_keeps_checksum_valid() {
+        let mut rng = Rng::new(0x5061_726B_5F76_3602);
+        for _ in 0..2000 {
+            let s0 = SocketAddr::new(IpAddr::V6(rng.v6_addr()), rng.port());
+            let d0 = SocketAddr::new(IpAddr::V6(rng.v6_addr()), rng.port());
+            let payload = rng.payload();
+            let orig = ipv6_tcp(s0, d0, &payload);
+
+            let s1 = SocketAddr::new(IpAddr::V6(rng.v6_addr()), rng.port());
+            let d1 = SocketAddr::new(IpAddr::V6(rng.v6_addr()), rng.port());
+            let mut p = orig.clone();
+            rewrite_tcp(&mut p, s1, d1).unwrap();
+            assert_eq!(tcp_endpoints(&p).unwrap(), (s1, d1));
+            assert!(
+                ipv6_tcp_checksum_ok(&p),
+                "v6 tcp checksum invalid after rewrite"
+            );
+
+            rewrite_tcp(&mut p, s0, d0).unwrap();
+            assert_eq!(p, orig, "v6 round-trip must reproduce the original");
+        }
+    }
+
+    #[test]
+    fn ipv6_extension_header_is_rejected() {
+        // A v6 packet whose next-header is an extension (here 44 = Fragment) can't be rewritten in
+        // place — the parser reports Ipv6Extension so the caller falls back. (The config selector
+        // is IPv4-only today; this pins the v6 boundary the rewriter does and doesn't handle.)
+        let mut p = ipv6_tcp(
+            "[2001:db8::1]:1".parse().unwrap(),
+            "[2001:db8::2]:2".parse().unwrap(),
+            b"",
+        );
+        p[6] = 44; // Fragment extension header
+        assert_eq!(tcp_endpoints(&p), Err(RewriteError::Ipv6Extension));
+        assert_eq!(
+            rewrite_tcp(
+                &mut p,
+                "[2001:db8::3]:3".parse().unwrap(),
+                "[2001:db8::4]:4".parse().unwrap()
+            ),
+            Err(RewriteError::Ipv6Extension)
+        );
+    }
+
+    #[test]
+    fn parsers_never_panic_on_arbitrary_bytes() {
+        // Fuzz the untrusted-packet surface: random buffers (and structured near-packets) must
+        // return Ok/Err, never panic or over-read. The test completing IS the assertion.
+        let mut rng = Rng::new(0x5061_726B_5F76_3603);
+        let dummy: SocketAddr = "1.2.3.4:5".parse().unwrap();
+        for _ in 0..20_000 {
+            let len = (rng.next() % 81) as usize; // 0..=80
+            let mut buf: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+            // Sometimes force a plausible IP version nibble to push past the version switch into
+            // the length/header checks.
+            if len > 0 && rng.next() & 1 == 0 {
+                buf[0] = (buf[0] & 0x0f) | if rng.next() & 1 == 0 { 0x40 } else { 0x60 };
+            }
+            let _ = ip_protocol(&buf);
+            let _ = tcp_endpoints(&buf);
+            let _ = udp_endpoints(&buf);
+            let _ = rewrite_tcp(&mut buf.clone(), dummy, dummy);
+        }
+    }
 }

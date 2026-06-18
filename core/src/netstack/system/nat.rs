@@ -321,4 +321,147 @@ mod tests {
         }
         assert_eq!(nat.len(), 1000);
     }
+
+    // ---- property / stress tests (system-stack hardening pass) ----
+
+    /// Deterministic PRNG (splitmix64) for reproducible randomized op sequences (no proptest dep).
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed)
+        }
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// The two indices must stay mutually consistent after every operation: equal size, and every
+    /// `by_source` entry's port resolves to a session whose source is that key (a one-to-one
+    /// source⇄port correspondence with no orphans and no port 0).
+    fn check_consistent(nat: &TcpNat) {
+        assert_eq!(
+            nat.by_source.len(),
+            nat.by_port.len(),
+            "by_source and by_port diverged in size"
+        );
+        for (src, &port) in &nat.by_source {
+            let s = nat
+                .by_port
+                .get(&port)
+                .unwrap_or_else(|| panic!("by_source[{src}]={port} has no by_port entry"));
+            assert_eq!(
+                s.source, *src,
+                "by_port[{port}].source != its by_source key"
+            );
+            assert_ne!(port, 0, "synthetic port 0 must never be allocated");
+        }
+    }
+
+    #[test]
+    fn randomized_ops_preserve_index_consistency() {
+        let mut nat = TcpNat::new();
+        let mut rng = Rng::new(0x5061_726B_5F6E_6174);
+        let t0 = Instant::now();
+        // Small pools so sources collide and ports get reused under churn.
+        let sources: Vec<SocketAddr> = (0u16..16)
+            .map(|i| SocketAddr::from(([10u8, 0, 0, 2], 5000 + i)))
+            .collect();
+        let dests: Vec<SocketAddr> = (0u16..4)
+            .map(|i| SocketAddr::from(([1u8, 1, 1, 1], 80 + i)))
+            .collect();
+
+        for step in 0..20_000u64 {
+            let now = t0 + Duration::from_millis(step * 7);
+            match rng.next() % 5 {
+                0 | 1 => {
+                    let src = sources[(rng.next() % sources.len() as u64) as usize];
+                    let dst = dests[(rng.next() % dests.len() as u64) as usize];
+                    if let Some(port) = nat.lookup(src, dst, now) {
+                        // A live mapping round-trips to its recorded source (the dest may be the
+                        // earlier one — lookup is keyed on source and doesn't rebind the dest).
+                        assert!(
+                            matches!(nat.lookup_back(port, now), Some((s, _)) if s == src),
+                            "lookup_back({port}) must return the mapped source"
+                        );
+                    }
+                }
+                2 => {
+                    if let Some(&port) = nat.by_port.keys().next() {
+                        nat.remove(port);
+                    }
+                }
+                3 => {
+                    if let Some(&port) = nat.by_port.keys().next() {
+                        nat.note_fin(port, rng.next() & 1 == 0, now);
+                    }
+                }
+                _ => {
+                    nat.evict_idle(now, Duration::from_millis(100), Duration::from_millis(20));
+                }
+            }
+            check_consistent(&nat);
+        }
+    }
+
+    #[test]
+    fn ephemeral_port_reuse_after_eviction_is_fresh() {
+        let mut nat = TcpNat::new();
+        let t0 = Instant::now();
+        let src: SocketAddr = "10.0.0.2:51000".parse().unwrap();
+        let d1: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        let d2: SocketAddr = "2.2.2.2:80".parse().unwrap();
+
+        let p1 = nat.lookup(src, d1, t0).unwrap();
+        assert_eq!(nat.lookup_back(p1, t0), Some((src, d1)));
+
+        // Idle past the timeout → evicted; the stale (src → d1) mapping is gone.
+        let timeout = Duration::from_secs(60);
+        assert_eq!(
+            nat.evict_idle(t0 + Duration::from_secs(120), timeout, timeout),
+            1
+        );
+        assert_eq!(nat.lookup_back(p1, t0), None);
+
+        // The app reuses the same ephemeral source for a DIFFERENT destination: it must map fresh
+        // to d2, never resurrect the evicted d1.
+        let later = t0 + Duration::from_secs(121);
+        let p2 = nat.lookup(src, d2, later).unwrap();
+        assert_eq!(
+            nat.lookup_back(p2, later),
+            Some((src, d2)),
+            "a reused source must map to the new destination, not the evicted one"
+        );
+    }
+
+    #[test]
+    fn port_space_exhaustion_returns_none_without_aliasing() {
+        let mut nat = TcpNat::new();
+        let now = Instant::now();
+        let dst: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        // Distinct sources (vary the IP) until the 1..=65535 synthetic port space is exhausted.
+        let mut ports = std::collections::HashSet::new();
+        for n in 0..70_000u32 {
+            let src = SocketAddr::from((n.to_be_bytes(), 12345u16));
+            match nat.lookup(src, dst, now) {
+                Some(port) => {
+                    assert_ne!(port, 0);
+                    assert!(ports.insert(port), "port {port} aliased a live mapping");
+                }
+                None => {
+                    // Exhausted gracefully (no panic / no infinite scan) after filling the space.
+                    assert_eq!(
+                        ports.len(),
+                        65535,
+                        "should fill all of 1..=65535 before failing"
+                    );
+                    return;
+                }
+            }
+        }
+        panic!("port space never exhausted after 70000 distinct sources");
+    }
 }

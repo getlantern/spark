@@ -658,7 +658,7 @@
   surface changed (+1 enum variant) → bindings regenerate (confirmed `StreamReconnected` in the Swift
   output; they're gitignored/regenerated at packaging). **Gate green:** 3 spark-ffi tests + host/bin
   clippy + fmt + windows cross-clippy. **Landed `3546afc`.**
-  **CONTROL-PLANE CORRECTNESS 2026-06-18 (commit pending).** From the external (codex) review — two
+  **CONTROL-PLANE CORRECTNESS 2026-06-18.** From the external (codex) review — two
   of the cheap, high-value items it flagged in `service/`. (1) **Honor `Subscribe { events, logs }`:**
   the actor discarded the flags (`Subscribe { .. }`) and registered a full subscriber. `Subscriber`
   now carries `events`/`logs`; `broadcast` filters by push kind (`wants`: `Push::Event` needs
@@ -675,7 +675,29 @@
   + `FakeEngine`). **NOT done (deferred, own chunk):** actual log *streaming* — `Push::Log(LogLine)`
   exists but is never produced; wiring it needs a `tracing` layer → actor channel + redaction
   (`core::redact`) + touches `main.rs`/`run_service` signature. **Gate green:** `cargo test --workspace
-  --all-features` 174 pass (spark-service 19, +2), clippy `-D warnings` + fmt clean.
+  --all-features` 174 pass (spark-service 19, +2), clippy `-D warnings` + fmt clean. **Landed
+  `09e9968`.**
+  **SYSTEM-STACK PROPERTY/FUZZ HARDENING 2026-06-18 (commit pending).** From the codex review —
+  test-only hardening of the novel kernel-TCP rewrite/NAT code (no production change). Deterministic
+  splitmix64 PRNG in each test mod (reproducible; no proptest dep, per the no-new-deps rule).
+  **`netstack/system/rewrite.rs`** (+4 tests): `prop_v4_rewrite_matches_full_recompute_and_round_trips`
+  (2000 random tuples — the incremental RFC-1624 checksum rewrite must be byte-identical to a
+  from-scratch full rebuild, then round-trip back to the original); `prop_v6_rewrite_round_trips_and_
+  keeps_checksum_valid` (new `ipv6_tcp` builder; v6 has no IP checksum, TCP must still fold to zero);
+  `ipv6_extension_header_is_rejected` (pins the v6 boundary codex flagged — next-header ≠ TCP →
+  `Ipv6Extension`, caller falls back; config selector is IPv4-only today); `parsers_never_panic_on_
+  arbitrary_bytes` (20k random + structured-near-packet buffers through `tcp_endpoints`/`udp_endpoints`/
+  `ip_protocol`/`rewrite_tcp` — the untrusted-input surface, no panic/over-read). **`netstack/system/
+  nat.rs`** (+3 tests): `randomized_ops_preserve_index_consistency` (20k random lookup/lookup_back/
+  remove/note_fin/evict ops over a small src/dst pool to force reuse; a `check_consistent` invariant —
+  `by_source ⇄ by_port` bijection, equal size, no orphan/port-0 — runs after EVERY op, catching dual-
+  index desync); `ephemeral_port_reuse_after_eviction_is_fresh` (the stale-mapping caveat's safe
+  boundary: after eviction, reusing a source maps to the NEW dest, never resurrects the old);
+  `port_space_exhaustion_returns_none_without_aliasing` (fill all 1..=65535, graceful `None`, no
+  aliasing/port-0/infinite scan). **Gate green:** `cargo test --workspace --all-features` 181 pass
+  (+7; 30 in the system module), `clippy --features system-stack` + `--all-features` `-D warnings` +
+  fmt clean. **Still open from the review:** WASM signing fail-closed + memory cap; log streaming;
+  backend contract (richer IPC/FFI + handle); domain-target preservation (`Target` enum + DNS capture).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
