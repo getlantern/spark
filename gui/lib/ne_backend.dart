@@ -10,8 +10,19 @@ import 'spark_backend.dart';
 class NEBackend implements SparkBackend {
   static const _channel = MethodChannel('spark/ne');
 
+  /// Relay address ("host:port" IP literal). When set, `connect` tunnels every flow through it, so
+  /// the egress IP becomes the relay's; empty/null forwards directly. Sourced from
+  /// `--dart-define=SPARK_PROXY=host:port` (see main.dart); a profile UI will set it later.
+  final String? proxyServer;
+
+  NEBackend({this.proxyServer});
+
   @override
-  Future<void> connect() => _invoke('connect');
+  Future<void> connect() async {
+    final server = proxyServer;
+    final args = (server != null && server.isNotEmpty) ? {'server': server} : null;
+    await _guard(() => _channel.invokeMethod<void>('connect', args));
+  }
 
   @override
   Future<void> disconnect() => _invoke('disconnect');

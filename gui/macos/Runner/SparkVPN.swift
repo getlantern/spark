@@ -18,7 +18,11 @@ enum SparkNeChannel {
     let channel = FlutterMethodChannel(name: "spark/ne", binaryMessenger: registrar.messenger)
     channel.setMethodCallHandler { call, result in
       switch call.method {
-      case "connect": SparkVpn.shared.connect(result: result)
+      case "connect":
+        // Optional "server" arg ("host:port" IP literal) → tunnel through that plain relay; absent
+        // → forward directly. The Dart NEBackend supplies it (a future profile UI sets it).
+        let server = (call.arguments as? [String: Any])?["server"] as? String
+        SparkVpn.shared.connect(server: server, result: result)
       case "disconnect": SparkVpn.shared.disconnect(result: result)
       case "status": SparkVpn.shared.status(result: result)
       case "openExtensionSettings": SparkSysExt.shared.openSettings(); result(nil)
@@ -87,17 +91,18 @@ final class SparkVpn {
   static let shared = SparkVpn()
   private let providerBundleId = "org.getlantern.spark.tunnel"
 
-  /// Activate the system extension (if needed), then configure + start the tunnel.
-  func connect(result: @escaping FlutterResult) {
+  /// Activate the system extension (if needed), then configure + start the tunnel. `server`
+  /// ("host:port" IP literal) routes every flow through that plain relay; nil forwards directly.
+  func connect(server: String?, result: @escaping FlutterResult) {
     SparkSysExt.shared.activate { [weak self] error in
       if let error {
         return Self.fail(result, "sysext activation failed", error)
       }
-      self?.startTunnel(result: result)
+      self?.startTunnel(server: server, result: result)
     }
   }
 
-  private func startTunnel(result: @escaping FlutterResult) {
+  private func startTunnel(server: String?, result: @escaping FlutterResult) {
     NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in
       guard let self else { return }
       if let error { return Self.fail(result, "loadAll failed", error) }
@@ -105,6 +110,8 @@ final class SparkVpn {
       let proto = NETunnelProviderProtocol()
       proto.providerBundleIdentifier = self.providerBundleId
       proto.serverAddress = "spark"
+      // Hand the relay address to the system extension; it reads providerConfiguration["server"].
+      if let server, !server.isEmpty { proto.providerConfiguration = ["server": server] }
       manager.protocolConfiguration = proto
       manager.localizedDescription = "Spark"
       manager.isEnabled = true

@@ -41,12 +41,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 completionHandler(NEVPNError(.configurationInvalid))
                 return
             }
-            self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu))")
+            // The controlling app passes the relay address in `providerConfiguration["server"]`
+            // (a "host:port" IP literal) to tunnel through it; absent → forward directly.
+            let server = (self.protocolConfiguration as? NETunnelProviderProtocol)?
+                .providerConfiguration?["server"] as? String
+            self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), server=\(server ?? "direct"))")
 
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
-            // thread. The core owns `fd` and closes it on stop.
-            let worker = Thread { [mtu = self.mtu, log = self.log] in
-                let rc = spark_tunnel_run(fd, Int32(mtu))
+            // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C string
+            // alive for the whole blocking call (it returns only when the tunnel stops).
+            let worker = Thread { [mtu = self.mtu, log = self.log, server] in
+                let rc: Int32
+                if let server, !server.isEmpty {
+                    rc = server.withCString { spark_tunnel_run(fd, Int32(mtu), $0) }
+                } else {
+                    rc = spark_tunnel_run(fd, Int32(mtu), nil)
+                }
                 log.notice("spark_tunnel_run returned \(rc)")
             }
             worker.name = "spark-tunnel"

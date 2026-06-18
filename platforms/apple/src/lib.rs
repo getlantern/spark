@@ -14,18 +14,46 @@
 
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 mod ffi {
-    use std::os::raw::c_int;
+    use std::ffi::CStr;
+    use std::net::SocketAddr;
+    use std::os::raw::{c_char, c_int};
 
     /// Run the tunnel on the provided `utun` `fd` with `mtu`. Blocks the calling thread until
     /// [`spark_tunnel_stop`] (or the data path exits). Returns 0 on a clean stop, -1 on error.
     ///
     /// The caller (the Swift NE provider) hands ownership of `fd` to native for the tunnel's
     /// lifetime; the core closes it on stop.
+    ///
+    /// `server` selects the data path: null/empty forwards each flow **directly**; a `host:port` IP
+    /// literal tunnels every flow through that **plain spark relay** (so egress is the relay's IP).
+    /// A non-null, non-empty `server` that doesn't parse as a `SocketAddr` returns -1.
+    ///
+    /// # Safety
+    /// `server` must be null or a valid NUL-terminated C string for the duration of this call.
     #[no_mangle]
-    pub extern "C" fn spark_tunnel_run(fd: c_int, mtu: c_int) -> c_int {
-        // The NE always uses the cross-platform userspace stack (the `system` stack is Android-only),
-        // so the default config is right; `run_fd` is the shared run + status-code convention.
-        spark_core::fd_tunnel::run_fd(fd, mtu as u16, spark_core::config::Config::default())
+    pub unsafe extern "C" fn spark_tunnel_run(
+        fd: c_int,
+        mtu: c_int,
+        server: *const c_char,
+    ) -> c_int {
+        // The NE always uses the cross-platform userspace stack (the `system` stack is Android-only).
+        let mut config = spark_core::config::Config::default();
+        if !server.is_null() {
+            // SAFETY: caller contract — `server` is a valid NUL-terminated C string when non-null.
+            let s = match unsafe { CStr::from_ptr(server) }.to_str() {
+                Ok(s) => s.trim(),
+                Err(_) => return -1,
+            };
+            if !s.is_empty() {
+                match s.parse::<SocketAddr>() {
+                    Ok(addr) => config.transport.server = Some(addr),
+                    Err(_) => return -1,
+                }
+            }
+        }
+        // `run_fd` is the shared run + status-code convention. With `transport.server` set, the core
+        // tunnels TCP/UDP flows through the plain relay instead of dialing them directly.
+        spark_core::fd_tunnel::run_fd(fd, mtu as u16, config)
     }
 
     /// Signal a running [`spark_tunnel_run`] to stop (from `stopTunnel`).

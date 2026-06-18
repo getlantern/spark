@@ -20,7 +20,8 @@ Future<void> main() async {
 ///   to [CliBackend] if the Rust library can't initialize, so the app always launches.
 Future<SparkBackend> _desktopBackend() async {
   if (Platform.isMacOS) {
-    return NEBackend();
+    // Route through a relay when built with --dart-define=SPARK_PROXY=host:port; else direct.
+    return NEBackend(proxyServer: const String.fromEnvironment('SPARK_PROXY'));
   }
   try {
     return await FrbBackend.create();

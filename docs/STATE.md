@@ -1025,6 +1025,24 @@
   the Flutter controlling app. **REMAINING:** the live gate (launch the Flutter app → approve sysext →
   connect → browse); a CI job for the GUI DMG (mirror `package-macos-app`); drop the unused
   `spark_bridge` framework from the macOS build.
+  **PROXY ROUTING WIRED INTO THE NE DATA PATH + DO RELAY 2026-06-18 (commit pending).** Made the app
+  actually tunnel through a remote proxy (not just direct-forward). (1) **A throwaway DO droplet**
+  (`137.184.47.220`, sfo3, ID `578689132`) runs `scripts/spark-plain-relay.py` — a ~50-line relay
+  speaking spark's plain SOCKS5-style header (`ATYP|ADDR|PORT` then splice; see `tcp_tunnel/header.rs`)
+  on `:9000`. **Internet-proven:** mimicking spark's plain client from the laptop (target
+  `icanhazip.com:80`) returned `137.184.47.220` — egress is the relay. (2) **Apple C ABI extended:**
+  `spark_tunnel_run(fd, mtu, server)` — `server` null/empty → direct; a `host:port` IP literal sets
+  `Config.transport.server` so the core tunnels every flow through that plain relay. `PacketTunnelProvider`
+  reads `providerConfiguration["server"]` and passes it (already full-tunnel routes). (3) **Flutter
+  app:** `SparkVpn.connect(server:)` sets `providerConfiguration["server"]`; `NEBackend` sources it
+  from `--dart-define=SPARK_PROXY=host:port` (empty → direct, no throwaway IP committed); `build-gui-dmg.sh`
+  forwards `SPARK_PROXY`. So **toggling the app on → routes through the relay → egress = relay IP.**
+  **Verified (compile level):** `cargo clippy -p spark-apple` (macOS+iOS) + fmt; `swift build` (the
+  sysext provider against the new ABI); `flutter analyze` + `flutter build macos --release
+  --dart-define=SPARK_PROXY=…`. Also `scripts/spark-plain-gate.sh` = the `sudo spark run` CLI gate
+  (closes M4). **REMAINING (live, human):** run the gate / install the proxy-baked notarized DMG,
+  approve the sysext, connect, confirm the egress IP flips to the relay. Plaintext relay (demo, not
+  circumvention-grade — that's the AnyTLS path). **Tear down droplet 578689132 after testing.**
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

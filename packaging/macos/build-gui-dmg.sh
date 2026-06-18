@@ -67,8 +67,12 @@ SYSEXT_SRC="$ARCHIVE/Products/Applications/SparkApp.app/Contents/Library/SystemE
 [[ -d "$SYSEXT_SRC" ]] || { echo "system extension not found in archive: $SYSEXT_SRC" >&2; exit 1; }
 
 # --- 2. build the Flutter controlling app -------------------------------------------------------
-log "flutter build macos --release"
-( cd "$GUI_DIR" && flutter build macos --release )
+# SPARK_PROXY ("host:port" IP literal), if set, bakes the relay into the app so connect tunnels
+# through it (egress = relay); unset → the app forwards directly.
+PROXY_DEFINE=()
+[[ -n "${SPARK_PROXY:-}" ]] && PROXY_DEFINE=(--dart-define=SPARK_PROXY="$SPARK_PROXY")
+log "flutter build macos --release ${SPARK_PROXY:+(proxy $SPARK_PROXY)}"
+( cd "$GUI_DIR" && flutter build macos --release "${PROXY_DEFINE[@]}" )
 FLUTTER_APP="$GUI_DIR/build/macos/Build/Products/Release/$APP_NAME"
 [[ -d "$FLUTTER_APP" ]] || { echo "flutter build did not produce $FLUTTER_APP" >&2; exit 1; }
 rm -rf "$APP"
