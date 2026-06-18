@@ -1018,7 +1018,11 @@
   --verify --deep --strict` **"valid on disk / satisfies its Designated Requirement"**, DMG built; the
   final app verified to have the embedded `org.getlantern.spark.tunnel.systemextension`, **hardened
   runtime + Developer-ID + secure timestamp + `get-task-allow` STRIPPED** (notarization-ready), and the
-  sysext still validly signed. **REMAINING:** the live gate (launch the Flutter app → approve sysext →
+  sysext still validly signed. **FULL NOTARIZATION CONFIRMED:** a no-`SKIP_NOTARIZE` run notarized
+  both the `spark_gui.app` (embedded-sysext) and the DMG — `notarytool` **status Accepted** for each,
+  both stapled, `stapler validate` OK, `spctl --assess` → **"accepted, source = Notarized Developer
+  ID"**. So `dist/spark-gui-<ver>-macos-arm64.dmg` (19 MB) is a Gatekeeper-ready notarized release of
+  the Flutter controlling app. **REMAINING:** the live gate (launch the Flutter app → approve sysext →
   connect → browse); a CI job for the GUI DMG (mirror `package-macos-app`); drop the unused
   `spark_bridge` framework from the macOS build.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
