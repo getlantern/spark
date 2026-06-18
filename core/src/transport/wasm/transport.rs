@@ -48,6 +48,7 @@ const UDP_READ_SCRATCH: usize = 16 * 1024;
 pub struct WasmTransport {
     server: SocketAddr,
     module: TransformModule,
+    config: Vec<u8>,
     protector: Option<SocketProtector>,
 }
 
@@ -57,8 +58,16 @@ impl WasmTransport {
         Self {
             server,
             module,
+            config: Vec::new(),
             protector: None,
         }
+    }
+
+    /// Set the per-deployment configuration delivered to the module's `init` export on each dial
+    /// (e.g. a key or seed). Empty by default.
+    pub fn with_config(mut self, config: Vec<u8>) -> Self {
+        self.config = config;
+        self
     }
 
     /// Pin connections to the server to a physical interface, so they bypass the tunnel route.
@@ -74,7 +83,7 @@ impl Transport for WasmTransport {
         let conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         let transform = self
             .module
-            .instantiate()
+            .instantiate_with_config(&self.config)
             .map_err(|e| io::Error::other(e.to_string()))?;
         let mut wrapped = TransformStream::new(conn, transform);
 
@@ -132,7 +141,7 @@ impl UdpTransport for WasmTransport {
         // call is synchronous and the guard is never held across an `.await`.
         let transform = Arc::new(Mutex::new(
             self.module
-                .instantiate()
+                .instantiate_with_config(&self.config)
                 .map_err(|e| io::Error::other(e.to_string()))?,
         ));
 

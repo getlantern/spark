@@ -22,7 +22,7 @@
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +127,36 @@ pub struct TransportConfig {
     /// the `anytls` build feature to take effect (else `from_config` errors).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anytls: Option<AnytlsConfig>,
+    /// Dynamic wasm transport (ADR 0003): when set, flows tunnel through this spark server,
+    /// obfuscated by a signed WebAssembly module. Takes precedence over the plain `server` tunnel
+    /// (but `anytls`, if also set, wins). Requires the `wasm-transport` build feature to take effect
+    /// (else `from_config` errors).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<WasmConfig>,
+}
+
+/// Dynamic wasm transport configuration (ADR 0003).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasmConfig {
+    /// The spark server address to tunnel through.
+    pub server: SocketAddr,
+    /// Path to the signed module artifact (delivered out of band; see `wasm::ModuleVerifier`).
+    pub module: PathBuf,
+    /// Hex-encoded Ed25519 public key (32 bytes / 64 hex chars) the artifact is verified against.
+    /// Interim: production pins this key in the signed binary rather than trusting config (ADR 0003).
+    pub public_key: String,
+    /// Anti-rollback floor — reject a module whose version is below this. Default `0`.
+    #[serde(default)]
+    pub min_version: u32,
+    /// Optional hex-encoded configuration bytes delivered to the module's `init` export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_config: Option<String>,
+    /// Optional path to a persisted per-name version floor (a TOML `name = version` map). When set,
+    /// the loaded version must also clear the persisted floor, and a successful load bumps it —
+    /// anti-rollback that survives restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_path: Option<PathBuf>,
 }
 
 /// AnyTLS transport configuration (ADR 0001).
@@ -271,6 +301,16 @@ mod tests {
                     server: Some("[2001:db8::1]:443".parse().unwrap()),
                     protect_interface: Some("en0".into()),
                     anytls: None,
+                    wasm: Some(WasmConfig {
+                        server: "192.0.2.9:443".parse().unwrap(),
+                        module: PathBuf::from("/etc/spark/obfs.spkw"),
+                        public_key:
+                            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                                .into(),
+                        min_version: 7,
+                        init_config: Some("deadbeef".into()),
+                        floor_path: Some(PathBuf::from("/var/lib/spark/floors.toml")),
+                    }),
                 },
                 udp: UdpConfig {
                     idle_timeout_secs: 30,
@@ -284,6 +324,26 @@ mod tests {
             let parsed = Config::from_toml_str(&rendered).unwrap();
             assert_eq!(parsed, cfg, "round-trip changed the config:\n{rendered}");
         }
+    }
+
+    #[test]
+    fn parses_a_wasm_transport_config() {
+        let c = Config::from_toml_str(
+            r#"
+            [transport.wasm]
+            server = "192.0.2.1:443"
+            module = "/etc/spark/obfs.spkw"
+            public_key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+            min_version = 9
+        "#,
+        )
+        .unwrap();
+        let wasm = c.transport.wasm.expect("wasm config");
+        assert_eq!(wasm.server, "192.0.2.1:443".parse().unwrap());
+        assert_eq!(wasm.module, PathBuf::from("/etc/spark/obfs.spkw"));
+        assert_eq!(wasm.min_version, 9);
+        assert_eq!(wasm.init_config, None);
+        assert_eq!(wasm.floor_path, None);
     }
 
     #[test]

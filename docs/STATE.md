@@ -492,11 +492,25 @@
   fmt+workspace clean.
   **PATH B STATUS: the in-process pipeline is complete + hardened, TCP + UDP** — signed/verified load
   → instantiate (+config) → native-crypto host fns → obfuscated `Transport`+`UdpTransport`/
-  `WasmServer` tunnel, fuel-bounded. **Remaining (lower priority):** (c) delivery (fetch artifact
-  over config/fronting) + `transport.wasm` config wiring in `from_config` + persisted per-name
-  version floor; (d) pin a real Ed25519 pubkey const at build time; plus v0 ABI niceties (explicit
-  `dealloc`/arena-reset, AAD param on the AEAD host fns, per-datagram-buffering caveat in the UDP
-  source for modules that don't emit output per call).
+  `WasmServer` tunnel, fuel-bounded.
+  **CONFIG WIRING + VERIFIED LOAD BUILT 2026-06-17 (chunk 8 = item c, the in-`core` half).** Added
+  `config::WasmConfig { server, module (artifact path), public_key (hex Ed25519), min_version,
+  init_config (hex), floor_path }` + `TransportConfig.wasm`; `from_config` now builds the wasm
+  transport (precedence: anytls > wasm > plain server > direct), feature-gated `wasm_transport()`
+  (with a non-feature stub that errors like anytls). It: hex-decodes the pinned key (hand-rolled
+  `decode_hex`, no `hex` crate), reads the artifact file, `ModuleVerifier::verify(artifact,
+  min_version)` (authenticate BEFORE trusting the name), then a persisted per-name floor
+  (`wasm_floor` mod: TOML `name=version` map; get/bump; missing file = empty) as a second
+  anti-rollback gate that survives restarts, then `WasmTransport::new(..).with_config(init)` (new
+  `config: Vec<u8>` field → `instantiate_with_config` per dial/dial_udp). 4 from_config tests (builds
+  a verified transport; rejects rollback via min_version; rejects wrong pinned key; persisted floor
+  enforced+bumped — install v5 then reject v4). Also fixed `cli/main.rs`'s explicit `TransportConfig`
+  literal (+`wasm: None`). Debug 112 lib / release 25 wasm tests green; clippy(feature+default)+fmt+
+  workspace clean. **Remaining (lower priority):** the network-delivery half of (c) — actually
+  *fetch* the artifact over the config/fronting channel and write it to `module` path (the verify/
+  load/floor logic is done; this is a client/service+fronting integration); (d) pin a real Ed25519
+  pubkey const at build time (verifier/`WasmConfig.public_key` is the interim source); v0 ABI niceties
+  (`dealloc`/arena-reset, AAD param on the AEAD host fns, UDP-source per-call-buffering caveat).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
