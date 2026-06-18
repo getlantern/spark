@@ -842,6 +842,22 @@
   cross-check still ring-blocked here (CI). **SLICE 5 COMPLETE — ADR 0004 (the backend contract) is
   DONE end-to-end: capabilities, details, metrics, profiles (CRUD + connect-by-active + persistence),
   log streaming, and the embedded handle model, all over `spark-ipc` + mirrored in `spark-ffi`.**
+  **GUI — Flutter v1 (connect/disconnect/status) 2026-06-18 (commit pending).** First product GUI
+  (direction in the [[gui-direction-flutter]] memory): a **Flutter** app in `gui/` (macOS target),
+  one screen — a state-reactive "signal orb", connect/disconnect toggle, fail-open warning — polling
+  status every 2s. **Integration via a `SparkBackend` abstraction** (`lib/spark_backend.dart`, same
+  `status`/`connect`/`disconnect` shape as `spark-ffi`'s `Backend`); the v1 impl `CliBackend` shells
+  out to the built `spark` CLI (which speaks `spark-ipc` to `spark-service`) — **zero FFI, works
+  today**, and the UI is unchanged when the real bindings slot in (desktop = `flutter_rust_bridge`
+  over `spark_ipc::Client`; mobile = platform channel → native VpnService/NE shim + the `spark-ffi`
+  UniFFI bindings). Distinctive dark "signal" theme (Sora + JetBrains Mono via `google_fonts`,
+  teal/amber/rose state colours, pulsing orb). **Verified:** `flutter analyze` clean, `flutter test`
+  (widget smoke test vs a fake backend) passes, **`flutter build macos --debug` → `spark_gui.app`**.
+  Build artifacts (`build/`, `.dart_tool/`) gitignored. **Runtime caveat:** the macOS App Sandbox
+  blocks `CliBackend` spawning `spark` — disable the sandbox for dev, or use the (follow-up)
+  in-process `flutter_rust_bridge` backend. **Next:** real frb desktop backend; ios/android +
+  platform-channel backend; richer screens (capabilities/details/metrics/logs/profiles) off the
+  ADR-0004 contract.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
