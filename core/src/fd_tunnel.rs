@@ -16,6 +16,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -28,12 +29,22 @@ use crate::proxy;
 use crate::transport;
 use crate::tun::Tun;
 
-/// Process-global stop signal: [`run_tunnel_with_config`] waits on it, [`stop`] fires it. The host
-/// lifecycle is start → stop, and the waiter is registered before stop can fire (the tunnel is up),
+/// The stop signal of every running tunnel. Each tunnel registers its own [`Notify`] here for its
+/// lifetime: the no-arg [`stop`] (the shim entry) signals them all, while a [`TunnelHandle`] signals
+/// only its own — so independent tunnels tear down independently (replacing the former single
+/// process-global signal). Each waiter is registered before its stop can fire (the tunnel is up),
 /// so `notify_waiters` is sufficient.
-fn shutdown() -> &'static Notify {
-    static SHUTDOWN: OnceLock<Notify> = OnceLock::new();
-    SHUTDOWN.get_or_init(Notify::new)
+fn registry() -> &'static Mutex<Vec<Arc<Notify>>> {
+    static REGISTRY: OnceLock<Mutex<Vec<Arc<Notify>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn register(stop: &Arc<Notify>) {
+    registry().lock().unwrap().push(Arc::clone(stop));
+}
+
+fn deregister(stop: &Arc<Notify>) {
+    registry().lock().unwrap().retain(|n| !Arc::ptr_eq(n, stop));
 }
 
 /// Build the fd-path [`Config`] from the host primitives the platform shims share: direct
@@ -74,10 +85,21 @@ pub fn run_fd(fd: i32, mtu: u16, config: Config) -> i32 {
 /// (`config.tun.mtu` is unused on the fd path). Returns once torn down. The FFI shims go through
 /// [`run_fd`] (which adds the shared status-code convention); call this directly from Rust.
 pub fn run_tunnel_with_config(fd: i32, mtu: u16, config: Config) -> std::io::Result<()> {
+    // A private stop signal registered for the no-arg `stop` (the shim entry); behavior is identical
+    // to the former single global signal for the one-tunnel-per-process shim case.
+    run_with_handle(fd, mtu, config, Arc::new(Notify::new()))
+}
+
+/// The shared implementation: run the tunnel until `stop` is signalled (by [`stop`] or a
+/// [`TunnelHandle`]) or the data path exits, registering `stop` for its lifetime so the no-arg
+/// [`stop`] can find it.
+fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std::io::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async move {
+    register(&stop);
+    let waiter = Arc::clone(&stop);
+    let result = runtime.block_on(async move {
         // SAFETY: `fd` is the TUN fd from the OS (Android `establish()`/`detachFd`, or the Apple
         // NE utun fd); the host side transfers ownership to native for the tunnel's lifetime.
         let tun = Arc::new(
@@ -102,17 +124,59 @@ pub fn run_tunnel_with_config(fd: i32, mtu: u16, config: Config) -> std::io::Res
         let metrics = Arc::new(crate::metrics::Metrics::default());
         tokio::select! {
             _ = proxy::tcp::run(stack, tcp_transport, metrics) => warn!("netstack accept loop exited"),
-            _ = shutdown().notified() => info!("stop requested; tearing the tunnel down"),
+            _ = waiter.notified() => info!("stop requested; tearing the tunnel down"),
         }
         drop(tun);
         Ok(())
-    })
+    });
+    deregister(&stop);
+    result
 }
 
-/// Signal a running tunnel ([`run_fd`] / [`run_tunnel_with_config`]) to stop, called from the
-/// host's teardown via FFI.
+/// Signal **every** running tunnel ([`run_fd`] / [`run_tunnel_with_config`]) to stop — the no-arg
+/// teardown the JNI/C-ABI shims call (they own one tunnel per process). For a single tunnel this
+/// addresses the [`TunnelHandle::stop`] target.
 pub fn stop() {
-    shutdown().notify_waiters();
+    for stop in registry().lock().unwrap().iter() {
+        stop.notify_waiters();
+    }
+}
+
+/// A handle to a tunnel started by [`spawn_tunnel`]: stop it via [`TunnelHandle::stop`] (or by
+/// dropping the handle). The per-tunnel alternative to the process-global [`stop`], for an
+/// in-process embedder that owns the lifecycle (the desktop service uses the IPC control plane
+/// instead; the mobile shims use the blocking [`run_fd`] + no-arg [`stop`]).
+pub struct TunnelHandle {
+    stop: Arc<Notify>,
+}
+
+impl TunnelHandle {
+    /// Signal this tunnel to tear down (idempotent; a no-op once it has stopped).
+    pub fn stop(&self) {
+        self.stop.notify_waiters();
+    }
+}
+
+impl Drop for TunnelHandle {
+    fn drop(&mut self) {
+        // Dropping the handle tears the tunnel down — the embedder's RAII lifecycle.
+        self.stop.notify_waiters();
+    }
+}
+
+/// Start a tunnel on `fd` on a background thread and return a [`TunnelHandle`] that stops it.
+/// Unlike [`run_fd`] this does **not** block; a start failure is logged (the non-blocking handle
+/// can't report it). The thread runs on its own private runtime until the handle stops it (or the
+/// data path exits).
+pub fn spawn_tunnel(fd: i32, mtu: u16, config: Config) -> TunnelHandle {
+    let stop = Arc::new(Notify::new());
+    let stop_thread = Arc::clone(&stop);
+    std::thread::spawn(move || {
+        if let Err(e) = run_with_handle(fd, mtu, config, stop_thread) {
+            warn!(error = %e, "spawned tunnel exited with error");
+        }
+    });
+    TunnelHandle { stop }
 }
 
 #[cfg(test)]
@@ -131,5 +195,47 @@ mod tests {
             fd_config(Ipv4Addr::UNSPECIFIED, 24, true).tun.stack,
             StackKind::System
         );
+    }
+
+    #[tokio::test]
+    async fn registered_stop_wakes_only_its_own_waiter() {
+        // Two independent tunnel stop signals; signalling one must not wake the other.
+        let a = Arc::new(Notify::new());
+        let b = Arc::new(Notify::new());
+        register(&a);
+        register(&b);
+
+        let a2 = Arc::clone(&a);
+        let wa = tokio::spawn(async move { a2.notified().await });
+        let b2 = Arc::clone(&b);
+        let mut wb = tokio::spawn(async move { b2.notified().await });
+        // Let both waiters register their interest before signalling.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        TunnelHandle {
+            stop: Arc::clone(&a),
+        }
+        .stop(); // stop only tunnel a (handle drop also signals a)
+
+        tokio::time::timeout(Duration::from_secs(1), wa)
+            .await
+            .expect("a's waiter must be woken")
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut wb)
+                .await
+                .is_err(),
+            "b's waiter must NOT be woken by a's stop"
+        );
+
+        // The global stop() then wakes b too.
+        super::stop();
+        tokio::time::timeout(Duration::from_secs(1), &mut wb)
+            .await
+            .expect("global stop must wake b")
+            .unwrap();
+
+        deregister(&a);
+        deregister(&b);
     }
 }

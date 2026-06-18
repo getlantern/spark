@@ -822,7 +822,26 @@
   (+2: `log_lines_stream_to_logs_subscribers_only` — a fed log reaches a `logs:true` subscriber but not
   an events-only one; `logbus::maps_tracing_levels`); clippy `--all-features -D warnings` + fmt +
   windows-ffi cross-clippy clean. **SLICE 4 COMPLETE.** ADR 0004 remaining: slice 5 (embedded
-  `TunnelHandle`).
+  `TunnelHandle`). **(committed `35e8895`.)**
+  **BACKEND CONTRACT — SLICE 5 (embedded TunnelHandle) 2026-06-18 (commit pending).** Replaces
+  `fd_tunnel`'s single process-global stop `Notify` with a **registry of per-tunnel `Arc<Notify>`**:
+  each running tunnel registers its own signal for its lifetime; the no-arg `stop()` (the shim
+  teardown) signals them all, while a new `TunnelHandle::stop()` signals only its own — so independent
+  tunnels tear down independently (codex #5). The shared impl `run_with_handle(fd, mtu, config, stop)`
+  registers/deregisters the signal and waits on it; `run_tunnel_with_config` (→ `run_fd`, the shims)
+  delegates with a private signal, so the **JNI/C-ABI ABIs + behavior are unchanged** (for one
+  tunnel: register one signal, `stop()` wakes it = identical to the old single global) — the
+  live-gated mobile paths aren't touched. New `pub fn spawn_tunnel(fd, mtu, config) -> TunnelHandle`:
+  a **non-blocking** start (runs on a background thread + private runtime) returning a handle that
+  stops the tunnel via `stop()` or on `Drop` (RAII) — the per-tunnel API for a future in-process
+  embedder (start failures are logged, not returned — a status callback is a later refinement). **Gate
+  green:** `cargo test --workspace --all-features` 196 pass (+1: `registered_stop_wakes_only_its_own_
+  waiter` — an independent waiter isn't woken by another tunnel's stop, but the global `stop()` wakes
+  all); host clippy `--all-features -D warnings` + fmt + **`cargo ndk -t arm64-v8a clippy -p
+  spark-android`** clean (the Apple shim on macОS is covered by host clippy). Windows full-workspace
+  cross-check still ring-blocked here (CI). **SLICE 5 COMPLETE — ADR 0004 (the backend contract) is
+  DONE end-to-end: capabilities, details, metrics, profiles (CRUD + connect-by-active + persistence),
+  log streaming, and the embedded handle model, all over `spark-ipc` + mirrored in `spark-ffi`.**
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
