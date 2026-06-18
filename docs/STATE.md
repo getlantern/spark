@@ -398,9 +398,26 @@
   `wat` dev-dep; `cargo clippy --features wasm-transport -Dwarnings` + default clippy + fmt + workspace
   check all clean. wasmi API verified against docs.rs 2.0.0-beta.2 (`Linker::func_wrap`/
   `instantiate_and_start`, `Instance::get_typed_func`/`get_memory`, `Memory::read`/`write`,
-  `Caller::get_export`, `TypedFunc::call`). **Next: chunk 2 — the `Transport`/`AsyncRead`+`AsyncWrite`
-  stream wrapper** (`WasmTransform` over the protected upstream; `Transform` is `Send` for the boxed
-  stream), then signing + delivery.
+  `Caller::get_export`, `TypedFunc::call`).
+  **STREAM ADAPTER BUILT 2026-06-17 (chunk 2).** `core/src/transport/wasm/stream.rs`:
+  `TransformStream<S>` (`S: AsyncRead+AsyncWrite+Unpin`) impls `AsyncRead`+`AsyncWrite`, pumping the
+  underlying stream through the module as a **stateful stream codec** — writes run `transform_out`,
+  reads run `transform_in`; no length-preservation or 1:1-call assumption, and the host adds NO wire
+  framing (a host length-prefix would be a fingerprint; framing lives inside the module). Poll-based
+  buffering (`write_buf: BytesMut` FIFO, `read_buf: Bytes`, reused 16 KiB read scratch) → cancel-safe;
+  backpressure at the top of `poll_write` (won't transform new app bytes until prior output drains →
+  bounded buffering). 4 stream tests (both-direction duplex round-trip, wire-is-obfuscated, chunked
+  reassembly via a self-yielding reader, + the release-only large-transform). **wasmi debug-stack
+  gotcha (root-caused):** wasmi uses tail-call threading → LLVM TCO makes it **constant-stack in
+  release** (proven: 256 KiB single transform passes release) but **stack ∝ instructions executed at
+  opt-level 0** → a large single transform overflows the ~2 MB test thread *in debug only*. No
+  production impact (release is constant-stack; `MAX_TRANSFORM_LEN` safe); debug tests just keep
+  per-call sizes small and the large-transform test is `#[cfg(not(debug_assertions))]`. Also avoid
+  always-`Ready` mock readers in async tests (they collapse a transfer into one giant synchronous
+  poll); the chunked test's reader yields `Pending` like a real socket. Debug 10 / release 11 tests
+  green; clippy (feature+default) + fmt + workspace check clean. **Next: chunk 3 — the `Transport`
+  impl** (dial a spark server, a handshake to convey the target, wrap the server stream in
+  `TransformStream`), then Ed25519 module signing + out-of-band delivery.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

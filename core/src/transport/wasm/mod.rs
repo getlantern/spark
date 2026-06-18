@@ -30,6 +30,9 @@ use std::sync::Arc;
 use ring::rand::{SecureRandom, SystemRandom};
 use wasmi::{Caller, Engine, Extern, Linker, Memory, Module, Store, TypedFunc};
 
+mod stream;
+pub use stream::TransformStream;
+
 /// Import module name the host functions are defined under.
 const HOST_MODULE: &str = "env";
 /// Import: cryptographically secure random fill (`host_rand(ptr, len)`).
@@ -298,17 +301,18 @@ fn host_rand(mut caller: Caller<HostState>, ptr: i32, len: i32) {
     caller.data_mut().rand_bytes += len as u64;
 }
 
+/// Test-only fixtures, shared by this module's tests and the [`stream`] adapter's tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testutil {
+    use super::TransformModule;
 
     /// A minimal Path B transform module, in WebAssembly text. It XORs every byte with `0x5A`
     /// (length-preserving and involutive, so `transform_in` undoes `transform_out`) and, in
     /// `transform_out`, calls the `host_rand` import once — proving the host capability is wired.
-    const XOR_WAT: &str = r#"
+    pub const XOR_WAT: &str = r#"
 (module
   (import "env" "host_rand" (func $host_rand (param i32 i32)))
-  (memory (export "memory") 1)
+  (memory (export "memory") 40)
   (global $bump (mut i32) (i32.const 1024))
   (func (export "alloc") (param $len i32) (result i32)
     (local $p i32)
@@ -340,14 +344,21 @@ mod tests {
       (i64.extend_i32_u (local.get $len)))))
 "#;
 
-    fn load_fixture() -> TransformModule {
+    /// Compile the XOR fixture into a [`TransformModule`].
+    pub fn xor_module() -> TransformModule {
         let wasm = wat::parse_str(XOR_WAT).expect("assemble fixture");
         TransformModule::load(&wasm).expect("load module")
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::xor_module;
+    use super::*;
 
     #[test]
     fn round_trips_through_the_module() {
-        let module = load_fixture();
+        let module = xor_module();
         let mut t = module.instantiate().expect("instantiate");
         let plaintext = b"the quick brown fox jumps over the lazy dog";
         let wire = t.transform_out(plaintext).expect("transform_out");
@@ -366,7 +377,7 @@ mod tests {
 
     #[test]
     fn empty_input_round_trips() {
-        let module = load_fixture();
+        let module = xor_module();
         let mut t = module.instantiate().expect("instantiate");
         let wire = t.transform_out(b"").expect("transform_out");
         assert!(wire.is_empty());
@@ -375,7 +386,7 @@ mod tests {
 
     #[test]
     fn host_rand_capability_is_invoked() {
-        let module = load_fixture();
+        let module = xor_module();
         let mut t = module.instantiate().expect("instantiate");
         assert_eq!(t.entropy_drawn(), 0);
         let _ = t.transform_out(b"abc").expect("transform_out");
@@ -385,6 +396,34 @@ mod tests {
             4,
             "guest must have drawn 4 bytes from host_rand"
         );
+    }
+
+    // Release-only: a single large transform (256 KiB) round-trips. wasmi's interpreter uses
+    // tail-call threading, which LLVM turns into constant stack under optimization but NOT at
+    // opt-level 0 — so in debug a large single call exhausts the test thread's stack (a debug-only
+    // artifact). This guards that release execution is genuinely constant-stack, so handing
+    // `transform_*` inputs up to `MAX_TRANSFORM_LEN` is safe in production builds.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn transforms_a_large_payload_in_one_call_release() {
+        let module = xor_module();
+        let mut t = module.instantiate().expect("instantiate");
+        let payload: Vec<u8> = (0..262_144u32).map(|i| (i % 251) as u8).collect();
+        let wire = t.transform_out(&payload).expect("transform_out");
+        assert_eq!(wire.len(), payload.len());
+        let recovered = t.transform_in(&wire).expect("transform_in");
+        assert_eq!(recovered, payload, "round-trip must recover a large input");
+    }
+
+    #[test]
+    fn many_sequential_transforms_on_one_instance() {
+        // Repeated calls on one instance must each reclaim their stack (mimics the stream pump).
+        let module = xor_module();
+        let mut t = module.instantiate().expect("instantiate");
+        for _ in 0..40 {
+            let out = t.transform_in(&[0u8; 64]).expect("transform_in");
+            assert_eq!(out.len(), 64);
+        }
     }
 
     #[test]
