@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 /// The control-plane protocol version. Bumped on any breaking change to these types.
 pub type ProtocolVersion = u32;
 
-/// The version this build speaks.
-pub const PROTOCOL_VERSION: ProtocolVersion = 1;
+/// The version this build speaks. v2 (ADR 0004) adds the read-only backend-contract requests
+/// [`RequestPayload::GetCapabilities`]/[`RequestPayload::GetDetails`] and their responses; all
+/// additive (appended enum variants), so v1 peers still decode v1 frames.
+pub const PROTOCOL_VERSION: ProtocolVersion = 2;
 
 /// The oldest version this build can still interoperate with.
 pub const MIN_SUPPORTED_VERSION: ProtocolVersion = 1;
@@ -48,6 +50,11 @@ pub enum RequestPayload {
         /// Stream (already-redacted) log lines.
         logs: bool,
     },
+    /// (v2) Ask what this build supports — see [`Capabilities`]. Static; render valid UI choices.
+    GetCapabilities,
+    /// (v2) Ask for a richer status snapshot than [`GetStatus`](RequestPayload::GetStatus) — see
+    /// [`Details`].
+    GetDetails,
 }
 
 /// A service→client response. `req_id` echoes the request it answers.
@@ -71,6 +78,10 @@ pub enum ResponsePayload {
     },
     /// Reply to [`RequestPayload::GetStatus`].
     Status(TunnelStatus),
+    /// (v2) Reply to [`RequestPayload::GetCapabilities`].
+    Capabilities(Capabilities),
+    /// (v2) Reply to [`RequestPayload::GetDetails`].
+    Details(Details),
     /// A request succeeded with no payload.
     Ack,
     /// A request failed.
@@ -130,6 +141,85 @@ pub struct TunnelStatus {
     /// True if the kill-switch failed open and routing is currently direct (loud signal —
     /// the client should surface this; see process-architecture-and-ipc.md §5).
     pub direct_fallback: bool,
+}
+
+/// (v2) A transport a build supports or has selected. `Direct` means no tunnel server (dial the
+/// original destination); the others tunnel through a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TransportKind {
+    /// No tunnel — flows dial their original destination directly.
+    #[default]
+    Direct,
+    /// The plain spark tunnel server.
+    Plain,
+    /// AnyTLS-over-TLS (ADR 0001).
+    Anytls,
+    /// Dynamic wasm transport (ADR 0003).
+    Wasm,
+}
+
+/// (v2) A netstack a build supports or has selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NetStack {
+    /// Userspace smoltcp stack (cross-platform, the default).
+    #[default]
+    Userspace,
+    /// Kernel-TCP "system" stack (ADR 0002; desktop/Android, build-gated).
+    System,
+}
+
+/// (v2) Kill-switch behavior when the tunnel drops unexpectedly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum KillSwitchMode {
+    /// Restore direct routing (loudly) — the product default.
+    #[default]
+    FailOpen,
+    /// Block traffic instead of falling back to direct.
+    FailClosed,
+}
+
+/// (v2) The active dynamic transform module (wasm), once loaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleInfo {
+    /// The signed module's name.
+    pub name: String,
+    /// The signed module's version (anti-rollback floor).
+    pub version: u32,
+}
+
+/// (v2) What this build supports, so a UI offers only valid options. Static (compiled features +
+/// platform); see [`RequestPayload::GetCapabilities`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Capabilities {
+    /// The service's [`PROTOCOL_VERSION`].
+    pub protocol_version: ProtocolVersion,
+    /// The service's build version (`CARGO_PKG_VERSION`).
+    pub build_version: String,
+    /// Transports this build can use.
+    pub transports: Vec<TransportKind>,
+    /// Netstacks this build can use.
+    pub stacks: Vec<NetStack>,
+    /// `os/arch`, e.g. `"macos/aarch64"`.
+    pub platform: String,
+}
+
+/// (v2) A richer status snapshot than [`TunnelStatus`]; see [`RequestPayload::GetDetails`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Details {
+    /// Current lifecycle state.
+    pub state: TunnelState,
+    /// Kill-switch failed open and routing is currently direct (see [`TunnelStatus::direct_fallback`]).
+    pub direct_fallback: bool,
+    /// The transport the active config selects.
+    pub selected_transport: TransportKind,
+    /// The netstack the active config selects.
+    pub selected_stack: NetStack,
+    /// The loaded wasm module, if a wasm transport is connected (populated in a later slice).
+    pub module: Option<ModuleInfo>,
+    /// The kill-switch mode the active config sets.
+    pub kill_switch: KillSwitchMode,
+    /// The most recent error the service surfaced (cleared on a successful connect). No secrets.
+    pub last_error: Option<String>,
 }
 
 /// A tunnel event delivered over a [`Push`] stream.

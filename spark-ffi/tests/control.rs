@@ -32,8 +32,9 @@ fn error_codes_map_to_typed_errors() {
 mod harness {
     use spark_ffi::{Backend, EventListener, TunnelEvent, TunnelState};
     use spark_ipc::{
-        read_frame, write_frame, Push, Request, RequestPayload, Response, ResponsePayload,
-        ServerMessage, TunnelStatus as IpcStatus, PROTOCOL_VERSION,
+        read_frame, write_frame, Capabilities as IpcCapabilities, Details as IpcDetails,
+        KillSwitchMode, NetStack, Push, Request, RequestPayload, Response, ResponsePayload,
+        ServerMessage, TransportKind, TunnelStatus as IpcStatus, PROTOCOL_VERSION,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -68,6 +69,22 @@ mod harness {
                 RequestPayload::GetStatus => ResponsePayload::Status(IpcStatus {
                     state: spark_ipc::TunnelState::Connected,
                     direct_fallback: false,
+                }),
+                RequestPayload::GetCapabilities => ResponsePayload::Capabilities(IpcCapabilities {
+                    protocol_version: PROTOCOL_VERSION,
+                    build_version: "test".to_owned(),
+                    transports: vec![TransportKind::Direct, TransportKind::Plain],
+                    stacks: vec![NetStack::Userspace],
+                    platform: "test/arch".to_owned(),
+                }),
+                RequestPayload::GetDetails => ResponsePayload::Details(IpcDetails {
+                    state: spark_ipc::TunnelState::Connected,
+                    direct_fallback: false,
+                    selected_transport: TransportKind::Direct,
+                    selected_stack: NetStack::Userspace,
+                    module: None,
+                    kill_switch: KillSwitchMode::FailOpen,
+                    last_error: None,
                 }),
                 RequestPayload::Subscribe { .. } => ResponsePayload::Ack,
             };
@@ -132,6 +149,13 @@ mod harness {
             backend.status().await.expect("status").state,
             TunnelState::Connected
         );
+
+        // v2 read-only backend-contract requests (ADR 0004 slice 1).
+        let caps = backend.capabilities().await.expect("capabilities");
+        assert_eq!(caps.protocol_version, spark_ipc::PROTOCOL_VERSION);
+        assert!(!caps.transports.is_empty());
+        let details = backend.details().await.expect("details");
+        assert_eq!(details.state, TunnelState::Connected);
 
         let events = Arc::new(Mutex::new(Vec::new()));
         backend.subscribe(Box::new(Recorder {

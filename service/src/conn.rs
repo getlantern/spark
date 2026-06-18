@@ -99,7 +99,12 @@ mod tests {
         let (cmd_tx, cmd_rx) = channel();
         let engine = FakeEngine::default();
         let handle = engine.clone();
-        tokio::spawn(run_service(engine, cmd_rx, fail_closed));
+        tokio::spawn(run_service(
+            engine,
+            cmd_rx,
+            fail_closed,
+            crate::service::BackendInfo::default(),
+        ));
         let (client, server) = tokio::io::duplex(4096);
         tokio::spawn(serve_connection(server, cmd_tx));
         (client, handle)

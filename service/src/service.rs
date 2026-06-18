@@ -8,15 +8,76 @@
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
+use spark_core::caps;
+use spark_core::config::{Config, StackKind};
 use spark_ipc::{
-    negotiate, ErrorCode, Push, Request, RequestPayload, Response, ResponsePayload, TunnelEvent,
-    TunnelState, TunnelStatus, PROTOCOL_VERSION,
+    negotiate, Capabilities, Details, ErrorCode, KillSwitchMode, NetStack, ProtocolVersion, Push,
+    Request, RequestPayload, Response, ResponsePayload, TransportKind, TunnelEvent, TunnelState,
+    TunnelStatus, PROTOCOL_VERSION,
 };
 
 use crate::engine::{Teardown, TunnelEngine};
 
 /// Depth of the command channel feeding the event loop.
 const COMMAND_DEPTH: usize = 64;
+
+/// Static backend facts the event loop reports for the v2 read-only requests (ADR 0004): the build's
+/// [`Capabilities`] plus the active config's selected transport/stack. Computed once at startup
+/// (config is fixed for the daemon's lifetime); the loop overlays its live state for `GetDetails`.
+#[derive(Debug, Clone, Default)]
+pub struct BackendInfo {
+    /// What this build supports (compiled features + platform).
+    pub capabilities: Capabilities,
+    /// The transport the active config selects.
+    pub selected_transport: TransportKind,
+    /// The netstack the active config selects.
+    pub selected_stack: NetStack,
+}
+
+/// Derive the [`BackendInfo`] from the loaded config + this build's compiled [`caps`].
+pub fn backend_info(config: &Config) -> BackendInfo {
+    let c = caps::compiled();
+    let mut transports = vec![TransportKind::Direct, TransportKind::Plain];
+    if c.anytls {
+        transports.push(TransportKind::Anytls);
+    }
+    if c.wasm_transport {
+        transports.push(TransportKind::Wasm);
+    }
+    let mut stacks = vec![NetStack::Userspace];
+    if c.system_stack {
+        stacks.push(NetStack::System);
+    }
+    BackendInfo {
+        capabilities: Capabilities {
+            protocol_version: PROTOCOL_VERSION,
+            build_version: env!("CARGO_PKG_VERSION").to_owned(),
+            transports,
+            stacks,
+            platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        },
+        selected_transport: selected_transport(config),
+        selected_stack: match config.tun.stack {
+            StackKind::System => NetStack::System,
+            StackKind::Userspace => NetStack::Userspace,
+        },
+    }
+}
+
+/// Which transport the config selects (precedence mirrors `transport::from_config`: anytls > wasm >
+/// plain server > direct).
+fn selected_transport(config: &Config) -> TransportKind {
+    let t = &config.transport;
+    if t.anytls.is_some() {
+        TransportKind::Anytls
+    } else if t.wasm.is_some() {
+        TransportKind::Wasm
+    } else if t.server.is_some() {
+        TransportKind::Plain
+    } else {
+        TransportKind::Direct
+    }
+}
 
 /// A client request handed to the event loop: the request, a channel to answer it, and the
 /// connection's push sender (registered as a subscriber if the request is `Subscribe`).
@@ -41,10 +102,15 @@ pub async fn run_service<E: TunnelEngine>(
     mut engine: E,
     mut rx: mpsc::Receiver<Envelope>,
     fail_closed: bool,
+    info: BackendInfo,
 ) {
     let mut state = TunnelState::Disconnected;
     let mut direct_fallback = false;
-    let mut handshook = false;
+    // `None` until the `Hello` handshake completes; then the negotiated protocol version (gates the
+    // v2-only requests so we never answer a v1 peer with a frame it can't decode).
+    let mut negotiated: Option<ProtocolVersion> = None;
+    // The most recent error surfaced (for `GetDetails.last_error`); cleared on a successful connect.
+    let mut last_error: Option<String> = None;
     let mut subscribers: Vec<Subscriber> = Vec::new();
 
     // The actor owns one exit channel; `start` is handed the sender and the data-path
@@ -60,11 +126,11 @@ pub async fn run_service<E: TunnelEngine>(
                 let response_payload = match payload {
                     RequestPayload::Hello { client_version } => {
                         match negotiate(PROTOCOL_VERSION, client_version) {
-                            Some(negotiated) => {
-                                handshook = true;
+                            Some(neg) => {
+                                negotiated = Some(neg);
                                 ResponsePayload::Hello {
                                     service_version: PROTOCOL_VERSION,
-                                    negotiated,
+                                    negotiated: neg,
                                 }
                             }
                             None => ResponsePayload::Error {
@@ -76,10 +142,36 @@ pub async fn run_service<E: TunnelEngine>(
                         }
                     }
                     // Every other command requires a completed handshake first.
-                    _ if !handshook => ResponsePayload::Error {
+                    _ if negotiated.is_none() => ResponsePayload::Error {
                         code: ErrorCode::InvalidRequest,
                         message: "Hello handshake required before commands".into(),
                     },
+                    // v2-only requests: refuse on a v1-negotiated peer rather than send a frame it
+                    // can't decode (ADR 0004 — never emit above the negotiated version).
+                    RequestPayload::GetCapabilities | RequestPayload::GetDetails
+                        if negotiated < Some(2) =>
+                    {
+                        ResponsePayload::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: "request requires protocol version 2".into(),
+                        }
+                    }
+                    RequestPayload::GetCapabilities => {
+                        ResponsePayload::Capabilities(info.capabilities.clone())
+                    }
+                    RequestPayload::GetDetails => ResponsePayload::Details(Details {
+                        state,
+                        direct_fallback,
+                        selected_transport: info.selected_transport,
+                        selected_stack: info.selected_stack,
+                        module: None, // live module name/version is a later slice
+                        kill_switch: if fail_closed {
+                            KillSwitchMode::FailClosed
+                        } else {
+                            KillSwitchMode::FailOpen
+                        },
+                        last_error: last_error.clone(),
+                    }),
                     RequestPayload::Connect => {
                         // Announce the in-progress state before the (possibly slow) bring-up, so a
                         // subscribed UI can show "Connecting…" while `start` runs.
@@ -87,14 +179,17 @@ pub async fn run_service<E: TunnelEngine>(
                         match engine.start(exit_tx.clone()).await {
                             Ok(()) => {
                                 direct_fallback = false;
+                                last_error = None;
                                 transition(&mut state, TunnelState::Connected, &mut subscribers);
                                 ResponsePayload::Ack
                             }
                             Err(e) => {
+                                let message = e.to_string();
+                                last_error = Some(message.clone());
                                 transition(&mut state, TunnelState::Failed, &mut subscribers);
                                 ResponsePayload::Error {
                                     code: ErrorCode::Internal,
-                                    message: e.to_string(),
+                                    message,
                                 }
                             }
                         }
@@ -132,6 +227,10 @@ pub async fn run_service<E: TunnelEngine>(
                     // direct) by default, or fail closed (blackhole) for a fail-closed profile.
                     let teardown = if fail_closed { Teardown::Block } else { Teardown::RestoreDirect };
                     let _ = engine.stop(teardown).await;
+                    last_error = Some(format!(
+                        "tunnel exited unexpectedly; failed {}",
+                        if fail_closed { "closed" } else { "open" }
+                    ));
                     if fail_closed {
                         direct_fallback = false;
                         transition(&mut state, TunnelState::Failed, &mut subscribers);
@@ -295,7 +394,12 @@ mod tests {
     #[tokio::test]
     async fn connect_disconnect_emit_transitional_states() {
         let (cmd, cmd_rx) = channel();
-        let handle = tokio::spawn(run_service(FakeEngine::default(), cmd_rx, false));
+        let handle = tokio::spawn(run_service(
+            FakeEngine::default(),
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+        ));
         let (push_tx, mut push_rx) = mpsc::channel::<Push>(16);
 
         request(
@@ -342,6 +446,76 @@ mod tests {
             Push::Event(TunnelEvent::StateChanged(TunnelState::Disconnected))
         );
 
+        drop(cmd);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn capabilities_and_details_reflect_backend_info() {
+        let info = BackendInfo {
+            capabilities: Capabilities {
+                protocol_version: PROTOCOL_VERSION,
+                build_version: "x".to_owned(),
+                transports: vec![TransportKind::Direct, TransportKind::Plain],
+                stacks: vec![NetStack::Userspace],
+                platform: "p".to_owned(),
+            },
+            selected_transport: TransportKind::Plain,
+            selected_stack: NetStack::Userspace,
+        };
+        let (cmd, cmd_rx) = channel();
+        let handle = tokio::spawn(run_service(FakeEngine::default(), cmd_rx, false, info));
+        let (push_tx, _rx) = mpsc::channel::<Push>(4);
+
+        request(
+            &cmd,
+            &push_tx,
+            RequestPayload::Hello {
+                client_version: PROTOCOL_VERSION,
+            },
+        )
+        .await;
+        match request(&cmd, &push_tx, RequestPayload::GetCapabilities).await {
+            ResponsePayload::Capabilities(c) => {
+                assert_eq!(c.protocol_version, PROTOCOL_VERSION);
+                assert_eq!(
+                    c.transports,
+                    vec![TransportKind::Direct, TransportKind::Plain]
+                );
+            }
+            other => panic!("expected Capabilities, got {other:?}"),
+        }
+        match request(&cmd, &push_tx, RequestPayload::GetDetails).await {
+            ResponsePayload::Details(d) => {
+                assert_eq!(d.selected_transport, TransportKind::Plain);
+                assert_eq!(d.kill_switch, KillSwitchMode::FailOpen);
+            }
+            other => panic!("expected Details, got {other:?}"),
+        }
+        drop(cmd);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn v2_requests_are_refused_on_a_v1_peer() {
+        let (cmd, cmd_rx) = channel();
+        let handle = tokio::spawn(run_service(
+            FakeEngine::default(),
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+        ));
+        let (push_tx, _rx) = mpsc::channel::<Push>(4);
+        // A v1 client negotiates v1; the v2-only requests must be refused, not answered with a
+        // frame it can't decode.
+        request(&cmd, &push_tx, RequestPayload::Hello { client_version: 1 }).await;
+        assert!(matches!(
+            request(&cmd, &push_tx, RequestPayload::GetCapabilities).await,
+            ResponsePayload::Error {
+                code: ErrorCode::InvalidRequest,
+                ..
+            }
+        ));
         drop(cmd);
         let _ = handle.await;
     }

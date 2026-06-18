@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 // Run the data path on an OS-provided TUN fd — the shared entry for Android `VpnService` and
 // Apple NetworkExtension (iOS + macOS). The FFI shims (`platforms/android` JNI, `platforms/apple`
 // C ABI) call into this.
+pub mod caps;
 pub mod config;
 #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
 pub mod fd_tunnel;

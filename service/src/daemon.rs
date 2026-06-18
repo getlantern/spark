@@ -16,7 +16,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::engine::CoreEngine;
-use crate::service::{channel, run_service, Envelope};
+use crate::service::{backend_info, channel, run_service, Envelope};
 
 /// The privileged spark tunnel daemon.
 #[derive(Parser, Debug)]
@@ -87,8 +87,14 @@ pub async fn serve_daemon(args: Args, shutdown: impl Future<Output = ()>) -> any
 
     // The event loop owns the engine + tunnel state; connections talk to it over `cmd_tx`.
     let fail_closed = config.kill_switch.fail_closed;
+    let info = backend_info(&config); // capabilities + selected transport/stack for the v2 requests
     let (cmd_tx, cmd_rx) = channel();
-    tokio::spawn(run_service(CoreEngine::new(config), cmd_rx, fail_closed));
+    tokio::spawn(run_service(
+        CoreEngine::new(config),
+        cmd_rx,
+        fail_closed,
+        info,
+    ));
 
     tokio::pin!(shutdown);
     tokio::select! {

@@ -717,7 +717,7 @@
   build}`, `Store::limiter`, `ResourceLimiter`). **Gate green:** `cargo test --workspace --all-features`
   182 pass (+1), clippy `--all-features -D warnings` + fmt clean. **Still open from the review:** log
   streaming; backend contract (richer IPC/FFI + handle); domain-target preservation (`Target` + DNS).
-  **BACKEND CONTRACT — ADR 0004 (Proposed) 2026-06-18 (commit pending).** Review item #2/#5 design:
+  **BACKEND CONTRACT — ADR 0004 (Proposed) 2026-06-18 (committed `91521de`).** Review item #2/#5 design:
   the control plane is launch-time-config + 4 verbs (service loads one `Config` at start, never
   mutates; `spark-ffi` mirrors connect/disconnect/status/subscribe) — a surface gap, not structural.
   `docs/adr/0004-backend-contract.md` records the decision: grow `spark-ipc` + `spark-ffi` into a
@@ -730,6 +730,23 @@
   **Slices (each shippable):** 1 capabilities+richer-status (read-only, start), 2 metrics, 3 profiles
   (CRUD + connect-by-profile, the big one), 4 log streaming (folds in review item B), 5 embedded
   handle model. Approved direction; building 1 then 2.
+  **BACKEND CONTRACT — SLICE 1 (capabilities + richer status) 2026-06-18 (commit pending).** Read-only,
+  additive. **`PROTOCOL_VERSION → 2`**. New `core::caps::compiled()` reports the build's optional
+  features (`cfg!(feature = anytls|wasm-transport|system-stack)`). ipc gains `RequestPayload::
+  {GetCapabilities,GetDetails}` + `ResponsePayload::{Capabilities,Details}` + types `Capabilities`
+  (protocol/build version, supported `transports`/`stacks`, `os/arch` platform), `Details` (state,
+  direct_fallback, selected transport/stack, `module: Option<ModuleInfo>` [None until a later slice],
+  kill_switch, last_error), and the ipc-local enums `TransportKind`/`NetStack`/`KillSwitchMode`
+  (portable — ipc has no core dep). The actor (`run_service`) now takes a `BackendInfo` (computed once
+  at startup by `service::backend_info(&config)` from caps + the selected transport/stack); it tracks
+  `negotiated: Option<ProtocolVersion>` (replacing `handshook`) and `last_error` (set on connect
+  failure + kill-switch, cleared on connect). **v2 requests are version-gated:** a v1-negotiated peer
+  gets `InvalidRequest` rather than an undecodable frame (ADR principle). `spark-ffi` mirrors the
+  types + adds async `Backend::capabilities()`/`details()` (Swift `func … async throws -> Capabilities/
+  Details` confirmed in regenerated bindings); the CLI gains `spark capabilities`/`spark details`
+  subcommands. **Gate green:** `cargo test --workspace --all-features` 184 pass (+2 service tests:
+  capabilities/details-reflect-info + v1-gate; spark-ffi e2e extended to exercise both); clippy
+  `--all-features -D warnings` + fmt + windows cross-clippy clean.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

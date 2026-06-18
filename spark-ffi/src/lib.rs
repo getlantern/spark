@@ -89,6 +89,123 @@ impl From<spark_ipc::TunnelEvent> for TunnelEvent {
     }
 }
 
+/// Mirror of [`spark_ipc::TransportKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TransportKind {
+    Direct,
+    Plain,
+    Anytls,
+    Wasm,
+}
+
+impl From<spark_ipc::TransportKind> for TransportKind {
+    fn from(t: spark_ipc::TransportKind) -> Self {
+        use spark_ipc::TransportKind as T;
+        match t {
+            T::Direct => Self::Direct,
+            T::Plain => Self::Plain,
+            T::Anytls => Self::Anytls,
+            T::Wasm => Self::Wasm,
+        }
+    }
+}
+
+/// Mirror of [`spark_ipc::NetStack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NetStack {
+    Userspace,
+    System,
+}
+
+impl From<spark_ipc::NetStack> for NetStack {
+    fn from(s: spark_ipc::NetStack) -> Self {
+        match s {
+            spark_ipc::NetStack::Userspace => Self::Userspace,
+            spark_ipc::NetStack::System => Self::System,
+        }
+    }
+}
+
+/// Mirror of [`spark_ipc::KillSwitchMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum KillSwitchMode {
+    FailOpen,
+    FailClosed,
+}
+
+impl From<spark_ipc::KillSwitchMode> for KillSwitchMode {
+    fn from(m: spark_ipc::KillSwitchMode) -> Self {
+        match m {
+            spark_ipc::KillSwitchMode::FailOpen => Self::FailOpen,
+            spark_ipc::KillSwitchMode::FailClosed => Self::FailClosed,
+        }
+    }
+}
+
+/// Mirror of [`spark_ipc::ModuleInfo`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ModuleInfo {
+    pub name: String,
+    pub version: u32,
+}
+
+impl From<spark_ipc::ModuleInfo> for ModuleInfo {
+    fn from(m: spark_ipc::ModuleInfo) -> Self {
+        Self {
+            name: m.name,
+            version: m.version,
+        }
+    }
+}
+
+/// Mirror of [`spark_ipc::Capabilities`] — what the service build supports.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Capabilities {
+    pub protocol_version: u32,
+    pub build_version: String,
+    pub transports: Vec<TransportKind>,
+    pub stacks: Vec<NetStack>,
+    pub platform: String,
+}
+
+impl From<spark_ipc::Capabilities> for Capabilities {
+    fn from(c: spark_ipc::Capabilities) -> Self {
+        Self {
+            protocol_version: c.protocol_version,
+            build_version: c.build_version,
+            transports: c.transports.into_iter().map(Into::into).collect(),
+            stacks: c.stacks.into_iter().map(Into::into).collect(),
+            platform: c.platform,
+        }
+    }
+}
+
+/// Mirror of [`spark_ipc::Details`] — a richer status snapshot than [`TunnelStatus`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Details {
+    pub state: TunnelState,
+    pub direct_fallback: bool,
+    pub selected_transport: TransportKind,
+    pub selected_stack: NetStack,
+    pub module: Option<ModuleInfo>,
+    pub kill_switch: KillSwitchMode,
+    pub last_error: Option<String>,
+}
+
+impl From<spark_ipc::Details> for Details {
+    fn from(d: spark_ipc::Details) -> Self {
+        Self {
+            state: d.state.into(),
+            direct_fallback: d.direct_fallback,
+            selected_transport: d.selected_transport.into(),
+            selected_stack: d.selected_stack.into(),
+            module: d.module.map(Into::into),
+            kill_switch: d.kill_switch.into(),
+            last_error: d.last_error,
+        }
+    }
+}
+
 /// Errors surfaced to foreign callers: the service's typed [`ErrorCode`](spark_ipc::ErrorCode)
 /// categories plus a transport bucket for connect/IO/handshake failures.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -187,6 +304,26 @@ impl Backend {
             ResponsePayload::Status(s) => Ok(s.into()),
             ResponsePayload::Error { code, .. } => Err(code.into()),
             other => Err(unexpected("status", &other)),
+        }
+    }
+
+    /// Fetch what this service build supports (transports, stacks, versions) — render valid UI
+    /// choices. Static for the service's lifetime.
+    pub async fn capabilities(&self) -> Result<Capabilities, BackendError> {
+        match self.call(RequestPayload::GetCapabilities).await? {
+            ResponsePayload::Capabilities(c) => Ok(c.into()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("capabilities", &other)),
+        }
+    }
+
+    /// Fetch a richer status snapshot than [`Backend::status`]: selected transport/stack, the loaded
+    /// module, kill-switch mode, and the last error.
+    pub async fn details(&self) -> Result<Details, BackendError> {
+        match self.call(RequestPayload::GetDetails).await? {
+            ResponsePayload::Details(d) => Ok(d.into()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("details", &other)),
         }
     }
 

@@ -46,6 +46,10 @@ enum Command {
     Disconnect(CtlArgs),
     /// Print the tunnel status from a running spark-service.
     Status(CtlArgs),
+    /// Print what the service build supports (transports, stacks, versions).
+    Capabilities(CtlArgs),
+    /// Print a detailed status snapshot (selected transport/stack, kill-switch, last error).
+    Details(CtlArgs),
 }
 
 /// Flags for the in-process `run` driver.
@@ -140,6 +144,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Connect(ctl) => control(ctl.socket, RequestPayload::Connect).await,
         Command::Disconnect(ctl) => control(ctl.socket, RequestPayload::Disconnect).await,
         Command::Status(ctl) => control(ctl.socket, RequestPayload::GetStatus).await,
+        Command::Capabilities(ctl) => control(ctl.socket, RequestPayload::GetCapabilities).await,
+        Command::Details(ctl) => control(ctl.socket, RequestPayload::GetDetails).await,
     }
 }
 
@@ -224,6 +230,31 @@ async fn control(socket: PathBuf, payload: RequestPayload) -> anyhow::Result<()>
             println!("state: {:?}", s.state);
             if s.direct_fallback {
                 println!("WARNING: failed open — traffic is routing directly, not tunneled");
+            }
+        }
+        ResponsePayload::Capabilities(c) => {
+            println!(
+                "protocol: {}  build: {}",
+                c.protocol_version, c.build_version
+            );
+            println!("platform: {}", c.platform);
+            println!("transports: {:?}", c.transports);
+            println!("stacks: {:?}", c.stacks);
+        }
+        ResponsePayload::Details(d) => {
+            println!("state: {:?}", d.state);
+            println!(
+                "transport: {:?}  stack: {:?}  kill-switch: {:?}",
+                d.selected_transport, d.selected_stack, d.kill_switch
+            );
+            if d.direct_fallback {
+                println!("WARNING: failed open — traffic is routing directly, not tunneled");
+            }
+            if let Some(m) = d.module {
+                println!("module: {} v{}", m.name, m.version);
+            }
+            if let Some(e) = d.last_error {
+                println!("last error: {e}");
             }
         }
         ResponsePayload::Error { code, message } => {

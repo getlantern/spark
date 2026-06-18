@@ -25,9 +25,10 @@ pub use codec::{
     decode_frame, decode_message, encode_frame, encode_message, IpcError, MAX_FRAME_LEN,
 };
 pub use message::{
-    negotiate, ErrorCode, LogLevel, LogLine, ProtocolVersion, Push, ReqId, Request, RequestPayload,
-    Response, ResponsePayload, ServerMessage, TunnelEvent, TunnelState, TunnelStatus,
-    MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
+    negotiate, Capabilities, Details, ErrorCode, KillSwitchMode, LogLevel, LogLine, ModuleInfo,
+    NetStack, ProtocolVersion, Push, ReqId, Request, RequestPayload, Response, ResponsePayload,
+    ServerMessage, TransportKind, TunnelEvent, TunnelState, TunnelStatus, MIN_SUPPORTED_VERSION,
+    PROTOCOL_VERSION,
 };
 #[cfg(feature = "stream")]
 pub use stream::{read_frame, write_frame, Client};
