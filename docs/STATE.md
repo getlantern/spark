@@ -443,12 +443,28 @@
   only drained on the NEXT poll_write/flush → `write_all`+`read` (no flush) deadlocked with bytes
   stuck in `write_buf`. Fix: drain eagerly inside `poll_write` (buffer only what the socket can't
   accept); regression-covered by removing the explicit flush from the both-directions stream test.
-  Debug 17 / release 18 tests green; clippy (feature+default)+fmt+workspace clean. **Next (Path B
-  remaining):** (a) UDP path (UoT-over-`TransformStream`, mirroring the tunnel client's
-  `dial_udp`); (b) richer module ABI (handshake/negotiate phase + host-fn AEAD/hash beyond
-  `host_rand`); (c) delivery path (fetch artifact over the config/fronting channel) + persisted
-  per-name version floor + config wiring (`transport.wasm`) so `from_config` builds it; (d) pin a
-  real Ed25519 pubkey const at build time (verifier currently takes the key as a param).
+  Debug 17 / release 18 tests green; clippy (feature+default)+fmt+workspace clean.
+  **RICHER ABI BUILT 2026-06-17 (chunk 5 = item b; user ordered "b then fuel metering").** Added
+  native crypto host fns + an `init` config hook, so a real encrypting transport runs at native
+  speed instead of the interpreter floor. New host imports (the module's whole capability surface):
+  `host_hash(in,len,out)` = SHA-256 (ring `digest`); `host_aead_seal`/`host_aead_open(key_ptr,
+  nonce_ptr,in_ptr,in_len,out_ptr)->i64` = ChaCha20-Poly1305 (ring `aead::LessSafeKey`,
+  `seal_in_place_append_tag`/`open_in_place`, empty AAD in v0); plus existing `host_rand`. All read
+  key/nonce/data from guest memory via `read_guest`/`read_guest_array::<N>`/`write_guest`/
+  `guest_memory` helpers, range-check lengths, and record faults (auth failure on open → fault →
+  `HostFault`, fail-closed). Optional `init(config_ptr,config_len)` export: `TransformModule::
+  instantiate_with_config(&[u8])` allocs+writes config, calls `init`; no `init` export + non-empty
+  config → `MissingExport`. wasmi `func_wrap` handles the 5-arg host fns fine. **PERF PAYOFF measured
+  (release bench `bench_transform_throughput`):** XOR-in-interpreter ~0.77 Gb/s vs **host-AEAD
+  (native ChaCha20-Poly1305) ~11–14 Gb/s** (~18× faster while doing real AEAD, ~9× over the ~1.6 Gb/s
+  tunnel → transform no longer the bottleneck); passthrough/marshalling floor 120–250 Gb/s; native
+  XOR 28 Gb/s. Validates the ADR "bulk native, interpret only control" rule with numbers. 5 new tests
+  (host_hash == ring SHA-256; AEAD seal/open round-trip; tampered ct → HostFault; init delivers
+  config / different key → different transform; config-without-init rejected). Debug 22 / release 23
+  green; clippy+fmt+workspace clean. **Next (Path B remaining):** fuel metering (per the user's order
+  — wire wasmi `Config::consume_fuel` + per-call `Store::set_fuel` so a malicious/buggy module can't
+  spin forever); then (a) UDP path; (c) delivery + config wiring (`transport.wasm` in `from_config`)
+  + persisted per-name floor; (d) pin a real Ed25519 pubkey const.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
