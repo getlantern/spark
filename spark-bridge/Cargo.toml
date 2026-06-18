@@ -4,7 +4,12 @@
 # CLI. Control surface only (the data path lives in the platform shims). Like `spark-ffi` for mobile,
 # this crate is the *only* place `flutter_rust_bridge` is linked — never into `core`/`cli`/`service`.
 [package]
-name = "spark-bridge"
+# Underscore (not the usual hyphen) on purpose: cargokit — the `rust_builder` Flutter plugin that
+# compiles this crate on macOS/iOS — builds the expected artifact filename as `lib<package-name>.a`
+# verbatim, but cargo normalizes hyphens to underscores in artifact names. A hyphenated package would
+# make cargokit look for `libspark-bridge.a` while cargo emits `libspark_bridge.a` → "unable to find
+# bundle". (The directory stays `spark-bridge/`; only the cargo package name is underscored.)
+name = "spark_bridge"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +17,10 @@ license.workspace = true
 
 [lib]
 name = "spark_bridge"
-# `cdylib` is what the Flutter app loads at runtime; `lib` so the frb-generated glue (and any Rust
-# test) can link the crate.
-crate-type = ["cdylib", "lib"]
+# `staticlib` is what cargokit force-loads into the Flutter app binary on macOS/iOS (the
+# `rust_builder` plugin); `cdylib` for the Android `.so` (and a standalone desktop dylib); `lib` so
+# the frb-generated glue (and any Rust test) can link the crate.
+crate-type = ["staticlib", "cdylib", "lib"]
 
 [dependencies]
 # The GUI-agnostic backend (the typed control logic); this crate is just its Flutter binding.

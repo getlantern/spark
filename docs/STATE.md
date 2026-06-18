@@ -910,6 +910,30 @@
   as the default desktop backend (it needs no subprocess → works under the App Sandbox, unlike
   `CliBackend`) and run a live gate against a running `spark-service`. `flutter_rust_bridge` is linked
   ONLY by `spark-bridge` — never core/cli/service.
+  **DESKTOP FLUTTER BACKEND — native build wired + `FrbBackend` is now the default 2026-06-18 (commit
+  pending).** Closed the "remaining" item from the prior entry: `flutter build macos` now compiles +
+  links the Rust bridge, and `FrbBackend` is the desktop default. **cargokit integration:** harvested
+  the version-matched `rust_builder/` plugin from `flutter_rust_bridge_codegen create` into `gui/`,
+  repointed at `spark-bridge` (each relative crate path gains one `../` since the crate sits *outside*
+  the `gui/` app dir → `../../../spark-bridge`; plugin named `spark_bridge`). **Gotcha hit + fixed:**
+  cargokit builds the expected artifact filename as `lib<cargo-package-name>.a` **verbatim**, but
+  cargo normalizes hyphens → underscores — so a `spark-bridge` package made it hunt for
+  `libspark-bridge.a` while cargo emits `libspark_bridge.a` ("unable to find bundle for dynamic
+  library"). Fix: renamed the cargo **package** to `spark_bridge` (underscore; dir stays
+  `spark-bridge/`, lib name was already `spark_bridge`) — the frb template uses underscore names for
+  exactly this reason. Added `staticlib` to the crate-type (cargokit force-loads `libspark_bridge.a`
+  into the app on macOS/iOS). `gui/pubspec.yaml` deps on the `spark_bridge` plugin (`path:
+  rust_builder`); `gui/analysis_options.yaml` excludes `rust_builder/**` (vendored build tooling, not
+  app code). **`main.dart`** now builds `FrbBackend` as the desktop default with a **graceful
+  fallback to `CliBackend`** if `RustLib` can't init (so the app always launches). **Verified
+  (build/link level):** `flutter build macos --debug` → `spark_gui.app` with **`spark_bridge.framework`
+  (11.9 MB) bundled** — `nm` confirms the Rust staticlib + frb's `frbgen_spark_gui_rust_arc_*` exports
+  + `Dart_PostCObject_DL` are force-loaded in; `flutter analyze` clean + `flutter test` passes; Rust
+  workspace `cargo test --workspace --all-features` + clippy `-D warnings` + fmt clean after the
+  package rename. **NOT yet verified (the live gate):** actually *launching* the GUI and connecting —
+  needs a running `spark-service`, a windowed run, and (under the App Sandbox) either disabling the
+  sandbox or a unix-socket entitlement for `/var/run/spark.sock`. The `FrbBackend.create()` →
+  `CliBackend` fallback de-risks a bad runtime load.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

@@ -10,15 +10,15 @@ The UI talks only to an abstract **`SparkBackend`** (`lib/spark_backend.dart`) �
 as `spark-ffi`'s `Backend` (`status` / `connect` / `disconnect`). That seam is the point: the UI
 never changes as the binding underneath it does.
 
-- **Desktop v1 — `CliBackend`** (current default): shells out to the `spark` CLI (`spark connect|
-  disconnect|status`), which already speaks `spark-ipc` to a running `spark-service`. Zero FFI, works
-  today.
-- **Desktop (real) — `FrbBackend`** (`lib/frb_backend.dart`, BUILT): an in-process
+- **Desktop — `FrbBackend`** (`lib/frb_backend.dart`, **default**): an in-process
   `flutter_rust_bridge` binding over the `spark-bridge` crate → `spark-backend` → `spark-ipc` — **no
-  subprocess**, so it isn't blocked by the App Sandbox. The Rust + Dart sides are generated and green;
-  the **remaining wiring is the native build** (cargokit / `rust_builder`) so `flutter build` compiles
-  and bundles `libspark_bridge.dylib`, plus pointing `RustLib`'s loader at the workspace
-  `target/`. Until that lands, `CliBackend` stays the default.
+  subprocess**, so it isn't blocked by the App Sandbox. The `rust_builder` cargokit plugin compiles
+  `spark-bridge` and links it into the app during `flutter build` (no manual dylib step). `main` builds
+  this and **falls back to `CliBackend`** if the Rust library can't initialize, so the app always
+  launches.
+- **Desktop fallback — `CliBackend`**: shells out to the `spark` CLI (`spark connect|disconnect|
+  status`), which speaks `spark-ipc` to a running `spark-service`. Zero FFI; the fallback when the
+  in-process bridge is unavailable.
 - **Mobile** — a platform-channel backend to the native VpnService/NE layer, which runs the tunnel
   via the `platforms/{android,apple}` shims and the UniFFI Kotlin/Swift bindings from `spark-ffi`.
   *Follow-up* (ios/android targets not yet scaffolded here).
@@ -32,32 +32,33 @@ from the repo root with `flutter_rust_bridge_codegen generate` (config: `flutter
 ## Run (macOS dev)
 
 ```bash
-# 1. Have a spark-service running (privileged) and the `spark` CLI on PATH:
-cargo build --release --bin spark --bin spark-service
+# 1. Have a spark-service running (privileged):
+cargo build --release --bin spark-service
 sudo target/release/spark-service --spark-gid "$(id -g)" &      # privileged daemon
-sudo install target/release/spark /usr/local/bin/spark          # or symlink; CliBackend runs `spark`
 
-# 2. Run the GUI:
+# 2. Run the GUI (cargokit compiles + links spark-bridge automatically):
 cd gui && flutter run -d macos
 ```
 
-> **macOS App Sandbox caveat:** the default macOS build is sandboxed, which **blocks spawning the
-> external `spark` binary**, so `CliBackend` can't reach the service under the sandbox. For local
+> **macOS App Sandbox caveat:** `FrbBackend` runs in-process (no subprocess), but it still opens the
+> service's unix socket at `/var/run/spark.sock`, which is outside the sandbox container. For local
 > dev, disable the App Sandbox in `macos/Runner/DebugProfile.entitlements`
-> (`com.apple.security.app-sandbox` → `false`), or wait for the in-process `flutter_rust_bridge`
-> backend (which needs no subprocess and works sandboxed with the network-client entitlement).
+> (`com.apple.security.app-sandbox` → `false`). If the Rust library can't initialize at all, the app
+> falls back to `CliBackend` (which needs the `spark` CLI on `PATH` and is itself sandbox-blocked from
+> spawning) — so disabling the sandbox is the simplest dev path either way.
 
-`CliBackend` defaults to the `spark` binary on `PATH` and socket `/var/run/spark.sock`; both are
-constructor args if you need to point elsewhere.
+Both backends default to socket `/var/run/spark.sock` (a constructor arg if you need to point
+elsewhere); `CliBackend` also takes the `spark` binary path.
 
 ## Verified
 
 `flutter analyze` clean · `flutter test` (the widget smoke test, against a fake backend) passes ·
-`flutter build macos --debug` produces `spark_gui.app`.
+`flutter build macos --debug` produces `spark_gui.app` with `spark_bridge.framework` (the Rust bridge)
+bundled and its frb symbols force-loaded in. **Not yet live-gated:** launching the GUI and connecting
+to a running `spark-service` (needs a windowed run + sandbox/entitlement handling for the socket).
 
 ## Next
 
-Wire the `FrbBackend` native build (cargokit / `rust_builder`) so `flutter build` bundles the
-`spark-bridge` dylib, then make it the default desktop backend; ios/android targets + the
+Live-gate `FrbBackend` (launch + connect against a running `spark-service`); ios/android targets + the
 platform-channel/native backend; richer screens (capabilities, details, live metrics, the log stream,
 profile management) off the ADR-0004 backend contract the service already exposes.

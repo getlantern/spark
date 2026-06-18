@@ -3,10 +3,24 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'frb_backend.dart';
 import 'spark_backend.dart';
 
-void main() {
-  runApp(const SparkApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(SparkApp(backend: await _desktopBackend()));
+}
+
+/// The desktop backend: the in-process Rust bridge ([FrbBackend], no subprocess → works under the
+/// macOS App Sandbox). Falls back to [CliBackend] if the Rust library can't be loaded/initialized,
+/// so the app always launches (degraded to driving the `spark` CLI).
+Future<SparkBackend> _desktopBackend() async {
+  try {
+    return await FrbBackend.create();
+  } catch (e) {
+    debugPrint('FrbBackend unavailable ($e); falling back to CliBackend');
+    return CliBackend();
+  }
 }
 
 /// Palette — a dark "signal" aesthetic: near-black field, electric-teal connected accent.
@@ -22,7 +36,8 @@ class _Palette {
 }
 
 class SparkApp extends StatelessWidget {
-  /// Override the backend (tests inject a fake); defaults to [CliBackend].
+  /// The backend to drive. `main` passes the desktop backend ([FrbBackend], or a [CliBackend]
+  /// fallback); tests inject a fake. If null (e.g. `const SparkApp()`), [HomePage] uses [CliBackend].
   final SparkBackend? backend;
 
   const SparkApp({super.key, this.backend});
@@ -54,8 +69,8 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin {
-  // Desktop v1: drive the service through the `spark` CLI. Swap for a flutter_rust_bridge /
-  // platform-channel backend later without touching this UI.
+  // `main` injects the desktop backend (the in-process flutter_rust_bridge `FrbBackend`, or a
+  // `CliBackend` fallback); a null override (e.g. a bare `const SparkApp()`) defaults to `CliBackend`.
   late final SparkBackend _backend = widget.backend ?? CliBackend();
 
   TunnelStatus _status = TunnelStatus.unknown;

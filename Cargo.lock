@@ -2013,17 +2013,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spark-bridge"
-version = "0.1.0"
-dependencies = [
- "flutter_rust_bridge",
- "spark-backend",
- "spark-ipc",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "spark-cli"
 version = "0.1.0"
 dependencies = [
@@ -2101,6 +2090,17 @@ dependencies = [
  "tracing-subscriber",
  "windows-service",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spark_bridge"
+version = "0.1.0"
+dependencies = [
+ "flutter_rust_bridge",
+ "spark-backend",
+ "spark-ipc",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
