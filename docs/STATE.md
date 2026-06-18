@@ -930,10 +930,16 @@
   (11.9 MB) bundled** — `nm` confirms the Rust staticlib + frb's `frbgen_spark_gui_rust_arc_*` exports
   + `Dart_PostCObject_DL` are force-loaded in; `flutter analyze` clean + `flutter test` passes; Rust
   workspace `cargo test --workspace --all-features` + clippy `-D warnings` + fmt clean after the
-  package rename. **NOT yet verified (the live gate):** actually *launching* the GUI and connecting —
-  needs a running `spark-service`, a windowed run, and (under the App Sandbox) either disabling the
-  sandbox or a unix-socket entitlement for `/var/run/spark.sock`. The `FrbBackend.create()` →
-  `CliBackend` fallback de-risks a bad runtime load.
+  package rename. **Runtime-verified end-to-end** via a **flutter integration test**
+  (`gui/integration_test/frb_bridge_test.dart`, run with `flutter test integration_test -d macos`):
+  unlike `flutter test` (bare Dart VM, no native lib), this launches the real macOS app so the
+  cargokit-linked framework actually loads, then `FrbBackend.create()` + `status()` against a dead
+  socket surfaces a typed `SparkException` — proving `RustLib.init()` loaded the framework, the FFI
+  call dispatched into Rust, `spark-backend` attempted the connection, and the error round-tripped
+  back through the bridge. (Ran headless here — "Failed to foreground app" since there's no window
+  server, but the test executed + passed.) **STILL pending = the *successful*-connect path:** launch
+  against a running `spark-service` (needs the daemon + sandbox disabled / a socket entitlement for
+  `/var/run/spark.sock`). The `FrbBackend.create()` → `CliBackend` fallback de-risks a bad load.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

@@ -48,6 +48,10 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  # Runs the app on a real macOS instance so the cargokit-linked Rust bridge actually loads — the
+  # only way to runtime-verify `FrbBackend` end-to-end (see integration_test/frb_bridge_test.dart).
+  integration_test:
+    sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

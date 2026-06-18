@@ -54,8 +54,11 @@ elsewhere); `CliBackend` also takes the `spark` binary path.
 
 `flutter analyze` clean · `flutter test` (the widget smoke test, against a fake backend) passes ·
 `flutter build macos --debug` produces `spark_gui.app` with `spark_bridge.framework` (the Rust bridge)
-bundled and its frb symbols force-loaded in. **Not yet live-gated:** launching the GUI and connecting
-to a running `spark-service` (needs a windowed run + sandbox/entitlement handling for the socket).
+bundled and its frb symbols force-loaded in · **`flutter test integration_test -d macos`** runtime-
+verifies the bridge end-to-end (the real app loads the framework; `FrbBackend.status()` against a dead
+socket round-trips a typed error through `RustLib` → Rust → `spark-backend` → back). **Still pending:**
+the *successful*-connect path against a running `spark-service` (needs the daemon + sandbox/entitlement
+handling for the socket).
 
 ## Next
 
