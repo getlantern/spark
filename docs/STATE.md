@@ -948,6 +948,24 @@
   fetching (`_findFamilyWithVariantAssetPath` matches the `<Family>-<Variant>` filename), so the
   `GoogleFonts.*` calls are unchanged and there's now **zero runtime network fetch** for fonts (works
   offline + sandboxed). Verified bundled into `spark_gui.app`; analyze + widget test clean.
+  **macOS distribution model — ADR 0005 (Proposed) 2026-06-18 (commit pending).** Researched the ask
+  "create a notarized release build" + the follow-up "app bundle w/ embedded system extension (DMG)
+  vs `.pkg` + launchd". Wrote `docs/adr/0005-macos-distribution-and-privileged-component.md` (external
+  research agent, cited). **Key reframe:** it's "which privileged component," not "DMG vs pkg" — modern
+  `SMAppService` (macOS 13+) lets the *daemon* model also ship in a drag-installed app bundle, so
+  `.pkg` is only the legacy daemon path. **Model A** = NE *system extension* embedded in the app, DMG
+  (already built/notarized/**live-gated** in `platforms/apple`; control via `NETunnelProviderManager`/
+  `sendProviderMessage`, NOT `FrbBackend`). **Model B** = `spark-service` launchd daemon
+  (SMAppService or pkg; reuses the `FrbBackend`/`spark-bridge`/`spark-ipc` stack we just built).
+  Confirmed constraint: non-App-Store ⇒ must be a *system extension* (NE app-extensions are App-Store
+  only — Tailscale). **Recommendation: Model A for the macOS consumer product** (lowest risk — extends
+  the proven sysext; Apple-idiomatic; no always-on root daemon; DMG drag-install + delete-to-uninstall;
+  future-proofs an App-Store NE build), **keep Model B + `FrbBackend` for Linux/Windows desktop + the
+  CLI/Homebrew/enterprise channel** (matches the doc's "one path per channel"). **Main consequence:**
+  the macOS GUI backend becomes a NE/platform-channel adapter, not `FrbBackend` — the `SparkBackend`
+  Dart seam makes that swap clean; `FrbBackend` stays the Linux/Windows path. **Awaiting the user's
+  pick before building the `packaging/macos/` notarize pipeline** (decided inputs already: script
+  called by CI; unsandboxed + hardened runtime).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
