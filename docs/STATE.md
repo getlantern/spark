@@ -783,7 +783,29 @@
   persistence** (the store is in-memory — profiles are lost on daemon restart). **Gate green:** `cargo
   test --workspace --all-features` 191 pass (+5: 4 `ProfileStore` unit tests incl. the secret
   round-trip + redaction, 1 actor CRUD/redaction e2e; spark-ffi e2e exercises the FFI CRUD); clippy
-  `--all-features -D warnings` + fmt + windows cross-clippy clean.
+  `--all-features -D warnings` + fmt + windows cross-clippy clean. **(committed `581e2c1`, pushed.)**
+  **BACKEND CONTRACT — SLICE 3b (connect-by-active + disk persistence) 2026-06-18 (commit pending).**
+  Makes profiles fully live. (1) **Connect-by-active-profile:** `TunnelEngine::start` now takes the
+  `Config` per call (`start(config, exit)`), so `CoreEngine` no longer stores one — `new()` is
+  argless and the actor passes the *effective* config (the active profile's, or the launch/base
+  config if none) on each Connect. `BackendInfo` reshaped: dropped the static `selected_transport`/
+  `selected_stack` (now derived live from the active profile or base), added `base_config` +
+  `profiles_path`. `GetDetails` reflects the active profile's transport/stack. (2) **Disk
+  persistence:** `ProfileStore` now persists to a single root-owned TOML file (`StoredProfiles`
+  wrapper; profile names are map keys, **not** path components — no filesystem traversal from a
+  profile name), loaded at startup, rewritten on every mutation (best-effort, logged on failure;
+  missing = empty, unparseable = logged + ignored so a corrupt file can't wedge the daemon). daemon
+  gains a `--profiles` arg (default `/var/lib/spark/profiles.toml`; `C:\ProgramData\spark\…` on
+  Windows, mirroring the `socket` arg). Added `serde`+`toml` to `spark-service` (both workspace-locked,
+  already used by `core` — not new external deps). `FakeEngine` now records the config it was started
+  with so the test can prove Connect used the active profile. **Profiles are full `Config`s** (the
+  effective config is the active profile's, not a merge with base) — documented. **Gate green:** `cargo
+  test --workspace --all-features` 193 pass (+2: `connect_uses_the_active_profile`,
+  `persists_across_reload_including_secrets_and_active`); host clippy `--all-features -D warnings` +
+  fmt clean. **Windows cross-check not run here** — `ring`'s C build needs a Windows toolchain this
+  macOS host lacks (pre-existing; CI covers it); the one Windows-specific addition (the `--profiles`
+  arg) mirrors the working `socket` arg. **SLICE 3 COMPLETE (profiles end-to-end).** ADR 0004 remaining:
+  slice 4 (log streaming), slice 5 (embedded `TunnelHandle`).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

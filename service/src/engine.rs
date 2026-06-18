@@ -46,7 +46,7 @@ pub trait TunnelEngine: Send {
     /// Bring the tunnel up (open the device, install routes, start the core). `exit` is fired
     /// (one `()`) if the data path later dies on its own — NOT on a deliberate [`stop`](Self::stop),
     /// which aborts before the signal is sent.
-    async fn start(&mut self, exit: mpsc::Sender<()>) -> Result<(), EngineError>;
+    async fn start(&mut self, config: Config, exit: mpsc::Sender<()>) -> Result<(), EngineError>;
     /// Tear the tunnel down, leaving the routing end-state requested by `teardown`.
     async fn stop(&mut self, teardown: Teardown) -> Result<(), EngineError>;
     /// A snapshot of the data-path counters (ADR 0004 slice 2). Cheap atomic reads; cumulative over
@@ -62,8 +62,11 @@ pub trait TunnelEngine: Send {
 /// runs privileged; the live gate exercises it under root. Full-tunnel route management (the
 /// active half of the kill-switch) is opt-in via `[routing] manage`; the live route commands
 /// themselves are unit-tested but not yet exercised under root.
+/// The config is supplied per [`start`](TunnelEngine::start) (the resolved active profile, or the
+/// launch config), not stored — so a reconnect can use a different profile without rebuilding the
+/// engine.
+#[derive(Default)]
 pub struct CoreEngine {
-    config: Config,
     tun: Option<Arc<Tun>>,
     supervisor: Option<JoinHandle<()>>,
     /// Present only while connected with `[routing] manage` on — owns the installed routes.
@@ -74,42 +77,36 @@ pub struct CoreEngine {
 }
 
 impl CoreEngine {
-    /// Create an engine that brings tunnels up per `config`.
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            tun: None,
-            supervisor: None,
-            routes: None,
-            metrics: Arc::new(Metrics::default()),
-        }
+    /// Create an idle engine; the per-connect config is passed to [`start`](TunnelEngine::start).
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 #[async_trait]
 impl TunnelEngine for CoreEngine {
-    async fn start(&mut self, exit: mpsc::Sender<()>) -> Result<(), EngineError> {
+    async fn start(&mut self, config: Config, exit: mpsc::Sender<()>) -> Result<(), EngineError> {
         if self.tun.is_some() {
             return Ok(()); // already running
         }
         let tun = Arc::new(
             Tun::open(TunConfig {
-                name: self.config.tun.name.clone(),
-                ipv4: (self.config.tun.addr, self.config.tun.prefix),
-                mtu: self.config.tun.mtu,
+                name: config.tun.name.clone(),
+                ipv4: (config.tun.addr, config.tun.prefix),
+                mtu: config.tun.mtu,
             })
             .map_err(|e| EngineError(format!("opening TUN device: {e}")))?,
         );
         let device = tun.name().unwrap_or_else(|_| "?".to_string());
-        let tunneled = self.config.transport.server.is_some();
-        info!(device = %device, addr = %self.config.tun.addr, tunneled, "tunnel up");
+        let tunneled = config.transport.server.is_some();
+        info!(device = %device, addr = %config.tun.addr, tunneled, "tunnel up");
 
-        let (tcp_transport, udp_transport) = transport::from_config(&self.config)
+        let (tcp_transport, udp_transport) = transport::from_config(&config)
             .map_err(|e| EngineError(format!("building transport: {e}")))?;
 
-        let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &self.config)
+        let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)
             .map_err(|e| EngineError(format!("starting the netstack: {e}")))?;
-        let idle = Duration::from_secs(self.config.udp.idle_timeout_secs);
+        let idle = Duration::from_secs(config.udp.idle_timeout_secs);
 
         // One supervisor task runs the data-path loops. It signals `exit` only if a loop
         // returns on its own; `stop` aborts the task before that line is reached.
@@ -133,7 +130,7 @@ impl TunnelEngine for CoreEngine {
         // Take over the routing table only when asked (full-tunnel); otherwise the operator
         // routes traffic in. Keep the manager even if install fails so `stop` can clear any
         // partial state.
-        if self.config.routing.manage {
+        if config.routing.manage {
             let mut routes = RouteManager::new(&device);
             let outcome = routes.install().await;
             self.routes = Some(routes);
@@ -184,6 +181,7 @@ pub(crate) mod test_support {
     pub struct FakeEngine {
         pub running: Arc<AtomicBool>,
         last_teardown: Arc<Mutex<Option<Teardown>>>,
+        last_config: Arc<Mutex<Option<Config>>>,
         exit: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     }
 
@@ -200,12 +198,22 @@ pub(crate) mod test_support {
         pub fn last_teardown(&self) -> Option<Teardown> {
             *self.last_teardown.lock().unwrap()
         }
+
+        /// The config the most recent `start` was given (to assert connect-by-active-profile).
+        pub fn last_config(&self) -> Option<Config> {
+            self.last_config.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
     impl TunnelEngine for FakeEngine {
-        async fn start(&mut self, exit: mpsc::Sender<()>) -> Result<(), EngineError> {
+        async fn start(
+            &mut self,
+            config: Config,
+            exit: mpsc::Sender<()>,
+        ) -> Result<(), EngineError> {
             self.running.store(true, Ordering::SeqCst);
+            *self.last_config.lock().unwrap() = Some(config);
             *self.exit.lock().unwrap() = Some(exit);
             Ok(())
         }

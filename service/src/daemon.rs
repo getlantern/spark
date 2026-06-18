@@ -46,6 +46,16 @@ pub struct Args {
     /// bypass the tunnel route. Overrides `[transport] protect_interface` from the config.
     #[arg(long)]
     pub protect_interface: Option<String>,
+
+    /// File the connection profiles are persisted to (ADR 0004). Root-owned; secrets live here.
+    #[cfg(unix)]
+    #[arg(long, default_value = "/var/lib/spark/profiles.toml")]
+    pub profiles: PathBuf,
+
+    /// File the connection profiles are persisted to (ADR 0004).
+    #[cfg(windows)]
+    #[arg(long, default_value = r"C:\ProgramData\spark\profiles.toml")]
+    pub profiles: PathBuf,
 }
 
 /// Entry point: initialize logging, then — on Windows — run as a service if the SCM launched us;
@@ -87,14 +97,11 @@ pub async fn serve_daemon(args: Args, shutdown: impl Future<Output = ()>) -> any
 
     // The event loop owns the engine + tunnel state; connections talk to it over `cmd_tx`.
     let fail_closed = config.kill_switch.fail_closed;
-    let info = backend_info(&config); // capabilities + selected transport/stack for the v2 requests
+    // Capabilities + the launch/base config + the profile-store path for the v2 requests.
+    let mut info = backend_info(&config);
+    info.profiles_path = Some(args.profiles.clone());
     let (cmd_tx, cmd_rx) = channel();
-    tokio::spawn(run_service(
-        CoreEngine::new(config),
-        cmd_rx,
-        fail_closed,
-        info,
-    ));
+    tokio::spawn(run_service(CoreEngine::new(), cmd_rx, fail_closed, info));
 
     tokio::pin!(shutdown);
     tokio::select! {

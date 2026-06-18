@@ -3,24 +3,84 @@
 //! A profile is a named `core::config::Config`, stored in the privileged service. Secrets (the
 //! AnyTLS `password`, the wasm `init_config`) are **write-only over IPC**: blanked on read, and a
 //! blanked field on write keeps the stored value — so a read→edit→write round-trip never requires
-//! the client to have seen the secret. The store is in-memory for now; disk persistence and
-//! connect-by-active-profile (wiring the active profile into the engine) are follow-ups (3b).
+//! the client to have seen the secret. The store persists to a single root-owned TOML file (one
+//! file, profile names as map keys — so a name can't traverse the filesystem), loaded at startup
+//! and rewritten on every mutation.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use spark_core::config::Config;
 use spark_ipc::{ProfileDoc, ProfileSummary, Validation};
+use tracing::warn;
 
 use crate::service::{netstack_of, selected_transport};
 
-/// The privileged set of named connection profiles + which one is active.
+/// The on-disk form of the store (a single TOML document). Secrets are stored here in the clear —
+/// the file is root-owned, the same trust level as the launch config.
+#[derive(Default, Serialize, Deserialize)]
+struct StoredProfiles {
+    #[serde(default)]
+    active: Option<String>,
+    #[serde(default)]
+    profiles: BTreeMap<String, Config>,
+}
+
+/// The privileged set of named connection profiles + which one is active. Persisted to `path`
+/// (`None` = in-memory only, e.g. tests).
 #[derive(Default)]
 pub struct ProfileStore {
+    path: Option<PathBuf>,
     profiles: BTreeMap<String, Config>,
     active: Option<String>,
 }
 
 impl ProfileStore {
+    /// Load the store from `path` (if set + present); a missing file is an empty store, an
+    /// unparseable one is logged and ignored (don't wedge the daemon on a corrupt file).
+    pub fn load(path: Option<PathBuf>) -> Self {
+        let mut store = Self {
+            path,
+            ..Self::default()
+        };
+        if let Some(p) = &store.path {
+            match std::fs::read_to_string(p) {
+                Ok(s) => match toml::from_str::<StoredProfiles>(&s) {
+                    Ok(sp) => {
+                        store.profiles = sp.profiles;
+                        store.active = sp.active;
+                    }
+                    Err(e) => warn!(error = %e, "ignoring unparseable profiles file"),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // no profiles yet
+                Err(e) => warn!(error = %e, "could not read profiles file"),
+            }
+        }
+        store
+    }
+
+    /// Persist the store (best-effort; no-op when in-memory). Logged on failure.
+    fn save(&self) {
+        let Some(p) = &self.path else {
+            return;
+        };
+        let doc = StoredProfiles {
+            active: self.active.clone(),
+            profiles: self.profiles.clone(),
+        };
+        match toml::to_string(&doc) {
+            Ok(s) => {
+                if let Some(dir) = p.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if let Err(e) = std::fs::write(p, s) {
+                    warn!(error = %e, "could not write profiles file");
+                }
+            }
+            Err(e) => warn!(error = %e, "could not serialize profiles"),
+        }
+    }
     /// Redacted summaries of every stored profile.
     pub fn list(&self) -> Vec<ProfileSummary> {
         self.profiles
@@ -53,6 +113,7 @@ impl ProfileStore {
             keep_blanked_secrets(&mut cfg, existing);
         }
         self.profiles.insert(name.to_owned(), cfg);
+        self.save();
         Ok(())
     }
 
@@ -62,12 +123,14 @@ impl ProfileStore {
         if self.active.as_deref() == Some(name) {
             self.active = None;
         }
+        self.save();
     }
 
     /// Select the active profile; errors if there's no such profile.
     pub fn set_active(&mut self, name: &str) -> Result<(), String> {
         if self.profiles.contains_key(name) {
             self.active = Some(name.to_owned());
+            self.save();
             Ok(())
         } else {
             Err(format!("no such profile: {name}"))
@@ -203,5 +266,32 @@ password = \"hunter2\"
     fn validate_reports_parse_errors() {
         assert!(validate(ANYTLS_TOML).valid);
         assert!(!validate("[transport]\nbogus_key = 1").valid);
+    }
+
+    #[test]
+    fn persists_across_reload_including_secrets_and_active() {
+        let path = std::env::temp_dir().join(format!("spk-profiles-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = ProfileStore::load(Some(path.clone()));
+            store.set("home", ANYTLS_TOML).unwrap();
+            store.set_active("home").unwrap();
+        }
+        // A fresh load sees the persisted profile, the active selection, and the stored secret.
+        let store = ProfileStore::load(Some(path.clone()));
+        assert!(store.list().iter().any(|p| p.name == "home" && p.active));
+        assert_eq!(
+            store
+                .active()
+                .unwrap()
+                .transport
+                .anytls
+                .as_ref()
+                .unwrap()
+                .password,
+            "hunter2",
+            "the stored secret must survive a reload"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

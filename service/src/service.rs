@@ -21,20 +21,22 @@ use crate::engine::{Teardown, TunnelEngine};
 /// Depth of the command channel feeding the event loop.
 const COMMAND_DEPTH: usize = 64;
 
-/// Static backend facts the event loop reports for the v2 read-only requests (ADR 0004): the build's
-/// [`Capabilities`] plus the active config's selected transport/stack. Computed once at startup
-/// (config is fixed for the daemon's lifetime); the loop overlays its live state for `GetDetails`.
+/// Backend facts the event loop needs for the v2 requests (ADR 0004): the build's static
+/// [`Capabilities`], the launch config (the fallback when no profile is active), and where to
+/// persist profiles. `GetDetails`' selected transport/stack are derived live from the *active*
+/// profile (or this base config).
 #[derive(Debug, Clone, Default)]
 pub struct BackendInfo {
     /// What this build supports (compiled features + platform).
     pub capabilities: Capabilities,
-    /// The transport the active config selects.
-    pub selected_transport: TransportKind,
-    /// The netstack the active config selects.
-    pub selected_stack: NetStack,
+    /// The launch config — the connect/details fallback when no profile is active.
+    pub base_config: Config,
+    /// Where profiles are persisted (`None` = in-memory, e.g. tests).
+    pub profiles_path: Option<std::path::PathBuf>,
 }
 
 /// Derive the [`BackendInfo`] from the loaded config + this build's compiled [`caps`].
+/// (`profiles_path` is left `None` for the caller to set.)
 pub fn backend_info(config: &Config) -> BackendInfo {
     let c = caps::compiled();
     let mut transports = vec![TransportKind::Direct, TransportKind::Plain];
@@ -56,8 +58,8 @@ pub fn backend_info(config: &Config) -> BackendInfo {
             stacks,
             platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
         },
-        selected_transport: selected_transport(config),
-        selected_stack: netstack_of(config),
+        base_config: config.clone(),
+        profiles_path: None,
     }
 }
 
@@ -116,8 +118,8 @@ pub async fn run_service<E: TunnelEngine>(
     let mut negotiated: Option<ProtocolVersion> = None;
     // The most recent error surfaced (for `GetDetails.last_error`); cleared on a successful connect.
     let mut last_error: Option<String> = None;
-    // Stored connection profiles (ADR 0004 slice 3; in-memory for now).
-    let mut profiles = crate::profiles::ProfileStore::default();
+    // Stored connection profiles (ADR 0004 slice 3), loaded from disk if a path was given.
+    let mut profiles = crate::profiles::ProfileStore::load(info.profiles_path.clone());
     let mut subscribers: Vec<Subscriber> = Vec::new();
 
     // The actor owns one exit channel; `start` is handed the sender and the data-path
@@ -174,11 +176,15 @@ pub async fn run_service<E: TunnelEngine>(
                     RequestPayload::GetCapabilities => {
                         ResponsePayload::Capabilities(info.capabilities.clone())
                     }
-                    RequestPayload::GetDetails => ResponsePayload::Details(Details {
+                    RequestPayload::GetDetails => {
+                        // Reflect the active profile (or the base config) — the same config a
+                        // Connect would use.
+                        let effective = profiles.active().unwrap_or(&info.base_config);
+                        ResponsePayload::Details(Details {
                         state,
                         direct_fallback,
-                        selected_transport: info.selected_transport,
-                        selected_stack: info.selected_stack,
+                        selected_transport: selected_transport(effective),
+                        selected_stack: netstack_of(effective),
                         module: None, // live module name/version is a later slice
                         kill_switch: if fail_closed {
                             KillSwitchMode::FailClosed
@@ -186,7 +192,8 @@ pub async fn run_service<E: TunnelEngine>(
                             KillSwitchMode::FailOpen
                         },
                         last_error: last_error.clone(),
-                    }),
+                    })
+                    }
                     RequestPayload::GetMetrics => {
                         let m = engine.metrics();
                         ResponsePayload::Metrics(spark_ipc::Metrics {
@@ -226,10 +233,15 @@ pub async fn run_service<E: TunnelEngine>(
                         ResponsePayload::Validated(crate::profiles::validate(&toml))
                     }
                     RequestPayload::Connect => {
+                        // Connect with the active profile's config, or the launch config if none.
+                        let effective = profiles
+                            .active()
+                            .cloned()
+                            .unwrap_or_else(|| info.base_config.clone());
                         // Announce the in-progress state before the (possibly slow) bring-up, so a
                         // subscribed UI can show "Connecting…" while `start` runs.
                         transition(&mut state, TunnelState::Connecting, &mut subscribers);
-                        match engine.start(exit_tx.clone()).await {
+                        match engine.start(effective, exit_tx.clone()).await {
                             Ok(()) => {
                                 direct_fallback = false;
                                 last_error = None;
@@ -505,6 +517,10 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_and_details_reflect_backend_info() {
+        // A base config with a plain tunnel server → Details should report transport = Plain
+        // (no active profile, so Details reflects this base).
+        let mut base_config = Config::default();
+        base_config.transport.server = Some("1.2.3.4:443".parse().unwrap());
         let info = BackendInfo {
             capabilities: Capabilities {
                 protocol_version: PROTOCOL_VERSION,
@@ -513,8 +529,8 @@ mod tests {
                 stacks: vec![NetStack::Userspace],
                 platform: "p".to_owned(),
             },
-            selected_transport: TransportKind::Plain,
-            selected_stack: NetStack::Userspace,
+            base_config,
+            profiles_path: None,
         };
         let (cmd, cmd_rx) = channel();
         let handle = tokio::spawn(run_service(FakeEngine::default(), cmd_rx, false, info));
@@ -631,6 +647,55 @@ mod tests {
             }
             other => panic!("expected Profile, got {other:?}"),
         }
+        drop(cmd);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn connect_uses_the_active_profile() {
+        let engine = FakeEngine::default();
+        let probe = engine.clone();
+        let (cmd, cmd_rx) = channel();
+        let handle = tokio::spawn(run_service(engine, cmd_rx, false, BackendInfo::default()));
+        let (push_tx, _rx) = mpsc::channel::<Push>(4);
+        request(
+            &cmd,
+            &push_tx,
+            RequestPayload::Hello {
+                client_version: PROTOCOL_VERSION,
+            },
+        )
+        .await;
+
+        let toml = "[transport.anytls]\nserver = \"9.9.9.9:443\"\npassword = \"p\"\n".to_owned();
+        request(
+            &cmd,
+            &push_tx,
+            RequestPayload::SetProfile {
+                name: "vpn".into(),
+                toml,
+            },
+        )
+        .await;
+        request(
+            &cmd,
+            &push_tx,
+            RequestPayload::SetActiveProfile { name: "vpn".into() },
+        )
+        .await;
+        assert!(matches!(
+            request(&cmd, &push_tx, RequestPayload::Connect).await,
+            ResponsePayload::Ack
+        ));
+
+        // The engine was started with the active profile's config, not the (default) base config.
+        let started = probe.last_config().expect("engine started with a config");
+        let anytls = started
+            .transport
+            .anytls
+            .expect("Connect must use the active profile's anytls config");
+        assert_eq!(anytls.server.to_string(), "9.9.9.9:443");
+
         drop(cmd);
         let _ = handle.await;
     }
