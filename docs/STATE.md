@@ -461,10 +461,28 @@
   XOR 28 Gb/s. Validates the ADR "bulk native, interpret only control" rule with numbers. 5 new tests
   (host_hash == ring SHA-256; AEAD seal/open round-trip; tampered ct → HostFault; init delivers
   config / different key → different transform; config-without-init rejected). Debug 22 / release 23
-  green; clippy+fmt+workspace clean. **Next (Path B remaining):** fuel metering (per the user's order
-  — wire wasmi `Config::consume_fuel` + per-call `Store::set_fuel` so a malicious/buggy module can't
-  spin forever); then (a) UDP path; (c) delivery + config wiring (`transport.wasm` in `from_config`)
-  + persisted per-name floor; (d) pin a real Ed25519 pubkey const.
+  green; clippy+fmt+workspace clean.
+  **FUEL METERING BUILT 2026-06-17 (chunk 6; the second half of the user's "b then fuel" order).**
+  `TransformModule::load` now builds the engine with `Config::consume_fuel(true)`; each guest entry
+  refills a per-call budget via `Store::set_fuel` — `fuel_for(len) = FUEL_BASE(5M) + len*FUEL_PER_BYTE
+  (1024)`, set before `instantiate_and_start` (covers a `start` fn), before `init`, and before every
+  `alloc`+transform in `run`. Fuel meters only the module's INTERPRETED bytecode — host-fn crypto
+  runs natively and costs no fuel — so it bounds a runaway without penalizing bulk work. A failed
+  guest call is routed through `classify_call`, which maps an out-of-fuel trap to a dedicated
+  `WasmError::Fuel` (vs `Call` for other traps). New release-only test
+  `fuel_metering_stops_a_runaway_module`: an infinite-loop module returns `WasmError::Fuel` instead
+  of hanging. (Release-only because in debug wasmi's non-TCO interpreter overflows the stack on a
+  runaway *before* any sane fuel budget trips — same artifact as the large-transform test; fuel is a
+  release/production safeguard.) Perf: re-ran the bench with fuel ON — host-AEAD ~11–14 Gb/s and
+  passthrough 113–255 Gb/s **unchanged within noise** (negligible interpreted work to meter), so fuel
+  is effectively free on the realistic path. Debug 22 / release 24 green; clippy(feature+default)+fmt+
+  workspace clean.
+  **PATH B STATUS: the in-process pipeline is complete + hardened** — signed/verified load →
+  instantiate (+config) → native-crypto host fns → obfuscated `Transport`/`WasmServer` tunnel, fuel-
+  bounded. **Remaining (lower priority):** (a) UDP path (UoT-over-`TransformStream`); (c) delivery
+  (fetch artifact over config/fronting) + `transport.wasm` config wiring in `from_config` + persisted
+  per-name version floor; (d) pin a real Ed25519 pubkey const at build time; plus the v0 ABI niceties
+  (explicit `dealloc`/arena-reset, AAD param on the AEAD host fns).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

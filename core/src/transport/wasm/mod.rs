@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::{aead, digest};
-use wasmi::{Caller, Engine, Extern, Linker, Memory, Module, Store, TypedFunc};
+use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, Module, Store, TypedFunc};
 
 mod signing;
 mod stream;
@@ -86,6 +86,14 @@ const AEAD_TAG_LEN: usize = 16;
 /// SHA-256 digest length.
 const HASH_LEN: usize = 32;
 
+/// Per-call fuel budget = [`FUEL_BASE`] + `input_len` × [`FUEL_PER_BYTE`]. Fuel meters the module's
+/// own interpreted bytecode (host-fn crypto runs natively and costs no fuel), so this bounds a
+/// runaway/buggy module without penalizing bulk work. Deliberately generous — a legit transform
+/// (even one that touches every byte in the interpreter, ~a handful of ops/byte) never approaches it.
+const FUEL_BASE: u64 = 5_000_000;
+/// Per-input-byte fuel allowance (see [`FUEL_BASE`]). ~1000 ops/byte of headroom.
+const FUEL_PER_BYTE: u64 = 1024;
+
 /// Errors from loading or running a dynamic transform module.
 #[derive(Debug, thiserror::Error)]
 pub enum WasmError {
@@ -115,6 +123,9 @@ pub enum WasmError {
     /// A host function recorded a fault during the guest call (CSPRNG failure, bad length, …).
     #[error("host function fault: {0}")]
     HostFault(String),
+    /// The module exhausted its per-call execution fuel — a runaway or pathologically slow module.
+    #[error("fuel: {0}")]
+    Fuel(String),
     /// The transform input exceeds [`MAX_TRANSFORM_LEN`].
     #[error("transform input of {len} bytes exceeds the {max}-byte limit")]
     InputTooLarge {
@@ -147,7 +158,10 @@ impl TransformModule {
     /// This only validates and compiles; it does not run the module. Per-connection state is
     /// created by [`TransformModule::instantiate`].
     pub fn load(wasm: &[u8]) -> Result<Self, WasmError> {
-        let engine = Engine::default();
+        // Enable fuel metering so a runaway module is bounded per call (see `fuel_for`).
+        let mut config = Config::default();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config);
         let module = Module::new(&engine, wasm).map_err(WasmError::Compile)?;
         Ok(Self {
             engine,
@@ -211,6 +225,9 @@ impl Transform {
                 rand_bytes: 0,
             },
         );
+        // Fuel metering is on, so the store starts empty; grant a budget that covers the module's
+        // `start` function (if any) and the `init` hook below. Per-transform calls refill in `run`.
+        set_fuel(&mut store, fuel_for(config.len()))?;
 
         // Register the host functions (the module's entire capability surface): a CSPRNG, SHA-256,
         // and ChaCha20-Poly1305 seal/open. Bulk crypto runs natively here so modules don't pay the
@@ -313,19 +330,19 @@ impl Transform {
         let alloc = self.alloc;
         let memory = self.memory;
 
+        // Refill the per-call fuel budget so a runaway module traps instead of spinning forever.
+        set_fuel(&mut self.store, fuel_for(input.len()))?;
+
         let ptr = alloc
             .call(&mut self.store, len)
-            .map_err(|source| WasmError::Call {
-                func: EXPORT_ALLOC,
-                source,
-            })?;
+            .map_err(|source| classify_call(EXPORT_ALLOC, source))?;
         memory
             .write(&mut self.store, ptr as usize, input)
             .map_err(|e| WasmError::Memory(e.to_string()))?;
 
         let packed = func
             .call(&mut self.store, (ptr, len))
-            .map_err(|source| WasmError::Call { func: name, source })? as u64;
+            .map_err(|source| classify_call(name, source))? as u64;
         self.take_fault()?;
 
         let out_ptr = (packed >> 32) as usize;
@@ -349,6 +366,31 @@ impl Transform {
             Some(msg) => Err(WasmError::HostFault(msg)),
             None => Ok(()),
         }
+    }
+}
+
+/// The per-call fuel budget for an input of `input_len` bytes (see [`FUEL_BASE`]).
+fn fuel_for(input_len: usize) -> u64 {
+    FUEL_BASE.saturating_add((input_len as u64).saturating_mul(FUEL_PER_BYTE))
+}
+
+/// Set the store's remaining fuel. Fuel metering is always enabled (see [`TransformModule::load`]),
+/// so this only fails on an internal invariant violation.
+fn set_fuel(store: &mut Store<HostState>, fuel: u64) -> Result<(), WasmError> {
+    store
+        .set_fuel(fuel)
+        .map_err(|e| WasmError::Fuel(format!("set fuel: {e}")))
+}
+
+/// Map a failed guest call to an error, distinguishing fuel exhaustion (a runaway module) from other
+/// traps — wasmi reports an out-of-fuel trap whose message mentions fuel.
+fn classify_call(func: &'static str, source: wasmi::Error) -> WasmError {
+    if source.to_string().contains("fuel") {
+        WasmError::Fuel(format!(
+            "`{func}` exhausted its execution budget (possible runaway)"
+        ))
+    } else {
+        WasmError::Call { func, source }
     }
 }
 
@@ -959,6 +1001,33 @@ mod tests {
                 Err(WasmError::MissingExport(_))
             ),
             "config for a module without `init` must be rejected"
+        );
+    }
+
+    // Release-only: in debug, wasmi's non-TCO interpreter overflows the test stack on a runaway
+    // before fuel can trip (see the large-payload test); in release it runs constant-stack until the
+    // fuel budget is exhausted and traps.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn fuel_metering_stops_a_runaway_module() {
+        const SPIN_WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param i32 i32) (result i64)
+    (loop $spin (br $spin))
+    (unreachable))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+        let module =
+            TransformModule::load(&wat::parse_str(SPIN_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let err = t
+            .transform_out(b"hi")
+            .expect_err("a runaway must be stopped by fuel");
+        assert!(
+            matches!(err, WasmError::Fuel(_)),
+            "expected a fuel error, got: {err:?}"
         );
     }
 
