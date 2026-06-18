@@ -57,16 +57,13 @@ pub fn backend_info(config: &Config) -> BackendInfo {
             platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
         },
         selected_transport: selected_transport(config),
-        selected_stack: match config.tun.stack {
-            StackKind::System => NetStack::System,
-            StackKind::Userspace => NetStack::Userspace,
-        },
+        selected_stack: netstack_of(config),
     }
 }
 
 /// Which transport the config selects (precedence mirrors `transport::from_config`: anytls > wasm >
 /// plain server > direct).
-fn selected_transport(config: &Config) -> TransportKind {
+pub(crate) fn selected_transport(config: &Config) -> TransportKind {
     let t = &config.transport;
     if t.anytls.is_some() {
         TransportKind::Anytls
@@ -76,6 +73,14 @@ fn selected_transport(config: &Config) -> TransportKind {
         TransportKind::Plain
     } else {
         TransportKind::Direct
+    }
+}
+
+/// Which netstack the config selects.
+pub(crate) fn netstack_of(config: &Config) -> NetStack {
+    match config.tun.stack {
+        StackKind::System => NetStack::System,
+        StackKind::Userspace => NetStack::Userspace,
     }
 }
 
@@ -111,6 +116,8 @@ pub async fn run_service<E: TunnelEngine>(
     let mut negotiated: Option<ProtocolVersion> = None;
     // The most recent error surfaced (for `GetDetails.last_error`); cleared on a successful connect.
     let mut last_error: Option<String> = None;
+    // Stored connection profiles (ADR 0004 slice 3; in-memory for now).
+    let mut profiles = crate::profiles::ProfileStore::default();
     let mut subscribers: Vec<Subscriber> = Vec::new();
 
     // The actor owns one exit channel; `start` is handed the sender and the data-path
@@ -151,6 +158,12 @@ pub async fn run_service<E: TunnelEngine>(
                     RequestPayload::GetCapabilities
                     | RequestPayload::GetDetails
                     | RequestPayload::GetMetrics
+                    | RequestPayload::ListProfiles
+                    | RequestPayload::GetProfile { .. }
+                    | RequestPayload::SetProfile { .. }
+                    | RequestPayload::DeleteProfile { .. }
+                    | RequestPayload::SetActiveProfile { .. }
+                    | RequestPayload::ValidateProfile { .. }
                         if negotiated < Some(2) =>
                     {
                         ResponsePayload::Error {
@@ -182,6 +195,35 @@ pub async fn run_service<E: TunnelEngine>(
                             sessions_active: m.sessions_active,
                             sessions_total: m.sessions_total,
                         })
+                    }
+                    RequestPayload::ListProfiles => ResponsePayload::Profiles(profiles.list()),
+                    RequestPayload::GetProfile { name } => match profiles.get_redacted(&name) {
+                        Some(doc) => ResponsePayload::Profile(doc),
+                        None => ResponsePayload::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: format!("no such profile: {name}"),
+                        },
+                    },
+                    RequestPayload::SetProfile { name, toml } => match profiles.set(&name, &toml) {
+                        Ok(()) => ResponsePayload::Ack,
+                        Err(e) => ResponsePayload::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: e,
+                        },
+                    },
+                    RequestPayload::DeleteProfile { name } => {
+                        profiles.delete(&name);
+                        ResponsePayload::Ack
+                    }
+                    RequestPayload::SetActiveProfile { name } => match profiles.set_active(&name) {
+                        Ok(()) => ResponsePayload::Ack,
+                        Err(e) => ResponsePayload::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: e,
+                        },
+                    },
+                    RequestPayload::ValidateProfile { toml } => {
+                        ResponsePayload::Validated(crate::profiles::validate(&toml))
                     }
                     RequestPayload::Connect => {
                         // Announce the in-progress state before the (possibly slow) bring-up, so a
@@ -532,6 +574,63 @@ mod tests {
                 ..
             }
         ));
+        drop(cmd);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn profile_crud_through_the_actor_redacts_secrets() {
+        let (cmd, cmd_rx) = channel();
+        let handle = tokio::spawn(run_service(
+            FakeEngine::default(),
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+        ));
+        let (push_tx, _rx) = mpsc::channel::<Push>(4);
+        request(
+            &cmd,
+            &push_tx,
+            RequestPayload::Hello {
+                client_version: PROTOCOL_VERSION,
+            },
+        )
+        .await;
+
+        let toml =
+            "[transport.anytls]\nserver = \"1.2.3.4:443\"\npassword = \"s3cret\"\n".to_owned();
+        assert!(matches!(
+            request(
+                &cmd,
+                &push_tx,
+                RequestPayload::SetProfile {
+                    name: "home".into(),
+                    toml,
+                },
+            )
+            .await,
+            ResponsePayload::Ack
+        ));
+        match request(&cmd, &push_tx, RequestPayload::ListProfiles).await {
+            ResponsePayload::Profiles(ps) => {
+                assert!(ps.iter().any(|p| p.name == "home" && p.has_password));
+            }
+            other => panic!("expected Profiles, got {other:?}"),
+        }
+        match request(
+            &cmd,
+            &push_tx,
+            RequestPayload::GetProfile {
+                name: "home".into(),
+            },
+        )
+        .await
+        {
+            ResponsePayload::Profile(d) => {
+                assert!(!d.toml.contains("s3cret"), "the password must be redacted");
+            }
+            other => panic!("expected Profile, got {other:?}"),
+        }
         drop(cmd);
         let _ = handle.await;
     }

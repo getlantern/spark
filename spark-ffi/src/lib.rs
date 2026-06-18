@@ -226,6 +226,60 @@ impl From<spark_ipc::Details> for Details {
     }
 }
 
+/// Mirror of [`spark_ipc::ProfileSummary`] — a stored profile's redacted summary.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProfileSummary {
+    pub name: String,
+    pub transport: TransportKind,
+    pub stack: NetStack,
+    pub has_password: bool,
+    pub active: bool,
+}
+
+impl From<spark_ipc::ProfileSummary> for ProfileSummary {
+    fn from(p: spark_ipc::ProfileSummary) -> Self {
+        Self {
+            name: p.name,
+            transport: p.transport.into(),
+            stack: p.stack.into(),
+            has_password: p.has_password,
+            active: p.active,
+        }
+    }
+}
+
+/// Mirror of [`spark_ipc::ProfileDoc`] — a profile as a redacted TOML config document.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProfileDoc {
+    pub name: String,
+    pub toml: String,
+}
+
+impl From<spark_ipc::ProfileDoc> for ProfileDoc {
+    fn from(d: spark_ipc::ProfileDoc) -> Self {
+        Self {
+            name: d.name,
+            toml: d.toml,
+        }
+    }
+}
+
+/// Mirror of [`spark_ipc::Validation`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Validation {
+    pub valid: bool,
+    pub error: Option<String>,
+}
+
+impl From<spark_ipc::Validation> for Validation {
+    fn from(v: spark_ipc::Validation) -> Self {
+        Self {
+            valid: v.valid,
+            error: v.error,
+        }
+    }
+}
+
 /// Errors surfaced to foreign callers: the service's typed [`ErrorCode`](spark_ipc::ErrorCode)
 /// categories plus a transport bucket for connect/IO/handshake failures.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -353,6 +407,61 @@ impl Backend {
             ResponsePayload::Metrics(m) => Ok(m.into()),
             ResponsePayload::Error { code, .. } => Err(code.into()),
             other => Err(unexpected("metrics", &other)),
+        }
+    }
+
+    /// List the stored connection profiles (redacted — no secrets).
+    pub async fn list_profiles(&self) -> Result<Vec<ProfileSummary>, BackendError> {
+        match self.call(RequestPayload::ListProfiles).await? {
+            ResponsePayload::Profiles(ps) => Ok(ps.into_iter().map(Into::into).collect()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("list_profiles", &other)),
+        }
+    }
+
+    /// Fetch one profile as a redacted TOML config document (secrets blanked).
+    pub async fn get_profile(&self, name: String) -> Result<ProfileDoc, BackendError> {
+        match self.call(RequestPayload::GetProfile { name }).await? {
+            ResponsePayload::Profile(d) => Ok(d.into()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("get_profile", &other)),
+        }
+    }
+
+    /// Create or replace a profile from a TOML config document. Blanked secret fields keep the
+    /// stored value, so a `get_profile` → edit → `set_profile` round-trip preserves secrets.
+    pub async fn set_profile(&self, name: String, toml: String) -> Result<(), BackendError> {
+        match self.call(RequestPayload::SetProfile { name, toml }).await? {
+            ResponsePayload::Ack => Ok(()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("set_profile", &other)),
+        }
+    }
+
+    /// Delete a stored profile.
+    pub async fn delete_profile(&self, name: String) -> Result<(), BackendError> {
+        match self.call(RequestPayload::DeleteProfile { name }).await? {
+            ResponsePayload::Ack => Ok(()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("delete_profile", &other)),
+        }
+    }
+
+    /// Select the active profile (the one a future `connect` will use).
+    pub async fn set_active_profile(&self, name: String) -> Result<(), BackendError> {
+        match self.call(RequestPayload::SetActiveProfile { name }).await? {
+            ResponsePayload::Ack => Ok(()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("set_active_profile", &other)),
+        }
+    }
+
+    /// Validate a TOML config document without storing it.
+    pub async fn validate_profile(&self, toml: String) -> Result<Validation, BackendError> {
+        match self.call(RequestPayload::ValidateProfile { toml }).await? {
+            ResponsePayload::Validated(v) => Ok(v.into()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("validate_profile", &other)),
         }
     }
 

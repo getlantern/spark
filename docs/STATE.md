@@ -762,7 +762,28 @@
   TCP-only — UDP metrics + periodic `Push::Metrics` are follow-ups.** **Gate green:** `cargo test
   --workspace --all-features` 186 pass (+2 core: `session_guard_tracks…`, `counting_tallies…`;
   GetMetrics folded into the slice-1 service + spark-ffi e2e tests); clippy `--all-features -D warnings`
-  + fmt + windows cross-clippy clean; Kotlin bindings carry `metrics`/`class Metrics`.
+  + fmt + windows cross-clippy clean; Kotlin bindings carry `metrics`/`class Metrics`. **(committed
+  `a5e6b2a`, pushed.)**
+  **BACKEND CONTRACT — SLICE 3a (profile management) 2026-06-18 (commit pending).** Connection-profile
+  CRUD, still v2. A **profile = a named `core::config::Config`** stored in the privileged service.
+  **Secrets are write-only over IPC** (CLAUDE.md): the AnyTLS `password` + wasm `init_config` are
+  blanked on read and a blanked field on write keeps the stored value — so a read→edit→write round-trip
+  never needs the client to have seen the secret. Represented as a **redacted TOML doc** (not a typed
+  mirror) to keep the ipc surface small and the redaction in one place. New `service::profiles`
+  (`ProfileStore`: in-memory `BTreeMap<name, Config>` + active; `set` parses TOML + `keep_blanked_
+  secrets` merge; `get_redacted` clears secrets + `to_toml_string`; `list`→summaries; `validate`).
+  ipc adds `RequestPayload::{ListProfiles,GetProfile,SetProfile,DeleteProfile,SetActiveProfile,
+  ValidateProfile}` + `ResponsePayload::{Profiles,Profile,Validated}` + `ProfileSummary`/`ProfileDoc`/
+  `Validation` (all version-gated with the v2 reqs). The actor holds a `ProfileStore` + handlers;
+  `selected_transport`/`netstack_of` promoted to `pub(crate)` and reused. `spark-ffi` mirrors the
+  types + adds async `list_profiles`/`get_profile`/`set_profile`/`delete_profile`/`set_active_profile`/
+  `validate_profile` (Swift bindings confirmed); CLI gains `spark profiles`. **DEFERRED to slice 3b
+  (own chunk, touches the live-gated connect/engine path):** connect-by-active-profile (the
+  `TunnelEngine::start(config)` refactor + `Details` reflecting the active profile) and **disk
+  persistence** (the store is in-memory — profiles are lost on daemon restart). **Gate green:** `cargo
+  test --workspace --all-features` 191 pass (+5: 4 `ProfileStore` unit tests incl. the secret
+  round-trip + redaction, 1 actor CRUD/redaction e2e; spark-ffi e2e exercises the FFI CRUD); clippy
+  `--all-features -D warnings` + fmt + windows cross-clippy clean.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

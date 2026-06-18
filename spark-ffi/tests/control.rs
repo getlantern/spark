@@ -33,8 +33,10 @@ mod harness {
     use spark_ffi::{Backend, EventListener, TunnelEvent, TunnelState};
     use spark_ipc::{
         read_frame, write_frame, Capabilities as IpcCapabilities, Details as IpcDetails,
-        KillSwitchMode, Metrics as IpcMetrics, NetStack, Push, Request, RequestPayload, Response,
-        ResponsePayload, ServerMessage, TransportKind, TunnelStatus as IpcStatus, PROTOCOL_VERSION,
+        KillSwitchMode, Metrics as IpcMetrics, NetStack, ProfileDoc as IpcProfileDoc,
+        ProfileSummary as IpcProfileSummary, Push, Request, RequestPayload, Response,
+        ResponsePayload, ServerMessage, TransportKind, TunnelStatus as IpcStatus,
+        Validation as IpcValidation, PROTOCOL_VERSION,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -60,6 +62,8 @@ mod harness {
     ) {
         while let Ok(Some(req)) = read_frame::<_, Request>(&mut stream).await {
             let req_id = req.req_id;
+            // Computed before the match, which moves fields out of some request payloads.
+            let subscribed = matches!(req.payload, RequestPayload::Subscribe { .. });
             let resp = match req.payload {
                 RequestPayload::Hello { .. } => ResponsePayload::Hello {
                     service_version: PROTOCOL_VERSION,
@@ -92,9 +96,30 @@ mod harness {
                     sessions_active: 1,
                     sessions_total: 3,
                 }),
+                RequestPayload::ListProfiles => {
+                    ResponsePayload::Profiles(vec![IpcProfileSummary {
+                        name: "home".to_owned(),
+                        transport: TransportKind::Plain,
+                        stack: NetStack::Userspace,
+                        has_password: true,
+                        active: true,
+                    }])
+                }
+                RequestPayload::GetProfile { name } => ResponsePayload::Profile(IpcProfileDoc {
+                    name,
+                    toml: "# redacted".to_owned(),
+                }),
+                RequestPayload::ValidateProfile { .. } => {
+                    ResponsePayload::Validated(IpcValidation {
+                        valid: true,
+                        error: None,
+                    })
+                }
+                RequestPayload::SetProfile { .. }
+                | RequestPayload::DeleteProfile { .. }
+                | RequestPayload::SetActiveProfile { .. } => ResponsePayload::Ack,
                 RequestPayload::Subscribe { .. } => ResponsePayload::Ack,
             };
-            let subscribed = matches!(req.payload, RequestPayload::Subscribe { .. });
             if write_frame(
                 &mut stream,
                 &ServerMessage::Response(Response {
@@ -165,6 +190,30 @@ mod harness {
         let metrics = backend.metrics().await.expect("metrics");
         assert_eq!(metrics.bytes_up, 100);
         assert_eq!(metrics.sessions_total, 3);
+
+        // Profiles (ADR 0004 slice 3): the FFI marshalling of the CRUD surface.
+        backend
+            .set_profile("home".to_owned(), "# cfg".to_owned())
+            .await
+            .expect("set_profile");
+        let profs = backend.list_profiles().await.expect("list_profiles");
+        assert!(profs.iter().any(|p| p.name == "home" && p.has_password));
+        let doc = backend
+            .get_profile("home".to_owned())
+            .await
+            .expect("get_profile");
+        assert_eq!(doc.name, "home");
+        assert!(
+            backend
+                .validate_profile("# cfg".to_owned())
+                .await
+                .expect("validate")
+                .valid
+        );
+        backend
+            .set_active_profile("home".to_owned())
+            .await
+            .expect("set_active");
 
         let events = Arc::new(Mutex::new(Vec::new()));
         backend.subscribe(Box::new(Recorder {

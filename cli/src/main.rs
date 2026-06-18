@@ -52,6 +52,8 @@ enum Command {
     Details(CtlArgs),
     /// Print the data-path counters (bytes up/down, active/total sessions).
     Metrics(CtlArgs),
+    /// List the stored connection profiles (`*` marks the active one).
+    Profiles(CtlArgs),
 }
 
 /// Flags for the in-process `run` driver.
@@ -149,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Capabilities(ctl) => control(ctl.socket, RequestPayload::GetCapabilities).await,
         Command::Details(ctl) => control(ctl.socket, RequestPayload::GetDetails).await,
         Command::Metrics(ctl) => control(ctl.socket, RequestPayload::GetMetrics).await,
+        Command::Profiles(ctl) => control(ctl.socket, RequestPayload::ListProfiles).await,
     }
 }
 
@@ -269,6 +272,26 @@ async fn control(socket: PathBuf, payload: RequestPayload) -> anyhow::Result<()>
                 m.sessions_active, m.sessions_total
             );
         }
+        ResponsePayload::Profiles(ps) => {
+            if ps.is_empty() {
+                println!("(no profiles)");
+            }
+            for p in ps {
+                let active = if p.active { " *" } else { "" };
+                println!(
+                    "{}{active}  transport={:?} stack={:?} password={}",
+                    p.name, p.transport, p.stack, p.has_password
+                );
+            }
+        }
+        ResponsePayload::Profile(d) => {
+            println!("# profile: {}", d.name);
+            print!("{}", d.toml);
+        }
+        ResponsePayload::Validated(v) => match v.error {
+            None => println!("valid"),
+            Some(e) => anyhow::bail!("invalid: {e}"),
+        },
         ResponsePayload::Error { code, message } => {
             anyhow::bail!("service error [{code:?}]: {message}");
         }

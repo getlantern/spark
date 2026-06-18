@@ -57,6 +57,37 @@ pub enum RequestPayload {
     GetDetails,
     /// (v2) Ask for the data-path counters — see [`Metrics`]. Poll for live values.
     GetMetrics,
+    /// (v2) List the stored connection profiles (redacted). → [`ResponsePayload::Profiles`].
+    ListProfiles,
+    /// (v2) Fetch one profile as a redacted config document. → [`ResponsePayload::Profile`].
+    GetProfile {
+        /// The profile's name (its id).
+        name: String,
+    },
+    /// (v2) Create or replace a profile from a TOML config document. Secrets are write-only: a
+    /// blanked secret field (e.g. an empty `password`) keeps the stored value, so a
+    /// read→edit→write round-trip never needs the client to have seen the secret. → `Ack`.
+    SetProfile {
+        /// The profile's name (its id).
+        name: String,
+        /// A `core::config::Config` as TOML (secret fields may be blank to keep the stored value).
+        toml: String,
+    },
+    /// (v2) Delete a stored profile. → `Ack`.
+    DeleteProfile {
+        /// The profile's name (its id).
+        name: String,
+    },
+    /// (v2) Select the active profile (the one a future `Connect` will use). → `Ack`.
+    SetActiveProfile {
+        /// The profile's name (its id).
+        name: String,
+    },
+    /// (v2) Validate a TOML config document without storing it. → [`ResponsePayload::Validated`].
+    ValidateProfile {
+        /// A candidate `core::config::Config` as TOML.
+        toml: String,
+    },
 }
 
 /// A service→client response. `req_id` echoes the request it answers.
@@ -86,6 +117,12 @@ pub enum ResponsePayload {
     Details(Details),
     /// (v2) Reply to [`RequestPayload::GetMetrics`].
     Metrics(Metrics),
+    /// (v2) Reply to [`RequestPayload::ListProfiles`].
+    Profiles(Vec<ProfileSummary>),
+    /// (v2) Reply to [`RequestPayload::GetProfile`] — a redacted config document.
+    Profile(ProfileDoc),
+    /// (v2) Reply to [`RequestPayload::ValidateProfile`].
+    Validated(Validation),
     /// A request succeeded with no payload.
     Ack,
     /// A request failed.
@@ -205,6 +242,40 @@ pub struct Capabilities {
     pub stacks: Vec<NetStack>,
     /// `os/arch`, e.g. `"macos/aarch64"`.
     pub platform: String,
+}
+
+/// (v2) A one-line summary of a stored profile (no secrets); see [`RequestPayload::ListProfiles`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileSummary {
+    /// The profile's name (its id).
+    pub name: String,
+    /// The transport the profile selects.
+    pub transport: TransportKind,
+    /// The netstack the profile selects.
+    pub stack: NetStack,
+    /// Whether the profile has an AnyTLS password stored (the value is never sent).
+    pub has_password: bool,
+    /// Whether this is the active profile.
+    pub active: bool,
+}
+
+/// (v2) A profile as a redacted TOML config document; see [`RequestPayload::GetProfile`]. Secret
+/// fields (AnyTLS `password`, wasm `init_config`) are blanked — edit and `SetProfile` to keep them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileDoc {
+    /// The profile's name (its id).
+    pub name: String,
+    /// The profile's `core::config::Config` serialized as TOML, with secrets blanked.
+    pub toml: String,
+}
+
+/// (v2) The result of [`RequestPayload::ValidateProfile`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Validation {
+    /// Whether the document parsed as a valid config.
+    pub valid: bool,
+    /// The parse/validation error (no secrets), if invalid.
+    pub error: Option<String>,
 }
 
 /// (v2) Data-path counters; see [`RequestPayload::GetMetrics`]. Cumulative since the service
