@@ -1,0 +1,2 @@
+# Keeps the SparkFFI source dir present in git; build-xcframework.sh drops the generated
+# spark_ffi.swift here (gitignored). swift build only runs after that generation step.

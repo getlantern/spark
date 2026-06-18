@@ -579,7 +579,7 @@
   runtime inside another runtime panics (a TEST-only artifact; foreign callers drop on an off-runtime
   thread). Gate green: `cargo test -p spark-ffi` 2 pass, clippy `-D warnings` + fmt + `cargo check
   --workspace` clean. **Landed `51122d1`.**
-  **WINDOWS TEST + EVENT-STREAM RECONNECT 2026-06-18 (commit pending).** (1) **Auto-reconnect:**
+  **WINDOWS TEST + EVENT-STREAM RECONNECT 2026-06-18.** (1) **Auto-reconnect:**
   `subscribe`'s task no longer `return`s on the first error — it's now a `subscription_loop` with
   capped exponential backoff (`run_subscription_session` per attempt; `MIN 250ms` … `MAX 30s`, doubles
   while unreachable, resets to the floor once a session is *established* = handshake + `Subscribe`
@@ -599,7 +599,38 @@
   instance after each `connect().await`). **Gate green:** 3 unix tests pass; host clippy `-D warnings`
   + fmt clean; **`cargo clippy -p spark-ffi --all-targets --target x86_64-pc-windows-msvc -D warnings`
   clean** (the named-pipe test type-checks + lints; runs live only in CI on Windows — no host here);
-  `cargo check --workspace` clean.
+  `cargo check --workspace` clean. **Landed `7bab14b`.**
+  **MOBILE PACKAGING 2026-06-18 (commit pending).** `spark-ffi` now ships consumable mobile artifacts.
+  **Prereq fix:** the crate enabled `uniffi`'s `cli`+`tokio` features unconditionally (via the
+  workspace dep) — `cli` drags `uniffi_bindgen` + host-only deps (askama/toml/goblin) into EVERY
+  build's feature-unified graph, so an iOS/Android cross-compile of the shipped lib would needlessly
+  compile (maybe fail) the bindgen toolchain. Fixed: workspace `uniffi` dep now featureless; spark-ffi
+  gates the CLI behind a bin-only feature `uniffi-bindgen = ["uniffi/cli"]` + `[[bin]] required-features
+  = ["uniffi-bindgen"]`, so `cargo build --lib --target <ios/android>` never sees the CLI deps. Also
+  DROPPED `uniffi/tokio` — that feature only powers `async_runtime = "tokio"` (`async-compat`'s global
+  runtime), which the owned-runtime model doesn't use (verified: lib + 3 tests still green without it).
+  crate-type `["cdylib","lib"]` → `["cdylib","staticlib","lib"]` (staticlib for the Apple xcframework).
+  **Apple (`spark-ffi/apple/`):** `build-xcframework.sh` builds the staticlib for `aarch64-apple-{ios,
+  ios-sim,darwin}`, generates the Swift glue + C header from a host cdylib (UniFFI reads metadata by
+  dlopen — iOS libs can't load on host), bundles header+`module.modulemap` per slice, assembles
+  `SparkFFI.xcframework` (3 slices: ios-arm64 / ios-arm64-simulator / macos-arm64) + drops
+  `Sources/SparkFFI/spark_ffi.swift`. `Package.swift` = binaryTarget `spark_ffiFFI` (the xcframework) +
+  Swift target `SparkFFI`. **Verified: `swift build` compiles the generated Swift against the macOS
+  slice.** Mirrors `platforms/apple/build-xcframework.sh`. **Android (`spark-ffi/android/`):**
+  `build-android.sh` = `cargo ndk -t arm64-v8a -t x86_64 -P 24 -o jniLibs build --release -p spark-ffi
+  --lib` (mirrors `platforms/android`) + Kotlin generation from a host cdylib. **Verified: both
+  `libspark_ffi.so` build (aarch64 + x86_64 stripped ELF) + the Kotlin (`Backend`/`EventListener`/
+  `suspend connect|disconnect|status`, loads lib `spark_ffi`) generates.** `build.gradle.kts` = an
+  Android library module (sourceSets → `kotlin/` + `jniLibs/`; deps `net.java.dev.jna:jna:5.14.0@aar`
+  for the FFI + `kotlinx-coroutines-core` for the `suspend` calls — both confirmed from the generated
+  `.kt`'s imports). No `.aar` built here (no standalone gradle project; documented as the consumer/CI
+  step, consistent with `platforms/android` deferring its AAR). Shell-bug found+fixed mid-build: under
+  `set -o pipefail`, `ls a b | head` returns `ls`'s non-zero when one path is absent → aborts; replaced
+  with an explicit `[ -f … ]` host-lib check. **All generated outputs gitignored** (xcframework, Swift
+  glue, jniLibs, Kotlin); tracked = the scripts/manifests/READMEs only. **Gate green:** 3 tests, host
+  clippy `-D warnings` (incl. the bin w/ feature) + fmt, windows cross-clippy, `cargo check --workspace`
+  — all clean. **Remaining spark-ffi out-of-scope:** desktop GUI, JSON-RPC/web facade, data-path shim
+  unification, standalone-AAR gradle wrapper, the synthetic "reconnected" event.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

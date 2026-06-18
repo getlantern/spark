@@ -1,0 +1,6 @@
+# Build outputs — regenerate with ./build-android.sh.
+/jniLibs/
+/kotlin/
+# Gradle build output (if a consumer builds the .aar from here).
+/build/
+/.gradle/

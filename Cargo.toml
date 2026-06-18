@@ -57,9 +57,12 @@ wasmi = "=2.0.0-beta.2"
 # Test-only (dev-dependency); never linked into a release binary.
 wat = "1"
 # UniFFI: generates type-safe Swift/Kotlin bindings for the `spark-ffi` control surface (one Rust
-# definition → all UI languages). Used ONLY by `spark-ffi` (a cdylib); never linked into the
-# `core`/`cli`/`service` binaries. `cli` provides the bindgen entrypoint; `tokio` the async runtime.
-uniffi = { version = "0.31", features = ["cli", "tokio"] }
+# definition → all UI languages). Used ONLY by `spark-ffi`; never linked into the `core`/`cli`/
+# `service` binaries. No features here so the shipped lib/cdylib/staticlib stays lean and
+# cross-compiles clean for iOS/Android — the bindgen CLI is pulled by spark-ffi's (bin-only)
+# `uniffi-bindgen` feature, and the owned-runtime model doesn't use `async_runtime = "tokio"`, so
+# the `tokio` feature (its `async-compat` global runtime) is omitted too.
+uniffi = { version = "0.31" }
 
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed

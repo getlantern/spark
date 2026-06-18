@@ -12,9 +12,9 @@ license.workspace = true
 
 [lib]
 name = "spark_ffi"
-# `cdylib` for the shipped library the generated bindings load; `lib` so the Rust integration test
-# (and the bindgen bin) can link the crate.
-crate-type = ["cdylib", "lib"]
+# `cdylib` for Android (System.loadLibrary) + the host build the bindgen reads; `staticlib` for the
+# Apple xcframework; `lib` so the Rust integration test (and the bindgen bin) can link the crate.
+crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
 # The control-plane protocol + async client (the `stream` feature pulls the tokio `Client`).
@@ -23,7 +23,15 @@ uniffi.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 
-# The bindings generator: `cargo run -p spark-ffi --bin uniffi-bindgen -- generate ...`.
+[features]
+# Pulls UniFFI's bindgen CLI for the `uniffi-bindgen` bin only — kept off the default lib build so
+# the shipped cdylib/staticlib never drags `uniffi_bindgen` + its host-only deps into an iOS/Android
+# cross-compile. Enable only when running the generator: `--features uniffi-bindgen`.
+uniffi-bindgen = ["uniffi/cli"]
+
+# The bindings generator (run with the feature):
+#   cargo run -p spark-ffi --features uniffi-bindgen --bin uniffi-bindgen -- generate ...
 [[bin]]
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
+required-features = ["uniffi-bindgen"]

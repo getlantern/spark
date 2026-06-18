@@ -1,0 +1,6 @@
+# Build outputs — regenerate with ./build-xcframework.sh.
+/SparkFFI.xcframework/
+/.generated/
+/.build/
+# The generated Swift glue (UniFFI output); the Sources/SparkFFI dir itself is kept (.gitkeep).
+/Sources/SparkFFI/*.swift
