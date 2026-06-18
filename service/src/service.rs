@@ -148,7 +148,9 @@ pub async fn run_service<E: TunnelEngine>(
                     },
                     // v2-only requests: refuse on a v1-negotiated peer rather than send a frame it
                     // can't decode (ADR 0004 — never emit above the negotiated version).
-                    RequestPayload::GetCapabilities | RequestPayload::GetDetails
+                    RequestPayload::GetCapabilities
+                    | RequestPayload::GetDetails
+                    | RequestPayload::GetMetrics
                         if negotiated < Some(2) =>
                     {
                         ResponsePayload::Error {
@@ -172,6 +174,15 @@ pub async fn run_service<E: TunnelEngine>(
                         },
                         last_error: last_error.clone(),
                     }),
+                    RequestPayload::GetMetrics => {
+                        let m = engine.metrics();
+                        ResponsePayload::Metrics(spark_ipc::Metrics {
+                            bytes_up: m.bytes_up,
+                            bytes_down: m.bytes_down,
+                            sessions_active: m.sessions_active,
+                            sessions_total: m.sessions_total,
+                        })
+                    }
                     RequestPayload::Connect => {
                         // Announce the in-progress state before the (possibly slow) bring-up, so a
                         // subscribed UI can show "Connecting…" while `start` runs.
@@ -491,6 +502,11 @@ mod tests {
                 assert_eq!(d.kill_switch, KillSwitchMode::FailOpen);
             }
             other => panic!("expected Details, got {other:?}"),
+        }
+        // FakeEngine reports zero metrics; this just proves the GetMetrics path + mapping.
+        match request(&cmd, &push_tx, RequestPayload::GetMetrics).await {
+            ResponsePayload::Metrics(m) => assert_eq!(m, spark_ipc::Metrics::default()),
+            other => panic!("expected Metrics, got {other:?}"),
         }
         drop(cmd);
         let _ = handle.await;

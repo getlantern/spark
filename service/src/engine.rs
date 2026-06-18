@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 use spark_core::config::Config;
+use spark_core::metrics::{Metrics, MetricsSnapshot};
 use spark_core::netstack;
 use spark_core::proxy;
 use spark_core::routing::RouteManager;
@@ -48,6 +49,9 @@ pub trait TunnelEngine: Send {
     async fn start(&mut self, exit: mpsc::Sender<()>) -> Result<(), EngineError>;
     /// Tear the tunnel down, leaving the routing end-state requested by `teardown`.
     async fn stop(&mut self, teardown: Teardown) -> Result<(), EngineError>;
+    /// A snapshot of the data-path counters (ADR 0004 slice 2). Cheap atomic reads; cumulative over
+    /// the engine's lifetime, with `sessions_active` reflecting currently-open flows.
+    fn metrics(&self) -> MetricsSnapshot;
 }
 
 /// The production engine: opens the TUN, starts `spark-core`'s netstack + forwarders, and
@@ -64,6 +68,9 @@ pub struct CoreEngine {
     supervisor: Option<JoinHandle<()>>,
     /// Present only while connected with `[routing] manage` on — owns the installed routes.
     routes: Option<RouteManager>,
+    /// Data-path counters, shared into the forwarder; persists across connect/disconnect so totals
+    /// are cumulative for the engine's lifetime.
+    metrics: Arc<Metrics>,
 }
 
 impl CoreEngine {
@@ -74,6 +81,7 @@ impl CoreEngine {
             tun: None,
             supervisor: None,
             routes: None,
+            metrics: Arc::new(Metrics::default()),
         }
     }
 }
@@ -105,15 +113,16 @@ impl TunnelEngine for CoreEngine {
 
         // One supervisor task runs the data-path loops. It signals `exit` only if a loop
         // returns on its own; `stop` aborts the task before that line is reached.
+        let metrics = Arc::clone(&self.metrics); // shared with the TCP forwarder for counters
         let supervisor = tokio::spawn(async move {
             match udp_surface {
                 Some((udp_inbound, udp_reply)) => {
                     tokio::select! {
-                        _ = proxy::tcp::run(stack, tcp_transport) => {}
+                        _ = proxy::tcp::run(stack, tcp_transport, metrics) => {}
                         _ = proxy::udp::run_udp(udp_inbound, udp_reply, udp_transport, idle) => {}
                     }
                 }
-                None => proxy::tcp::run(stack, tcp_transport).await,
+                None => proxy::tcp::run(stack, tcp_transport, metrics).await,
             }
             let _ = exit.send(()).await; // unexpected exit (not reached on abort)
         });
@@ -155,6 +164,10 @@ impl TunnelEngine for CoreEngine {
             result.map_err(|e| EngineError(format!("tearing down routes: {e}")))?;
         }
         Ok(())
+    }
+
+    fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 }
 
@@ -201,6 +214,9 @@ pub(crate) mod test_support {
             *self.last_teardown.lock().unwrap() = Some(teardown);
             *self.exit.lock().unwrap() = None;
             Ok(())
+        }
+        fn metrics(&self) -> MetricsSnapshot {
+            MetricsSnapshot::default()
         }
     }
 }

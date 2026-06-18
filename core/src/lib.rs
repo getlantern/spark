@@ -16,6 +16,7 @@ pub mod caps;
 pub mod config;
 #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
 pub mod fd_tunnel;
+pub mod metrics;
 pub mod net;
 pub mod netstack;
 pub mod packet;

@@ -746,7 +746,23 @@
   Details` confirmed in regenerated bindings); the CLI gains `spark capabilities`/`spark details`
   subcommands. **Gate green:** `cargo test --workspace --all-features` 184 pass (+2 service tests:
   capabilities/details-reflect-info + v1-gate; spark-ffi e2e extended to exercise both); clippy
-  `--all-features -D warnings` + fmt + windows cross-clippy clean.
+  `--all-features -D warnings` + fmt + windows cross-clippy clean. **(committed `5045eb6`.)**
+  **BACKEND CONTRACT — SLICE 2 (metrics) 2026-06-18 (commit pending).** Data-path counters, still v2.
+  New `core::metrics`: `Metrics` (atomic `bytes_up`/`bytes_down`/`sessions_active`/`sessions_total`),
+  `MetricsSnapshot`, a `Counting<S>` stream wrapper (live byte tally — one Relaxed add per poll, not
+  per byte; on the *upstream* half so writes=up, reads=down), and an RAII `SessionGuard` (inc total+
+  active on open, dec active on drop — so an aborted forwarder task still releases its active count).
+  `proxy::tcp::run`/`forward` thread `Arc<Metrics>` (the upstream is wrapped in `Counting`, the flow
+  scoped by a `SessionGuard`); the 4 callers (engine, fd_tunnel, cli, proxy test) updated — `CoreEngine`
+  owns the `Arc<Metrics>` (cumulative across connect/disconnect) and the others pass a local counter.
+  `TunnelEngine` gains `fn metrics(&self) -> MetricsSnapshot` (CoreEngine → snapshot; FakeEngine →
+  default). ipc adds `RequestPayload::GetMetrics` + `ResponsePayload::Metrics` + the `Metrics` wire
+  type (version-gated with the other v2 reqs). `spark-ffi` mirrors `Metrics` + async `Backend::
+  metrics()`; CLI gains `spark metrics`. **Counting is on flow COMPLETION-independent (live per poll);
+  TCP-only — UDP metrics + periodic `Push::Metrics` are follow-ups.** **Gate green:** `cargo test
+  --workspace --all-features` 186 pass (+2 core: `session_guard_tracks…`, `counting_tallies…`;
+  GetMetrics folded into the slice-1 service + spark-ffi e2e tests); clippy `--all-features -D warnings`
+  + fmt + windows cross-clippy clean; Kotlin bindings carry `metrics`/`class Metrics`.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

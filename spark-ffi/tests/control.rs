@@ -33,8 +33,8 @@ mod harness {
     use spark_ffi::{Backend, EventListener, TunnelEvent, TunnelState};
     use spark_ipc::{
         read_frame, write_frame, Capabilities as IpcCapabilities, Details as IpcDetails,
-        KillSwitchMode, NetStack, Push, Request, RequestPayload, Response, ResponsePayload,
-        ServerMessage, TransportKind, TunnelStatus as IpcStatus, PROTOCOL_VERSION,
+        KillSwitchMode, Metrics as IpcMetrics, NetStack, Push, Request, RequestPayload, Response,
+        ResponsePayload, ServerMessage, TransportKind, TunnelStatus as IpcStatus, PROTOCOL_VERSION,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -85,6 +85,12 @@ mod harness {
                     module: None,
                     kill_switch: KillSwitchMode::FailOpen,
                     last_error: None,
+                }),
+                RequestPayload::GetMetrics => ResponsePayload::Metrics(IpcMetrics {
+                    bytes_up: 100,
+                    bytes_down: 200,
+                    sessions_active: 1,
+                    sessions_total: 3,
                 }),
                 RequestPayload::Subscribe { .. } => ResponsePayload::Ack,
             };
@@ -156,6 +162,9 @@ mod harness {
         assert!(!caps.transports.is_empty());
         let details = backend.details().await.expect("details");
         assert_eq!(details.state, TunnelState::Connected);
+        let metrics = backend.metrics().await.expect("metrics");
+        assert_eq!(metrics.bytes_up, 100);
+        assert_eq!(metrics.sessions_total, 3);
 
         let events = Arc::new(Mutex::new(Vec::new()));
         backend.subscribe(Box::new(Recorder {

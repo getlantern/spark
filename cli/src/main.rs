@@ -50,6 +50,8 @@ enum Command {
     Capabilities(CtlArgs),
     /// Print a detailed status snapshot (selected transport/stack, kill-switch, last error).
     Details(CtlArgs),
+    /// Print the data-path counters (bytes up/down, active/total sessions).
+    Metrics(CtlArgs),
 }
 
 /// Flags for the in-process `run` driver.
@@ -146,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Status(ctl) => control(ctl.socket, RequestPayload::GetStatus).await,
         Command::Capabilities(ctl) => control(ctl.socket, RequestPayload::GetCapabilities).await,
         Command::Details(ctl) => control(ctl.socket, RequestPayload::GetDetails).await,
+        Command::Metrics(ctl) => control(ctl.socket, RequestPayload::GetMetrics).await,
     }
 }
 
@@ -199,11 +202,13 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
         ));
     }
 
+    // The in-process driver doesn't surface metrics; a local counter satisfies the forwarder.
+    let metrics = Arc::new(spark_core::metrics::Metrics::default());
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("signal received — shutting down");
         }
-        _ = proxy::tcp::run(stack, tcp_transport) => {
+        _ = proxy::tcp::run(stack, tcp_transport, metrics) => {
             warn!("netstack accept loop exited unexpectedly");
         }
     }
@@ -256,6 +261,13 @@ async fn control(socket: PathBuf, payload: RequestPayload) -> anyhow::Result<()>
             if let Some(e) = d.last_error {
                 println!("last error: {e}");
             }
+        }
+        ResponsePayload::Metrics(m) => {
+            println!("bytes up: {}  down: {}", m.bytes_up, m.bytes_down);
+            println!(
+                "sessions active: {}  total: {}",
+                m.sessions_active, m.sessions_total
+            );
         }
         ResponsePayload::Error { code, message } => {
             anyhow::bail!("service error [{code:?}]: {message}");

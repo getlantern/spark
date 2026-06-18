@@ -180,6 +180,26 @@ impl From<spark_ipc::Capabilities> for Capabilities {
     }
 }
 
+/// Mirror of [`spark_ipc::Metrics`] — the data-path counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct Metrics {
+    pub bytes_up: u64,
+    pub bytes_down: u64,
+    pub sessions_active: u64,
+    pub sessions_total: u64,
+}
+
+impl From<spark_ipc::Metrics> for Metrics {
+    fn from(m: spark_ipc::Metrics) -> Self {
+        Self {
+            bytes_up: m.bytes_up,
+            bytes_down: m.bytes_down,
+            sessions_active: m.sessions_active,
+            sessions_total: m.sessions_total,
+        }
+    }
+}
+
 /// Mirror of [`spark_ipc::Details`] — a richer status snapshot than [`TunnelStatus`].
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Details {
@@ -324,6 +344,15 @@ impl Backend {
             ResponsePayload::Details(d) => Ok(d.into()),
             ResponsePayload::Error { code, .. } => Err(code.into()),
             other => Err(unexpected("details", &other)),
+        }
+    }
+
+    /// Fetch the data-path counters (bytes up/down, active/total sessions). Poll for live values.
+    pub async fn metrics(&self) -> Result<Metrics, BackendError> {
+        match self.call(RequestPayload::GetMetrics).await? {
+            ResponsePayload::Metrics(m) => Ok(m.into()),
+            ResponsePayload::Error { code, .. } => Err(code.into()),
+            other => Err(unexpected("metrics", &other)),
         }
     }
 

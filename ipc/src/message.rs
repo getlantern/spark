@@ -55,6 +55,8 @@ pub enum RequestPayload {
     /// (v2) Ask for a richer status snapshot than [`GetStatus`](RequestPayload::GetStatus) — see
     /// [`Details`].
     GetDetails,
+    /// (v2) Ask for the data-path counters — see [`Metrics`]. Poll for live values.
+    GetMetrics,
 }
 
 /// A service→client response. `req_id` echoes the request it answers.
@@ -82,6 +84,8 @@ pub enum ResponsePayload {
     Capabilities(Capabilities),
     /// (v2) Reply to [`RequestPayload::GetDetails`].
     Details(Details),
+    /// (v2) Reply to [`RequestPayload::GetMetrics`].
+    Metrics(Metrics),
     /// A request succeeded with no payload.
     Ack,
     /// A request failed.
@@ -201,6 +205,20 @@ pub struct Capabilities {
     pub stacks: Vec<NetStack>,
     /// `os/arch`, e.g. `"macos/aarch64"`.
     pub platform: String,
+}
+
+/// (v2) Data-path counters; see [`RequestPayload::GetMetrics`]. Cumulative since the service
+/// started, with `sessions_active` reflecting currently-open flows. Currently TCP-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Metrics {
+    /// Bytes sent app→upstream (egress).
+    pub bytes_up: u64,
+    /// Bytes received upstream→app (ingress).
+    pub bytes_down: u64,
+    /// Flows currently open.
+    pub sessions_active: u64,
+    /// Flows opened since start (cumulative).
+    pub sessions_total: u64,
 }
 
 /// (v2) A richer status snapshot than [`TunnelStatus`]; see [`RequestPayload::GetDetails`].

@@ -97,8 +97,11 @@ pub fn run_tunnel_with_config(fd: i32, mtu: u16, config: Config) -> std::io::Res
         }
 
         info!(mtu, "spark tunnel up (fd mode)");
+        // Metrics aren't surfaced on the embedded fd path (no IPC here), but the forwarder requires
+        // a sink; a local counter is enough.
+        let metrics = Arc::new(crate::metrics::Metrics::default());
         tokio::select! {
-            _ = proxy::tcp::run(stack, tcp_transport) => warn!("netstack accept loop exited"),
+            _ = proxy::tcp::run(stack, tcp_transport, metrics) => warn!("netstack accept loop exited"),
             _ = shutdown().notified() => info!("stop requested; tearing the tunnel down"),
         }
         drop(tun);
