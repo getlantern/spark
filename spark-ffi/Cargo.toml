@@ -1,0 +1,29 @@
+# `spark-ffi` — the control-plane backend binding. Exposes a typed `Backend` over the `spark-ipc`
+# control client as UniFFI-generated Swift/Kotlin, so any UI drives a running `spark-service`
+# through one API (superseding the CLI's hand-written control client). Control surface only — the
+# data path stays in the platform shims (`platforms/android`, `platforms/apple`). `uniffi` is
+# isolated here and is never linked into the `core`/`cli`/`service` binaries.
+[package]
+name = "spark-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "spark_ffi"
+# `cdylib` for the shipped library the generated bindings load; `lib` so the Rust integration test
+# (and the bindgen bin) can link the crate.
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# The control-plane protocol + async client (the `stream` feature pulls the tokio `Client`).
+spark-ipc = { path = "../ipc", features = ["stream"] }
+uniffi.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+
+# The bindings generator: `cargo run -p spark-ffi --bin uniffi-bindgen -- generate ...`.
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"

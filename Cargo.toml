@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple"]
+members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-ffi"]
 # Kept out of the workspace on purpose:
 #  - vendor/netstack-smoltcp: depended on by `path`, but its examples/tests/dev-deps
 #    (tun2, structopt, socket2-ext, …) should not be built as part of our workspace.
@@ -56,6 +56,10 @@ wasmi = "=2.0.0-beta.2"
 # Assembles the inline WebAssembly-text fixture into module bytes for the wasm-transport tests.
 # Test-only (dev-dependency); never linked into a release binary.
 wat = "1"
+# UniFFI: generates type-safe Swift/Kotlin bindings for the `spark-ffi` control surface (one Rust
+# definition → all UI languages). Used ONLY by `spark-ffi` (a cdylib); never linked into the
+# `core`/`cli`/`service` binaries. `cli` provides the bindgen entrypoint; `tokio` the async runtime.
+uniffi = { version = "0.31", features = ["cli", "tokio"] }
 
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed

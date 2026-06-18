@@ -537,6 +537,34 @@
   **PATH B COMPLETE in-`core`.** Only out-of-core work remains: the network-delivery half of (c) —
   *fetch* the artifact over the config/fronting channel into `module` (a client/service+fronting
   integration; verify/load/floor is done).
+- **`spark-ffi` control-plane binding BUILT 2026-06-18.** New workspace crate `spark-ffi/` — a typed
+  `Backend` over the **real `spark_ipc::Client`** generated as Swift/Kotlin via **UniFFI 0.31**, so any
+  UI (desktop GUI, mobile app) drives a running `spark-service` through one type-safe API. Supersedes
+  the CLI's hand-written control client (`cli/src/main.rs::control`/`connect_control`). **Grew out of
+  the framework/generic-backend assessment** (Google Doc `1Lbsd8eXu0vY2S13r1EJ35ax_NyeYHYyJLe9-tyXk3os`
+  Part 2); de-risked first with a throwaway `ffi-spike/` (now removed). **Control surface ONLY — the
+  FFI split:** the data path stays in the platform shims (`platforms/android` JNI + `platforms/apple`
+  C-ABI), which run `core::fd_tunnel::run_tunnel(fd)` IN-PROCESS on an OS-provided fd; `spark-ffi` is a
+  *different* surface (commands/status/events over the control socket), not that. **Runtime model:**
+  `Backend` owns a multi-thread `tokio::runtime::Runtime`; `connect`/`disconnect`/`status` are sync
+  (`block_on` one `connect_control → Client::new → handshake → request` round-trip per call — per-command
+  connections, matching the CLI, control ops are infrequent); `subscribe(listener)` `rt.spawn`s a task on
+  a dedicated connection (`Subscribe{events:true,logs:false}` → loop `next_push` → `EventListener::on_event`),
+  `unsubscribe`/`Drop` abort it. Mirror types `TunnelState`/`TunnelStatus`/`TunnelEvent`/`BackendError`
+  (the latter maps `ipc::ErrorCode` + a `Transport{message}` bucket for connect/io/handshake) with
+  `From` conversions; `EventListener` is a `callback_interface`. **`uniffi` enters the product** as a new
+  workspace member, but isolated to the `spark-ffi` cdylib — NOT linked into `core`/`cli`/`service`, so
+  their binary sizes are unaffected. **Gate (all green):** `cargo test -p spark-ffi` = 2 pass
+  (`error_codes_map_to_typed_errors` + `control_roundtrips_over_a_real_socket`, the latter drives
+  `Backend` connect→status→subscribe-receives-event→disconnect against a mock `spark-ipc` responder over
+  a real temp unix socket, no `spark-service` dep); bindings generate non-empty Swift (1231 lines) +
+  Kotlin (1851) exposing `Backend`/`EventListener`/the mirror types; `clippy -p spark-ffi -D warnings` +
+  `fmt` + `cargo check --workspace` clean. **Test gotcha:** `tokio::net::UnixListener::from_std` panics on
+  a blocking fd → `set_nonblocking(true)` before adopting the std listener. **Out of scope (noted):**
+  packaging integration (xcframework/cargo-ndk bundling the cdylib + bindings), the desktop GUI, the
+  JSON-RPC/web facade, a Windows named-pipe test, event-stream auto-reconnect, async-exported methods
+  (Swift `async`/Kotlin `suspend` — proven in the spike, an ergonomic refinement), and data-path shim
+  unification. **Uncommitted** (awaiting the user's commit/push call).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
