@@ -94,12 +94,18 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TransformStream<S> {
             return Poll::Ready(Ok(0));
         }
         match this.transform.transform_out(buf) {
-            // We've taken ownership of all of `buf` into `write_buf`; it drains on the next
-            // poll_write/poll_flush. Report the full length consumed.
             Ok(out) => this.write_buf.extend_from_slice(&out),
             Err(e) => return Poll::Ready(Err(io::Error::other(e.to_string()))),
         }
-        Poll::Ready(Ok(buf.len()))
+        // Eagerly push the freshly-produced output so data actually flows without requiring the
+        // caller to flush after every write — otherwise `write_all` followed by a read deadlocks
+        // with the bytes stuck in `write_buf`. A would-block leaves the remainder buffered for the
+        // next poll_write/poll_flush; we've taken all of `buf`, so report it fully consumed. A hard
+        // write error surfaces now (the stream is then broken, so the buffered bytes won't be sent).
+        match this.poll_drain(cx) {
+            Poll::Ready(Ok(())) | Poll::Pending => Poll::Ready(Ok(buf.len())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -174,16 +180,15 @@ mod tests {
         let mut client = TransformStream::new(a, module.instantiate().expect("instantiate"));
         let mut server = TransformStream::new(b, module.instantiate().expect("instantiate"));
 
+        // No explicit flush between write and read: poll_write must push eagerly, or this deadlocks.
         let request = b"hello over the wasm transform stream";
         client.write_all(request).await.expect("client write");
-        client.flush().await.expect("client flush");
         let mut got = vec![0u8; request.len()];
         server.read_exact(&mut got).await.expect("server read");
         assert_eq!(got.as_slice(), &request[..]);
 
         let reply = b"and back the other way";
         server.write_all(reply).await.expect("server write");
-        server.flush().await.expect("server flush");
         let mut got = vec![0u8; reply.len()];
         client.read_exact(&mut got).await.expect("client read");
         assert_eq!(got.as_slice(), &reply[..]);

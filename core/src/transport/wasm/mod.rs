@@ -32,8 +32,10 @@ use wasmi::{Caller, Engine, Extern, Linker, Memory, Module, Store, TypedFunc};
 
 mod signing;
 mod stream;
+mod transport;
 pub use signing::{build_artifact, signing_payload, ModuleError, ModuleVerifier, SignedModule};
 pub use stream::TransformStream;
+pub use transport::{WasmServer, WasmTransport};
 
 /// Import module name the host functions are defined under.
 const HOST_MODULE: &str = "env";

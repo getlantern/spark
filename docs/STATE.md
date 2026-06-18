@@ -427,12 +427,28 @@
   signing is external tooling; core only assembles (`signing_payload`/`build_artifact`) + verifies.
   6 tests (verify+load+run, tampered-wasm→BadSignature, wrong-key→BadSignature, rollback rejected /
   current+newer accepted, truncated, bad-magic-even-when-signed). Debug 16 / release 17 tests green;
-  clippy (feature+default) + fmt + workspace check clean. **Next (Path B remaining):** (a) the
-  `Transport` impl + a matching server (dial server, handshake the target, wrap in `TransformStream`)
-  — needs a server/handshake design pass; (b) a richer module ABI (handshake/negotiate phase +
-  host-fn AEAD/hash beyond `host_rand`); (c) the delivery path (fetch artifact over the config/
-  fronting channel) + a persisted per-name version floor; (d) pin a real Ed25519 pubkey const at
-  build time (verifier currently takes the key as a param).
+  clippy (feature+default) + fmt + workspace check clean.
+  **TRANSPORT + SERVER BUILT 2026-06-17 (chunk 4; user picked this next).** `core/src/transport/
+  wasm/transport.rs`: `WasmTransport` (client, impls `Transport`) + `WasmServer` (server). Design:
+  the wasm transform is a byte-obfuscation layer **underneath the EXISTING tunnel handshake** — the
+  client dials the spark server, wraps the socket in `TransformStream`, then runs the ordinary
+  `tcp_tunnel::header::Address` exchange over it; the server wraps its accept in the inverse
+  transform and `read_header`s the target back. So target-conveyance is reused unchanged (no new
+  handshake), the module stays a pure byte transform, and the header being the first bytes through
+  `transform_out`/`transform_in` keeps the two endpoints' codec state aligned (matters for a
+  stateful module). `WasmTransport::new(server, module)` (+`with_socket_protection`); `WasmServer::
+  new(module).accept(conn) -> (Address, leftover, TransformStream<conn>)`; fresh `Transform` per
+  connection. End-to-end test over real TCP (client → wasm server → echo) round-trips through the
+  XOR module. **Bug found+fixed during this chunk:** `poll_write` buffered the transform output and
+  only drained on the NEXT poll_write/flush → `write_all`+`read` (no flush) deadlocked with bytes
+  stuck in `write_buf`. Fix: drain eagerly inside `poll_write` (buffer only what the socket can't
+  accept); regression-covered by removing the explicit flush from the both-directions stream test.
+  Debug 17 / release 18 tests green; clippy (feature+default)+fmt+workspace clean. **Next (Path B
+  remaining):** (a) UDP path (UoT-over-`TransformStream`, mirroring the tunnel client's
+  `dial_udp`); (b) richer module ABI (handshake/negotiate phase + host-fn AEAD/hash beyond
+  `host_rand`); (c) delivery path (fetch artifact over the config/fronting channel) + persisted
+  per-name version floor + config wiring (`transport.wasm`) so `from_config` builds it; (d) pin a
+  real Ed25519 pubkey const at build time (verifier currently takes the key as a param).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
