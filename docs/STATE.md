@@ -805,7 +805,24 @@
   fmt clean. **Windows cross-check not run here** — `ring`'s C build needs a Windows toolchain this
   macOS host lacks (pre-existing; CI covers it); the one Windows-specific addition (the `--profiles`
   arg) mirrors the working `socket` arg. **SLICE 3 COMPLETE (profiles end-to-end).** ADR 0004 remaining:
-  slice 4 (log streaming), slice 5 (embedded `TunnelHandle`).
+  slice 4 (log streaming), slice 5 (embedded `TunnelHandle`). **(committed `91ec21c`, pushed.)**
+  **BACKEND CONTRACT — SLICE 4 (log streaming) 2026-06-18 (commit pending).** Produces the `Push::Log`
+  stream the `logs` subscribe flag (wired in the earlier control-plane-correctness chunk) already
+  filters on. New `service::logbus`: a `LogForwarder` `tracing` Layer turns each event into a redacted
+  `LogLine` (`core::redact::redact_addrs` strips address literals — the GOAL.md privacy property) and
+  `try_send`s it (lossy on backpressure — never blocks a logging call) onto a process-global channel;
+  `logbus::init()` creates the channel + registers the global sender, returning the receiver. The
+  daemon's `init_tracing` switched from `fmt().init()` to a `registry().with(filter).with(fmt).with(
+  LogForwarder)`. `run_service` gained `log_rx: Option<Receiver<LogLine>>` (a `next_log` helper pends
+  forever when `None` so the `select!` branch never busy-loops; on close it sets `None`); it drains the
+  channel and `broadcast`s `Push::Log` (the `wants` filter drops it for events-only subscribers).
+  `spark-ffi` now CONSUMES logs: mirror `LogLine`/`LogLevel`, `EventListener` gained `on_log`, and the
+  subscription loop requests `logs: true` + routes `Push::Log → on_log` (Swift `onLog`/`LogLine`/
+  `LogLevel` in regenerated bindings). **Gate green:** `cargo test --workspace --all-features` 195 pass
+  (+2: `log_lines_stream_to_logs_subscribers_only` — a fed log reaches a `logs:true` subscriber but not
+  an events-only one; `logbus::maps_tracing_levels`); clippy `--all-features -D warnings` + fmt +
+  windows-ffi cross-clippy clean. **SLICE 4 COMPLETE.** ADR 0004 remaining: slice 5 (embedded
+  `TunnelHandle`).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

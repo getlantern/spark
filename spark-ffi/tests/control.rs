@@ -30,7 +30,7 @@ fn error_codes_map_to_typed_errors() {
 /// e2e tests below.
 #[cfg(any(unix, windows))]
 mod harness {
-    use spark_ffi::{Backend, EventListener, TunnelEvent, TunnelState};
+    use spark_ffi::{Backend, EventListener, LogLine, TunnelEvent, TunnelState};
     use spark_ipc::{
         read_frame, write_frame, Capabilities as IpcCapabilities, Details as IpcDetails,
         KillSwitchMode, Metrics as IpcMetrics, NetStack, ProfileDoc as IpcProfileDoc,
@@ -50,6 +50,7 @@ mod harness {
         fn on_event(&self, event: TunnelEvent) {
             self.events.lock().unwrap().push(event);
         }
+        fn on_log(&self, _line: LogLine) {} // the e2e mock doesn't push logs
     }
 
     /// Mock service over any byte stream: handshake, then `Connect`/`Disconnect`→Ack,

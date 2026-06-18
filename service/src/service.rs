@@ -11,9 +11,9 @@ use tracing::warn;
 use spark_core::caps;
 use spark_core::config::{Config, StackKind};
 use spark_ipc::{
-    negotiate, Capabilities, Details, ErrorCode, KillSwitchMode, NetStack, ProtocolVersion, Push,
-    Request, RequestPayload, Response, ResponsePayload, TransportKind, TunnelEvent, TunnelState,
-    TunnelStatus, PROTOCOL_VERSION,
+    negotiate, Capabilities, Details, ErrorCode, KillSwitchMode, LogLine, NetStack,
+    ProtocolVersion, Push, Request, RequestPayload, Response, ResponsePayload, TransportKind,
+    TunnelEvent, TunnelState, TunnelStatus, PROTOCOL_VERSION,
 };
 
 use crate::engine::{Teardown, TunnelEngine};
@@ -86,6 +86,15 @@ pub(crate) fn netstack_of(config: &Config) -> NetStack {
     }
 }
 
+/// Await the next log line from an optional source. With no source (tests, or after the channel
+/// closed) this pends forever, so the `select!` branch simply never fires (no busy-loop).
+async fn next_log(rx: &mut Option<mpsc::Receiver<LogLine>>) -> Option<LogLine> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// A client request handed to the event loop: the request, a channel to answer it, and the
 /// connection's push sender (registered as a subscriber if the request is `Subscribe`).
 pub struct Envelope {
@@ -110,6 +119,7 @@ pub async fn run_service<E: TunnelEngine>(
     mut rx: mpsc::Receiver<Envelope>,
     fail_closed: bool,
     info: BackendInfo,
+    mut log_rx: Option<mpsc::Receiver<LogLine>>,
 ) {
     let mut state = TunnelState::Disconnected;
     let mut direct_fallback = false;
@@ -311,6 +321,16 @@ pub async fn run_service<E: TunnelEngine>(
                     );
                 }
             }
+
+            // A `tracing` log line from the LogForwarder — fan out to `logs`-subscribed clients
+            // (the `wants` filter drops it for events-only subscribers). `None` = no log source
+            // (tests) or the channel closed; either way stop polling it.
+            maybe_log = next_log(&mut log_rx) => {
+                match maybe_log {
+                    Some(line) => broadcast(&mut subscribers, Push::Log(line)),
+                    None => log_rx = None,
+                }
+            }
         }
     }
 
@@ -464,6 +484,7 @@ mod tests {
             cmd_rx,
             false,
             BackendInfo::default(),
+            None,
         ));
         let (push_tx, mut push_rx) = mpsc::channel::<Push>(16);
 
@@ -533,7 +554,13 @@ mod tests {
             profiles_path: None,
         };
         let (cmd, cmd_rx) = channel();
-        let handle = tokio::spawn(run_service(FakeEngine::default(), cmd_rx, false, info));
+        let handle = tokio::spawn(run_service(
+            FakeEngine::default(),
+            cmd_rx,
+            false,
+            info,
+            None,
+        ));
         let (push_tx, _rx) = mpsc::channel::<Push>(4);
 
         request(
@@ -578,6 +605,7 @@ mod tests {
             cmd_rx,
             false,
             BackendInfo::default(),
+            None,
         ));
         let (push_tx, _rx) = mpsc::channel::<Push>(4);
         // A v1 client negotiates v1; the v2-only requests must be refused, not answered with a
@@ -602,6 +630,7 @@ mod tests {
             cmd_rx,
             false,
             BackendInfo::default(),
+            None,
         ));
         let (push_tx, _rx) = mpsc::channel::<Push>(4);
         request(
@@ -656,7 +685,13 @@ mod tests {
         let engine = FakeEngine::default();
         let probe = engine.clone();
         let (cmd, cmd_rx) = channel();
-        let handle = tokio::spawn(run_service(engine, cmd_rx, false, BackendInfo::default()));
+        let handle = tokio::spawn(run_service(
+            engine,
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+            None,
+        ));
         let (push_tx, _rx) = mpsc::channel::<Push>(4);
         request(
             &cmd,
@@ -695,6 +730,72 @@ mod tests {
             .anytls
             .expect("Connect must use the active profile's anytls config");
         assert_eq!(anytls.server.to_string(), "9.9.9.9:443");
+
+        drop(cmd);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn log_lines_stream_to_logs_subscribers_only() {
+        use spark_ipc::{LogLevel, LogLine};
+        let (log_tx, log_rx) = mpsc::channel::<LogLine>(8);
+        let (cmd, cmd_rx) = channel();
+        let handle = tokio::spawn(run_service(
+            FakeEngine::default(),
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+            Some(log_rx),
+        ));
+
+        // Two subscribers on distinct push channels: one wants logs, one wants only events.
+        let (logs_push, mut logs_rx) = mpsc::channel::<Push>(8);
+        let (ev_push, mut ev_rx) = mpsc::channel::<Push>(8);
+        request(
+            &cmd,
+            &logs_push,
+            RequestPayload::Hello {
+                client_version: PROTOCOL_VERSION,
+            },
+        )
+        .await;
+        request(
+            &cmd,
+            &logs_push,
+            RequestPayload::Subscribe {
+                events: false,
+                logs: true,
+            },
+        )
+        .await;
+        request(
+            &cmd,
+            &ev_push,
+            RequestPayload::Subscribe {
+                events: true,
+                logs: false,
+            },
+        )
+        .await;
+
+        log_tx
+            .send(LogLine {
+                level: LogLevel::Info,
+                message: "hello".into(),
+            })
+            .await
+            .unwrap();
+
+        // The logs subscriber receives it…
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), logs_rx.recv())
+            .await
+            .expect("a log push should arrive");
+        assert!(matches!(got, Some(Push::Log(_))));
+        // …and the events-only subscriber does not.
+        assert!(
+            ev_rx.try_recv().is_err(),
+            "an events-only subscriber must not receive log pushes"
+        );
 
         drop(cmd);
         let _ = handle.await;

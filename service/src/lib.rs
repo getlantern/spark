@@ -15,6 +15,7 @@ pub mod auth;
 pub mod conn;
 pub mod daemon;
 pub mod engine;
+pub mod logbus;
 pub mod profiles;
 pub mod service;
 

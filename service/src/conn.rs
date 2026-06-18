@@ -104,6 +104,7 @@ mod tests {
             cmd_rx,
             fail_closed,
             crate::service::BackendInfo::default(),
+            None,
         ));
         let (client, server) = tokio::io::duplex(4096);
         tokio::spawn(serve_connection(server, cmd_tx));

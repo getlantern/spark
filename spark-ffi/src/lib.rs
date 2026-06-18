@@ -321,10 +321,54 @@ fn transport(e: impl std::fmt::Display) -> BackendError {
     }
 }
 
-/// The foreign-implemented event sink: the `Subscribe` → `Push(Event)` stream of `spark-ipc`.
+/// Log severity, mirror of [`spark_ipc::LogLevel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl From<spark_ipc::LogLevel> for LogLevel {
+    fn from(l: spark_ipc::LogLevel) -> Self {
+        use spark_ipc::LogLevel as L;
+        match l {
+            L::Error => Self::Error,
+            L::Warn => Self::Warn,
+            L::Info => Self::Info,
+            L::Debug => Self::Debug,
+            L::Trace => Self::Trace,
+        }
+    }
+}
+
+/// A redacted log line streamed to a subscriber, mirror of [`spark_ipc::LogLine`].
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LogLine {
+    pub level: LogLevel,
+    pub message: String,
+}
+
+impl From<spark_ipc::LogLine> for LogLine {
+    fn from(l: spark_ipc::LogLine) -> Self {
+        Self {
+            level: l.level.into(),
+            message: l.message,
+        }
+    }
+}
+
+/// The foreign-implemented sink for the subscription stream: tunnel events and (already-redacted)
+/// log lines. `subscribe` opts into both; a listener that doesn't care about logs leaves `on_log`
+/// empty.
 #[uniffi::export(callback_interface)]
 pub trait EventListener: Send + Sync {
+    /// A tunnel lifecycle event (state change, fail-open, reconnect).
     fn on_event(&self, event: TunnelEvent);
+    /// A redacted log line from the service.
+    fn on_log(&self, line: LogLine);
 }
 
 /// A handle to a running `spark-service`'s control plane. Drives the `spark-ipc` protocol on an
@@ -564,7 +608,7 @@ async fn run_subscription_session(
     if client
         .request(RequestPayload::Subscribe {
             events: true,
-            logs: false,
+            logs: true,
         })
         .await
         .is_err()
@@ -577,7 +621,8 @@ async fn run_subscription_session(
     loop {
         match client.next_push().await {
             Ok(Some(Push::Event(event))) => listener.on_event(event.into()),
-            // The service only pushes events here (logs disabled); ignore anything else.
+            Ok(Some(Push::Log(line))) => listener.on_log(line.into()),
+            // `Push::Dropped` (backpressure marker) carries no payload the listener acts on.
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => break,
         }

@@ -100,8 +100,16 @@ pub async fn serve_daemon(args: Args, shutdown: impl Future<Output = ()>) -> any
     // Capabilities + the launch/base config + the profile-store path for the v2 requests.
     let mut info = backend_info(&config);
     info.profiles_path = Some(args.profiles.clone());
+    // The receiver the LogForwarder publishes to; the event loop drains it into Push::Log.
+    let log_rx = crate::logbus::init();
     let (cmd_tx, cmd_rx) = channel();
-    tokio::spawn(run_service(CoreEngine::new(), cmd_rx, fail_closed, info));
+    tokio::spawn(run_service(
+        CoreEngine::new(),
+        cmd_rx,
+        fail_closed,
+        info,
+        log_rx,
+    ));
 
     tokio::pin!(shutdown);
     tokio::select! {
@@ -182,9 +190,14 @@ fn secure_socket(path: &std::path::Path, group: Option<u32>) -> std::io::Result<
 
 /// Initialize tracing from `RUST_LOG` (default `info`).
 fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Registry + layers so the LogForwarder (the control-plane log stream, ADR 0004 slice 4) runs
+    // alongside the console formatter. The forwarder is a no-op until `logbus::init` runs.
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(crate::logbus::LogForwarder)
         .init();
 }

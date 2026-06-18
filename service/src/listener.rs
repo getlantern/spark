@@ -97,6 +97,7 @@ mod tests {
             cmd_rx,
             false,
             crate::service::BackendInfo::default(),
+            None,
         ));
 
         // Allow the current user (the test process is the peer).
@@ -138,6 +139,7 @@ mod tests {
             cmd_rx,
             false,
             crate::service::BackendInfo::default(),
+            None,
         ));
 
         // Allow only an impossible group; the current non-root user is refused.
