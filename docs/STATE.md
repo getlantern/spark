@@ -1007,6 +1007,20 @@
   the `SparkTunnel.systemextension` into the Flutter app bundle + re-sign inside-out + DMG + notarize
   (the packaging step for the Flutter app); then the live gate (activate sysext + connect). Also: the
   unused `spark_bridge` framework still builds into the macOS app (bloat) — exclude it from macOS later.
+  **FLUTTER NOTARIZED-DMG PACKAGING (slice 2) 2026-06-18 (commit pending).** `packaging/macos/
+  build-gui-dmg.sh`: builds the signed `SparkTunnel.systemextension` via the platforms/apple archive,
+  `flutter build macos --release`, **embeds the sysext** into `spark_gui.app/Contents/Library/
+  SystemExtensions/`, **re-signs the app top-level** (no `--deep`: seals the sysext + re-signs the main
+  exec with `Release.entitlements`, which omits `get-task-allow` → notarizable, + `--options runtime`;
+  nested Flutter frameworks + the sysext keep their own signatures), then DMG → notarize+staple
+  (.app + DMG) → verify. Same creds/flags as `build-dmg.sh` (`SKIP_NOTARIZE=1` dry run). **Dry-run
+  validated end-to-end:** archive SUCCEEDED, flutter build → 45 MB app, embed + re-sign → `codesign
+  --verify --deep --strict` **"valid on disk / satisfies its Designated Requirement"**, DMG built; the
+  final app verified to have the embedded `org.getlantern.spark.tunnel.systemextension`, **hardened
+  runtime + Developer-ID + secure timestamp + `get-task-allow` STRIPPED** (notarization-ready), and the
+  sysext still validly signed. **REMAINING:** the live gate (launch the Flutter app → approve sysext →
+  connect → browse); a CI job for the GUI DMG (mirror `package-macos-app`); drop the unused
+  `spark_bridge` framework from the macOS build.
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

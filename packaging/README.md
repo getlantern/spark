@@ -80,9 +80,28 @@ adding the repo secrets `MACOS_CERT_P12`/`MACOS_CERT_PASSWORD` (base64 `.p12` + 
 `MACOS_PROFILE_APP`/`MACOS_PROFILE_TUNNEL` (base64 profiles), and `AC_USERNAME`/`AC_PASSWORD`
 (notarytool). The job uploads the DMG to the same GitHub Release.
 
-> **Follow-up:** today the controlling app is the `platforms/apple` SwiftUI harness. Making the
-> Flutter `gui/` app the controlling app (embedding the same sysext, driving it via a
-> NetworkExtension platform-channel backend) is the integration tracked in ADR 0005.
+### Flutter controlling-app DMG (the product)
+
+`build-dmg.sh` above packages the `platforms/apple` **SwiftUI harness** (lean, ~1 MB — useful for
+testing the sysext in isolation). The actual product is the **Flutter `gui/` app as the controlling
+app** (ADR 0005), built by **`packaging/macos/build-gui-dmg.sh`**: it builds the signed system
+extension via the platforms/apple archive, runs `flutter build macos --release`, **embeds the sysext**
+into the Flutter `.app`, **re-signs the bundle** (seals the sysext, strips `get-task-allow`, applies
+the hardened runtime — making it notarizable), then DMG → notarize+staple → verify. Same env/creds as
+`build-dmg.sh`:
+
+```bash
+SKIP_NOTARIZE=1 packaging/macos/build-gui-dmg.sh                 # dry run -> dist/spark-gui-<ver>-macos-arm64.dmg
+AC_USERNAME=<apple-id> AC_PASSWORD=<app-pw> VERSION=0.1.0 packaging/macos/build-gui-dmg.sh   # notarized
+```
+
+The Flutter app reuses bundle id `org.getlantern.spark` (so the "Spark macOS App" profile applies) and
+drives the NE system extension via the native `spark/ne` channel (`gui/macos/Runner/SparkVPN.swift` ↔
+`gui/lib/ne_backend.dart`). It's ~45 MB (the Flutter engine), vs the ~1 MB SwiftUI harness.
+
+> **Remaining:** the live gate (launch → approve the sysext → connect → browse); a CI job mirroring
+> `package-macos-app` for the GUI DMG; and dropping the unused `spark_bridge` framework (the
+> Linux/Windows FrbBackend dependency) from the macOS build.
 
 ## Linux — systemd
 
