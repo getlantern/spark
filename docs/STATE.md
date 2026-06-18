@@ -414,10 +414,25 @@
   production impact (release is constant-stack; `MAX_TRANSFORM_LEN` safe); debug tests just keep
   per-call sizes small and the large-transform test is `#[cfg(not(debug_assertions))]`. Also avoid
   always-`Ready` mock readers in async tests (they collapse a transfer into one giant synchronous
-  poll); the chunked test's reader yields `Pending` like a real socket. Debug 10 / release 11 tests
-  green; clippy (feature+default) + fmt + workspace check clean. **Next: chunk 3 — the `Transport`
-  impl** (dial a spark server, a handshake to convey the target, wrap the server stream in
-  `TransformStream`), then Ed25519 module signing + out-of-band delivery.
+  poll); the chunked test's reader yields `Pending` like a real socket.
+  **SIGNED MODULE LOADING BUILT 2026-06-17 (chunk 3; user picked this over Transport-wiring as the
+  next step).** `core/src/transport/wasm/signing.rs`: a delivered module is a signed artifact —
+  `MAGIC "SPKW" || version:u32 BE || name_len:u16 || name || wasm_len:u32 || wasm || sig:64`, the
+  Ed25519 signature covering everything before it. `ModuleVerifier::new([u8;32] pinned pubkey)
+  .verify(artifact, min_version) -> SignedModule{name,version,module}`: (1) authenticate the WHOLE
+  payload (ring `UnparsedPublicKey`+`ED25519`) BEFORE parsing, so the length-prefixed name/wasm
+  fields are trusted when read (no malicious-length over-read/alloc); (2) anti-rollback — reject
+  `version < min_version` (a correctly-signed *old* module is still an attack; caller supplies the
+  floor = highest installed); (3) compile via `TransformModule::load`. Private key never in core —
+  signing is external tooling; core only assembles (`signing_payload`/`build_artifact`) + verifies.
+  6 tests (verify+load+run, tampered-wasm→BadSignature, wrong-key→BadSignature, rollback rejected /
+  current+newer accepted, truncated, bad-magic-even-when-signed). Debug 16 / release 17 tests green;
+  clippy (feature+default) + fmt + workspace check clean. **Next (Path B remaining):** (a) the
+  `Transport` impl + a matching server (dial server, handshake the target, wrap in `TransformStream`)
+  — needs a server/handshake design pass; (b) a richer module ABI (handshake/negotiate phase +
+  host-fn AEAD/hash beyond `host_rand`); (c) the delivery path (fetch artifact over the config/
+  fronting channel) + a persisted per-name version floor; (d) pin a real Ed25519 pubkey const at
+  build time (verifier currently takes the key as a param).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

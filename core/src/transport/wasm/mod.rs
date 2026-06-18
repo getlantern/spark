@@ -30,7 +30,9 @@ use std::sync::Arc;
 use ring::rand::{SecureRandom, SystemRandom};
 use wasmi::{Caller, Engine, Extern, Linker, Memory, Module, Store, TypedFunc};
 
+mod signing;
 mod stream;
+pub use signing::{build_artifact, signing_payload, ModuleError, ModuleVerifier, SignedModule};
 pub use stream::TransformStream;
 
 /// Import module name the host functions are defined under.
