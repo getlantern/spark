@@ -477,12 +477,26 @@
   passthrough 113–255 Gb/s **unchanged within noise** (negligible interpreted work to meter), so fuel
   is effectively free on the realistic path. Debug 22 / release 24 green; clippy(feature+default)+fmt+
   workspace clean.
-  **PATH B STATUS: the in-process pipeline is complete + hardened** — signed/verified load →
-  instantiate (+config) → native-crypto host fns → obfuscated `Transport`/`WasmServer` tunnel, fuel-
-  bounded. **Remaining (lower priority):** (a) UDP path (UoT-over-`TransformStream`); (c) delivery
-  (fetch artifact over config/fronting) + `transport.wasm` config wiring in `from_config` + persisted
-  per-name version floor; (d) pin a real Ed25519 pubkey const at build time; plus the v0 ABI niceties
-  (explicit `dealloc`/arena-reset, AAD param on the AEAD host fns).
+  **UDP PATH BUILT 2026-06-17 (chunk 7 = item a).** `impl UdpTransport for WasmTransport::dial_udp`:
+  mirrors the tunnel client's UoT — obfuscated associate handshake (`udp_associate_sentinel` +
+  target via `transform_out`), then `TcpStream::into_split()` into `WasmUdpSink` (PacketSink) +
+  `WasmUdpSource` (PacketSource). The two halves live in different tasks (netstack send loop / reply
+  pump) but ONE `Transform` serves both directions, so it's shared via `Arc<std::sync::Mutex<
+  Transform>>` — locked only for the synchronous transform call, **never across an `.await`** (free
+  `transform_out`/`transform_in` helpers enforce this). Sink frames `[u16 len][payload]` →
+  transform_out → write; source reads → transform_in → reassembles frames in a buffer (truncation
+  semantics, EOF = Ok(0), matching `TunnelUdpSource`). Server side stays single-task: a whole
+  `TransformStream` (read plaintext / write plaintext, obfuscation transparent), so no split/mutex
+  there. End-to-end test: two datagrams round-trip through an in-test obfuscated UDP echo relay
+  (proves frame alignment holds across calls). Debug 23 / release 25 green; clippy(feature+default)+
+  fmt+workspace clean.
+  **PATH B STATUS: the in-process pipeline is complete + hardened, TCP + UDP** — signed/verified load
+  → instantiate (+config) → native-crypto host fns → obfuscated `Transport`+`UdpTransport`/
+  `WasmServer` tunnel, fuel-bounded. **Remaining (lower priority):** (c) delivery (fetch artifact
+  over config/fronting) + `transport.wasm` config wiring in `from_config` + persisted per-name
+  version floor; (d) pin a real Ed25519 pubkey const at build time; plus v0 ABI niceties (explicit
+  `dealloc`/arena-reset, AAD param on the AEAD host fns, per-datagram-buffering caveat in the UDP
+  source for modules that don't emit output per call).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,

@@ -14,17 +14,26 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use bytes::BytesMut;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use bytes::{Buf, BufMut, BytesMut};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
-use super::{TransformModule, TransformStream};
+use super::{Transform, TransformModule, TransformStream};
 use crate::net::SocketProtector;
 use crate::transport::tcp_tunnel::header::Address;
 use crate::transport::tcp_tunnel::stream::read_header;
-use crate::transport::{protected_tcp_connect, Transport};
+use crate::transport::tcp_tunnel::udp::udp_associate_sentinel;
+use crate::transport::{
+    protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, PacketSink, PacketSource, Transport,
+    UdpTransport,
+};
 use crate::BoxedStream;
+
+/// Scratch buffer size for a raw read from the connection before deobfuscation (UDP source).
+const UDP_READ_SCRATCH: usize = 16 * 1024;
 
 /// A dynamic-transport client: dials a spark server, obfuscates the connection with a wasm module,
 /// and announces the target over the obfuscated stream. One [`Transform`](super::Transform) is
@@ -111,6 +120,127 @@ impl WasmServer {
     }
 }
 
+#[async_trait]
+impl UdpTransport for WasmTransport {
+    async fn dial_udp(
+        &self,
+        target: SocketAddr,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        // One transform instance serves both directions; the split halves (which live in different
+        // tasks — the netstack send loop and the reply pump) share it behind a Mutex. The transform
+        // call is synchronous and the guard is never held across an `.await`.
+        let transform = Arc::new(Mutex::new(
+            self.module
+                .instantiate()
+                .map_err(|e| io::Error::other(e.to_string()))?,
+        ));
+
+        // UDP-associate handshake (obfuscated): the sentinel switches the server to UDP relay mode,
+        // then the real target follows (connect-mode — no per-datagram address after this).
+        let mut header = BytesMut::new();
+        udp_associate_sentinel().encode(&mut header);
+        Address::from(target).encode(&mut header);
+        let header_wire = transform_out(&transform, &header)?;
+        conn.write_all(&header_wire).await?;
+
+        let (read, write) = conn.into_split();
+        Ok((
+            Box::new(WasmUdpSink {
+                write,
+                transform: Arc::clone(&transform),
+            }),
+            Box::new(WasmUdpSource {
+                read,
+                transform,
+                buf: BytesMut::new(),
+                scratch: vec![0u8; UDP_READ_SCRATCH].into_boxed_slice(),
+            }),
+        ))
+    }
+}
+
+/// Connect-mode UDP send half: frame each datagram as `[u16 BE len][payload]`, obfuscate it through
+/// the shared transform, and write it to the connection.
+struct WasmUdpSink {
+    write: OwnedWriteHalf,
+    transform: Arc<Mutex<Transform>>,
+}
+
+#[async_trait]
+impl PacketSink for WasmUdpSink {
+    async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
+        if payload.len() > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "UDP payload exceeds the 2-byte length field",
+            ));
+        }
+        let mut frame = BytesMut::with_capacity(2 + payload.len());
+        frame.put_u16(payload.len() as u16);
+        frame.put_slice(payload);
+        let wire = transform_out(&self.transform, &frame)?;
+        self.write.write_all(&wire).await
+    }
+}
+
+/// Connect-mode UDP receive half: read obfuscated bytes, deobfuscate through the shared transform,
+/// and reassemble `[u16 BE len][payload]` frames.
+struct WasmUdpSource {
+    read: OwnedReadHalf,
+    transform: Arc<Mutex<Transform>>,
+    /// Deobfuscated bytes awaiting frame reassembly.
+    buf: BytesMut,
+    /// Reused scratch for raw reads (allocated once, not per datagram).
+    scratch: Box<[u8]>,
+}
+
+#[async_trait]
+impl PacketSource for WasmUdpSource {
+    async fn recv(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        loop {
+            // A whole `[u16 len][payload]` frame buffered? Deliver it (truncating to `out`, but
+            // consuming the full datagram to stay frame-aligned — UDP truncation semantics).
+            if self.buf.len() >= 2 {
+                let len = u16::from_be_bytes([self.buf[0], self.buf[1]]) as usize;
+                if self.buf.len() >= 2 + len {
+                    self.buf.advance(2);
+                    let n = len.min(out.len());
+                    out[..n].copy_from_slice(&self.buf[..n]);
+                    self.buf.advance(len);
+                    return Ok(n);
+                }
+            }
+            // Otherwise read more wire bytes and deobfuscate them into `buf`.
+            let n = self.read.read(&mut self.scratch).await?;
+            if n == 0 {
+                return Ok(0); // connection closed
+            }
+            let recovered = transform_in(&self.transform, &self.scratch[..n])?;
+            self.buf.extend_from_slice(&recovered);
+        }
+    }
+}
+
+/// Lock the shared transform, run `transform_out`, and release before returning (no guard is held
+/// across an `.await`). Maps a poisoned lock or a transform error to an `io::Error`.
+fn transform_out(transform: &Mutex<Transform>, input: &[u8]) -> io::Result<Vec<u8>> {
+    let mut t = transform
+        .lock()
+        .map_err(|_| io::Error::other("wasm transform mutex poisoned"))?;
+    t.transform_out(input)
+        .map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// The inbound counterpart to [`transform_out`].
+fn transform_in(transform: &Mutex<Transform>, input: &[u8]) -> io::Result<Vec<u8>> {
+    let mut t = transform
+        .lock()
+        .map_err(|_| io::Error::other("wasm transform mutex poisoned"))?;
+    t.transform_in(input)
+        .map_err(|e| io::Error::other(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +301,93 @@ mod tests {
         let mut got = vec![0u8; message.len()];
         stream.read_exact(&mut got).await.expect("read");
         assert_eq!(got.as_slice(), &message[..]);
+    }
+
+    /// Read the `[sentinel][target]` UDP-associate handshake from a (deobfuscating) stream, returning
+    /// the announced target. Leftover bytes past the two addresses stay in `buf`.
+    async fn read_udp_handshake<S: AsyncRead + Unpin>(
+        stream: &mut S,
+        buf: &mut BytesMut,
+    ) -> Address {
+        let mut chunk = [0u8; 512];
+        loop {
+            if let Ok((_sentinel, n1)) = Address::parse(buf) {
+                if let Ok((target, n2)) = Address::parse(&buf[n1..]) {
+                    buf.advance(n1 + n2);
+                    return target;
+                }
+            }
+            let n = stream.read(&mut chunk).await.expect("read handshake");
+            assert!(n > 0, "EOF during UDP handshake");
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// Read one `[u16 len][payload]` frame from a (deobfuscating) stream, or `None` at EOF.
+    async fn read_frame<S: AsyncRead + Unpin>(
+        stream: &mut S,
+        buf: &mut BytesMut,
+    ) -> Option<Vec<u8>> {
+        let mut chunk = [0u8; 512];
+        loop {
+            if buf.len() >= 2 {
+                let len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+                if buf.len() >= 2 + len {
+                    buf.advance(2);
+                    let payload = buf[..len].to_vec();
+                    buf.advance(len);
+                    return Some(payload);
+                }
+            }
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_round_trips_through_the_obfuscated_tunnel() {
+        let module = xor_module();
+
+        // The wasm UDP server: deobfuscate, read the associate handshake, echo framed datagrams.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let server_addr = listener.local_addr().expect("server addr");
+        let server_module = module.clone();
+        tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.expect("accept");
+            // The whole stream is owned by this one task (read + write), so no split is needed
+            // server-side; TransformStream deobfuscates reads and obfuscates writes transparently.
+            let mut wrapped =
+                TransformStream::new(conn, server_module.instantiate().expect("instantiate"));
+            let mut buf = BytesMut::new();
+            let _target = read_udp_handshake(&mut wrapped, &mut buf).await;
+            while let Some(payload) = read_frame(&mut wrapped, &mut buf).await {
+                let mut reply = BytesMut::with_capacity(2 + payload.len());
+                reply.put_u16(payload.len() as u16);
+                reply.put_slice(&payload);
+                if wrapped.write_all(&reply).await.is_err() {
+                    break;
+                }
+                wrapped.flush().await.ok();
+            }
+        });
+
+        let transport = WasmTransport::new(server_addr, module);
+        let (mut sink, mut source) = transport
+            .dial_udp("198.51.100.7:53".parse().expect("addr"))
+            .await
+            .expect("dial_udp");
+
+        // Two datagrams, to prove the framed stream stays aligned across calls.
+        sink.send(b"dns query").await.expect("send 1");
+        let mut got = [0u8; 64];
+        let n = source.recv(&mut got).await.expect("recv 1");
+        assert_eq!(&got[..n], b"dns query");
+
+        sink.send(b"second datagram").await.expect("send 2");
+        let n = source.recv(&mut got).await.expect("recv 2");
+        assert_eq!(&got[..n], b"second datagram");
     }
 }
