@@ -45,12 +45,19 @@ What's DONE (this and prior sessions; all on `main`, pushed):
   auth needs **no ECDH** — `derivePSK` HKDFs the server pubkey bytes directly as IKM.
 
 **NEXT (in rough priority):**
-0. **Samizdat (branch `samizdat-transport`) — chunked build per §10 of the design doc.** NEXT CHUNK:
-   `core/src/transport/samizdat/auth.rs` — PSK + 32-byte SessionID in pure `ring`
-   (`HKDF-SHA256(ikm=serverPubKey, salt=shortID, info="SAMIZDAT")` → `HMAC-SHA256(PSK, nonce)[:16]`,
-   layout `shortID(8)‖nonce(8)‖tag(16)`), behind a new `samizdat` cargo feature, with vectors
-   cross-checked vs Go `auth.go`. Then `session_id.rs` (the kID recipe above), `h2.rs` (h2-crate
-   CONNECT ⇄ AsyncRead+AsyncWrite), `transport.rs` + config wiring, then interop + TUN gates.
+0. **Samizdat (branch `samizdat-transport`) — chunked build per §10 of the design doc.**
+   - **Chunk 1 — auth.rs DONE 2026-06-19 (TDD; commit `977242e`).** New `samizdat = []` cargo feature
+     gates `core/src/transport/samizdat/`. `auth.rs` = PSK + 32-byte SessionID in pure `ring`
+     (`HKDF-SHA256(ikm=serverPubKey, salt=shortID, info="SAMIZDAT")` → `HMAC-SHA256(PSK, nonce)[:16]`,
+     layout `shortID(8)‖nonce(8)‖tag(16)`). 3 tests vs vectors captured from Go `auth.go` +
+     cross-checked through the package's `VerifySessionID` (ok=true; generator `/tmp/sz-vec`). clippy
+     -Dwarnings + fmt clean (feature on/off); default build unaffected.
+   - **NEXT CHUNK: `session_id.rs`** — the kID SessionID-injection seam realizing the validated recipe
+     (see the verified-API note above: `SSL_SESSION_new` → `set_protocol_version(TLS1_2)` →
+     `SSL_SESSION_set1_id` → `set_time`/`set_timeout` → `SSL_set_session`). This is the first chunk that
+     pulls boring2, so extend the `samizdat` feature to `["dep:boring2","dep:tokio-boring2"]` (+ likely
+     reuse `anytls/tls.rs`). Then `h2.rs` (h2-crate CONNECT ⇄ AsyncRead+AsyncWrite), `transport.rs` +
+     config wiring, then interop + TUN gates. Reference impl for the FFI: `/tmp/kid-spike`.
 1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
    (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
    `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:
