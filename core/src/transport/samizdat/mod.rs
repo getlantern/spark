@@ -9,6 +9,8 @@
 //! - [`auth`]: the SessionID auth crypto (HKDF/HMAC over the server public key + short ID).
 //! - [`session_id`]: the no-fork `kID` seam that injects the auth SessionID into the boring
 //!   ClientHello's `legacy_session_id`.
+//! - [`h2_mux`]: the HTTP/2 CONNECT multiplexer (one TLS conn → many tunnel streams).
 
 pub mod auth;
+pub mod h2_mux;
 pub mod session_id;

@@ -36,6 +36,9 @@ tokio-boring2 = { workspace = true, optional = true }
 # FFI access for the Samizdat kID SessionID-injection seam (ADR 0007 §5); pulled by `samizdat` only.
 boring-sys2 = { workspace = true, optional = true }
 foreign-types-shared = { workspace = true, optional = true }
+# HTTP/2 CONNECT mux for the Samizdat transport (ADR 0007 §4); pulled by `samizdat` only.
+h2 = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
 # wasmi: the Path B dynamic-transport runtime (ADR 0003). Optional — only the `wasm-transport`
 # feature pulls it, so the base build carries no WASM interpreter.
 wasmi = { workspace = true, optional = true }
@@ -59,4 +62,11 @@ wasm-transport = ["dep:wasmi"]
 # interoperable with deployed lantern-box `"samizdat"` servers. `auth.rs` needs only `ring`; the
 # `session_id.rs` kID-injection seam pulls the boring TLS backend + its FFI. (A later chunk adds the
 # `h2` dep for CONNECT muxing.)
-samizdat = ["dep:boring2", "dep:tokio-boring2", "dep:boring-sys2", "dep:foreign-types-shared"]
+samizdat = [
+    "dep:boring2",
+    "dep:tokio-boring2",
+    "dep:boring-sys2",
+    "dep:foreign-types-shared",
+    "dep:h2",
+    "dep:http",
+]
