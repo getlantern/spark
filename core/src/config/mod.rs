@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::transport::gambit::{ClientHello, Records};
+
 /// Top-level configuration. Each section has defaults, so missing sections and fields fall
 /// back rather than erroring.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -198,6 +200,14 @@ pub struct AnytlsConfig {
     /// TLS SNI to present; defaults to the server's IP literal when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
+    /// Inline Layer-A ClientHello knobs (ADR 0006 P2 gambit genome). Default = the Chrome-137
+    /// anchor (byte-identical to the prior hardcoded handshake). This is an operator-set *local*
+    /// profile; signed, discovery-deployed gambits use the same vocabulary over a verified channel.
+    #[serde(default)]
+    pub clienthello: ClientHello,
+    /// Inline Layer-B record-framing knobs (`size_limit`, `split_offsets`). Default = the anchor.
+    #[serde(default)]
+    pub records: Records,
 }
 
 /// UDP forwarding settings.
@@ -379,5 +389,32 @@ mod tests {
     fn unknown_keys_are_rejected() {
         let err = Config::from_toml_str("[tun]\nbogus = 1\n").unwrap_err();
         assert!(matches!(err, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn parses_inline_anytls_gambit_knobs() {
+        use crate::transport::gambit::EchMode;
+        let c = Config::from_toml_str(
+            r#"
+            [transport.anytls]
+            server = "192.0.2.1:443"
+            password = "hunter2"
+            sni = "www.example.com"
+
+            [transport.anytls.clienthello]
+            ech = "off"
+            pq_kem = false
+
+            [transport.anytls.records]
+            size_limit = 1300
+        "#,
+        )
+        .unwrap();
+        let anytls = c.transport.anytls.expect("anytls config");
+        assert_eq!(anytls.clienthello.ech, Some(EchMode::Off));
+        assert_eq!(anytls.clienthello.pq_kem, Some(false));
+        assert_eq!(anytls.records.size_limit, Some(1300));
+        // An omitted gambit section defaults to the Chrome-137 anchor (all-None).
+        assert_eq!(anytls.clienthello.alps, None);
     }
 }

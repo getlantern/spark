@@ -131,6 +131,12 @@ fn anytls_transport(
         .sni
         .clone()
         .unwrap_or_else(|| cfg.server.ip().to_string());
+    // Resolve the inline gambit genome (Layers A/B) onto the boring executor (ADR 0006 P2). Knobs
+    // boring2 can't realize are surfaced once here, never silently dropped.
+    let resolved = anytls::profile::Profile::resolve(&cfg.clienthello, &cfg.records);
+    for note in &resolved.unrealizable {
+        tracing::warn!(knob = note, "anytls gambit knob not realizable on boring");
+    }
     // One transport serves both TCP and UDP (UoT v2), sharing the session pool.
     let t = Arc::new(anytls::AnytlsTransport::new(
         cfg.server,
@@ -138,6 +144,7 @@ fn anytls_transport(
         sni,
         protector,
         wire,
+        resolved.profile,
     ));
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
 }

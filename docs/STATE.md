@@ -1071,7 +1071,30 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **P2 STARTED — gambit genome decode + signed envelope (ADR 0006) 2026-06-19 (commit pending).**
+- **P2 — gambit knobs drive the boring connector (ADR 0006) 2026-06-19 (commit pending).** The
+  AnyTLS TLS connector is no longer a hardcoded Chrome-137 profile — it applies a gambit's Layer-A
+  (ClientHello) + Layer-B (records) knobs. New `core/src/transport/anytls/profile.rs` (feature
+  `anytls`): `Profile::resolve(&ClientHello, &Records) -> Resolved {profile, unrealizable}` maps the
+  genome onto boring, and `Profile::for_boring(&Gambit)` gates a *signed* gambit's `requires` against
+  `BORING_CAPABILITIES = [Ech, Alps, PqKem]` (declines `session_id_inject`/`raw_clienthello` — uTLS-now
+  / spark-P4). `tls::connect` now takes `&Profile`; it parameterizes GREASE, extension permutation,
+  the PQ supported-group (`CHROME_CURVES_NO_PQ` when `pq_kem` off), `record_size_limit`, ECH grease,
+  and ALPS — the cipher/sigalg lists + cert-compression + ALPN + OCSP/SCT stay the fixed anchor.
+  **`Profile::default()` is the byte-exact Chrome-137 baseline, so the live gate is unchanged.**
+  Verified API surface against the boring2 4.15 source first (per the repo's verification discipline):
+  **expressible** = GREASE on/off, permute on/off (no seed), groups list, `set_record_size_limit`,
+  ECH grease, ALPS; **not expressible** = explicit order-by-id, exact GREASE/permute seed,
+  ClientHello padding-to-length, `legacy_session_id` inject, record split_offsets — these are
+  **surfaced (logged `warn` once at construction), never silently dropped**, awaiting the P4
+  byte-builder. Made live via inline `[transport.anytls.clienthello]` / `[transport.anytls.records]`
+  TOML (reuses the already-`Deserialize` genome types — an operator-set *local* profile; signed
+  remote delivery is the next chunk). **Verified:** 5 profile unit tests (baseline; expressible knobs;
+  unrealizable-knobs-surfaced; for_boring accept/decline) + 1 config parse test; core `--all-features`
+  166 tests, default 101, clippy `--all-features -D warnings` + fmt + `cargo check --workspace
+  --all-features` green. **Next P2 increment:** signed-gambit *delivery* — a verified file source
+  (pinned Ed25519 key + persisted anti-rollback floor, mirroring `wasm_transport`) feeding
+  `Profile::for_boring`, plus real ECH (ECHConfig) wiring; then P3 (Path B computes the gambit).
+- **P2 STARTED — gambit genome decode + signed envelope (ADR 0006) 2026-06-19 (committed `d561ccd`).**
   New `core/src/transport/gambit.rs` (always-on): the **locked v1 genome as Rust** (design doc §2) —
   `Gambit` {genome_version, version (monotonic), id, anchor, clienthello (Layer A), records (Layer B),
   wire (Layer C), requires}, the `Capability` closed vocabulary (`ech`/`alps`/`pq_kem`/

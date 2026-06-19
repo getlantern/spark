@@ -24,6 +24,7 @@ use crate::transport::{
 };
 use crate::BoxedStream;
 
+use super::profile::Profile;
 use super::{tls, udp, PaddingScheme, Session};
 
 /// Open a new session once a session is carrying this many streams (spreads load / bounds HOL).
@@ -46,6 +47,8 @@ struct Inner {
     protector: Option<SocketProtector>,
     /// Opening-handshake shaping for each new TLS connection (ADR 0006 Phase 1).
     wire: WirePlan,
+    /// Gambit-resolved ClientHello/record knobs for the boring handshake (ADR 0006 P2).
+    profile: Profile,
     pool: Mutex<Vec<Arc<Session>>>,
 }
 
@@ -59,6 +62,7 @@ impl AnytlsTransport {
         sni: String,
         protector: Option<SocketProtector>,
         wire: WirePlan,
+        profile: Profile,
     ) -> Self {
         let inner = Arc::new(Inner {
             server,
@@ -66,6 +70,7 @@ impl AnytlsTransport {
             sni,
             protector,
             wire,
+            profile,
             pool: Mutex::new(Vec::new()),
         });
         let sweep = tokio::spawn(sweep_loop(Arc::clone(&inner)));
@@ -103,7 +108,7 @@ impl Inner {
         // Shape the opening write (the ClientHello) — e.g. fragment it across the SNI boundary —
         // by sitting between boring and the socket (ADR 0006 Phase 1).
         let shaped = SegmentShapingStream::new(tcp, self.wire.clone());
-        let tls = tls::connect(shaped, &self.sni).await?;
+        let tls = tls::connect(shaped, &self.sni, &self.profile).await?;
         let session = Arc::new(Session::client(
             tls,
             &self.password,
