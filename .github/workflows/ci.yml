@@ -37,15 +37,21 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
-  # Belt-and-suspenders: each host also confirms it can *cross-check* the other two desktop
-  # targets, so a unix-only/windows-only break is caught even from one runner.
+  # Belt-and-suspenders compile check per desktop target (default features + `-D warnings`),
+  # complementing the per-OS `test` jobs (which run `--all-features`). Each target is checked on a
+  # host with its native C toolchain: `ring`'s build needs the target's archiver (MSVC `lib.exe` for
+  # *-windows-msvc), which isn't available when cross-compiling to MSVC from Linux.
   cross-check:
     name: cross-check (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu]
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
