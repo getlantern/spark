@@ -53,6 +53,9 @@ fn username_of(uid: u32) -> Option<CString> {
 /// Wrap `getgrouplist` for `name` with primary group `gid`. Retries once with the
 /// kernel-reported size if the initial buffer is too small; falls back to `[gid]` on failure.
 #[cfg(unix)]
+// `RawGid` is `u32` on Linux but `i32` on macOS (`getgrouplist` takes `int`), so the `g as u32`
+// below is necessary on macOS and only redundant on Linux — allow the platform-conditional cast.
+#[allow(clippy::unnecessary_cast)]
 fn grouplist(name: &CStr, gid: u32) -> Vec<u32> {
     // Typical accounts belong to a handful of groups; 32 covers the common case in one call.
     let mut capacity: libc::c_int = 32;
