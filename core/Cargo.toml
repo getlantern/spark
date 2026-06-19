@@ -52,3 +52,7 @@ system-stack = []
 # Path B dynamic transport (ADR 0003): a wasmi-hosted byte-transform module. Off by default so the
 # base build carries no WASM runtime. See docs/dynamic-transports-design.md §8.4.
 wasm-transport = ["dep:wasmi"]
+# Samizdat transport (ADR 0007): REALITY-style auth in the TLS SessionID + H2 CONNECT mux,
+# interoperable with deployed lantern-box `"samizdat"` servers. The auth chunk needs only `ring`
+# (unconditional); later TLS/H2 chunks extend this to pull boring2/tokio-boring2 + h2.
+samizdat = []

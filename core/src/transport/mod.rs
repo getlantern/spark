@@ -36,6 +36,11 @@ pub mod discovery;
 pub mod gambit;
 /// JA4 TLS-client fingerprinting (ADR 0006 §4): the anchor drift check over a ClientHello record.
 pub mod ja4;
+/// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
+/// mux, wire-interoperable with deployed lantern-box `"samizdat"` servers. Behind the `samizdat`
+/// feature so the base build pulls neither the boring TLS backend nor the `h2` dependency.
+#[cfg(feature = "samizdat")]
+pub mod samizdat;
 /// Socket-layer opening-handshake framing/timing (ADR 0006 Phase 1): fragment the ClientHello
 /// across TCP segments (e.g. at the SNI boundary) with optional inter-segment delay.
 pub mod shaping;
