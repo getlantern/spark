@@ -47,8 +47,16 @@ struct Inner {
     protector: Option<SocketProtector>,
     /// Opening-handshake shaping for each new TLS connection (ADR 0006 Phase 1).
     wire: WirePlan,
-    /// Gambit-resolved ClientHello/record knobs for the boring handshake (ADR 0006 P2).
+    /// Static gambit-resolved ClientHello/record knobs (ADR 0006 P2); also the fallback when a
+    /// dynamic [`Inner::gambit_source`] faults or yields a gambit boring can't realize.
     profile: Profile,
+    /// Optional Path-B module that **computes** a fresh gambit per connection (ADR 0006 P3). When
+    /// present, each new TLS session resolves its [`Profile`] from this module instead of `profile`.
+    /// `Mutex` because the `wasmi` `Transform` is `!Sync` and stateful (a gambit may be
+    /// adaptive/stateful across connections); the lock is held only for the synchronous compute,
+    /// never across the handshake `.await`.
+    #[cfg(feature = "wasm-transport")]
+    gambit_source: Option<Mutex<crate::transport::wasm::Transform>>,
     pool: Mutex<Vec<Arc<Session>>>,
 }
 
@@ -64,15 +72,48 @@ impl AnytlsTransport {
         wire: WirePlan,
         profile: Profile,
     ) -> Self {
-        let inner = Arc::new(Inner {
+        Self::spawn(Inner {
             server,
             password,
             sni,
             protector,
             wire,
             profile,
+            #[cfg(feature = "wasm-transport")]
+            gambit_source: None,
             pool: Mutex::new(Vec::new()),
-        });
+        })
+    }
+
+    /// Like [`new`](Self::new) but with a Path-B `gambit` module that computes a fresh gambit per
+    /// connection (ADR 0006 P3). `profile` is the fallback used when the module faults or its gambit
+    /// exceeds boring's capabilities, so connectivity never depends on the dynamic gambit succeeding.
+    #[cfg(feature = "wasm-transport")]
+    pub fn with_dynamic_gambit(
+        server: SocketAddr,
+        password: String,
+        sni: String,
+        protector: Option<SocketProtector>,
+        wire: WirePlan,
+        profile: Profile,
+        gambit: crate::transport::wasm::Transform,
+    ) -> Self {
+        Self::spawn(Inner {
+            server,
+            password,
+            sni,
+            protector,
+            wire,
+            profile,
+            gambit_source: Some(Mutex::new(gambit)),
+            pool: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Wrap an [`Inner`] in the shared `Arc` and spawn its idle sweep (must run within a tokio
+    /// runtime).
+    fn spawn(inner: Inner) -> Self {
+        let inner = Arc::new(inner);
         let sweep = tokio::spawn(sweep_loop(Arc::clone(&inner)));
         Self { inner, sweep }
     }
@@ -108,7 +149,8 @@ impl Inner {
         // Shape the opening write (the ClientHello) — e.g. fragment it across the SNI boundary —
         // by sitting between boring and the socket (ADR 0006 Phase 1).
         let shaped = SegmentShapingStream::new(tcp, self.wire.clone());
-        let tls = tls::connect(shaped, &self.sni, &self.profile).await?;
+        let profile = self.resolve_profile();
+        let tls = tls::connect(shaped, &self.sni, &profile).await?;
         let session = Arc::new(Session::client(
             tls,
             &self.password,
@@ -117,6 +159,47 @@ impl Inner {
         let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         pool.push(Arc::clone(&session));
         Ok(session)
+    }
+
+    /// The boring [`Profile`] for a new TLS session. With a dynamic [`gambit_source`](Self::
+    /// gambit_source) (ADR 0006 P3), compute a fresh gambit and resolve it onto boring; **fall back
+    /// to the static `profile`** if the module faults, returns an undecodable gambit, or yields one
+    /// boring can't realize — a dynamic gambit must never break connectivity (boring always
+    /// completes the handshake; a declined gambit degrades to the portable default).
+    #[cfg(feature = "wasm-transport")]
+    fn resolve_profile(&self) -> Profile {
+        let Some(source) = &self.gambit_source else {
+            return self.profile.clone();
+        };
+        let mut transform = source.lock().unwrap_or_else(|e| e.into_inner());
+        // Per-connection context is reserved (ADR 0006 §6 gambit-id/region signaling); empty for now.
+        match transform.compute_gambit(&[]) {
+            Ok(gambit) => match Profile::for_boring(&gambit) {
+                Ok(resolved) => {
+                    for note in &resolved.unrealizable {
+                        tracing::warn!(
+                            knob = note,
+                            "computed gambit knob not realizable on boring"
+                        );
+                    }
+                    resolved.profile
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "computed gambit declined by boring; using static profile");
+                    self.profile.clone()
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_gambit failed; using static profile");
+                self.profile.clone()
+            }
+        }
+    }
+
+    /// Without the `wasm-transport` feature there is no dynamic source — the static profile is used.
+    #[cfg(not(feature = "wasm-transport"))]
+    fn resolve_profile(&self) -> Profile {
+        self.profile.clone()
     }
 }
 
@@ -171,5 +254,94 @@ impl UdpTransport for AnytlsTransport {
         let session = self.inner.acquire().await?;
         let stream = session.open_stream().await?;
         udp::associate(stream, target).await
+    }
+}
+
+#[cfg(all(test, feature = "wasm-transport"))]
+mod tests {
+    use super::*;
+    use crate::transport::gambit::{Capability, ClientHello, EchMode, Gambit, Records};
+    use crate::transport::wasm::{Transform, TransformModule};
+
+    /// A Path-B module that, on `compute_gambit`, returns the postcard encoding of `g`.
+    fn gambit_transform(g: &Gambit) -> Transform {
+        let bytes = postcard::to_stdvec(g).expect("encode gambit");
+        let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
+        let wat = format!(
+            r#"
+(module
+  (memory (export "memory") 2)
+  (data (i32.const 2048) "{escaped}")
+  (func (export "alloc") (param $len i32) (result i32) (i32.const 1024))
+  (func (export "compute_gambit") (param $p i32) (param $l i32) (result i64)
+    (i64.or
+      (i64.shl (i64.extend_i32_u (i32.const 2048)) (i64.const 32))
+      (i64.extend_i32_u (i32.const {len})))))
+"#,
+            len = bytes.len()
+        );
+        TransformModule::load(&wat::parse_str(&wat).expect("assemble"))
+            .expect("load")
+            .instantiate()
+            .expect("instantiate")
+    }
+
+    fn transport_with(gambit: &Gambit) -> AnytlsTransport {
+        AnytlsTransport::with_dynamic_gambit(
+            "127.0.0.1:1".parse().unwrap(),
+            "pw".into(),
+            "example.com".into(),
+            None,
+            WirePlan::default(),
+            Profile::default(),
+            gambit_transform(gambit),
+        )
+    }
+
+    fn gambit(clienthello: ClientHello, requires: Vec<Capability>) -> Gambit {
+        Gambit {
+            genome_version: 1,
+            version: 1,
+            id: "dyn".into(),
+            anchor: Default::default(),
+            clienthello,
+            records: Records::default(),
+            wire: Default::default(),
+            requires,
+        }
+    }
+
+    #[tokio::test]
+    async fn per_connection_compute_drives_the_profile() {
+        let g = gambit(
+            ClientHello {
+                ech: Some(EchMode::Off),
+                pq_kem: Some(false),
+                ..Default::default()
+            },
+            vec![Capability::Ech],
+        );
+        let t = transport_with(&g);
+        let profile = t.inner.resolve_profile();
+        // The computed gambit (not the static Profile::default) shaped the handshake.
+        assert!(!profile.ech_grease);
+        assert!(!profile.pq_kem);
+    }
+
+    #[tokio::test]
+    async fn a_gambit_beyond_boring_falls_back_to_the_static_profile() {
+        // requires raw_clienthello → for_boring declines → resolve_profile must return the static
+        // fallback (the default Chrome-137 profile), never break the connection.
+        let g = gambit(
+            ClientHello {
+                ech: Some(EchMode::Off),
+                ..Default::default()
+            },
+            vec![Capability::RawClienthello],
+        );
+        let t = transport_with(&g);
+        let profile = t.inner.resolve_profile();
+        assert_eq!(profile, Profile::default());
+        assert!(profile.ech_grease); // the declined gambit's ech=off did NOT take effect
     }
 }

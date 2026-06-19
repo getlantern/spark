@@ -1071,8 +1071,26 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **P3 (chunk 1) — Path B computes the gambit: the `open`/shape ABI (ADR 0006) 2026-06-19 (commit
-  pending).** The `wasmi` Path B module (`core/src/transport/wasm/`) gains a third **mode** beside the
+- **P3 (chunk 2) — per-connection computed gambit wired into AnyTLS (ADR 0006) 2026-06-19 (commit
+  pending).** `AnytlsTransport` gains an optional dynamic gambit source: `with_dynamic_gambit(...,
+  gambit: wasm::Transform)` stores the Path-B module behind a `Mutex` (the `wasmi` `Transform` is
+  `!Sync` and stateful — a gambit may adapt across connections; the lock is held only for the
+  synchronous compute, never across the handshake `.await`). `Inner::resolve_profile()` — called by
+  `acquire()` per new TLS session — computes a fresh gambit, runs `Profile::for_boring`, and **falls
+  back to the static `profile`** on any fault / undecodable genome / capability decline, so a dynamic
+  gambit can never break connectivity (boring always completes the handshake; a declined gambit
+  degrades to the portable default). Feature-combo isolated cleanly: the field + `with_dynamic_gambit`
+  + the dynamic `resolve_profile` are `#[cfg(feature = "wasm-transport")]` inside the already
+  `anytls`-gated file; an `anytls`-only build keeps a static-profile `resolve_profile`. **Verified:**
+  2 new `#[cfg(all(test, feature = "wasm-transport"))]` `#[tokio::test]`s (per-connection compute
+  drives ech=off/pq=off; a `raw_clienthello` gambit is declined → static fallback, ech-grease stays
+  on); all-features 172 tests, anytls-only 106, clippy clean for `anytls` + `--all-features`, fmt +
+  workspace check green. **Still pending for P3:** the config-driven *source* — a signed Path-B
+  gambit module loaded + verified (pinned key + persisted floor, mirroring `wasm_transport`) and
+  attached via `with_dynamic_gambit` in `anytls_transport`; plus the per-connection `ctx` payload
+  design (target/seq/region, ADR 0006 §6). Then P4 (unconstrained byte-builder + crypto host fns).
+- **P3 (chunk 1) — Path B computes the gambit: the `open`/shape ABI (ADR 0006) 2026-06-19 (committed
+  `2d4abfe`).** The `wasmi` Path B module (`core/src/transport/wasm/`) gains a third **mode** beside the
   byte-transform pair: a `compute_gambit(ctx_ptr, ctx_len) -> packed` export, invoked once per
   connection, that emits a **postcard-encoded `Gambit` genome** (the opening *plan* — CH knobs +
   record/segment framing) rather than stream bytes. `Transform::compute_gambit(&[u8]) -> Result<Gambit,
