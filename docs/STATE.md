@@ -1071,8 +1071,28 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
+- **P4 (chunk 1) — handshake-crypto host-fn menu (ADR 0006) 2026-06-19 (commit pending).** The
+  *unconstrained* regime needs a Path-B module to drive a TLS 1.3 handshake itself; this adds the
+  crypto primitives beside the existing `host_rand`/`host_hash`/ChaCha20-Poly1305 menu (verified
+  against the pinned ring 0.17.14 source; same fault-recording + bounds-checking discipline):
+  `host_hkdf_extract` (HKDF-Extract == HMAC-SHA256, returns the raw 32-byte PRK so the module can run
+  the TLS key schedule), `host_hkdf_expand` (HKDF-Expand-SHA256, module supplies its own
+  `HKDF-Expand-Label` info, bounded 255×32), `host_aes_gcm_seal`/`open` (key_len 16 ⇒ AES-128-GCM,
+  32 ⇒ AES-256-GCM; mirrors the ChaCha20-Poly1305 pattern), and X25519 ECDH via a **host-held
+  ephemeral-key registry** — `host_x25519_generate(out_pub) -> key_id` (private key stays host-side,
+  never enters guest memory — a sandbox win) + `host_x25519_agree(key_id, peer_pub, out)` (consumes
+  the key; one ECDH per handshake; ≤`MAX_X25519_KEYS` live, freed slots reused). Two commits:
+  `b3cbfc7` (HKDF + AES-GCM, stateless) + the X25519 commit (adds `HostState::x25519_keys`).
+  **Verified:** 5 new wat-fixture tests (HKDF vs native ring; AES-GCM round-trip + bad-key-len fault;
+  X25519 agrees with a native peer [module is one party, test the other, shared secrets match] +
+  unknown-key-id fault); all-features 181, clippy `-D warnings` clean default + all-features, fmt +
+  workspace green. **Next P4 increment (large, own design):** the *module-owns-the-handshake* ABI —
+  a handshake-driving loop (host does socket I/O; module produces/consumes raw bytes and runs the
+  TLS-1.3 state machine via these primitives) so a module can emit a raw/malformed ClientHello boring
+  can't continue. Build only if constrained variation (P2/P3) can't beat a given censor (ADR 0006
+  "build only if needed"). Crypto menu is the prerequisite, now in place.
 - **P3 (chunk 3) — config-driven signed gambit module + per-connection `ctx` (ADR 0006) 2026-06-19
-  (commit pending). P3 is now end-to-end from config.** `[transport.anytls.gambit]` (new
+  (committed `740eaec`). P3 is now end-to-end from config.** `[transport.anytls.gambit]` (new
   `GambitModuleConfig` {module, min_version, floor_path}) names a **signed Path-B module**;
   `anytls_transport` loads + verifies it via `load_gambit_module` — the **same pinned key + config &
   persisted anti-rollback floors as `wasm_transport`** (the module is the trust root for the gambits

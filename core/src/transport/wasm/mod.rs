@@ -49,6 +49,12 @@
 //!   — AES-GCM seal; `key_len` 16 ⇒ AES-128-GCM, 32 ⇒ AES-256-GCM; 12-byte nonce, 16-byte tag.
 //! - `host_aes_gcm_open(key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64`
 //!   — the inverse; `-1` on authentication failure.
+//! - `host_x25519_generate(out_pub_ptr) -> i64` — generate an ephemeral X25519 keypair, write the
+//!   32-byte public key to `out_pub_ptr`, and return an opaque **key id** (the private key stays
+//!   host-side — it never enters guest memory). `-1` on fault.
+//! - `host_x25519_agree(key_id, peer_pub_ptr, out_ptr) -> i64` — X25519 ECDH between the stored
+//!   private key `key_id` (consumed) and the 32-byte peer public key at `peer_pub_ptr`, writing the
+//!   32-byte shared secret to `out_ptr`. Returns 32, or `-1` on fault.
 //!
 //! Bulk per-byte crypto runs **natively** through these host functions, not in the interpreter — the
 //! module interprets only its control/framing logic. (Measured: bulk work in the interpreter caps a
@@ -62,7 +68,7 @@
 use std::sync::Arc;
 
 use ring::rand::{SecureRandom, SystemRandom};
-use ring::{aead, digest, hkdf, hmac};
+use ring::{aead, agreement, digest, hkdf, hmac};
 use wasmi::{
     Caller, Config, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
     TypedFunc,
@@ -95,6 +101,10 @@ const HOST_HKDF_EXPAND: &str = "host_hkdf_expand";
 const HOST_AES_GCM_SEAL: &str = "host_aes_gcm_seal";
 /// Import: AES-GCM open (`host_aes_gcm_open(key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr)`).
 const HOST_AES_GCM_OPEN: &str = "host_aes_gcm_open";
+/// Import: X25519 ephemeral keygen (`host_x25519_generate(out_pub_ptr) -> key_id`).
+const HOST_X25519_GENERATE: &str = "host_x25519_generate";
+/// Import: X25519 ECDH (`host_x25519_agree(key_id, peer_pub_ptr, out_ptr)`).
+const HOST_X25519_AGREE: &str = "host_x25519_agree";
 
 /// Export: the module's linear memory.
 const EXPORT_MEMORY: &str = "memory";
@@ -141,6 +151,11 @@ const HASH_LEN: usize = 32;
 const HKDF_PRK_LEN: usize = 32;
 /// HKDF-Expand's output ceiling: 255 × HashLen (RFC 5869).
 const HKDF_MAX_EXPAND_LEN: usize = 255 * HKDF_PRK_LEN;
+/// X25519 public-key / shared-secret length.
+const X25519_KEY_LEN: usize = 32;
+/// Cap on a session's *live* (un-consumed) X25519 ephemeral keys — a handshake needs one; this
+/// bounds a module that spams keygen without agreeing.
+const MAX_X25519_KEYS: usize = 16;
 
 /// Per-call fuel budget = [`FUEL_BASE`] + `input_len` × [`FUEL_PER_BYTE`]. Fuel meters the module's
 /// own interpreted bytecode (host-fn crypto runs natively and costs no fuel), so this bounds a
@@ -249,6 +264,11 @@ struct HostState {
     rng: SystemRandom,
     fault: Option<String>,
     rand_bytes: u64,
+    /// Host-held X25519 ephemeral private keys, indexed by the id returned from
+    /// `host_x25519_generate` (ADR 0006 P4). `agree` `take`s the key (one-shot, matching one ECDH
+    /// per handshake); freed slots are reused so the vec stays ≤ [`MAX_X25519_KEYS`]. Keeping
+    /// private keys host-side means a buggy/hostile module can never read or leak them.
+    x25519_keys: Vec<Option<agreement::EphemeralPrivateKey>>,
     /// Caps the guest's linear-memory + table growth (fuel bounds compute, not allocation). Read by
     /// the store limiter wired up in [`Transform::new`].
     limits: StoreLimits,
@@ -291,6 +311,7 @@ impl Transform {
                 rng: SystemRandom::new(),
                 fault: None,
                 rand_bytes: 0,
+                x25519_keys: Vec::new(),
                 limits: StoreLimitsBuilder::new()
                     .memory_size(MAX_WASM_MEMORY_BYTES)
                     .table_elements(MAX_WASM_TABLE_ELEMENTS)
@@ -332,6 +353,12 @@ impl Transform {
             .map_err(|e| WasmError::Link(e.to_string()))?;
         linker
             .func_wrap(HOST_MODULE, HOST_AES_GCM_OPEN, host_aes_gcm_open)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        linker
+            .func_wrap(HOST_MODULE, HOST_X25519_GENERATE, host_x25519_generate)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        linker
+            .func_wrap(HOST_MODULE, HOST_X25519_AGREE, host_x25519_agree)
             .map_err(|e| WasmError::Link(e.to_string()))?;
 
         let instance = linker
@@ -975,6 +1002,122 @@ fn aes_gcm_open(
     Ok(plaintext.to_vec())
 }
 
+/// The `host_x25519_generate(out_pub_ptr) -> i64` import: generate an ephemeral X25519 keypair,
+/// write the 32-byte public key to `out_pub_ptr`, store the private key host-side, and return its
+/// id. The private key never enters guest memory. `-1` with a recorded fault on error (including
+/// more than [`MAX_X25519_KEYS`] live keys).
+fn host_x25519_generate(mut caller: Caller<HostState>, out_pub_ptr: i32) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let live = caller
+        .data()
+        .x25519_keys
+        .iter()
+        .filter(|k| k.is_some())
+        .count();
+    if live >= MAX_X25519_KEYS {
+        caller.data_mut().fault = Some(format!(
+            "host_x25519_generate: too many live keys (max {MAX_X25519_KEYS})"
+        ));
+        return -1;
+    }
+    // A fresh `SystemRandom` is the same OS entropy source as `HostState::rng` and avoids borrowing
+    // `caller` immutably while we also mutate the key registry below.
+    let rng = SystemRandom::new();
+    let private = match agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng) {
+        Ok(p) => p,
+        Err(_) => {
+            caller.data_mut().fault = Some("host_x25519_generate: keygen failed".to_string());
+            return -1;
+        }
+    };
+    let public = match private.compute_public_key() {
+        Ok(p) => p,
+        Err(_) => {
+            caller.data_mut().fault =
+                Some("host_x25519_generate: public-key derivation failed".to_string());
+            return -1;
+        }
+    };
+    if let Err(msg) = write_guest(&mut caller, out_pub_ptr, public.as_ref()) {
+        caller.data_mut().fault = Some(format!("host_x25519_generate: {msg}"));
+        return -1;
+    }
+    // Reuse a freed slot if one exists so the registry stays bounded by the live cap.
+    let keys = &mut caller.data_mut().x25519_keys;
+    match keys.iter().position(Option::is_none) {
+        Some(id) => {
+            keys[id] = Some(private);
+            id as i64
+        }
+        None => {
+            let id = keys.len();
+            keys.push(Some(private));
+            id as i64
+        }
+    }
+}
+
+/// The `host_x25519_agree(key_id, peer_pub_ptr, out_ptr) -> i64` import: X25519 ECDH between the
+/// stored private key `key_id` (consumed) and the 32-byte peer public key at `peer_pub_ptr`, writing
+/// the 32-byte shared secret to `out_ptr`. Returns 32, or `-1` with a recorded fault (unknown/
+/// already-consumed key id, or a bad peer point).
+fn host_x25519_agree(
+    mut caller: Caller<HostState>,
+    key_id: i32,
+    peer_pub_ptr: i32,
+    out_ptr: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    if key_id < 0 {
+        caller.data_mut().fault = Some(format!("host_x25519_agree: invalid key id {key_id}"));
+        return -1;
+    }
+    let private = match caller
+        .data_mut()
+        .x25519_keys
+        .get_mut(key_id as usize)
+        .and_then(Option::take)
+    {
+        Some(p) => p,
+        None => {
+            caller.data_mut().fault = Some(format!(
+                "host_x25519_agree: unknown or already-consumed key id {key_id}"
+            ));
+            return -1;
+        }
+    };
+    let peer = match read_guest_array::<X25519_KEY_LEN>(&caller, peer_pub_ptr) {
+        Ok(p) => p,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_x25519_agree: {msg}"));
+            return -1;
+        }
+    };
+    let shared = agreement::agree_ephemeral(
+        private,
+        &agreement::UnparsedPublicKey::new(&agreement::X25519, peer),
+        |secret| secret.to_vec(),
+    );
+    let shared = match shared {
+        Ok(s) => s,
+        Err(_) => {
+            caller.data_mut().fault = Some("host_x25519_agree: agreement failed".to_string());
+            return -1;
+        }
+    };
+    match write_guest(&mut caller, out_ptr, &shared) {
+        Ok(()) => shared.len() as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_x25519_agree: {msg}"));
+            -1
+        }
+    }
+}
+
 /// Read `len` bytes at `ptr` from the caller's guest memory, range-checking `len` against
 /// [`MAX_TRANSFORM_LEN`] before allocating (the guest is untrusted; a negative `i32` would become a
 /// huge `usize`).
@@ -1424,6 +1567,80 @@ mod tests {
         let mut want = vec![0u8; 42];
         okm.fill(&mut want).expect("fill");
         assert_eq!(got, want, "host HKDF must equal native HKDF-SHA256");
+    }
+
+    /// X25519 ECDH: the module generates a keypair (public key A) and agrees with a peer public key
+    /// B fed in as the transform input; it returns `A || shared`. The test plays the *other* party
+    /// natively (it holds B's private key) and checks `agree(priv_B, A) == shared`.
+    const X25519_WAT: &str = r#"
+(module
+  (import "env" "host_x25519_generate" (func $gen (param i32) (result i64)))
+  (import "env" "host_x25519_agree" (func $agree (param i32 i32 i32) (result i64)))
+  (memory (export "memory") 2)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (local $id i32)
+    ;; pub_A at 16384; shared at 16416 — adjacent, returned as one 64-byte blob.
+    (local.set $id (i32.wrap_i64 (call $gen (i32.const 16384))))
+    (drop (call $agree (local.get $id) (local.get $ptr) (i32.const 16416)))
+    (i64.or (i64.shl (i64.const 16384) (i64.const 32)) (i64.const 64)))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+
+    #[test]
+    fn host_x25519_agrees_with_a_native_peer() {
+        use ring::agreement;
+        use ring::rand::SystemRandom;
+
+        let rng = SystemRandom::new();
+        let priv_b =
+            agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng).expect("keygen B");
+        let pub_b = priv_b.compute_public_key().expect("pub B");
+
+        let module =
+            TransformModule::load(&wat::parse_str(X25519_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let blob = t.transform_out(pub_b.as_ref()).expect("transform_out");
+        assert_eq!(blob.len(), 64, "pub_A || shared");
+        let (pub_a, shared_module) = blob.split_at(32);
+
+        // The other side of the ECDH, natively: agree(priv_B, pub_A) must equal the module's secret.
+        let shared_native = agreement::agree_ephemeral(
+            priv_b,
+            &agreement::UnparsedPublicKey::new(&agreement::X25519, pub_a),
+            |s| s.to_vec(),
+        )
+        .expect("native agree");
+        assert_eq!(
+            shared_module,
+            &shared_native[..],
+            "module ECDH shared secret must match the native peer's"
+        );
+        assert_ne!(
+            shared_module, &[0u8; 32],
+            "shared secret must be non-trivial"
+        );
+    }
+
+    #[test]
+    fn host_x25519_agree_rejects_an_unknown_key_id() {
+        const WAT: &str = r#"
+(module
+  (import "env" "host_x25519_agree" (func $agree (param i32 i32 i32) (result i64)))
+  (memory (export "memory") 2)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (drop (call $agree (i32.const 7) (local.get $ptr) (i32.const 8192)))
+    (i64.const 0))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        // No key was ever generated, so id 7 is unknown → recorded fault.
+        assert!(matches!(
+            t.transform_out(&[0u8; 32]),
+            Err(WasmError::HostFault(_))
+        ));
     }
 
     #[test]
