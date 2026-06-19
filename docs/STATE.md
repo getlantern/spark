@@ -1071,7 +1071,21 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **P5 (chunk 1) — discovery harness inner loop (ADR 0006, design §5.2) 2026-06-19 (commit pending).**
+- **ANCHOR drift CI — scheduled live-Chrome oracle (ADR 0006 §4) 2026-06-19 (commit pending).** New
+  `.github/workflows/anchor-drift.yml` (weekly cron + `workflow_dispatch` + push on the profile/JA4
+  files). Two jobs: **`profile-drift`** (deterministic, reliable) re-runs the `ANCHOR_JA4` +
+  `ja4` tests under `--features anytls` — does *our* boring ClientHello still emit the pinned anchor;
+  **`chrome-oracle`** (best-effort) sets up stable Chrome (`browser-actions/setup-chrome`), captures
+  real Chrome's JA4 from the `tls.peet.ws` fingerprint echo (grepped by JA4 shape, schema-independent,
+  5× retry), and compares the **JA4_a+JA4_b prefix** (`EXPECTED_CHROME_PREFIX=t13d1516h2_8daaf6152771`
+  — the cipher-stable part our anchor matches) — a mismatch means real Chrome moved past chrome-137 →
+  refresh the profile + `ANCHOR_JA4`. Note: the per-push main CI already runs the deterministic guard
+  via `--all-features`; this adds the cadence + the live-Chrome half. Injection-safe (only the trusted
+  setup-chrome output crosses into a `run:`, via `env:` + quoting); YAML validated; the test selector
+  confirmed to hit the 4 anchor/ja4 tests. **Remaining:** an even-truer oracle would use the Cronet
+  capture path (ADR 0006 Decision 4) instead of the external echo service.
+- **P5 (chunk 1) — discovery harness inner loop (ADR 0006, design §5.2) 2026-06-19 (committed
+  `eb95dbd`, pushed).**
   The full search loop is **server-side** (§5.5 — servers are sensors, fitness = arrival rate, client
   stays thin); spark owns the **inner tier** because it has the boring engine. New
   `core/src/transport/discovery.rs`: (pure, always-on) a seeded `SplitMix64` PRNG + GA **`mutate`**
