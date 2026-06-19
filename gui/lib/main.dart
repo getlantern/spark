@@ -18,11 +18,20 @@ Future<void> main() async {
 ///   privileged tunnel; no daemon). This is the macOS *product* path.
 /// - **Linux/Windows** → the in-process Rust bridge [FrbBackend] over `spark-service`, falling back
 ///   to [CliBackend] if the Rust library can't initialize, so the app always launches.
+///
+/// Overridable for dev/testing via `--dart-define=SPARK_BACKEND=frb|ne|cli`. `frb` drives a
+/// (root-run) `spark-service` from the macOS app — how we exercise the AnyTLS data path through the
+/// GUI before the NE provider learns the AnyTLS config.
 Future<SparkBackend> _desktopBackend() async {
-  if (Platform.isMacOS) {
+  const choice = String.fromEnvironment('SPARK_BACKEND');
+  if (choice == 'ne' || (choice.isEmpty && Platform.isMacOS)) {
     // Route through a relay when built with --dart-define=SPARK_PROXY=host:port; else direct.
     return NEBackend(proxyServer: const String.fromEnvironment('SPARK_PROXY'));
   }
+  if (choice == 'cli') {
+    return CliBackend();
+  }
+  // `frb` (explicit) or the Linux/Windows default: the in-process bridge over spark-service.
   try {
     return await FrbBackend.create();
   } catch (e) {
