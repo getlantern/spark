@@ -287,6 +287,68 @@ report" at every checkpoint.
     (full `spark run tun` gate → HTTP 301; DNS over the UoT path → valid response). See ADR
     `docs/adr/0001-chrome-mimicry-tls-backend.md` and the STATE.md M11 entries for detail.
 
+### UI Migration Track (Flutter → Tauri v2): U0–U4
+
+> Per **ADR 0008**. Replaces the `gui/` Flutter app + its two core bindings (`flutter_rust_bridge`
+> desktop + platform-channels mobile) with one **Tauri v2** app: web frontend → Rust backend via
+> `invoke()` + events. Everything below the shell (core, netstack, transports, `ipc/`,
+> `spark-ffi`/UniFFI, the privileged service, the `platforms/{android,apple}` tunnel shims) is reused
+> unchanged; the process/privilege model (ADR 0005) is unchanged (Tauri app = unprivileged client).
+> Android-weighted but **macOS-first** for the lowest-risk proof. Do **not** delete `gui/` until
+> per-platform parity (U4). Keep Tauri confined to the UI-shell crate — `core/` stays Tauri-free.
+
+#### U0 — Tauri shell + Lantern web UI (mock backend)
+- **Goal:** A Tauri v2 app that builds and renders the Lantern connect screen against a mock backend.
+- **In:** new `gui-tauri/` (Tauri v2 + Svelte+Vite — confirm stack here); port the screen + settings
+  from `docs/mockups/spark-tauri-lantern-look.html`; a `SparkBackend` TS interface with a mock impl.
+- **Out:** real core wiring; any mobile target.
+- **Deliverables:** `gui-tauri/`, the web UI, the mock backend.
+- **Gate:** `cargo tauri build` runs on macOS; the screen matches the mockup; **`cargo tree -i
+  openssl-sys` is empty** (CLAUDE.md hard rule); shell bundle size reported.
+- **Sessions:** 1–2.
+- **Checkpoint:** confirm the front-end stack (Svelte vs vanilla TS) and the no-`openssl-sys` result.
+
+#### U1 — macOS to parity (real core)
+- **Goal:** One-click Connect on macOS equal to today's Flutter product, over the real core.
+- **In:** Tauri commands/events implementing `SparkBackend` against `spark` core / `spark-ipc` (reuse
+  the NE/service path from ADR 0005 + STATE M10); runtime `config.toml` read matching the current
+  `NEBackend` precedence (file → baked `SPARK_CONFIG` → `SPARK_PROXY` → direct).
+- **Out:** other platforms.
+- **Deliverables:** the Rust command layer in `gui-tauri/src-tauri`, the status event stream, a macOS bundle.
+- **Gate:** connect e2e on macOS (IP changes to the relay, as in the current macOS gate) **and the
+  macOS app-bundle size measured vs the Flutter DMG**.
+- **Sessions:** 2–3.
+- **Checkpoint:** record the size delta and the command/event surface.
+
+#### U2 — Android (priority platform)
+- **Goal:** Connect e2e on Android via Tauri mobile.
+- **In:** the Tauri v2 Android project; a **Tauri plugin** wrapping the existing `platforms/android`
+  `VpnService` + UniFFI (M9); the same web UI.
+- **Out:** iOS, Windows, Linux.
+- **Deliverables:** the Android Tauri project + the VpnService plugin bridge.
+- **Gate:** builds for `aarch64-linux-android`; browse/connect test passes on device/emulator; **APK
+  size measured vs the Flutter APK**.
+- **Sessions:** 2–4 (the plugin bridge is the main unknown).
+- **Checkpoint:** note the plugin architecture, NDK pins, and the size.
+
+#### U3 — Windows → iOS → Linux to parity
+- **Goal:** each remaining platform to connect-parity, one at a time.
+- **In:** Windows (WinTun/service path, WebView2); iOS (Tauri iOS + the NE plugin — **verify the NE
+  extension packages inside the Tauri iOS project**); Linux (WebKitGTK + service path).
+- **Gate (per platform):** connect e2e + size measured. iOS additionally: the NE entitlement/extension
+  loads under the Tauri iOS project.
+- **Sessions:** 2–3 each.
+- **Checkpoint:** per platform; flag any WebView rendering fixes.
+
+#### U4 — Retire Flutter; switch packaging + docs
+- **Goal:** Tauri is the only client; Flutter removed.
+- **In:** retire `gui/`; retarget `packaging/` to the Tauri bundler on all platforms; update
+  README/STATE; produce the final five-platform size table.
+- **Gate:** all five platforms ship from the Tauri app; `gui/` is out of the build; STATE + PLAN
+  reflect it; final Flutter→Tauri size table recorded.
+- **Sessions:** 1–2.
+- **Checkpoint:** the final per-platform size comparison.
+
 ---
 
 ## 5. Definition of done (whole project)

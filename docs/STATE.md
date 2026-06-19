@@ -1975,7 +1975,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 - FFI (mobile): **uniffi-rs** preferred (confirm at M10).
 - Config format: TOML (alternate import formats deferred).
 
+- 2026-06-19 (UI — DECIDED: migrate the GUI from Flutter → **Tauri v2**; ADR 0008): After a wholesale
+  re-eval of UI frameworks with Adam (client priorities Android > Windows > iOS > macOS > Linux;
+  install size first-class), chose **Tauri v2** over Compose Multiplatform and over keeping Flutter.
+  Rationale: Tauri uses the **system WebView** (no bundled engine → smallest install, on-ethos with
+  the <3 MB core), its backend **is** Rust (the core links in directly; collapses today's two bindings
+  — `flutter_rust_bridge` desktop + platform-channels mobile — into one `invoke()`/event surface), and
+  the Lantern look is pure CSS (proven: `docs/mockups/spark-tauri-lantern-look.html` reproduces
+  `gui/lib/main.dart`'s `_Palette` exactly). Compose was runner-up (best Android polish, reuses
+  Kotlin/UniFFI) but its desktop path needs a bundled JVM (fights the size goal). **Scope = UI shell
+  only:** `core/`, netstack, transports, `ipc/`, `spark-ffi`/UniFFI, the privileged `spark-service`,
+  and the `platforms/{android,apple}` tunnel shims are all reused unchanged; the process/privilege
+  model (ADR 0005) is unchanged (Tauri app = unprivileged client). Migration = UI track **U0–U4** in
+  PLAN.md §4 (macOS-first proof → Android → Windows/iOS/Linux; retire `gui/` only at parity). Open
+  sub-decision deferred to U0: front-end stack (Svelte+Vite recommended, vanilla TS fallback). **Hard
+  constraint:** the Tauri dep tree must not pull `openssl-sys` (verify at U0); keep Tauri out of `core/`.
+
 ## Milestone checklist
+- [ ] U0 [ ] U1 [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
