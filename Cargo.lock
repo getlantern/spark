@@ -2037,6 +2037,7 @@ dependencies = [
  "libc",
  "md-5",
  "netstack-smoltcp",
+ "postcard",
  "ring",
  "serde",
  "socket2",

@@ -1071,7 +1071,27 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **PHASE 1 WIRED INTO ANYTLS (ADR 0006) 2026-06-19 (commit pending).** The shaper now drives the
+- **P2 STARTED — gambit genome decode + signed envelope (ADR 0006) 2026-06-19 (commit pending).**
+  New `core/src/transport/gambit.rs` (always-on): the **locked v1 genome as Rust** (design doc §2) —
+  `Gambit` {genome_version, version (monotonic), id, anchor, clienthello (Layer A), records (Layer B),
+  wire (Layer C), requires}, the `Capability` closed vocabulary (`ech`/`alps`/`pq_kem`/
+  `session_id_inject`/`raw_clienthello`), and supporting enums (`Perm` permute-seed|explicit,
+  `EchMode`, `SessionId`). Delivery is the `SignedGambit` {gambit, key_id, sig} envelope:
+  `verify(&PinnedKeys, floor)` checks the **Ed25519** signature (ring `UnparsedPublicKey`/`ED25519`)
+  over the **canonical postcard encoding** *before* the anti-rollback floor check, then returns the
+  gambit; capability gating is the executor's separate call (`Gambit::check_supported`). `Wire::
+  to_wire_plan()` bridges Layer C to the Phase 1 `WirePlan` (same string grammar as `ShapingConfig`).
+  Design note: postcard is non-self-describing, so `skip_serializing_if` is deliberately omitted —
+  it would drop bytes the positional deserializer still expects; `Option` already encodes as a 1-byte
+  discriminant, keeping the signing pre-image deterministic. The Layer-A ClientHello knobs are
+  **modeled + round-tripped, not yet applied** to the boring connector (next P2 increment). **Verified:**
+  5 unit tests (postcard round-trip; sign/verify above floor; reject tamper/unknown-key/rollback;
+  capability gating; wire→WirePlan), core `--all-features` 160 tests, clippy `--all-features
+  -D warnings` + fmt clean, `cargo check --workspace --all-features` green. **Next P2 increment:**
+  refactor `anytls/tls.rs` to take parameterized ClientHello knobs (from a `Gambit`) instead of the
+  hardcoded Chrome-137 profile, so a signed gambit actually drives the handshake (Layers A+B), not
+  just Layer C. Cross-fleet (Go/uTLS) postcard canonicalization remains the noted open question.
+- **PHASE 1 WIRED INTO ANYTLS (ADR 0006) 2026-06-19 (committed `a42d50b`).** The shaper now drives the
   real AnyTLS handshake. `[transport.shaping]` config (`ShapingConfig` {segment_split, delay_ms,
   tcp_nodelay}, default = no-op) → `WirePlan::from_config` → `AnytlsTransport` carries the `WirePlan`
   and, per new TLS session in `acquire()`, sets `TCP_NODELAY` + wraps the socket in

@@ -28,6 +28,9 @@ use crate::net::SocketProtector;
 use crate::BoxedStream;
 
 pub mod anytls;
+/// The portable, signed gambit genome (ADR 0006 P2): the data-only spec of a flow's *opening*
+/// across the three layers, with Ed25519 verification, anti-rollback, and capability gating.
+pub mod gambit;
 /// Socket-layer opening-handshake framing/timing (ADR 0006 Phase 1): fragment the ClientHello
 /// across TCP segments (e.g. at the SNI boundary) with optional inter-segment delay.
 pub mod shaping;

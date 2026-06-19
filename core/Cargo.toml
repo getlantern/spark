@@ -25,6 +25,9 @@ toml.workspace = true
 thiserror.workspace = true
 ring.workspace = true
 md-5.workspace = true
+# Canonical (deterministic) encoding of a gambit genome for Ed25519 signing (ADR 0006 P2). Same codec
+# as the control plane; cross-fleet (Go) canonicalization is a noted open question in the design doc.
+postcard.workspace = true
 # AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
 # `pq-experimental` exposes Chrome's post-quantum group X25519MLKEM768; `cert-compression` exposes
 # brotli cert compression — both part of the Chrome ClientHello profile.
