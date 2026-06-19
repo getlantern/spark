@@ -28,6 +28,9 @@ use crate::net::SocketProtector;
 use crate::BoxedStream;
 
 pub mod anytls;
+/// Socket-layer opening-handshake framing/timing (ADR 0006 Phase 1): fragment the ClientHello
+/// across TCP segments (e.g. at the SNI boundary) with optional inter-segment delay.
+pub mod shaping;
 pub mod tcp_tunnel;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.

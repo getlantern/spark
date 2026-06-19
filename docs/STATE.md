@@ -1071,6 +1071,22 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
+- **PHASE 1 BUILT — socket-layer handshake shaper (ADR 0006) 2026-06-19 (commit pending).** New
+  `core/src/transport/shaping/` (always-on, no feature gate): `SegmentShapingStream<S>` — an
+  `AsyncRead+AsyncWrite` wrapper that shapes only the **opening write** (the ClientHello) by splitting
+  it into separate flushed TCP segments — **at the SNI boundary** (mid-hostname, defeating
+  SNI-keyword DPI) or explicit offsets — with an optional fixed/jitter inter-segment delay, then is a
+  zero-overhead passthrough. `shaping/sni.rs` = a total, bounds-checked SNI-host locator (walks only
+  to `server_name`; any truncation/non-match → `None`, never breaks a connection). `WirePlan`
+  {segment_split, inter_segment_delay, tcp_nodelay} = **genome Layer C** as a native struct — the
+  seam P2 (signed gambit) and P3 (Path-B module) will both populate. **Verified:** 6 unit tests
+  (SNI locator on a built ClientHello fixture + truncation rejection; shaper splits at explicit
+  offsets, splits mid-SNI, passthrough after the opening write, no-op plan = single write); full
+  `cargo test --workspace --all-features` green; core clippy `-D warnings` + fmt clean. **Remaining
+  Phase 1:** wire the shaper into the AnyTLS dial path (`[transport.shaping]` config), the
+  `capture-clienthello` anchor tool + JA4-drift test, and the tcpdump live gate (needs a TLS endpoint
+  + sudo — DO box is torn down, re-provision when gating). Then P2 (constrained CH knobs + the
+  genome decode on the locked v1 schema).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
