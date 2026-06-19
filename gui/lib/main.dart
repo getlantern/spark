@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
@@ -25,8 +26,15 @@ Future<void> main() async {
 Future<SparkBackend> _desktopBackend() async {
   const choice = String.fromEnvironment('SPARK_BACKEND');
   if (choice == 'ne' || (choice.isEmpty && Platform.isMacOS)) {
-    // Route through a relay when built with --dart-define=SPARK_PROXY=host:port; else direct.
-    return NEBackend(proxyServer: const String.fromEnvironment('SPARK_PROXY'));
+    // A plain relay via --dart-define=SPARK_PROXY=host:port, or a full TOML config (AnyTLS +
+    // shaping + gambit) via --dart-define=SPARK_CONFIG=<base64 TOML>; else direct.
+    const proxy = String.fromEnvironment('SPARK_PROXY');
+    const configB64 = String.fromEnvironment('SPARK_CONFIG');
+    final config = configB64.isEmpty ? null : utf8.decode(base64.decode(configB64));
+    return NEBackend(
+      proxyServer: proxy.isEmpty ? null : proxy,
+      config: config,
+    );
   }
   if (choice == 'cli') {
     return CliBackend();

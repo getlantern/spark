@@ -14,5 +14,11 @@ name = "spark_apple"
 crate-type = ["staticlib"]
 path = "src/lib.rs"
 
+[features]
+# AnyTLS transport (ADR 0001): enable spark-core's `anytls` so the NE provider can run an AnyTLS
+# config. Built for the macOS slice (boring builds for the host arch); the iOS slices stay off
+# (BoringSSL-for-iOS is a separate concern), so an AnyTLS config on iOS returns -1 until then.
+anytls = ["spark-core/anytls"]
+
 [dependencies]
 spark-core = { path = "../../core" }

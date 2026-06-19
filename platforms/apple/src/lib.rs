@@ -18,42 +18,65 @@ mod ffi {
     use std::net::SocketAddr;
     use std::os::raw::{c_char, c_int};
 
+    use spark_core::config::Config;
+
     /// Run the tunnel on the provided `utun` `fd` with `mtu`. Blocks the calling thread until
     /// [`spark_tunnel_stop`] (or the data path exits). Returns 0 on a clean stop, -1 on error.
     ///
     /// The caller (the Swift NE provider) hands ownership of `fd` to native for the tunnel's
     /// lifetime; the core closes it on stop.
     ///
-    /// `server` selects the data path: null/empty forwards each flow **directly**; a `host:port` IP
-    /// literal tunnels every flow through that **plain spark relay** (so egress is the relay's IP).
-    /// A non-null, non-empty `server` that doesn't parse as a `SocketAddr` returns -1.
+    /// `config` selects the data path (dual-mode for back-compat):
+    /// - null/empty → forward each flow **directly** (no tunnel).
+    /// - a bare `host:port` IP literal → tunnel every flow through that **plain spark relay**.
+    /// - any other string → a full **TOML [`Config`]** (AnyTLS + handshake shaping + gambit, …),
+    ///   parsed via [`Config::from_toml_str`]; the whole transport stack applies (ADR 0006). AnyTLS
+    ///   requires the staticlib to be built with the `anytls` feature (the macOS slice is), else the
+    ///   core returns -1.
+    ///
+    /// A non-null, non-empty `config` that is neither a `SocketAddr` nor valid TOML returns -1.
     ///
     /// # Safety
-    /// `server` must be null or a valid NUL-terminated C string for the duration of this call.
+    /// `config` must be null or a valid NUL-terminated C string for the duration of this call.
     #[no_mangle]
     pub unsafe extern "C" fn spark_tunnel_run(
         fd: c_int,
         mtu: c_int,
-        server: *const c_char,
+        config: *const c_char,
     ) -> c_int {
-        // The NE always uses the cross-platform userspace stack (the `system` stack is Android-only).
-        let mut config = spark_core::config::Config::default();
-        if !server.is_null() {
-            // SAFETY: caller contract — `server` is a valid NUL-terminated C string when non-null.
-            let s = match unsafe { CStr::from_ptr(server) }.to_str() {
-                Ok(s) => s.trim(),
-                Err(_) => return -1,
-            };
-            if !s.is_empty() {
-                match s.parse::<SocketAddr>() {
-                    Ok(addr) => config.transport.server = Some(addr),
-                    Err(_) => return -1,
-                }
-            }
-        }
-        // `run_fd` is the shared run + status-code convention. With `transport.server` set, the core
-        // tunnels TCP/UDP flows through the plain relay instead of dialing them directly.
+        // SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
+        let config = match unsafe { build_config(config) } {
+            Some(c) => c,
+            None => return -1,
+        };
+        // `run_fd` is the shared run + status-code convention; the core builds the transport from the
+        // config (direct / plain relay / AnyTLS) and owns the netstack.
         spark_core::fd_tunnel::run_fd(fd, mtu as u16, config)
+    }
+
+    /// Resolve the C `config` arg into a [`Config`]: null/empty → direct; a bare `host:port` → the
+    /// plain relay (today's behavior); otherwise a full TOML config. `None` signals a parse error
+    /// (`-1` to the caller). The NE always uses the userspace stack (`system` is Android-only).
+    ///
+    /// # Safety
+    /// `ptr` must be null or a valid NUL-terminated C string.
+    unsafe fn build_config(ptr: *const c_char) -> Option<Config> {
+        if ptr.is_null() {
+            return Some(Config::default());
+        }
+        // SAFETY: caller contract.
+        let s = unsafe { CStr::from_ptr(ptr) }.to_str().ok()?.trim();
+        if s.is_empty() {
+            return Some(Config::default());
+        }
+        // Back-compat: a bare host:port is the plain-relay server (the `SPARK_PROXY` path).
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            let mut c = Config::default();
+            c.transport.server = Some(addr);
+            return Some(c);
+        }
+        // Otherwise a full TOML config — AnyTLS, handshake shaping, gambit, etc.
+        Config::from_toml_str(s).ok()
     }
 
     /// Signal a running [`spark_tunnel_run`] to stop (from `stopTunnel`).

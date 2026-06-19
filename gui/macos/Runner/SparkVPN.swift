@@ -19,10 +19,12 @@ enum SparkNeChannel {
     channel.setMethodCallHandler { call, result in
       switch call.method {
       case "connect":
-        // Optional "server" arg ("host:port" IP literal) → tunnel through that plain relay; absent
-        // → forward directly. The Dart NEBackend supplies it (a future profile UI sets it).
-        let server = (call.arguments as? [String: Any])?["server"] as? String
-        SparkVpn.shared.connect(server: server, result: result)
+        // "config" arg: a "host:port" IP literal (plain relay) or a full TOML config (AnyTLS +
+        // handshake shaping + gambit); absent → forward directly. The Dart NEBackend supplies it (a
+        // future profile UI sets it). Back-compat: a legacy "server" host:port key is accepted too.
+        let args = call.arguments as? [String: Any]
+        let config = (args?["config"] as? String) ?? (args?["server"] as? String)
+        SparkVpn.shared.connect(config: config, result: result)
       case "disconnect": SparkVpn.shared.disconnect(result: result)
       case "status": SparkVpn.shared.status(result: result)
       case "openExtensionSettings": SparkSysExt.shared.openSettings(); result(nil)
@@ -91,18 +93,18 @@ final class SparkVpn {
   static let shared = SparkVpn()
   private let providerBundleId = "org.getlantern.spark.tunnel"
 
-  /// Activate the system extension (if needed), then configure + start the tunnel. `server`
-  /// ("host:port" IP literal) routes every flow through that plain relay; nil forwards directly.
-  func connect(server: String?, result: @escaping FlutterResult) {
+  /// Activate the system extension (if needed), then configure + start the tunnel. `config` is a
+  /// "host:port" plain relay or a full TOML config (AnyTLS + shaping + gambit); nil forwards directly.
+  func connect(config: String?, result: @escaping FlutterResult) {
     SparkSysExt.shared.activate { [weak self] error in
       if let error {
         return Self.fail(result, "sysext activation failed", error)
       }
-      self?.startTunnel(server: server, result: result)
+      self?.startTunnel(config: config, result: result)
     }
   }
 
-  private func startTunnel(server: String?, result: @escaping FlutterResult) {
+  private func startTunnel(config: String?, result: @escaping FlutterResult) {
     NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in
       guard let self else { return }
       if let error { return Self.fail(result, "loadAll failed", error) }
@@ -110,8 +112,9 @@ final class SparkVpn {
       let proto = NETunnelProviderProtocol()
       proto.providerBundleIdentifier = self.providerBundleId
       proto.serverAddress = "spark"
-      // Hand the relay address to the system extension; it reads providerConfiguration["server"].
-      if let server, !server.isEmpty { proto.providerConfiguration = ["server": server] }
+      // Hand the data-path config to the system extension; it reads providerConfiguration["config"]
+      // (a host:port plain relay, or a full TOML config — AnyTLS + shaping + gambit).
+      if let config, !config.isEmpty { proto.providerConfiguration = ["config": config] }
       manager.protocolConfiguration = proto
       manager.localizedDescription = "Spark"
       manager.isEnabled = true

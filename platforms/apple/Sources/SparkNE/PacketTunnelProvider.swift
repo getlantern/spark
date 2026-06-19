@@ -41,19 +41,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 completionHandler(NEVPNError(.configurationInvalid))
                 return
             }
-            // The controlling app passes the relay address in `providerConfiguration["server"]`
-            // (a "host:port" IP literal) to tunnel through it; absent → forward directly.
-            let server = (self.protocolConfiguration as? NETunnelProviderProtocol)?
-                .providerConfiguration?["server"] as? String
-            self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), server=\(server ?? "direct"))")
+            // The controlling app passes the data-path config in `providerConfiguration["config"]`:
+            // a bare "host:port" (plain relay), or a full TOML config (AnyTLS + shaping + gambit).
+            // Absent/empty → forward directly. (Back-compat: the legacy `["server"]` host:port key is
+            // still honored if `["config"]` is unset.)
+            let provider = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+            let config = (provider?["config"] as? String) ?? (provider?["server"] as? String)
+            self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), config=\(config?.isEmpty == false ? "set" : "direct"))")
 
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
             // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C string
             // alive for the whole blocking call (it returns only when the tunnel stops).
-            let worker = Thread { [mtu = self.mtu, log = self.log, server] in
+            let worker = Thread { [mtu = self.mtu, log = self.log, config] in
                 let rc: Int32
-                if let server, !server.isEmpty {
-                    rc = server.withCString { spark_tunnel_run(fd, Int32(mtu), $0) }
+                if let config, !config.isEmpty {
+                    rc = config.withCString { spark_tunnel_run(fd, Int32(mtu), $0) }
                 } else {
                     rc = spark_tunnel_run(fd, Int32(mtu), nil)
                 }

@@ -13,7 +13,11 @@ OUT="platforms/apple/SparkCore.xcframework"
 echo "building staticlib for: ${TARGETS[*]}" >&2
 for t in "${TARGETS[@]}"; do
     rustup target add "$t" >/dev/null 2>&1 || true
-    cargo build --release -p spark-apple --target "$t" >&2
+    # AnyTLS (BoringSSL) builds for the macOS host arch; BoringSSL-for-iOS is a separate concern, so
+    # only the macOS slice gets `anytls` — the iOS slices share the ABI but return -1 for AnyTLS.
+    feat=()
+    [[ "$t" == *darwin* ]] && feat=(--features anytls)
+    cargo build --release -p spark-apple --target "$t" "${feat[@]}" >&2
 done
 
 rm -rf "$OUT"

@@ -10,17 +10,29 @@ import 'spark_backend.dart';
 class NEBackend implements SparkBackend {
   static const _channel = MethodChannel('spark/ne');
 
-  /// Relay address ("host:port" IP literal). When set, `connect` tunnels every flow through it, so
-  /// the egress IP becomes the relay's; empty/null forwards directly. Sourced from
-  /// `--dart-define=SPARK_PROXY=host:port` (see main.dart); a profile UI will set it later.
+  /// Relay address ("host:port" IP literal). When set (and [config] is not), `connect` tunnels every
+  /// flow through that plain relay. Sourced from `--dart-define=SPARK_PROXY=host:port`.
   final String? proxyServer;
 
-  NEBackend({this.proxyServer});
+  /// Full TOML data-path config (AnyTLS + handshake shaping + gambit). Takes precedence over
+  /// [proxyServer] — the NE provider runs the whole transport stack. Sourced from
+  /// `--dart-define=SPARK_CONFIG=<base64 TOML>` (decoded in main.dart); a profile UI will set it later.
+  final String? config;
+
+  NEBackend({this.proxyServer, this.config});
 
   @override
   Future<void> connect() async {
+    final cfg = config;
     final server = proxyServer;
-    final args = (server != null && server.isNotEmpty) ? {'server': server} : null;
+    final Map<String, String>? args;
+    if (cfg != null && cfg.isNotEmpty) {
+      args = {'config': cfg};
+    } else if (server != null && server.isNotEmpty) {
+      args = {'server': server};
+    } else {
+      args = null;
+    }
     await _guard(() => _channel.invokeMethod<void>('connect', args));
   }
 
