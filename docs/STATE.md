@@ -1043,6 +1043,26 @@
   (closes M4). **REMAINING (live, human):** run the gate / install the proxy-baked notarized DMG,
   approve the sysext, connect, confirm the egress IP flips to the relay. Plaintext relay (demo, not
   circumvention-grade — that's the AnyTLS path). **Tear down droplet 578689132 after testing.**
+- **ADR 0006 — early-bytes handshake shaping + portable gambit + discovery (Proposed) 2026-06-18
+  (commit pending).** From a design discussion (not yet built): censors classify on the **first ~5
+  packets**, so specialize the substrate on the **opening gambit** (ClientHello content + record
+  framing + TCP-segment fragmentation + timing); bulk stays native. Key reframes: (1) most of this is
+  **Tier-1** (a signed, parameterized native gambit config), not Path B; (2) **Path B narrows to a
+  handshake-shaper** that emits a *plan* (knobs|bytes + framing + timing), with a **constrained** mode
+  (boring stays the TLS engine) primary and an **unconstrained** byte-level mode (module drives the
+  handshake via new X25519/HKDF/AES-GCM host fns) as the parser-differential escape hatch; (3) **don't
+  carve Cronet** — `boring2`+profile already *is* the byte-exact Chrome CH parcel; Cronet = CI
+  ground-truth oracle only; (4) the gambit is a **portable parameter genome** — `boring` (Rust/spark)
+  and **uTLS** (Go/lantern) are two executors, so **discover once, deploy to both fleets**; (5) a
+  **discovery loop** (GA + LLM grounded in the corpus; two-tier fitness = offline surrogate +
+  *passive* fleet telemetry; anchor at genuine Chrome and penalize anomaly; Ed25519-signed deploy).
+  Doc `docs/adr/0006-early-bytes-handshake-shaping.md` (decision) + `docs/handshake-gambit-design.md`
+  (genome schema + executor-mapping table + discovery-harness architecture + open questions). **Go
+  angle:** uTLS (the every-knob CH lib spark lacks in Rust) + wazero are already in lantern
+  (samizdat/water), so the Go fleet is the lower-effort home for CH manipulation; the portable genome
+  ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
+  P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
+  unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
 - **System stack ENABLED for Android 2026-06-17. ✅** Android's `VpnService` hands a Linux tun fd,
   so the kernel-TCP stack works there (the correction above). Wiring: (1) `fd_tunnel` split into
   `run_tunnel(fd,mtu)` (default, unchanged — keeps the Apple NE path) + `run_tunnel_with_config(fd,
