@@ -63,8 +63,7 @@ wasm-transport = ["dep:wasmi"]
 # `session_id.rs` kID-injection seam pulls the boring TLS backend + its FFI. (A later chunk adds the
 # `h2` dep for CONNECT muxing.)
 samizdat = [
-    "dep:boring2",
-    "dep:tokio-boring2",
+    "anytls", # reuse the Chrome boring connector (`anytls::tls`) + `anytls::profile::Profile`
     "dep:boring-sys2",
     "dep:foreign-types-shared",
     "dep:h2",

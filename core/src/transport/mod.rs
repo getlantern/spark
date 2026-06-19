@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
-use crate::config::{AnytlsConfig, Config, WasmConfig};
+use crate::config::{AnytlsConfig, Config, SamizdatConfig, WasmConfig};
 use crate::net::SocketProtector;
 use crate::BoxedStream;
 
@@ -103,6 +103,10 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
     if let Some(anytls) = &config.transport.anytls {
         let wire = shaping::WirePlan::from_config(&config.transport.shaping);
         return anytls_transport(anytls, protector, wire);
+    }
+    // Samizdat (ADR 0007) — like AnyTLS, takes precedence over the plain `server` tunnel.
+    if let Some(samizdat) = &config.transport.samizdat {
+        return samizdat_transport(samizdat, protector);
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
@@ -288,6 +292,56 @@ fn wasm_transport(
     Err(io::Error::other(
         "transport.wasm is configured but spark was built without the `wasm-transport` feature",
     ))
+}
+
+/// Build the Samizdat transport (feature `samizdat`): decode the pinned server public key + short
+/// ID, then a [`samizdat::SamizdatTransport`] (TCP only; its `UdpTransport` reports unsupported).
+#[cfg(feature = "samizdat")]
+fn samizdat_transport(
+    cfg: &SamizdatConfig,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let server_pubkey = decode_hex_n::<32>(&cfg.server_pubkey)
+        .ok_or_else(|| io::Error::other("transport.samizdat.server_pubkey must be 32-byte hex"))?;
+    let short_id = decode_hex_n::<8>(&cfg.short_id)
+        .ok_or_else(|| io::Error::other("transport.samizdat.short_id must be 8-byte hex"))?;
+    let sni = cfg
+        .sni
+        .clone()
+        .unwrap_or_else(|| cfg.server.ip().to_string());
+    let t = Arc::new(samizdat::SamizdatTransport::new(
+        cfg.server,
+        server_pubkey,
+        short_id,
+        sni,
+        protector,
+    ));
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `samizdat` feature, a configured Samizdat transport is a hard error (mirroring
+/// AnyTLS/wasm) rather than a silent fallback.
+#[cfg(not(feature = "samizdat"))]
+fn samizdat_transport(
+    _cfg: &SamizdatConfig,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.samizdat is configured but spark was built without the `samizdat` feature",
+    ))
+}
+
+/// Decode an even-length hex string into exactly `N` bytes (`None` on wrong length or non-hex).
+#[cfg(feature = "samizdat")]
+fn decode_hex_n<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != 2 * N {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Decode an even-length hex string into bytes (no `hex` crate dependency).
@@ -554,6 +608,51 @@ mod wasm_config_tests {
         std::fs::remove_file(&p5).ok();
         std::fs::remove_file(&p4).ok();
         std::fs::remove_file(&floor_path).ok();
+    }
+}
+
+/// Samizdat config wiring (ADR 0007): `from_config` builds the transport and validates the
+/// hex-encoded server public key + short ID.
+#[cfg(all(test, feature = "samizdat"))]
+mod samizdat_config_tests {
+    use super::*;
+    use crate::config::{Config, SamizdatConfig, TransportConfig};
+
+    fn config_with(server_pubkey: &str, short_id: &str) -> Config {
+        Config {
+            transport: TransportConfig {
+                samizdat: Some(SamizdatConfig {
+                    server: "192.0.2.1:443".parse().unwrap(),
+                    server_pubkey: server_pubkey.to_owned(),
+                    short_id: short_id.to_owned(),
+                    sni: Some("cover.example".to_owned()),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn builds_a_samizdat_transport() {
+        // 32-byte pubkey + 8-byte short id, valid hex.
+        from_config(&config_with(&"a0".repeat(32), &"10".repeat(8)))
+            .expect("from_config should build the samizdat transport");
+    }
+
+    #[test]
+    fn rejects_a_wrong_length_server_pubkey() {
+        assert!(from_config(&config_with(&"a0".repeat(31), &"10".repeat(8))).is_err());
+    }
+
+    #[test]
+    fn rejects_a_wrong_length_short_id() {
+        assert!(from_config(&config_with(&"a0".repeat(32), &"10".repeat(4))).is_err());
+    }
+
+    #[test]
+    fn rejects_non_hex() {
+        assert!(from_config(&config_with(&"zz".repeat(32), &"10".repeat(8))).is_err());
     }
 }
 

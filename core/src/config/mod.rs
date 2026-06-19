@@ -135,6 +135,12 @@ pub struct TransportConfig {
     /// (else `from_config` errors).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wasm: Option<WasmConfig>,
+    /// Samizdat transport (ADR 0007): when set, flows tunnel through this Samizdat server as HTTP/2
+    /// CONNECT streams over one Chrome-fingerprinted TLS session, authenticated by a REALITY-style
+    /// SessionID in the TLS `legacy_session_id`. Takes precedence over the plain `server` tunnel.
+    /// Requires the `samizdat` build feature (else `from_config` errors). TCP only (v1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub samizdat: Option<SamizdatConfig>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
     /// handshake. Default: no shaping.
@@ -213,6 +219,23 @@ pub struct AnytlsConfig {
     /// faults or yields a gambit boring can't realize). Requires the `wasm-transport` feature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gambit: Option<GambitModuleConfig>,
+}
+
+/// Samizdat transport configuration (ADR 0007). REALITY-style auth in the TLS `legacy_session_id`
+/// plus an HTTP/2 CONNECT mux over one Chrome-fingerprinted TLS session; wire-interoperable with
+/// deployed `lantern-box` `"samizdat"` servers. TCP only (v1) — see `docs/samizdat-transport-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamizdatConfig {
+    /// The Samizdat server address.
+    pub server: SocketAddr,
+    /// The server's X25519 public key, hex-encoded (32 bytes) — the HKDF IKM for the auth PSK.
+    pub server_pubkey: String,
+    /// The pre-shared short ID, hex-encoded (8 bytes).
+    pub short_id: String,
+    /// TLS SNI (cover-site name) to present; defaults to the server's IP literal when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
 }
 
 /// A signed Path-B module that computes a gambit per connection (ADR 0006 P3). Verified by the same
@@ -360,6 +383,7 @@ mod tests {
                     server: Some("[2001:db8::1]:443".parse().unwrap()),
                     protect_interface: Some("en0".into()),
                     anytls: None,
+                    samizdat: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
@@ -410,6 +434,25 @@ mod tests {
     fn unknown_keys_are_rejected() {
         let err = Config::from_toml_str("[tun]\nbogus = 1\n").unwrap_err();
         assert!(matches!(err, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn parses_samizdat_config() {
+        let c = Config::from_toml_str(
+            r#"
+            [transport.samizdat]
+            server = "192.0.2.1:443"
+            server_pubkey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+            short_id = "1011121314151617"
+            sni = "ok.example"
+        "#,
+        )
+        .unwrap();
+        let s = c.transport.samizdat.expect("samizdat config");
+        assert_eq!(s.server, "192.0.2.1:443".parse().unwrap());
+        assert_eq!(s.server_pubkey.len(), 64); // 32 bytes, hex
+        assert_eq!(s.short_id, "1011121314151617");
+        assert_eq!(s.sni.as_deref(), Some("ok.example"));
     }
 
     #[test]

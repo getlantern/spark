@@ -13,7 +13,10 @@
 
 use std::io;
 
-use boring2::ssl::{CertCompressionAlgorithm, SslConnector, SslCurve, SslMethod, SslVerifyMode};
+use boring2::ssl::{
+    CertCompressionAlgorithm, ConnectConfiguration, SslConnector, SslCurve, SslMethod,
+    SslVerifyMode,
+};
 use tokio_boring2::SslStream;
 
 /// Chrome's TLS 1.3 + ECDHE/RSA cipher order (`wreq-util` `CIPHER_LIST`).
@@ -81,6 +84,16 @@ pub async fn connect<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    tokio_boring2::connect(configure(profile)?, sni, stream)
+        .await
+        .map_err(|e| io::Error::other(format!("anytls tls handshake: {e}")))
+}
+
+/// Build the per-connection Chrome [`ConnectConfiguration`] — everything up to, but not including,
+/// the handshake. Split out from [`connect`] so a caller that must mutate the `Ssl` before the
+/// handshake (e.g. the Samizdat transport injecting a `legacy_session_id`) can do so on the returned
+/// config and then drive [`tokio_boring2::connect`] itself.
+pub fn configure(profile: &super::profile::Profile) -> io::Result<ConnectConfiguration> {
     let mut b = SslConnector::builder(SslMethod::tls()).map_err(|e| ssl(e, "builder"))?;
     // The cert is neither trusted nor pinned — AnyTLS's auth is the password (see module docs).
     b.set_verify(SslVerifyMode::NONE);
@@ -119,8 +132,5 @@ where
             .map_err(|e| ssl(e, "alps"))?; // ALPS
         config.set_alps_use_new_codepoint(true);
     }
-
-    tokio_boring2::connect(config, sni, stream)
-        .await
-        .map_err(|e| io::Error::other(format!("anytls tls handshake: {e}")))
+    Ok(config)
 }
