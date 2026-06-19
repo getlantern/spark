@@ -35,9 +35,11 @@ format* between the discovery loop and both executors.
 
 ---
 
-## 2. The genome schema (sketch)
+## 2. The genome schema (v1 — locked)
 
-Serde/JSON-portable (the Go side decodes the same document). Illustrative, not final:
+The interchange contract between the discovery loop and both executors. Serde/JSON-portable (the Go
+side decodes the *same* document). **Locked for v1**: executors and the search loop target exactly
+these fields. A conformant gambit:
 
 ```jsonc
 {
@@ -78,13 +80,66 @@ Serde/JSON-portable (the Go side decodes the same document). Illustrative, not f
 }
 ```
 
-Notes:
-- **Permutations as seeds**, not explicit orders, so a gambit reproduces Chrome's per-connection
-  permutation behavior deterministically and compactly (and the search can mutate one integer).
-- `padding.target_len`, `segment_split`, and `inter_segment_delay_ms` are the **highest-value, fully
-  portable, well-formed** knobs — they're the first ones to wire up (ADR 0006 P1–P2).
-- `session_id.inject` and a future `raw_clienthello` are the **unconstrained** class — they go in
-  `requires`, get review-gated, and only run on capable executors.
+Design notes: **permutations are seeds**, not explicit orders, so a gambit reproduces Chrome's
+per-connection permutation deterministically and compactly (the search mutates one integer);
+everything in `clienthello` is a **delta over the anchor** (absent ⇒ inherit the anchor's value).
+
+### 2.1 Signed envelope
+
+A gambit is delivered wrapped (ADR 0003 §4):
+
+```jsonc
+{ "gambit": { /* the document above */ },
+  "key_id": "...", "version_counter": 42,
+  "sig": "ed25519(detached, over the canonically-encoded gambit)" }
+```
+
+Decode **rejects**: bad signature, unknown `key_id`, or `version_counter ≤` the last accepted
+(anti-rollback). `genome_version` gates schema compat; unknown *optional* fields are ignored on decode
+(forward-compatible).
+
+### 2.2 Field reference (v1)
+
+| Field | Type | Default (= anchor) | Class |
+|---|---|---|---|
+| `anchor` | enum (`chrome-137`,…) | required | — |
+| `clienthello.extension_order` / `.cipher_order` | `{permute_seed:u32}` \| `{explicit:[id]}` | anchor's | constrained |
+| `clienthello.grease` | `{seed:u32}` | anchor's | constrained |
+| `clienthello.supported_groups` | `{pq_x25519mlkem768:bool, order:[str]}` | anchor's | constrained (`pq_kem` if PQ on) |
+| `clienthello.alpn` / `.cert_compression` / `.ext_toggles` | lists / map | anchor's | constrained |
+| `clienthello.padding.target_len` | `u16` \| null | null | constrained |
+| `clienthello.ech` | `{mode: off\|grease\|real, config_ref?}` | `grease` | `ech` |
+| `clienthello.alps` | `{mode: off\|on, settings?}` | anchor's | `alps` |
+| `clienthello.session_id` | `{mode: random\|resumption\|inject, hex?}` | `random` | **`session_id_inject`** if inject |
+| `clienthello.sni` | `{source: config_domain\|fronted, omit:bool}` | `config_domain` | constrained |
+| `clienthello.raw` | `{bytes_hex}` (overrides all of `clienthello.*`) | absent | **`raw_clienthello`** |
+| `records.size_limit` / `.split_offsets` | `u16`\|null / `[usize]` | null / [] | constrained |
+| `wire.segment_split` | `{mode: none\|sni_boundary\|explicit, offsets?}` | `none` | constrained |
+| `wire.inter_segment_delay_ms` | `{fixed:u32}` \| `{jitter:{min,max}}` \| null | null | constrained |
+| `wire.tcp_nodelay` / `.first_data_delay_ms` | bool / u32 | true / 0 | constrained |
+| `requires` | `[capability-tag]` | `[]` | — |
+
+### 2.3 Capability tags (`requires`) — closed vocabulary
+
+An executor declines a gambit whose `requires` it can't satisfy (and falls back to its best portable
+gambit). v1 tags: `ech`, `alps`, `pq_kem`, `session_id_inject`, `raw_clienthello`. **Untagged knobs
+(reorder, GREASE, padding, curve/cipher choice, records, segment-split, timing) run everywhere.**
+
+### 2.4 Classes
+
+- **Constrained (default, untagged):** produces a *well-formed* ClientHello; boring stays the TLS
+  engine; portable to both executors **today**. Layers B (records) and C (segment/timing) are *always*
+  constrained.
+- **Tagged (`requires` non-empty):** needs a capability beyond the well-formed-CH baseline
+  (`session_id_inject`, `raw_clienthello`); **review-gated**; runs only on capable executors
+  (uTLS now; spark via patched-boring / the P4 byte-builder).
+
+### 2.5 Versioning
+
+`genome_version` = the schema version (v1 = this doc). Optional knobs may be *added* within v1
+(defaulted; ignored if unknown → forward-compatible). Removing/retyping a field bumps to v2; executors
+advertise the max version they speak, and the search loop only emits gambits ≤ the min version across
+the target fleet.
 
 ---
 
@@ -148,8 +203,9 @@ them. No `requires` beyond `ech`/`alps` → portable, well-formed, keeps a worki
                               └────────────────┬───────────────────────┘
                                                ▼  survivors only
                               ┌─ outer fitness (ground truth) ─────────┐
-                              │   PASSIVE fleet telemetry, per-region  │ verify the few
-                              │   aggregate success of canary fetches  │
+                              │  SERVER-OBSERVED arrivals per (gambit,  │ verify the few
+                              │  region); A/B over sub-populations;     │ (no client telemetry)
+                              │  rotation isolates gambit vs server     │
                               └────────────────┬───────────────────────┘
                                                ▼
               selection (per-region niches + novelty; keep a PORTFOLIO, not one winner)
@@ -175,20 +231,37 @@ them. No `requires` beyond `ech`/`alps` → portable, well-formed, keeps a worki
   and/or an LLM-as-DPI scoring (i) **bucket-match** ("would DPI classify this as Chrome TLS?"), (ii)
   **anomaly** ("how distinctive/abnormal is it?"), and (iii) **fidelity vs the anchor** (how far from
   genuine Chrome). Pre-filters the population before any field trial.
-- **Outer (ground truth):** **passive fleet telemetry.** Clients already running a gambit report a
-  per-gambit, per-region, per-epoch **aggregate** success signal (did a connection to a known-reachable
-  canary complete?). We **observe real usage** — *no active probing* (which burns vantages and trains
-  the censor). Privacy by design: aggregate counts only, k-anonymity thresholds before a cell counts,
-  optional DP noise, no per-user traces.
-- **Composite fitness = f(field_success, −anomaly, fidelity_floor).** Crucially **not** got-through
-  alone: a gambit that beats one censor by becoming a glaring anomaly elsewhere must score poorly.
+- **Outer (ground truth) — the *server* is the oracle (no client telemetry).** A gambit "works" iff a
+  connection using it **reaches and completes auth to one of our servers.** The server logs, per
+  *successful* connection only, the **gambit id** (signaled by the client inside the authenticated
+  tunnel once connected), a **coarse region** (source-IP geo), and the **epoch + server id** → fitness
+  is the **arrival rate per (gambit, region)**. There is **no client phone-home and no separate
+  telemetry channel** — *a working proxy connection is itself the success datum*, which is both simpler
+  and more private than client reporting. The server inherently can't see *failures* (a blocked attempt
+  never arrives), so absolute success-rate isn't directly observable — resolved by comparison + rotation
+  (§5.3).
+- **Composite fitness = f(arrival_rate, −anomaly, fidelity_floor).** Crucially **not** arrivals
+  alone: a gambit that beats one censor by becoming a glaring anomaly elsewhere must score poorly (the
+  inner-loop anomaly score guards this before a gambit ever reaches the population).
 
-### 5.3 Non-stationarity & portfolio
-- The censor adapts ⇒ this is **continuous co-evolution**, not one-shot. Fitness **decays**; the loop
-  re-searches perpetually.
-- Score and select **per region** (a winner in region A may fail in B).
-- Ship a **portfolio** of good gambits per region and **rotate** among them (polymorphism), rather
-  than a single global "best" (which becomes a static target).
+### 5.3 Comparison, server rotation & non-stationarity
+- **Comparative A/B, not absolute rates.** Since the server sees only arrivals (no denominator),
+  *compare* candidate gambits assigned across **comparable client sub-populations** in a region and
+  pick the one with the higher **arrival volume** — a multi-armed bandit over gambits. Relative volume
+  over comparable populations ≈ relative success, so no failure-reporting is needed.
+- **Client fallback ladder supplies the negative signal implicitly.** A client tries its assigned
+  gambits until one connects; the server observes *the one that worked*. Natural client behavior +
+  server-observed arrivals ⇒ "which gambit ends up working most in region R" without explicit failure
+  reports.
+- **Server rotation isolates gambit-quality from server-blockedness.** Servers are ephemeral (IPs
+  burn → rotate). If a server's IP is blocked, *all* gambits to it drop together — a *server* signal,
+  not a gambit signal. A gambit's quality is its arrival rate **across multiple fresh servers**;
+  comparing gambits *per server* and servers *over time* separates the two. **Gambit search and server
+  rotation co-evolve against the live fleet** — they are one system, not two.
+- **Non-stationary.** The censor adapts ⇒ continuous co-evolution, not one-shot. Fitness **decays**;
+  the loop re-searches perpetually.
+- Score/select **per region** (a winner in A may fail in B); ship a **portfolio** of good gambits per
+  region and **rotate** among them (polymorphism), never a single global "best" (a static target).
 
 ### 5.4 Deployment gate & safety
 - Every shipped gambit passes a **review/policy gate** before signing — stricter for `requires`
@@ -201,17 +274,26 @@ them. No `requires` beyond `ech`/`alps` → portable, well-formed, keeps a worki
   channel → both fleets consume by genome.
 
 ### 5.5 Where the loop runs
-- **Centralized search, fleet as sensors** is the likely shape: the GA/LLM loop runs server-side
-  (cheap inner loop there), the *only* distributed part is passive telemetry + signed gambit delivery.
-  This keeps the client thin and the search auditable. (A fully on-device adaptive variant is a
-  later option, with a much tighter safety/telemetry story.)
+- **Centralized search; the *servers* are the sensors.** The GA/LLM loop runs server-side, *with* the
+  servers' arrival logs (the fitness signal originates exactly where the search lives). The only
+  things crossing to clients are **signed gambit assignments** (which gambits to try, for the A/B
+  bandit) going out, and **successful connections** coming in (the implicit fitness). The client stays
+  thin and carries no telemetry logic; the search is fully auditable server-side. (A fully on-device
+  adaptive variant is a later option with a much tighter safety story.)
 
 ---
 
 ## 6. Open questions
 
-- **Telemetry minimality vs utility:** the smallest per-gambit/per-region signal that's still a useful
-  fitness gradient *and* privacy-safe (count + region + epoch? success-rate buckets? DP budget?).
+- **Gambit-id signaling:** how the client conveys its gambit id to the server *inside the
+  authenticated tunnel* (so attribution can't be spoofed/observed by the censor), and at what
+  granularity region is derived from the source IP without storing per-user data.
+- **A/B assignment + bandit design:** how to split comparable sub-populations per region, the bandit
+  policy (explore/exploit), and how much the missing denominator (server sees only arrivals) biases
+  selection — plus whether a coarse assignment count is worth keeping as an approximate denominator.
+- **Coupling search with server rotation:** the search runs against an ephemeral, rotating server
+  fleet — how to schedule rotation vs. evaluation windows so a gambit is judged across enough fresh
+  servers to separate gambit-quality from server-blockedness.
 - **Surrogate-censor fidelity:** how well an offline classifier/LLM predicts a real censor — risk that
   the inner loop confidently mis-ranks. Calibrate the surrogate against outer-loop ground truth.
 - **Shared-knob vocabulary:** enumerate + *test* the exact constrained subset that boring and uTLS

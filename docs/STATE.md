@@ -1054,10 +1054,18 @@
   carve Cronet** — `boring2`+profile already *is* the byte-exact Chrome CH parcel; Cronet = CI
   ground-truth oracle only; (4) the gambit is a **portable parameter genome** — `boring` (Rust/spark)
   and **uTLS** (Go/lantern) are two executors, so **discover once, deploy to both fleets**; (5) a
-  **discovery loop** (GA + LLM grounded in the corpus; two-tier fitness = offline surrogate +
-  *passive* fleet telemetry; anchor at genuine Chrome and penalize anomaly; Ed25519-signed deploy).
-  Doc `docs/adr/0006-early-bytes-handshake-shaping.md` (decision) + `docs/handshake-gambit-design.md`
-  (genome schema + executor-mapping table + discovery-harness architecture + open questions). **Go
+  **discovery loop** (GA + LLM grounded in the corpus; anchor at genuine Chrome and penalize anomaly;
+  Ed25519-signed deploy). **Telemetry is SERVER-SIDE only (decided 2026-06-19):** the server is the
+  oracle — a connection that reaches+auths to one of our (rotating) servers *is* the success datum
+  (gambit id signaled inside the authenticated tunnel; no client phone-home). The server sees only
+  arrivals (no failures), so fitness is **comparative A/B over sub-populations** + **server rotation
+  isolates gambit-quality from server-blockedness** (search and rotation co-evolve). Docs:
+  `docs/adr/0006-early-bytes-handshake-shaping.md` (decision) + `docs/handshake-gambit-design.md`
+  (**genome schema locked v1** — field reference, signed envelope, capability tags, executor-mapping
+  table, the server-side discovery harness, open questions) + `docs/phase1-handshake-framing.md`
+  (**Phase 1 build spec** — the socket-layer `SegmentShapingStream` for SNI-boundary fragmentation +
+  timing, the minimal CH/SNI parser, the `WirePlan` = genome Layer C, and `capture-clienthello` +
+  JA4-drift test; build-ready, live-gate via tcpdump on the DO box). **Go
   angle:** uTLS (the every-knob CH lib spark lacks in Rust) + wazero are already in lantern
   (samizdat/water), so the Go fleet is the lower-effort home for CH manipulation; the portable genome
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
