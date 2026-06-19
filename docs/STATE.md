@@ -71,17 +71,27 @@ What's DONE (this and prior sessions; all on `main`, pushed):
      Verified-API note (don't re-verify): h2 0.4.15 / http 1.4.2; CONNECT request = build
      `Authority` then `Uri::from_parts` (authority-only is valid; `"host:port"` parses ambiguously
      as a URI); `Pseudo::request` drops scheme/path for CONNECT.
-   - **NEXT CHUNK: `transport.rs` + config wiring.** Tie it together: build the Chrome connector
-     (reuse `anytls::tls`/`anytls::profile` — add `"anytls"` to the `samizdat` feature, OR extract a
-     shared connector helper) → `.configure()` → `session_id::inject_session_id(&mut cfg, &auth_sid)`
-     → `tokio_boring2::connect(cfg, sni, tcp)` (assert ALPN==h2) → `H2Conn::handshake` →
-     `impl Transport::dial(target)` = `H2Conn::connect("host:port") → BoxedStream`; add a conn pool
-     (mirror `AnytlsTransport`'s `Mutex<Vec<Arc<…>>>` + idle sweep). Config: `SamizdatConfig { server,
-     server_pubkey (hex32), short_id (hex8), sni }` + `TransportConfig.samizdat` + `from_config`
-     precedence + the `#[cfg(not(feature="samizdat"))]` hard-error stub (mirror anytls/wasm). Then the
-     live **interop gate** (stand up `getlantern/samizdat` or lantern-box; spark client → HTTP 200) +
-     the `sudo spark run` TUN gate. FFI/CH reference: `/tmp/kid-spike`. NOTE: samizdat is **TCP-only**
-     in v1 — its `UdpTransport` should hard-error/"unsupported" (design §1, §11).
+   - **Chunk 4 — transport.rs + config wiring DONE 2026-06-19 (commit `f95e8b2`).** `SamizdatTransport`
+     impls `Transport` (one shared, reactively-reconnecting `H2Conn` multiplexes all CONNECT tunnels)
+     + `UdpTransport` (Unsupported, TCP-only v1). `establish()` = TCP → `inject_session_id` into the
+     Chrome ClientHello → `tokio_boring2::connect` (assert ALPN==h2) → `H2Conn::handshake`. Reuse:
+     **extracted `anytls::tls::configure()`** (behavior-preserving split of `connect()`) so samizdat
+     shares the JA4-verified connector; `samizdat` feature now enables `anytls`. Config
+     `SamizdatConfig{server,server_pubkey hex32,short_id hex8,sni}` + `TransportConfig.samizdat` +
+     `from_config` precedence (after anytls) + `not(samizdat)` hard-error stub. Tests: TOML parse,
+     from_config builds/rejects bad hex, UDP-unsupported. 10 samizdat tests green; anytls still green;
+     clippy/fmt/workspace/default all clean. **The full client stack now compiles + unit-passes; the
+     remaining work is purely live verification (no server stood up in this session).**
+   - **NEXT: the live gates (environment-heavy — needs a Samizdat server).**
+     (a) **Interop gate:** stand up a `getlantern/samizdat` (or `lantern-box` `"samizdat"`) server with a
+     known X25519 pubkey + short ID (mirror the AnyTLS DO-droplet recipe), point `[transport.samizdat]`
+     at it, and confirm spark's client reaches a target → HTTP 200. The server side is Go; the client
+     is built (`cargo build -p spark-cli --features samizdat`). Watch for: ALPN must negotiate h2;
+     the full handshake must *complete* with the kID session set (the spike only proved CH emission;
+     completion + live interop are unproven). (b) **`sudo spark run` TUN gate** with an **IP** target
+     (e.g. `curl https://1.1.1.1` — avoids DNS since samizdat is TCP-only). FFI/CH reference:
+     `/tmp/kid-spike`. **Deferred follow-ups (non-blocking):** ClientHello fragmentation/shaping reuse
+     (`shaping/`), a multi-conn pool + idle sweep (currently one shared conn), and UDP-over-CONNECT.
 1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
    (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
    `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:
