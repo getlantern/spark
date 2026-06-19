@@ -52,12 +52,23 @@ What's DONE (this and prior sessions; all on `main`, pushed):
      layout `shortID(8)‖nonce(8)‖tag(16)`). 3 tests vs vectors captured from Go `auth.go` +
      cross-checked through the package's `VerifySessionID` (ok=true; generator `/tmp/sz-vec`). clippy
      -Dwarnings + fmt clean (feature on/off); default build unaffected.
-   - **NEXT CHUNK: `session_id.rs`** — the kID SessionID-injection seam realizing the validated recipe
-     (see the verified-API note above: `SSL_SESSION_new` → `set_protocol_version(TLS1_2)` →
-     `SSL_SESSION_set1_id` → `set_time`/`set_timeout` → `SSL_set_session`). This is the first chunk that
-     pulls boring2, so extend the `samizdat` feature to `["dep:boring2","dep:tokio-boring2"]` (+ likely
-     reuse `anytls/tls.rs`). Then `h2.rs` (h2-crate CONNECT ⇄ AsyncRead+AsyncWrite), `transport.rs` +
-     config wiring, then interop + TUN gates. Reference impl for the FFI: `/tmp/kid-spike`.
+   - **Chunk 2 — session_id.rs DONE 2026-06-19 (TDD; commit `aff48c8`).** `inject_session_id(config,
+     &id)` installs the 32-byte auth SessionID as the ClientHello `legacy_session_id` via the kID
+     trick on stock boring2 (FFI: `SSL_SESSION_new`→`set_protocol_version(TLS1_2)`→`set1_id`→
+     `set_time`/`set_timeout`→`SSL_set_session`+`SSL_SESSION_free`). `samizdat` feature now =
+     `["dep:boring2","dep:tokio-boring2","dep:boring-sys2","dep:foreign-types-shared"]`
+     (added `boring-sys2` + `foreign-types-shared` to workspace deps — FFI access to the already-present
+     boring2). Test = in-tree hermetic ClientHello capture (asserts the id lands + TLS 1.3 still
+     offered). clippy/fmt clean; default build unaffected. NOTE: `samizdat` does NOT yet enable the
+     `anytls` feature — the next TLS-connect wiring should reuse `anytls/tls.rs`'s Chrome connector
+     (add `"anytls"` to the feature then, or extract a shared connector helper).
+   - **NEXT CHUNK: `h2.rs`** — HTTP/2 CONNECT mux over the TLS stream via the **`h2` crate** (new dep,
+     scoped no-hyper exception per ADR 0007 §4 — needs adding `h2` to workspace+core, pulled by the
+     `samizdat` feature). Adapt `(SendStream, RecvStream)` ⇄ `AsyncRead+AsyncWrite`: CONNECT request
+     with `:authority`=target, no `:scheme`/`:path`; spawn the `Connection` driver; `poll_shutdown` →
+     H2 half-close. Test against a local `h2` server doing CONNECT→echo. Then `transport.rs`
+     (build Chrome connector → inject_session_id → tokio_boring2 connect → h2 handshake → CONNECT;
+     impl `Transport`; pool) + config wiring, then interop + TUN gates. FFI reference: `/tmp/kid-spike`.
 1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
    (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
    `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:
