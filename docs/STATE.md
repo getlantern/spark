@@ -1071,7 +1071,19 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **ANCHOR drift CI — scheduled live-Chrome oracle (ADR 0006 §4) 2026-06-19 (commit pending).** New
+- **GAMBIT LIVE GATE PASSED on macOS (ADR 0006) 2026-06-19.** End-to-end over the internet: `sudo
+  spark run --config gate.toml` (AnyTLS → a fresh DO droplet running anytls-go 0.0.12 on :443, with
+  `[transport.anytls.clienthello]` = chrome-137 anchor + `[transport.shaping] segment_split =
+  sni_boundary`), then `route add 1.1.1.1 -interface utunN` + `curl https://1.1.1.1/cdn-cgi/trace`
+  → **`ip=137.184.138.90` (the droplet)**, not the host's `97.118.44.235`. Proves the full gambit
+  path live: spark netstack → AnytlsTransport (gambit-shaped boring **Chrome ClientHello**,
+  SNI-boundary TCP fragmentation) → anytls-go server → Cloudflare, egressing as the droplet. Infra was
+  ephemeral (droplet + DO ssh-key + local key all destroyed post-gate). `protect_interface = en0`
+  kept the upstream dial off the tun. This is the gambit-era successor to the M11 AnyTLS live gate.
+- **ANCHOR drift CI — scheduled live-Chrome oracle (ADR 0006 §4) 2026-06-19 (committed `f185529`,
+  pushed; both jobs VERIFIED GREEN in CI).** The `chrome-oracle` job captured real current Chrome's
+  JA4 = **`t13d1516h2_8daaf6152771_d8a2da3f94cd`** — the *entire* JA4 (incl. JA4_c) equals our
+  `ANCHOR_JA4`, i.e. **full JA4 parity with live Chrome**, not just the cipher prefix. New
   `.github/workflows/anchor-drift.yml` (weekly cron + `workflow_dispatch` + push on the profile/JA4
   files). Two jobs: **`profile-drift`** (deterministic, reliable) re-runs the `ANCHOR_JA4` +
   `ja4` tests under `--features anytls` — does *our* boring ClientHello still emit the pinned anchor;
