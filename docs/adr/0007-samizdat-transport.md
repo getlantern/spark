@@ -54,9 +54,10 @@ Hermetic spike (2026-06-19, `/tmp/kid-spike`) against spark's real Chrome connec
 still includes TLS 1.3 (no version cap from the 1.2 session); cipher list + extension set are
 identical to baseline (extension order permutes per-connection, as real Chrome does → JA4 unchanged).
 Working sequence: `SSL_SESSION_new` → `SSL_SESSION_set_protocol_version(TLS1_2)` → `SSL_SESSION_set1_id`
-→ `set_time`/`set_timeout` → `SSL_set_session` → `SSL_SESSION_free`. Still to prove at integration
-gates (not blockers): full-handshake completion with the session set, and live interop with a real
-server.
+→ `set_time`/`set_timeout` → `SSL_set_session` → `SSL_SESSION_free`. Both follow-on checks are now
+**confirmed**: `core/examples/samizdat_interop.rs` tunnels through a real `getlantern/samizdat` Go
+server — the full handshake completes with the session set, the server's `VerifySessionID` accepts
+spark's auth, and a request returns HTTP 200 (including with `sni_boundary` ClientHello fragmentation).
 
 ## Consequences
 

@@ -34,7 +34,7 @@ What's DONE (this and prior sessions; all on `main`, pushed):
   single TLS 1.3 + **H2 CONNECT mux via the `h2` crate** (scoped no-hyper exception; H2 is inside TLS
   so its fingerprint is moot), REALITY auth in the TLS `legacy_session_id`, reuse the AnyTLS Chrome
   connector + `shaping/` + `ring` + the session-pool pattern. **kID SessionID-injection spike PASSED**
-  (`/tmp/kid-spike`): a chosen 32-byte `legacy_session_id` reaches the wire in a Chrome-1.3 hello with
+  (`/tmp/kid-spike`): a chosen 32-byte `legacy_session_id` reaches the wire in a Chrome TLS-1.3 ClientHello with
   JA4 intact, on **stock boring2 (NO fork)** — the `boring-sys2` patch is a recorded-but-unused
   fallback. **Verified API facts (don't re-verify):** the kID recipe = `SSL_SESSION_new(ctx)` →
   `SSL_SESSION_set_protocol_version(TLS1_2_VERSION)` → `SSL_SESSION_set1_id(&sid32)` →

@@ -96,23 +96,41 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let cap = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
-            let mut data = Vec::new();
-            let mut buf = [0u8; 8192];
-            loop {
-                match tokio::time::timeout(Duration::from_millis(250), sock.read(&mut buf)).await {
-                    Ok(Ok(n)) if n > 0 => data.extend_from_slice(&buf[..n]),
-                    _ => break, // EOF, read error, or idle timeout: ClientHello captured
+            // Read exactly the first TLS record (the ClientHello): a 5-byte header
+            // (type, version, u16 length) then `length` payload bytes. Length-driven rather than
+            // idle-timeout-driven, so a slow/contended CI delivering it in pieces can't truncate it.
+            let read_record = async {
+                let mut data = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.ok()?;
+                    if n == 0 {
+                        return None; // EOF before a full record
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                    if data.len() >= 5 {
+                        let record_len = ((data[3] as usize) << 8) | data[4] as usize;
+                        if data.len() >= 5 + record_len {
+                            return Some(data);
+                        }
+                    }
                 }
-            }
-            data
+            };
+            tokio::time::timeout(Duration::from_secs(5), read_record)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default()
         });
         let tcp = TcpStream::connect(addr).await.unwrap();
-        let _ = tokio::time::timeout(
-            Duration::from_millis(500),
-            tokio_boring2::connect(config, "example.org", tcp),
-        )
-        .await;
-        cap.await.unwrap()
+        // The handshake never completes (the listener never replies), so drive it on a task we abort
+        // once the ClientHello record is captured.
+        let handshake = tokio::spawn(async move {
+            let _ = tokio_boring2::connect(config, "example.org", tcp).await;
+        });
+        let data = cap.await.unwrap();
+        handshake.abort();
+        data
     }
 
     struct ParsedCh {

@@ -8,9 +8,8 @@
 - **Builds on:** ADR 0001 (BoringSSL Chrome-mimicry TLS backend), ADR 0006 (opening-gambit /
   `Capability::SessionIdInject`), the `m11-transport-candidates-anytls-samizdat` memory, and the
   in-tree AnyTLS transport (`core/src/transport/anytls/`) it reuses heavily.
-- **Reference implementation:** `github.com/getlantern/samizdat` (Go), studied at
-  `/Users/afisk/go/src/github.com/getlantern/samizdat` — `auth.go`, `client.go`, `h2transport.go`,
-  `samizdat.go`.
+- **Reference implementation:** `github.com/getlantern/samizdat` (Go) — `auth.go`, `client.go`,
+  `h2transport.go`, `samizdat.go`, `server.go`.
 
 ---
 
