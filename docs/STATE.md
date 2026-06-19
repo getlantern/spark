@@ -1071,7 +1071,26 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **P4 (chunk 1) — handshake-crypto host-fn menu (ADR 0006) 2026-06-19 (commit pending).** The
+- **ANCHOR / JA4 drift control (ADR 0006 §4, deferred P0) 2026-06-19 (commit pending).** Two
+  commits. (1) `core/src/transport/ja4.rs` (always-on): a pure ClientHello parser + the **FoxIO JA4**
+  fingerprint (`JA4_a` version/SNI/cipher-count/ext-count/ALPN + `JA4_b` sorted-cipher hash + `JA4_c`
+  sorted-extension+sigalg hash; GREASE-stripped, extension-sorted ⇒ invariant to our per-connection
+  GREASE+permutation but flips on a real profile change). The spec verified against the pinned FoxIO
+  source; **validated against the spec's own worked example** `t13d1516h2_8daaf6152771_e5627efa2ab1`
+  reproduced byte-for-byte (committed `3311ab7`). (2) `anytls/anchor.rs` (feature `anytls`):
+  `capture_client_hello(profile, sni)` runs the boring handshake against an in-memory EOF peer to
+  record the exact ClientHello (no network), + a drift test pinning `ANCHOR_JA4` =
+  **`t13d1516h2_8daaf6152771_d8a2da3f94cd`** — the `t13d1516h2_8daaf6152771` prefix (15 ciphers, 16
+  exts, h2, canonical Chrome **cipher hash**) matches the well-known Chrome JA4, evidence the profile
+  fingerprints as Chrome. Plus a `capture-clienthello` example tool (`cargo run -p spark-core
+  --example capture_clienthello --features anytls -- [sni]`) printing the CH hex + JA4 + drift status.
+  **Verified:** JA4 = SNI-invariant in practice (same JA4 for `example.com` vs `cloudflare.com`); 4
+  new tests; all-features 185, clippy `-D warnings` clean default + all-features, fmt + workspace
+  green. **Remaining (deferred):** wire the drift test into a scheduled CI job that re-captures from a
+  live Chrome/Cronet oracle and proposes a refreshed anchor (ADR 0006 §4) — needs a Chrome capture
+  source. **Next: P5** (discovery harness).
+- **P4 (chunk 1) — handshake-crypto host-fn menu (ADR 0006) 2026-06-19 (committed `b3cbfc7` +
+  `2bae867`, pushed).** The
   *unconstrained* regime needs a Path-B module to drive a TLS 1.3 handshake itself; this adds the
   crypto primitives beside the existing `host_rand`/`host_hash`/ChaCha20-Poly1305 menu (verified
   against the pinned ring 0.17.14 source; same fault-recording + bounds-checking discipline):

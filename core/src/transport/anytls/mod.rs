@@ -42,6 +42,8 @@ pub mod settings;
 // `profile` (the gambit→boring executor mapping) rides with them — its only consumers are `tls`/
 // `transport`, and `BORING_CAPABILITIES` is boring-specific.
 #[cfg(feature = "anytls")]
+pub mod anchor;
+#[cfg(feature = "anytls")]
 pub mod profile;
 #[cfg(feature = "anytls")]
 pub mod tls;
