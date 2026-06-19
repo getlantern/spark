@@ -30,9 +30,15 @@ What's DONE (this and prior sessions; all on `main`, pushed):
   `makeKeyAndOrderFront` or it launches hidden), AppBar + a VPN-status/Protocol/Routing settings card.
 
 **NEXT (in rough priority):**
-1. **GUI profile/settings UI** — the server config is currently *baked at build time* (`SPARK_CONFIG`);
-   the app needs a runtime settings/profile screen to point at a server (and to surface server/region).
-   This is the natural next GUI chunk + unblocks a shippable client.
+1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
+   (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
+   `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:
+   file → baked `SPARK_CONFIG` → `SPARK_PROXY` → direct. So the relay is no longer pinned at build
+   time — drop a TOML there (download / fetch from a trusted location / a future in-app importer) and
+   Connect uses it. **Remaining:** (a) live-verify with a notarized DMG built *without* `SPARK_CONFIG`
+   + a `config.toml` + a relay; (b) an **in-app importer/fetcher** (file picker / fetch-from-URL) +
+   surfacing server/region in the UI; (c) **config trust** — since it "can come from anywhere",
+   sign+verify the config (reuse the `SignedGambit` Ed25519 pattern) before trusting a relay/password.
 2. **A lasting AnyTLS server** (a real deployment) instead of the ephemeral gate droplets the live
    gates used — so an installed app keeps working.
 3. **iOS** NE-AnyTLS: the macOS slice has `anytls`; iOS returns -1 (BoringSSL-for-iOS unbuilt).

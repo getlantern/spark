@@ -1,6 +1,13 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'spark_backend.dart';
+
+/// Filename of the runtime data-path config the app reads on connect (in the app-support dir).
+const _configFileName = 'config.toml';
 
 /// macOS backend (Model A, ADR 0005): drives the Network Extension system extension through the
 /// native `spark/ne` `MethodChannel` (implemented in macos/Runner/SparkVPN.swift). Implements the
@@ -14,26 +21,48 @@ class NEBackend implements SparkBackend {
   /// flow through that plain relay. Sourced from `--dart-define=SPARK_PROXY=host:port`.
   final String? proxyServer;
 
-  /// Full TOML data-path config (AnyTLS + handshake shaping + gambit). Takes precedence over
-  /// [proxyServer] — the NE provider runs the whole transport stack. Sourced from
-  /// `--dart-define=SPARK_CONFIG=<base64 TOML>` (decoded in main.dart); a profile UI will set it later.
+  /// Build-time *fallback* TOML config (AnyTLS + handshake shaping + gambit), from
+  /// `--dart-define=SPARK_CONFIG=<base64 TOML>`. The runtime [configFile] takes precedence over this.
   final String? config;
 
   NEBackend({this.proxyServer, this.config});
 
+  /// The runtime config file the app reads on connect: `<app-support>/config.toml` — on macOS
+  /// `~/Library/Application Support/org.getlantern.spark/config.toml`. Drop a TOML config here (from
+  /// a download, a fetch from a trusted location, a future in-app importer) to point the tunnel at a
+  /// relay without rebuilding. Returns the resolved path (also useful for a settings UI).
+  static Future<File> configFile() async {
+    final dir = await getApplicationSupportDirectory();
+    return File('${dir.path}/$_configFileName');
+  }
+
   @override
   Future<void> connect() async {
-    final cfg = config;
-    final server = proxyServer;
-    final Map<String, String>? args;
-    if (cfg != null && cfg.isNotEmpty) {
-      args = {'config': cfg};
-    } else if (server != null && server.isNotEmpty) {
-      args = {'server': server};
-    } else {
-      args = null;
-    }
+    final cfg = await _resolveConfig();
+    // The native side accepts a TOML config or a bare host:port under the same key.
+    final args = (cfg != null && cfg.isNotEmpty) ? {'config': cfg} : null;
     await _guard(() => _channel.invokeMethod<void>('connect', args));
+  }
+
+  /// Resolve the data-path config, newest-wins: (1) the runtime [configFile] (user-downloaded /
+  /// fetched), (2) the build-time-baked [config], (3) [proxyServer], (4) null = direct.
+  Future<String?> _resolveConfig() async {
+    try {
+      final f = await configFile();
+      if (await f.exists()) {
+        final s = (await f.readAsString()).trim();
+        if (s.isNotEmpty) {
+          debugPrint('NEBackend: using runtime config ${f.path}');
+          return s;
+        }
+      }
+    } catch (e) {
+      // Unreadable file → fall back to the baked config rather than failing the connect.
+      debugPrint('NEBackend: could not read runtime config ($e); using baked fallback');
+    }
+    if (config != null && config!.isNotEmpty) return config;
+    if (proxyServer != null && proxyServer!.isNotEmpty) return proxyServer;
+    return null;
   }
 
   @override

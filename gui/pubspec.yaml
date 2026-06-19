@@ -37,6 +37,9 @@ dependencies:
 
   # Distinctive typography (Sora display + JetBrains Mono for the state code).
   google_fonts: ^6.2.1
+  # Resolve the per-user application-support dir so NEBackend can read a runtime relay config file
+  # (config.toml) instead of a build-time-baked one. (Was transitive; promoted to a direct dep.)
+  path_provider: ^2.1.0
   flutter_rust_bridge: 2.12.0
   freezed_annotation: ^3.1.0
 
