@@ -133,6 +133,35 @@ pub struct TransportConfig {
     /// (else `from_config` errors).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wasm: Option<WasmConfig>,
+    /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
+    /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
+    /// handshake. Default: no shaping.
+    pub shaping: ShapingConfig,
+}
+
+/// Opening-handshake framing/timing (ADR 0006 Phase 1, genome Layer C). Shapes only the opening
+/// write (the ClientHello); a default value does nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShapingConfig {
+    /// `"none"`, `"sni_boundary"`, or comma-separated byte offsets (e.g. `"700,1400"`) into the
+    /// opening write at which to split it into separate, flushed TCP segments.
+    pub segment_split: String,
+    /// Fixed delay between segments, in milliseconds (omit for none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
+    /// Set `TCP_NODELAY` so each flushed segment leaves as its own packet.
+    pub tcp_nodelay: bool,
+}
+
+impl Default for ShapingConfig {
+    fn default() -> Self {
+        Self {
+            segment_split: "none".to_owned(),
+            delay_ms: None,
+            tcp_nodelay: true,
+        }
+    }
 }
 
 /// Dynamic wasm transport configuration (ADR 0003). The Ed25519 key that artifacts are verified
@@ -307,6 +336,11 @@ mod tests {
                         init_config: Some("deadbeef".into()),
                         floor_path: Some(PathBuf::from("/var/lib/spark/floors.toml")),
                     }),
+                    shaping: ShapingConfig {
+                        segment_split: "sni_boundary".into(),
+                        delay_ms: Some(12),
+                        tcp_nodelay: true,
+                    },
                 },
                 udp: UdpConfig {
                     idle_timeout_secs: 30,

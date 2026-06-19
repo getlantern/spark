@@ -1071,7 +1071,18 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **PHASE 1 BUILT — socket-layer handshake shaper (ADR 0006) 2026-06-19 (commit pending).** New
+- **PHASE 1 WIRED INTO ANYTLS (ADR 0006) 2026-06-19 (commit pending).** The shaper now drives the
+  real AnyTLS handshake. `[transport.shaping]` config (`ShapingConfig` {segment_split, delay_ms,
+  tcp_nodelay}, default = no-op) → `WirePlan::from_config` → `AnytlsTransport` carries the `WirePlan`
+  and, per new TLS session in `acquire()`, sets `TCP_NODELAY` + wraps the socket in
+  `SegmentShapingStream` before the boring handshake — so the Chrome ClientHello is fragmented (e.g.
+  at the SNI boundary) as it leaves. `tls::connect` is now generic over the carrier (`SslStream<S>`;
+  `Session::client<S>` was already generic), error formatting switched Debug→Display to drop the
+  `S: Debug` bound. **Verified:** `cargo test --workspace` (19 groups) + core `--all-features` (155)
+  green incl. the config round-trip with a non-default shaping block; clippy `--all-features
+  -D warnings` + fmt clean. **Remaining Phase 1 (follow-on):** `capture-clienthello` anchor tool +
+  JA4-drift test, and the tcpdump live gate (sudo + a TLS endpoint — re-provision DO when gating).
+- **PHASE 1 BUILT — socket-layer handshake shaper (ADR 0006) 2026-06-19 (committed `2be763e`).** New
   `core/src/transport/shaping/` (always-on, no feature gate): `SegmentShapingStream<S>` — an
   `AsyncRead+AsyncWrite` wrapper that shapes only the **opening write** (the ClientHello) by splitting
   it into separate flushed TCP segments — **at the SNI boundary** (mid-hostname, defeating

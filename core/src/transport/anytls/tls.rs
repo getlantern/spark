@@ -14,7 +14,6 @@
 use std::io;
 
 use boring2::ssl::{CertCompressionAlgorithm, SslConnector, SslCurve, SslMethod, SslVerifyMode};
-use tokio::net::TcpStream;
 use tokio_boring2::SslStream;
 
 /// Chrome's TLS 1.3 + ECDHE/RSA cipher order (`wreq-util` `CIPHER_LIST`).
@@ -59,8 +58,13 @@ fn ssl(e: boring2::error::ErrorStack, what: &str) -> io::Error {
     io::Error::other(format!("anytls boring {what}: {e}"))
 }
 
-/// TLS-connect over an established `TcpStream` with a Chrome ClientHello, using `sni` for SNI.
-pub async fn connect(stream: TcpStream, sni: &str) -> io::Result<SslStream<TcpStream>> {
+/// TLS-connect over an established byte stream with a Chrome ClientHello, using `sni` for SNI.
+/// Generic over the carrier so a [`crate::transport::shaping::SegmentShapingStream`] can sit between
+/// boring and the socket (ADR 0006 Phase 1) to fragment the ClientHello.
+pub async fn connect<S>(stream: S, sni: &str) -> io::Result<SslStream<S>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut b = SslConnector::builder(SslMethod::tls()).map_err(|e| ssl(e, "builder"))?;
     // The cert is neither trusted nor pinned — AnyTLS's auth is the password (see module docs).
     b.set_verify(SslVerifyMode::NONE);
@@ -92,5 +96,5 @@ pub async fn connect(stream: TcpStream, sni: &str) -> io::Result<SslStream<TcpSt
 
     tokio_boring2::connect(config, sni, stream)
         .await
-        .map_err(|e| io::Error::other(format!("anytls tls handshake: {e:?}")))
+        .map_err(|e| io::Error::other(format!("anytls tls handshake: {e}")))
 }

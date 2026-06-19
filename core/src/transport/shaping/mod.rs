@@ -65,9 +65,30 @@ pub struct WirePlan {
 }
 
 impl WirePlan {
-    /// True if the plan does any shaping at all (else `SegmentShapingStream` is a pure passthrough).
+    /// True if the plan does no shaping (then `SegmentShapingStream` is a pure passthrough).
     pub fn is_noop(&self) -> bool {
         matches!(self.segment_split, SegmentSplit::None)
+    }
+
+    /// Build a plan from the static `[transport.shaping]` config (the Phase 1 driver; P2 builds the
+    /// same `WirePlan` from a signed gambit's Layer C).
+    pub fn from_config(c: &crate::config::ShapingConfig) -> Self {
+        let segment_split = match c.segment_split.trim() {
+            "" | "none" => SegmentSplit::None,
+            "sni_boundary" => SegmentSplit::SniBoundary,
+            list => SegmentSplit::Explicit(
+                list.split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect(),
+            ),
+        };
+        WirePlan {
+            segment_split,
+            inter_segment_delay: c.delay_ms.map_or(DelaySpec::None, |ms| {
+                DelaySpec::Fixed(Duration::from_millis(ms))
+            }),
+            tcp_nodelay: c.tcp_nodelay,
+        }
     }
 }
 

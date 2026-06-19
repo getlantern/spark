@@ -88,7 +88,8 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
     };
     // AnyTLS takes precedence over the plain `server` tunnel when configured.
     if let Some(anytls) = &config.transport.anytls {
-        return anytls_transport(anytls, protector);
+        let wire = shaping::WirePlan::from_config(&config.transport.shaping);
+        return anytls_transport(anytls, protector, wire);
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
@@ -121,6 +122,7 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
 fn anytls_transport(
     cfg: &AnytlsConfig,
     protector: Option<SocketProtector>,
+    wire: shaping::WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     let sni = cfg
         .sni
@@ -132,6 +134,7 @@ fn anytls_transport(
         cfg.password.clone(),
         sni,
         protector,
+        wire,
     ));
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
 }
@@ -142,6 +145,7 @@ fn anytls_transport(
 fn anytls_transport(
     _cfg: &AnytlsConfig,
     _protector: Option<SocketProtector>,
+    _wire: shaping::WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.anytls is configured but spark was built without the `anytls` feature",

@@ -17,6 +17,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
 use crate::net::SocketProtector;
+use crate::transport::shaping::{SegmentShapingStream, WirePlan};
 use crate::transport::tcp_tunnel::header::Address;
 use crate::transport::{
     protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport,
@@ -43,6 +44,8 @@ struct Inner {
     password: String,
     sni: String,
     protector: Option<SocketProtector>,
+    /// Opening-handshake shaping for each new TLS connection (ADR 0006 Phase 1).
+    wire: WirePlan,
     pool: Mutex<Vec<Arc<Session>>>,
 }
 
@@ -55,12 +58,14 @@ impl AnytlsTransport {
         password: String,
         sni: String,
         protector: Option<SocketProtector>,
+        wire: WirePlan,
     ) -> Self {
         let inner = Arc::new(Inner {
             server,
             password,
             sni,
             protector,
+            wire,
             pool: Mutex::new(Vec::new()),
         });
         let sweep = tokio::spawn(sweep_loop(Arc::clone(&inner)));
@@ -92,7 +97,13 @@ impl Inner {
         }
         // No reusable session — connect a new one (no lock held across the handshake).
         let tcp = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
-        let tls = tls::connect(tcp, &self.sni).await?;
+        if self.wire.tcp_nodelay {
+            let _ = tcp.set_nodelay(true); // so each shaped segment leaves as its own packet
+        }
+        // Shape the opening write (the ClientHello) — e.g. fragment it across the SNI boundary —
+        // by sitting between boring and the socket (ADR 0006 Phase 1).
+        let shaped = SegmentShapingStream::new(tcp, self.wire.clone());
+        let tls = tls::connect(shaped, &self.sni).await?;
         let session = Arc::new(Session::client(
             tls,
             &self.password,
