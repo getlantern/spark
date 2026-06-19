@@ -33,6 +33,9 @@ postcard.workspace = true
 # brotli cert compression — both part of the Chrome ClientHello profile.
 boring2 = { workspace = true, optional = true, features = ["pq-experimental", "cert-compression"] }
 tokio-boring2 = { workspace = true, optional = true }
+# FFI access for the Samizdat kID SessionID-injection seam (ADR 0007 §5); pulled by `samizdat` only.
+boring-sys2 = { workspace = true, optional = true }
+foreign-types-shared = { workspace = true, optional = true }
 # wasmi: the Path B dynamic-transport runtime (ADR 0003). Optional — only the `wasm-transport`
 # feature pulls it, so the base build carries no WASM interpreter.
 wasmi = { workspace = true, optional = true }
@@ -53,6 +56,7 @@ system-stack = []
 # base build carries no WASM runtime. See docs/dynamic-transports-design.md §8.4.
 wasm-transport = ["dep:wasmi"]
 # Samizdat transport (ADR 0007): REALITY-style auth in the TLS SessionID + H2 CONNECT mux,
-# interoperable with deployed lantern-box `"samizdat"` servers. The auth chunk needs only `ring`
-# (unconditional); later TLS/H2 chunks extend this to pull boring2/tokio-boring2 + h2.
-samizdat = []
+# interoperable with deployed lantern-box `"samizdat"` servers. `auth.rs` needs only `ring`; the
+# `session_id.rs` kID-injection seam pulls the boring TLS backend + its FFI. (A later chunk adds the
+# `h2` dep for CONNECT muxing.)
+samizdat = ["dep:boring2", "dep:tokio-boring2", "dep:boring-sys2", "dep:foreign-types-shared"]

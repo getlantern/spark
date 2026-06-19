@@ -2031,8 +2031,10 @@ name = "spark-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "boring-sys2",
  "boring2",
  "bytes",
+ "foreign-types-shared",
  "futures",
  "libc",
  "md-5",

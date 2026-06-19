@@ -7,5 +7,8 @@
 //!
 //! Built in chunks (design §10). This module currently provides:
 //! - [`auth`]: the SessionID auth crypto (HKDF/HMAC over the server public key + short ID).
+//! - [`session_id`]: the no-fork `kID` seam that injects the auth SessionID into the boring
+//!   ClientHello's `legacy_session_id`.
 
 pub mod auth;
+pub mod session_id;
