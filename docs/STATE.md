@@ -1991,8 +1991,25 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   sub-decision deferred to U0: front-end stack (Svelte+Vite recommended, vanilla TS fallback). **Hard
   constraint:** the Tauri dep tree must not pull `openssl-sys` (verify at U0); keep Tauri out of `core/`.
 
+- 2026-06-19 (U0 DONE — Tauri shell + Lantern web UI, mock backend): Scaffolded `gui-tauri/`
+  (Tauri **v2.11.3** + **SvelteKit/svelte-ts**, adapter-static SPA, `ssr=false`; Svelte 5 runes).
+  Ported the Lantern connect screen from `docs/mockups/spark-tauri-lantern-look.html` into
+  `src/routes/+page.svelte` (the `_Palette` tokens verbatim; window 390×760 non-resizable, title
+  "Spark", identifier `org.getlantern.spark`). Added the `SparkBackend` TS seam + `MockBackend`
+  (`src/lib/spark_backend.ts`); the screen polls `status()` every 500ms exactly as it will against
+  the real service. `src-tauri/src/lib.rs` is shell-only (no commands yet). Root `Cargo.toml`
+  `exclude`s `gui-tauri/src-tauri` so Tauri stays out of the core workspace graph. **Gate PASSED:**
+  `npm run tauri build` green on macOS → `Spark.app` **8.3 MB** / `Spark_0.1.0_aarch64.dmg` **2.9 MB**
+  (vs Flutter's bundled-engine floor — direct Flutter-DMG comparison deferred to U1); `cargo tree -i
+  openssl-sys` empty (CLAUDE.md hard rule holds — no openssl/native-tls in the tree); `cargo fmt
+  --check` + `cargo clippy --release` clean; SPA bundle ~4.8 kB JS + 4.4 kB CSS. Not done in U0:
+  bundle the Sora font (system fallback for now), CSP hardening (left `csp:null`), a visual
+  screenshot (UI is a verbatim port of the rendered mockup). **Next chunk = U1** (macOS to parity:
+  real `invoke()` command surface implementing SparkBackend over `spark` core / `spark-ipc`, runtime
+  `config.toml` precedence, connect-e2e gate + Flutter-DMG size delta).
+
 ## Milestone checklist
-- [ ] U0 [ ] U1 [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green) [ ] U1 [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
