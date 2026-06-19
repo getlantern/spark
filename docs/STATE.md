@@ -1071,6 +1071,16 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
+- **SING-BOX INTEROP + UDP GATE PASSED on macOS (ADR 0006 / AnyTLS) 2026-06-19.** spark's clean-room
+  Rust anytls client validated against the **production ecosystem server** (not just the anytls-go
+  reference): `sing-box 1.13.13` `anytls` inbound on a fresh DO droplet (:443, self-signed EC cert,
+  password auth, default padding scheme), same gambit config (chrome-137 anchor + `sni_boundary`
+  shaping). **TCP:** `curl https://1.1.1.1/cdn-cgi/trace` → `ip=67.205.156.185` (the droplet). **UDP
+  (first live test of the UoT-v2 path):** `dig @9.9.9.9 example.com` through `utun15` → resolved (A
+  records) — spark's UDP-over-anytls interops with sing-box's UoT. Proves protocol correctness +
+  padding-scheme adoption + UoT v2 against the dominant deployed implementation. Ephemeral infra torn
+  down post-gate. So the AnyTLS transport is now gated against **both** anytls-go (reference) and
+  sing-box (production), TCP **and** UDP.
 - **GAMBIT LIVE GATE PASSED on macOS (ADR 0006) 2026-06-19.** End-to-end over the internet: `sudo
   spark run --config gate.toml` (AnyTLS → a fresh DO droplet running anytls-go 0.0.12 on :443, with
   `[transport.anytls.clienthello]` = chrome-137 anchor + `[transport.shaping] segment_split =
