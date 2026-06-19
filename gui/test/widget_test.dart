@@ -17,10 +17,11 @@ class _FakeBackend implements SparkBackend {
 }
 
 void main() {
-  testWidgets('renders the spark control screen', (tester) async {
+  testWidgets('renders the spark home screen with the toggle', (tester) async {
     await tester.pumpWidget(SparkApp(backend: _FakeBackend()));
     expect(find.text('spark'), findsOneWidget);
-    expect(find.text('control'), findsOneWidget);
+    // The Lantern-style connect toggle (rendered regardless of status).
+    expect(find.byKey(const Key('vpn.toggle')), findsOneWidget);
     // Unmount so the poll timer is cancelled (no pending timers at test end).
     await tester.pumpWidget(const SizedBox());
   });
