@@ -208,6 +208,27 @@ pub struct AnytlsConfig {
     /// Inline Layer-B record-framing knobs (`size_limit`, `split_offsets`). Default = the anchor.
     #[serde(default)]
     pub records: Records,
+    /// Optional Path-B module that **computes** a gambit per connection (ADR 0006 P3). When set, the
+    /// inline `clienthello`/`records` knobs above become the *fallback* profile (used when the module
+    /// faults or yields a gambit boring can't realize). Requires the `wasm-transport` feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gambit: Option<GambitModuleConfig>,
+}
+
+/// A signed Path-B module that computes a gambit per connection (ADR 0006 P3). Verified by the same
+/// pinned module-signing key + anti-rollback floor as the byte-transform [`WasmConfig`] modules.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GambitModuleConfig {
+    /// Path to the signed module artifact.
+    pub module: PathBuf,
+    /// Config anti-rollback floor — the artifact's version must be ≥ this.
+    #[serde(default)]
+    pub min_version: u32,
+    /// Optional persisted per-module version floor (a `name = version` TOML map) for anti-rollback
+    /// across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_path: Option<PathBuf>,
 }
 
 /// UDP forwarding settings.
@@ -416,5 +437,32 @@ mod tests {
         assert_eq!(anytls.records.size_limit, Some(1300));
         // An omitted gambit section defaults to the Chrome-137 anchor (all-None).
         assert_eq!(anytls.clienthello.alps, None);
+        // No dynamic gambit module unless explicitly configured.
+        assert!(anytls.gambit.is_none());
+    }
+
+    #[test]
+    fn parses_anytls_dynamic_gambit_module() {
+        let c = Config::from_toml_str(
+            r#"
+            [transport.anytls]
+            server = "192.0.2.1:443"
+            password = "pw"
+
+            [transport.anytls.gambit]
+            module = "/etc/spark/opening.spkw"
+            min_version = 4
+        "#,
+        )
+        .unwrap();
+        let g = c
+            .transport
+            .anytls
+            .expect("anytls")
+            .gambit
+            .expect("gambit module");
+        assert_eq!(g.module, PathBuf::from("/etc/spark/opening.spkw"));
+        assert_eq!(g.min_version, 4);
+        assert_eq!(g.floor_path, None);
     }
 }

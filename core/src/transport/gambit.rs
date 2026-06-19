@@ -253,6 +253,47 @@ impl SignedGambit {
     }
 }
 
+/// Version byte of the [`GambitContext`] header passed to a Path-B `compute_gambit` module.
+pub const GAMBIT_CONTEXT_VERSION: u8 = 1;
+
+/// Encoded length of the v1 [`GambitContext`] header.
+pub const GAMBIT_CONTEXT_LEN: usize = 16;
+
+/// The per-connection context handed to a Path-B gambit-compute module (ADR 0006 P3) — the *input*
+/// to `compute_gambit`, as the [`Gambit`] is its output.
+///
+/// A small **fixed-offset little-endian** header (not postcard), so the guest reads fields by offset
+/// with no decoder and new fields append at stable offsets, their presence gated by the version
+/// byte. v1 layout ([`GAMBIT_CONTEXT_LEN`] bytes):
+///
+/// | offset | field        | type                                   |
+/// |--------|--------------|----------------------------------------|
+/// | 0      | `version`    | `u8` (= [`GAMBIT_CONTEXT_VERSION`])     |
+/// | 1..8   | reserved (0) | —                                      |
+/// | 8..16  | `unix_secs`  | `u64` LE — host wall-clock at connect  |
+///
+/// Design (ADR 0006 §6): carry only what the sandbox **cannot** self-source. The module already has
+/// a CSPRNG (`host_rand`) and persistent state across connections (its own rotation counter), so the
+/// one genuinely host-only per-connection fact is the wall clock — and supplying it from the host
+/// keeps it *pinnable* for tests and the offline discovery-loop evaluator. Static deployment facts
+/// (server, SNI) go via the module's `init` config; connection-outcome feedback is a separate future
+/// export, not this input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GambitContext {
+    /// Host wall-clock at connection time, in Unix seconds.
+    pub unix_secs: u64,
+}
+
+impl GambitContext {
+    /// Encode the v1 fixed-offset header.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; GAMBIT_CONTEXT_LEN];
+        buf[0] = GAMBIT_CONTEXT_VERSION;
+        buf[8..16].copy_from_slice(&self.unix_secs.to_le_bytes());
+        buf
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +350,21 @@ mod tests {
         let bytes = postcard::to_stdvec(&g).unwrap();
         let back: Gambit = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(g, back);
+    }
+
+    #[test]
+    fn gambit_context_encodes_the_v1_header() {
+        let ctx = GambitContext {
+            unix_secs: 0x0102_0304_0506_0708,
+        };
+        let bytes = ctx.encode();
+        assert_eq!(bytes.len(), GAMBIT_CONTEXT_LEN);
+        assert_eq!(bytes[0], GAMBIT_CONTEXT_VERSION);
+        assert_eq!(&bytes[1..8], &[0u8; 7]); // reserved
+        assert_eq!(
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            0x0102_0304_0506_0708
+        );
     }
 
     #[test]

@@ -132,11 +132,36 @@ fn anytls_transport(
         .clone()
         .unwrap_or_else(|| cfg.server.ip().to_string());
     // Resolve the inline gambit genome (Layers A/B) onto the boring executor (ADR 0006 P2). Knobs
-    // boring2 can't realize are surfaced once here, never silently dropped.
+    // boring2 can't realize are surfaced once here, never silently dropped. This is also the fallback
+    // profile when a dynamic gambit module (P3, below) faults or over-reaches.
     let resolved = anytls::profile::Profile::resolve(&cfg.clienthello, &cfg.records);
     for note in &resolved.unrealizable {
         tracing::warn!(knob = note, "anytls gambit knob not realizable on boring");
     }
+    let profile = resolved.profile;
+
+    // P3: an optional signed Path-B module that computes a fresh gambit per connection.
+    #[cfg(feature = "wasm-transport")]
+    if let Some(gcfg) = &cfg.gambit {
+        let gambit = load_gambit_module(gcfg)?;
+        let t = Arc::new(anytls::AnytlsTransport::with_dynamic_gambit(
+            cfg.server,
+            cfg.password.clone(),
+            sni,
+            protector,
+            wire,
+            profile,
+            gambit,
+        ));
+        return Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>));
+    }
+    #[cfg(not(feature = "wasm-transport"))]
+    if cfg.gambit.is_some() {
+        return Err(io::Error::other(
+            "transport.anytls.gambit is configured but spark was built without the `wasm-transport` feature",
+        ));
+    }
+
     // One transport serves both TCP and UDP (UoT v2), sharing the session pool.
     let t = Arc::new(anytls::AnytlsTransport::new(
         cfg.server,
@@ -144,9 +169,42 @@ fn anytls_transport(
         sni,
         protector,
         wire,
-        resolved.profile,
+        profile,
     ));
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Read, verify (pinned key + config & persisted anti-rollback floors, exactly like
+/// [`wasm_transport`]), and instantiate a Path-B gambit-compute module (ADR 0006 P3). The module is
+/// the trust root; its computed gambits are gated per-connection by `Profile::for_boring`.
+#[cfg(all(feature = "anytls", feature = "wasm-transport"))]
+fn load_gambit_module(cfg: &crate::config::GambitModuleConfig) -> io::Result<wasm::Transform> {
+    let artifact = std::fs::read(&cfg.module).map_err(|e| {
+        io::Error::other(format!(
+            "transport.anytls.gambit: reading module {}: {e}",
+            cfg.module.display()
+        ))
+    })?;
+    let signed = wasm::ModuleVerifier::pinned()
+        .verify(&artifact, cfg.min_version)
+        .map_err(|e| io::Error::other(format!("transport.anytls.gambit: {e}")))?;
+    // Persisted per-name floor: a second anti-rollback gate that survives restarts.
+    if let Some(path) = &cfg.floor_path {
+        let floor = wasm_floor::get(path, signed.name())?;
+        if signed.version() < floor {
+            return Err(io::Error::other(format!(
+                "transport.anytls.gambit: module `{}` v{} is below the persisted floor v{}",
+                signed.name(),
+                signed.version(),
+                floor
+            )));
+        }
+        wasm_floor::bump(path, signed.name(), signed.version())?;
+    }
+    signed
+        .into_module()
+        .instantiate()
+        .map_err(|e| io::Error::other(format!("transport.anytls.gambit: instantiate: {e}")))
 }
 
 /// Without the `anytls` feature, a configured AnyTLS transport is a hard error rather than a silent
@@ -486,5 +544,106 @@ mod wasm_config_tests {
         std::fs::remove_file(&p5).ok();
         std::fs::remove_file(&p4).ok();
         std::fs::remove_file(&floor_path).ok();
+    }
+}
+
+/// AnyTLS + dynamic-gambit config wiring (ADR 0006 P3): a signed Path-B gambit module loaded via
+/// `[transport.anytls.gambit]` and attached to the AnyTLS transport.
+#[cfg(all(test, feature = "anytls", feature = "wasm-transport"))]
+mod anytls_gambit_config_tests {
+    use super::*;
+    use crate::config::{AnytlsConfig, Config, GambitModuleConfig, TransportConfig};
+    use crate::transport::gambit::Gambit;
+    use ring::signature::Ed25519KeyPair;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use wasm::testutil::dev_keypair;
+
+    /// A signed gambit-compute module: `memory` + `alloc` + a `compute_gambit` that returns the
+    /// postcard encoding of a minimal constrained gambit held in a data segment.
+    fn gambit_artifact(kp: &Ed25519KeyPair, name: &str, version: u32) -> Vec<u8> {
+        let g = Gambit {
+            genome_version: 1,
+            version: 1,
+            id: "g".into(),
+            anchor: Default::default(),
+            clienthello: Default::default(),
+            records: Default::default(),
+            wire: Default::default(),
+            requires: vec![],
+        };
+        let bytes = postcard::to_stdvec(&g).expect("encode gambit");
+        let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
+        let wat = format!(
+            r#"(module
+  (memory (export "memory") 2)
+  (data (i32.const 2048) "{escaped}")
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "compute_gambit") (param i32 i32) (result i64)
+    (i64.or (i64.shl (i64.extend_i32_u (i32.const 2048)) (i64.const 32))
+            (i64.extend_i32_u (i32.const {len})))))"#,
+            len = bytes.len()
+        );
+        let wasm = wat::parse_str(&wat).expect("assemble");
+        let sig = kp.sign(&wasm::signing_payload(name, version, &wasm));
+        let mut s = [0u8; 64];
+        s.copy_from_slice(sig.as_ref());
+        wasm::build_artifact(name, version, &wasm, &s)
+    }
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "spark-gambit-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn cfg_with(gambit: GambitModuleConfig) -> Config {
+        Config {
+            transport: TransportConfig {
+                anytls: Some(AnytlsConfig {
+                    server: "192.0.2.1:443".parse().unwrap(),
+                    password: "pw".into(),
+                    sni: None,
+                    clienthello: Default::default(),
+                    records: Default::default(),
+                    gambit: Some(gambit),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn from_config_attaches_a_verified_dynamic_gambit() {
+        let path = temp_path("ok");
+        std::fs::write(&path, gambit_artifact(&dev_keypair(), "opening", 2)).expect("write");
+        let cfg = cfg_with(GambitModuleConfig {
+            module: path.clone(),
+            min_version: 0,
+            floor_path: None,
+        });
+        // Builds within a runtime (the transport spawns its idle sweep).
+        from_config(&cfg).expect("from_config should attach the dynamic gambit");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn from_config_rejects_a_gambit_module_rollback() {
+        let path = temp_path("rollback");
+        std::fs::write(&path, gambit_artifact(&dev_keypair(), "opening", 2)).expect("write");
+        // Config floor 5 is above the artifact's version 2 → verification must fail.
+        let cfg = cfg_with(GambitModuleConfig {
+            module: path.clone(),
+            min_version: 5,
+            floor_path: None,
+        });
+        assert!(
+            from_config(&cfg).is_err(),
+            "a gambit-module rollback must be rejected"
+        );
+        std::fs::remove_file(&path).ok();
     }
 }

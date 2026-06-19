@@ -1071,8 +1071,30 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **P3 (chunk 2) — per-connection computed gambit wired into AnyTLS (ADR 0006) 2026-06-19 (commit
-  pending).** `AnytlsTransport` gains an optional dynamic gambit source: `with_dynamic_gambit(...,
+- **P3 (chunk 3) — config-driven signed gambit module + per-connection `ctx` (ADR 0006) 2026-06-19
+  (commit pending). P3 is now end-to-end from config.** `[transport.anytls.gambit]` (new
+  `GambitModuleConfig` {module, min_version, floor_path}) names a **signed Path-B module**;
+  `anytls_transport` loads + verifies it via `load_gambit_module` — the **same pinned key + config &
+  persisted anti-rollback floors as `wasm_transport`** (the module is the trust root for the gambits
+  it computes) — then attaches it through `AnytlsTransport::with_dynamic_gambit`. The inline
+  `clienthello`/`records` knobs become the **fallback** profile. Per-connection context is now real:
+  `GambitContext` (in `gambit.rs`) — a fixed-offset LE header `[version:u8 @0][unix_secs:u64 @8]`
+  (`GAMBIT_CONTEXT_LEN`=16) — carries the host wall-clock (the one fact a sandboxed module can't
+  self-source; host-supplied ⇒ pinnable for tests/eval); `resolve_profile` builds it per session.
+  **Decision recorded:** ctx carries *only* what the sandbox can't self-source — entropy is
+  `host_rand`, rotation is module-internal state, static facts (server/SNI) go via `init`,
+  connection-outcome feedback is a deliberately-separate future export. Feature gating: the dynamic
+  branch + `load_gambit_module` are `#[cfg(all(anytls, wasm-transport))]`; an `anytls`-only build
+  hard-errors if `[transport.anytls.gambit]` is set (mirroring the no-feature AnyTLS error). **Verified
+  across all four feature combos** (default / anytls / wasm-transport / all): 4 new tests
+  (`GambitContext` v1 layout; config parse of `[transport.anytls.gambit]`; `from_config` attaches a
+  dev-key-signed gambit module under `#[tokio::test]`; rollback rejected), all-features 176, clippy
+  `-D warnings` clean for default + all-features, `cargo check` green for every combo, fmt + workspace
+  green. **P3 complete.** Next: **P4** (unconstrained byte-builder + crypto host fns — the module
+  emits raw CH bytes and drives the handshake via X25519/HKDF/AES-GCM host fns), or the **P5**
+  discovery harness; plus the deferred `observe_outcome` export for the adaptive loop.
+- **P3 (chunk 2) — per-connection computed gambit wired into AnyTLS (ADR 0006) 2026-06-19 (committed
+  `40fe3f1`).** `AnytlsTransport` gains an optional dynamic gambit source: `with_dynamic_gambit(...,
   gambit: wasm::Transform)` stores the Path-B module behind a `Mutex` (the `wasmi` `Transform` is
   `!Sync` and stateful — a gambit may adapt across connections; the lock is held only for the
   synchronous compute, never across the handshake `.await`). `Inner::resolve_profile()` — called by

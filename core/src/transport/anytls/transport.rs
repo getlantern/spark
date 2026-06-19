@@ -172,8 +172,14 @@ impl Inner {
             return self.profile.clone();
         };
         let mut transform = source.lock().unwrap_or_else(|e| e.into_inner());
-        // Per-connection context is reserved (ADR 0006 §6 gambit-id/region signaling); empty for now.
-        match transform.compute_gambit(&[]) {
+        // Per-connection context (ADR 0006 P3): the host-controlled wall clock — the one fact a
+        // sandboxed module can't self-source (it has its own CSPRNG + persistent state otherwise).
+        let unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let ctx = crate::transport::gambit::GambitContext { unix_secs }.encode();
+        match transform.compute_gambit(&ctx) {
             Ok(gambit) => match Profile::for_boring(&gambit) {
                 Ok(resolved) => {
                     for note in &resolved.unrealizable {
