@@ -2008,8 +2008,27 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   real `invoke()` command surface implementing SparkBackend over `spark` core / `spark-ipc`, runtime
   `config.toml` precedence, connect-e2e gate + Flutter-DMG size delta).
 
+- 2026-06-19 (U1 DECISION + decomposition — macOS = NE Model A, spike-first): Adam chose **NE Model A**
+  (one-click, no sudo) for the macOS Tauri app over the `spark-service` daemon path. So `connect()`
+  drives `NETunnelProviderManager` (Swift port of `gui/macos/Runner/SparkVPN.swift`), **not**
+  `spark-backend`/`spark-ipc`. Code-grounded findings: the `SparkTunnel` **system-extension** target in
+  `platforms/apple` (project.yml; links `SparkCore.xcframework`, NE + system-extension.install
+  entitlements) and the embed/sign/notarize recipe in `packaging/macos/build-gui-dmg.sh` (build
+  `.systemextension` → copy into `App.app/Contents/Library/SystemExtensions/` → re-sign with NE
+  entitlements → notarize) are **reused as-is**; data-path config flows via
+  `providerConfiguration["config"]`. **The unproven part** (do NOT guess — CLAUDE.md): Tauri's macOS
+  *desktop* build is not Xcode-based, so calling Swift `NETunnelProviderManager` from a Tauri
+  `invoke()` command is unverified. U1 is decomposed in PLAN.md §4: **U1a** = Swift-bridge spike (prove
+  the Rust→Swift→NE path; smallest-first: C-ABI NE fns in `platforms/apple` / Swift staticlib via
+  build.rs / Tauri-v2 Swift plugin-on-desktop) → **U1b** = embed+sign+wire (invoke surface, config.toml
+  precedence, swap MockBackend→TauriBackend, adapt build-gui-dmg.sh for the Tauri .app; size vs Flutter
+  DMG) → **U1c** = live connect-e2e gate. **Human-blocked:** U1c needs the NE provisioning profile
+  (team `ACZRKC3LQ9`, distribution-only) — same blocker as M10; added to PLAN.md §3. **Next chunk =
+  U1a** (its own focused session — research-led spike, stop-and-report). No code written this turn
+  (the next step is the spike, not guessable glue).
+
 ## Milestone checklist
-- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green) [ ] U1 [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A; DECOMPOSED → U1a spike / U1b embed+wire / U1c live gate [human provisioning]) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)

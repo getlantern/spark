@@ -97,6 +97,11 @@ for them and **stop and request** them if a milestone needs one that's missing.
   crypto.
 - **Test server.** A simple TCP relay/echo server reachable from the dev box, for M3+
   integration tests. Minimal setup in Appendix B. Needed at M3.
+- **macOS NE provisioning profile (UI track).** The Developer-ID provisioning profile for
+  `org.getlantern.spark` carrying the `packet-tunnel-provider-systemextension` + `system-extension.install`
+  + app-group entitlements, under team `ACZRKC3LQ9` (distribution-only, so no automatic signing). The
+  same blocker as M10; required for the **U1c** live connect-e2e gate (and reused by the eventual iOS
+  work). Spike + scaffold (U1a/U1b) can proceed without it.
 
 ---
 
@@ -308,17 +313,39 @@ report" at every checkpoint.
 - **Sessions:** 1–2.
 - **Checkpoint:** confirm the front-end stack (Svelte vs vanilla TS) and the no-`openssl-sys` result.
 
-#### U1 — macOS to parity (real core)
-- **Goal:** One-click Connect on macOS equal to today's Flutter product, over the real core.
-- **In:** Tauri commands/events implementing `SparkBackend` against `spark` core / `spark-ipc` (reuse
-  the NE/service path from ADR 0005 + STATE M10); runtime `config.toml` read matching the current
-  `NEBackend` precedence (file → baked `SPARK_CONFIG` → `SPARK_PROXY` → direct).
-- **Out:** other platforms.
-- **Deliverables:** the Rust command layer in `gui-tauri/src-tauri`, the status event stream, a macOS bundle.
-- **Gate:** connect e2e on macOS (IP changes to the relay, as in the current macOS gate) **and the
-  macOS app-bundle size measured vs the Flutter DMG**.
-- **Sessions:** 2–3.
-- **Checkpoint:** record the size delta and the command/event surface.
+#### U1 — macOS to parity (NE Model A: one-click, no sudo) — DECOMPOSED, spike-first
+- **Goal:** One-click Connect on macOS equal to today's Flutter product (Model A — system extension,
+  no per-connect sudo), over the real core, from the Tauri app.
+- **Decision (2026-06-19, with Adam):** macOS uses **NE Model A**, not the `spark-service` daemon
+  path. So `connect()` drives `NETunnelProviderManager` (a Swift port of `gui/macos/Runner/SparkVPN.swift`),
+  **not** `spark-backend`/`spark-ipc`. Rationale + tradeoffs: ADR 0008 + the U1 decision-log entry.
+- **Reused as-is:** the `SparkTunnel` **system-extension** target in `platforms/apple` (project.yml —
+  links the `SparkCore.xcframework`, carries the NE + system-extension.install entitlements; built via
+  `xcodebuild`), and the embed/sign/notarize recipe in `packaging/macos/build-gui-dmg.sh` (build the
+  `.systemextension` → copy into `App.app/Contents/Library/SystemExtensions/` → re-sign with the NE
+  entitlements → notarize). The data-path config flows in via `providerConfiguration["config"]`.
+- **The real new work (why this is spike-first):** Tauri's macOS *desktop* build is **not** Xcode-based,
+  so calling Swift `NETunnelProviderManager` from a Tauri `invoke()` command is **unproven** — do NOT
+  guess at this glue (CLAUDE.md verification discipline). Split:
+  - **U1a — Swift-bridge spike (the unknown).** Prove the Tauri Rust side can drive the NE-management
+    Swift (activate the system extension via `OSSystemExtensionRequest`, then
+    `NETunnelProviderManager` load/save/start/stop/status). Candidate approaches to evaluate, smallest
+    first: (i) add C-callable NE-management fns to `platforms/apple` (Swift→C ABI, alongside
+    `spark_tunnel_run`) and call them from the Rust command; (ii) a Swift static lib/framework linked
+    via `build.rs` + an objc/C shim; (iii) a Tauri plugin with Swift (verify Tauri v2 supports Swift on
+    macOS *desktop*, not just iOS). **Gate:** a throwaway Tauri command toggles a real
+    `NETunnelProviderManager` preference / reads `connection.status` on macOS — proving the path —
+    plus a written recommendation. Stop and report.
+  - **U1b — embed + sign + wire.** Implement the `invoke()` command surface (status/connect/disconnect
+    + status event stream) over the chosen bridge; runtime `config.toml` precedence (file → baked
+    `SPARK_CONFIG` → `SPARK_PROXY` → direct, matching `NEBackend`); swap the frontend `MockBackend` →
+    `TauriBackend`; adapt `build-gui-dmg.sh` to embed the `.systemextension` into the **Tauri** `.app`
+    and sign with the NE entitlements. **Gate:** the signed Tauri `.app` installs the system extension
+    (approval prompt) and reaches `connecting`; **macOS app-bundle size measured vs the Flutter DMG**.
+  - **U1c — live connect-e2e gate.** Connect e2e on macOS (IP changes to the relay, as in the current
+    macOS gate). **Blocked on the human-owned NE provisioning profile (see §3)** — same blocker as M10.
+- **Sessions:** U1a 1–2 (spike) · U1b 2–3 · U1c 1 (after provisioning).
+- **Checkpoint:** after U1a, record the chosen Swift-bridge approach + evidence before U1b.
 
 #### U2 — Android (priority platform)
 - **Goal:** Connect e2e on Android via Tauri mobile.
