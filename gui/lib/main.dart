@@ -195,25 +195,16 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: _appBar(),
       body: SafeArea(
+        top: false,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
+          padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Column(
             children: [
-              const SizedBox(height: 24),
-              _header(),
-              const SizedBox(height: 56),
+              const SizedBox(height: 44),
               _pillToggle(),
-              const SizedBox(height: 30),
-              Text(
-                _stateLabel,
-                style: GoogleFonts.sora(
-                  color: _connected ? _Palette.brand : _Palette.textPrimary,
-                  fontSize: 26,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 18),
               Text(
                 _error ?? _subLabel(),
                 textAlign: TextAlign.center,
@@ -224,8 +215,8 @@ class _HomePageState extends State<HomePage> {
                 _failOpenBanner(),
               ],
               const Spacer(),
-              _statusCard(),
-              const SizedBox(height: 24),
+              _settingsCard(),
+              const SizedBox(height: 18),
             ],
           ),
         ),
@@ -233,28 +224,44 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _header() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(
-            color: _connected ? _Palette.brand : _Palette.off,
-            shape: BoxShape.circle,
+  /// The top bar — a centered `spark` wordmark with a state dot + a (placeholder) menu, over a
+  /// hairline divider. Mirrors Lantern's `Home` AppBar (logo title, leading menu, bottom divider).
+  PreferredSizeWidget _appBar() {
+    return AppBar(
+      backgroundColor: _Palette.bg,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      centerTitle: true,
+      leading: IconButton(
+        icon: const Icon(Icons.menu, color: _Palette.textSecondary, size: 22),
+        onPressed: () {}, // settings screen TBD
+      ),
+      title: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 9,
+            height: 9,
+            decoration: BoxDecoration(
+              color: _connected ? _Palette.brand : _Palette.off,
+              shape: BoxShape.circle,
+            ),
           ),
-        ),
-        const SizedBox(width: 10),
-        Text(
-          'spark',
-          style: GoogleFonts.sora(
-            color: _Palette.textPrimary,
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
+          const SizedBox(width: 8),
+          Text(
+            'spark',
+            style: GoogleFonts.sora(
+              color: _Palette.textPrimary,
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(1),
+        child: Container(height: 1, color: _Palette.border),
+      ),
     );
   }
 
@@ -343,54 +350,102 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// The bottom status card — Lantern's elevated white card under the toggle.
-  Widget _statusCard() {
+  /// The bottom settings card — Lantern's elevated white card of `SettingTile` rows (icon + label
+  /// on top, value indented below, a trailing indicator/chevron), separated by hairline dividers.
+  Widget _settingsCard() {
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
         color: _Palette.surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: _Palette.border),
         boxShadow: const [
           BoxShadow(color: Color(0x14000000), blurRadius: 24, offset: Offset(0, 4)),
         ],
       ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-        child: Row(
-          children: [
-            Icon(
-              _connected ? Icons.shield : Icons.shield_outlined,
-              color: _connected ? _Palette.brand : _Palette.textSecondary,
-              size: 24,
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Protection',
-                    style: GoogleFonts.sora(
-                      color: _Palette.textSecondary,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    _connected ? 'On' : 'Off',
-                    style: GoogleFonts.sora(
-                      color: _Palette.textPrimary,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
+      child: Column(
+        children: [
+          _settingRow(
+            icon: Icons.public,
+            label: 'VPN status',
+            value: _stateLabel,
+            trailing: Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(
+                color: _connected ? _Palette.brand : _Palette.off,
+                shape: BoxShape.circle,
               ),
             ),
-          ],
-        ),
+          ),
+          _divider(),
+          _settingRow(
+            icon: Icons.lock_outline,
+            label: 'Protocol',
+            value: 'AnyTLS',
+            trailing: const Icon(Icons.chevron_right, color: _Palette.textSecondary, size: 20),
+          ),
+          _divider(),
+          _settingRow(
+            icon: Icons.alt_route,
+            label: 'Routing',
+            value: 'Full tunnel',
+            trailing: const Icon(Icons.chevron_right, color: _Palette.textSecondary, size: 20),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _divider() => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Divider(height: 1, thickness: 1, color: _Palette.border),
+      );
+
+  /// One Lantern `SettingTile`-style row: a small icon + secondary-color label, the value below it
+  /// (indented to align under the label), and an optional trailing indicator.
+  Widget _settingRow({
+    required IconData icon,
+    required String label,
+    required String value,
+    Widget? trailing,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18, color: _Palette.textSecondary),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: GoogleFonts.sora(
+                  color: _Palette.textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              const SizedBox(width: 26),
+              Expanded(
+                child: Text(
+                  value,
+                  style: GoogleFonts.sora(
+                    color: _Palette.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              ?trailing,
+            ],
+          ),
+        ],
       ),
     );
   }
