@@ -1071,7 +1071,28 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **P2 — gambit knobs drive the boring connector (ADR 0006) 2026-06-19 (commit pending).** The
+- **P3 (chunk 1) — Path B computes the gambit: the `open`/shape ABI (ADR 0006) 2026-06-19 (commit
+  pending).** The `wasmi` Path B module (`core/src/transport/wasm/`) gains a third **mode** beside the
+  byte-transform pair: a `compute_gambit(ctx_ptr, ctx_len) -> packed` export, invoked once per
+  connection, that emits a **postcard-encoded `Gambit` genome** (the opening *plan* — CH knobs +
+  record/segment framing) rather than stream bytes. `Transform::compute_gambit(&[u8]) -> Result<Gambit,
+  WasmError>` calls it via the shared `call_io` sequence (refactored out of `run`) and postcard-decodes
+  the result (new `WasmError::GambitDecode`). ABI change: `transform_out`/`transform_in` are now
+  **optional** (a module exports the transform pair, `compute_gambit`, or both; `memory`+`alloc` stay
+  mandatory; a module with no mode is rejected) — so a *constrained* P3 module that only computes a
+  gambit (boring does the bytes) instantiates without dummy transforms. **Trust model:** the genome is
+  **not** separately signed — the module's own signature (`ModuleVerifier`/`SignedModule`) is the
+  trust root; the consumer still gates the computed gambit through `Profile::for_boring` so boring only
+  runs gambits it can realize (constrained regime; ADR 0006 §"Path B narrows"). **Verified:** 4 new
+  wasm tests (computes a known genome via a data-segment `wat` fixture; `compute_gambit` absent on the
+  transform-only XOR module → MissingExport; undecodable bytes → GambitDecode; **end-to-end
+  module→Gambit→`Profile::for_boring` under `--all-features`**); core `--all-features` 170, clippy
+  clean for default / `wasm-transport` / `--all-features`, fmt + `cargo check --workspace --all-features`
+  green. **Next P3 increment:** wire `compute_gambit` into the AnyTLS dial path — a per-connection
+  gambit source on `AnytlsTransport` (compute → `for_boring` → `Profile` per `acquire()`), needing both
+  the `anytls` and `wasm-transport` features; plus deciding the per-connection `ctx` payload (target/
+  seq/region). Then P4 (unconstrained byte-builder + crypto host fns).
+- **P2 — gambit knobs drive the boring connector (ADR 0006) 2026-06-19 (committed `c4cdc6a`).** The
   AnyTLS TLS connector is no longer a hardcoded Chrome-137 profile — it applies a gambit's Layer-A
   (ClientHello) + Layer-B (records) knobs. New `core/src/transport/anytls/profile.rs` (feature
   `anytls`): `Profile::resolve(&ClientHello, &Records) -> Resolved {profile, unrealizable}` maps the

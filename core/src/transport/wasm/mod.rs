@@ -9,12 +9,20 @@
 //!
 //! # ABI
 //!
-//! The module **exports**:
+//! The module **exports** (`memory` + `alloc` always; then at least one *mode* — the byte-transform
+//! pair and/or the gambit-compute export):
 //! - `memory` — its linear memory.
 //! - `alloc(len: i32) -> i32` — return a pointer to `len` writable bytes (the host writes input here).
-//! - `transform_out(ptr: i32, len: i32) -> i64` — transform `len` bytes at `ptr` on the
-//!   application → wire direction. Returns the output region packed as `(out_ptr << 32) | out_len`.
+//! - `transform_out(ptr: i32, len: i32) -> i64` — *byte-transform mode*; transform `len` bytes at
+//!   `ptr` on the application → wire direction. Returns the output region packed as
+//!   `(out_ptr << 32) | out_len`.
 //! - `transform_in(ptr: i32, len: i32) -> i64` — the inverse (wire → application), same packing.
+//! - `compute_gambit(ctx_ptr: i32, ctx_len: i32) -> i64` — *gambit-compute mode* (ADR 0006 P3);
+//!   invoked once per connection with a (reserved) per-connection context, returns a
+//!   **postcard-encoded [`crate::transport::gambit::Gambit`]** packed the same way — the opening
+//!   *plan* (CH knobs + record/segment framing), not stream bytes. The host decodes it and runs it
+//!   through the boring executor (`Profile::for_boring`), which stays the TLS engine. Lets a gambit
+//!   be **computed per connection** (adaptive/stateful) rather than shipped as static signed config.
 //! - `init(config_ptr: i32, config_len: i32)` — *optional*; called once after instantiation to
 //!   deliver per-deployment configuration (e.g. a key or seed). See [`TransformModule::instantiate_with_config`].
 //! - `reset()` — *optional*; called by the host after each transform (and after `init`) so a module
@@ -46,6 +54,8 @@ use wasmi::{
     Caller, Config, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
     TypedFunc,
 };
+
+use crate::transport::gambit::Gambit;
 
 mod signing;
 mod stream;
@@ -80,6 +90,9 @@ const EXPORT_ALLOC: &str = "alloc";
 const EXPORT_TRANSFORM_OUT: &str = "transform_out";
 /// Export: `transform_in(ptr, len) -> packed`.
 const EXPORT_TRANSFORM_IN: &str = "transform_in";
+/// Export (optional): `compute_gambit(ctx_ptr, ctx_len) -> packed` — emits a postcard-encoded
+/// [`Gambit`] genome (the per-connection opening plan), not stream bytes (ADR 0006 P3).
+const EXPORT_COMPUTE_GAMBIT: &str = "compute_gambit";
 
 /// Upper bound on a single transform's input or output length. Caps how much guest memory one call
 /// can drive the host to touch or allocate — the module is untrusted, so every length crossing the
@@ -141,6 +154,9 @@ pub enum WasmError {
     /// A host function recorded a fault during the guest call (CSPRNG failure, bad length, …).
     #[error("host function fault: {0}")]
     HostFault(String),
+    /// `compute_gambit` returned bytes that did not decode as a [`Gambit`] genome (ADR 0006 P3).
+    #[error("compute_gambit returned an undecodable gambit genome: {0}")]
+    GambitDecode(String),
     /// The module exhausted its per-call execution fuel — a runaway or pathologically slow module.
     #[error("fuel: {0}")]
     Fuel(String),
@@ -220,8 +236,12 @@ pub struct Transform {
     store: Store<HostState>,
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
-    transform_out: TypedFunc<(i32, i32), i64>,
-    transform_in: TypedFunc<(i32, i32), i64>,
+    /// Byte-transform mode (application → wire); absent for a gambit-compute-only module.
+    transform_out: Option<TypedFunc<(i32, i32), i64>>,
+    /// Byte-transform mode (wire → application); absent for a gambit-compute-only module.
+    transform_in: Option<TypedFunc<(i32, i32), i64>>,
+    /// Gambit-compute mode (ADR 0006 P3); absent for a byte-transform-only module.
+    compute_gambit: Option<TypedFunc<(i32, i32), i64>>,
     /// Optional `reset()` — rewinds the module's scratch arena after each transform.
     reset: Option<TypedFunc<(), ()>>,
 }
@@ -287,12 +307,21 @@ impl Transform {
         let alloc = instance
             .get_typed_func::<i32, i32>(&store, EXPORT_ALLOC)
             .map_err(|_| WasmError::MissingExport(EXPORT_ALLOC))?;
+        // Mode exports: a module provides byte transforms, gambit-compute (P3), or both. `alloc` +
+        // `memory` are mandatory; the modes are looked up optionally and a module with none is
+        // rejected (it has no usable entry point).
         let transform_out = instance
             .get_typed_func::<(i32, i32), i64>(&store, EXPORT_TRANSFORM_OUT)
-            .map_err(|_| WasmError::MissingExport(EXPORT_TRANSFORM_OUT))?;
+            .ok();
         let transform_in = instance
             .get_typed_func::<(i32, i32), i64>(&store, EXPORT_TRANSFORM_IN)
-            .map_err(|_| WasmError::MissingExport(EXPORT_TRANSFORM_IN))?;
+            .ok();
+        let compute_gambit = instance
+            .get_typed_func::<(i32, i32), i64>(&store, EXPORT_COMPUTE_GAMBIT)
+            .ok();
+        if transform_out.is_none() && transform_in.is_none() && compute_gambit.is_none() {
+            return Err(WasmError::MissingExport(EXPORT_TRANSFORM_OUT));
+        }
         // Optional `reset()` — arena management; absent for modules that manage memory themselves.
         let reset = instance.get_typed_func::<(), ()>(&store, EXPORT_RESET).ok();
 
@@ -337,6 +366,7 @@ impl Transform {
             alloc,
             transform_out,
             transform_in,
+            compute_gambit,
             reset,
         })
     }
@@ -351,6 +381,19 @@ impl Transform {
         self.run(Direction::In, input)
     }
 
+    /// Invoke the module's `compute_gambit` export (ADR 0006 P3): pass the per-connection context
+    /// and decode the returned bytes as a [`Gambit`] genome — the opening *plan*, not stream bytes.
+    /// The trust root is the module's own signature (the genome is *not* separately signed); the
+    /// caller still gates it via `Profile::for_boring` so boring only runs gambits it can realize.
+    /// Errors with [`WasmError::MissingExport`] if the module is byte-transform-only.
+    pub fn compute_gambit(&mut self, ctx: &[u8]) -> Result<Gambit, WasmError> {
+        let func = self
+            .compute_gambit
+            .ok_or(WasmError::MissingExport(EXPORT_COMPUTE_GAMBIT))?;
+        let bytes = self.call_io(func, EXPORT_COMPUTE_GAMBIT, ctx)?;
+        postcard::from_bytes::<Gambit>(&bytes).map_err(|e| WasmError::GambitDecode(e.to_string()))
+    }
+
     /// Total bytes this session has drawn from the `host_rand` capability — observability for how
     /// much entropy the module consumes.
     pub fn entropy_drawn(&self) -> u64 {
@@ -358,6 +401,23 @@ impl Transform {
     }
 
     fn run(&mut self, dir: Direction, input: &[u8]) -> Result<Vec<u8>, WasmError> {
+        let (func, name) = match dir {
+            Direction::Out => (self.transform_out, EXPORT_TRANSFORM_OUT),
+            Direction::In => (self.transform_in, EXPORT_TRANSFORM_IN),
+        };
+        let func = func.ok_or(WasmError::MissingExport(name))?;
+        self.call_io(func, name, input)
+    }
+
+    /// The shared guest-call sequence for any `(ptr, len) -> packed(out_ptr, out_len)` export
+    /// (`transform_out`/`transform_in`/`compute_gambit`): refill fuel, `alloc` + write the input,
+    /// call `func`, read the packed output region, then `reset` the scratch arena (if any).
+    fn call_io(
+        &mut self,
+        func: TypedFunc<(i32, i32), i64>,
+        name: &'static str,
+        input: &[u8],
+    ) -> Result<Vec<u8>, WasmError> {
         if input.len() > MAX_TRANSFORM_LEN {
             return Err(WasmError::InputTooLarge {
                 len: input.len(),
@@ -366,10 +426,6 @@ impl Transform {
         }
         let len = input.len() as i32;
         // `TypedFunc`/`Memory` are `Copy`, so copy the handles out and borrow only `self.store`.
-        let (func, name) = match dir {
-            Direction::Out => (self.transform_out, EXPORT_TRANSFORM_OUT),
-            Direction::In => (self.transform_in, EXPORT_TRANSFORM_IN),
-        };
         let alloc = self.alloc;
         let memory = self.memory;
 
@@ -1219,5 +1275,105 @@ mod tests {
             assert_eq!((packed >> 32) as u32, ptr);
             assert_eq!((packed & 0xFFFF_FFFF) as u32, len);
         }
+    }
+
+    // --- ADR 0006 P3: a module that *computes* a gambit (the open/shape mode) ---
+
+    /// A module that, on `compute_gambit`, returns the postcard encoding of `g` (held in a data
+    /// segment) — the minimal gambit-compute-mode module: `memory` + `alloc` + `compute_gambit`,
+    /// **no** `transform_*` exports.
+    fn gambit_module_emitting(g: &Gambit) -> TransformModule {
+        let bytes = postcard::to_stdvec(g).expect("encode gambit");
+        let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
+        let wat = format!(
+            r#"
+(module
+  (memory (export "memory") 2)
+  (data (i32.const 2048) "{escaped}")
+  (func (export "alloc") (param $len i32) (result i32) (i32.const 1024))
+  (func (export "compute_gambit") (param $p i32) (param $l i32) (result i64)
+    (i64.or
+      (i64.shl (i64.extend_i32_u (i32.const 2048)) (i64.const 32))
+      (i64.extend_i32_u (i32.const {len})))))
+"#,
+            len = bytes.len()
+        );
+        TransformModule::load(&wat::parse_str(&wat).expect("assemble")).expect("load")
+    }
+
+    fn sample_gambit() -> Gambit {
+        use crate::transport::gambit::{Capability, ClientHello, EchMode, Records, Wire};
+        Gambit {
+            genome_version: 1,
+            version: 5,
+            id: "wasm-computed".into(),
+            anchor: Default::default(),
+            clienthello: ClientHello {
+                ech: Some(EchMode::Off),
+                pq_kem: Some(false),
+                ..Default::default()
+            },
+            records: Records::default(),
+            wire: Wire {
+                segment_split: "sni_boundary".into(),
+                ..Default::default()
+            },
+            requires: vec![Capability::Ech],
+        }
+    }
+
+    #[test]
+    fn computes_a_gambit_genome() {
+        let expected = sample_gambit();
+        let module = gambit_module_emitting(&expected);
+        let mut t = module.instantiate().expect("instantiate");
+        // The per-connection context is reserved; an empty ctx is valid.
+        let got = t.compute_gambit(&[]).expect("compute gambit");
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn compute_gambit_absent_on_a_transform_only_module() {
+        // The XOR fixture exports transforms but not compute_gambit.
+        let mut t = xor_module().instantiate().expect("instantiate");
+        assert!(matches!(
+            t.compute_gambit(&[]),
+            Err(WasmError::MissingExport(EXPORT_COMPUTE_GAMBIT))
+        ));
+    }
+
+    #[test]
+    fn compute_gambit_rejects_undecodable_bytes() {
+        // A module whose compute_gambit returns a single 0xFF byte (a truncated varint) — not a
+        // decodable genome.
+        const WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (data (i32.const 2048) "\ff")
+  (func (export "alloc") (param $len i32) (result i32) (i32.const 1024))
+  (func (export "compute_gambit") (param $p i32) (param $l i32) (result i64)
+    (i64.or (i64.shl (i64.extend_i32_u (i32.const 2048)) (i64.const 32)) (i64.const 1))))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        assert!(matches!(
+            t.compute_gambit(&[]),
+            Err(WasmError::GambitDecode(_))
+        ));
+    }
+
+    /// End-to-end P3 (needs both features): a module computes a gambit, and it resolves onto the
+    /// boring executor — module → postcard `Gambit` → `Profile::for_boring`.
+    #[cfg(feature = "anytls")]
+    #[test]
+    fn computed_gambit_resolves_on_the_boring_executor() {
+        use crate::transport::anytls::profile::Profile;
+        let module = gambit_module_emitting(&sample_gambit());
+        let mut t = module.instantiate().expect("instantiate");
+        let gambit = t.compute_gambit(&[]).expect("compute gambit");
+        let resolved = Profile::for_boring(&gambit).expect("within boring capabilities");
+        // The gambit set ech=off and pq_kem=off; boring honors both.
+        assert!(!resolved.profile.ech_grease);
+        assert!(!resolved.profile.pq_kem);
     }
 }
