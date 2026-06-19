@@ -1092,7 +1092,14 @@
   `-D warnings` clean for default + all-features, `cargo check` green for every combo, fmt + workspace
   green. **P3 complete.** Next: **P4** (unconstrained byte-builder + crypto host fns — the module
   emits raw CH bytes and drives the handshake via X25519/HKDF/AES-GCM host fns), or the **P5**
-  discovery harness; plus the deferred `observe_outcome` export for the adaptive loop.
+  discovery harness. **Adaptive feedback is server-side (decision 2026-06-19):** there is no
+  client→server outcome-reporting export — we can't universally rely on a client being able to report
+  (the reporting channel can itself be blocked/observed; many clients can't report at all). The
+  authoritative fitness signal is the server-side **arrivals oracle** (design doc §5.2). A stateful P3
+  module may still adapt to outcomes the host observes **locally** (did this handshake complete? did
+  the connection survive?), fed in with no network round-trip — that steers only the module's own next
+  move and is optional (a module that can't observe still works). See design doc §5.2 "Per-connection
+  module adaptation is local-only, never a report."
 - **P3 (chunk 2) — per-connection computed gambit wired into AnyTLS (ADR 0006) 2026-06-19 (committed
   `40fe3f1`).** `AnytlsTransport` gains an optional dynamic gambit source: `with_dynamic_gambit(...,
   gambit: wasm::Transform)` stores the Path-B module behind a `Mutex` (the `wasmi` `Transform` is

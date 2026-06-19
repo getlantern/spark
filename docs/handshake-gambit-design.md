@@ -243,6 +243,15 @@ them. No `requires` beyond `ech`/`alps` → portable, well-formed, keeps a worki
 - **Composite fitness = f(arrival_rate, −anomaly, fidelity_floor).** Crucially **not** arrivals
   alone: a gambit that beats one censor by becoming a glaring anomaly elsewhere must score poorly (the
   inner-loop anomaly score guards this before a gambit ever reaches the population).
+- **Per-connection module adaptation is local-only, never a report.** A stateful P3 module (the
+  per-connection gambit computer) may adapt to outcomes the *host already observes locally* — did this
+  handshake complete? did the connection survive? — fed in as module input with **no network
+  round-trip**. There is deliberately **no client→server outcome-reporting export**: we can't
+  universally rely on a client being able to report (the reporting channel can itself be blocked or
+  fingerprinted, and many clients can't report at all). Authoritative fitness stays **server-side**
+  (the arrivals oracle above); a client-local signal only steers a module's *own* next move, and a
+  module that can't observe outcomes still works — local adaptation is an optimization, never a
+  dependency.
 
 ### 5.3 Comparison, server rotation & non-stationarity
 - **Comparative A/B, not absolute rates.** Since the server sees only arrivals (no denominator),
