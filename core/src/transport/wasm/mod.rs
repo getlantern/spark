@@ -37,6 +37,19 @@
 //! - `host_aead_open(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64` — the
 //!   inverse; returns the plaintext length, or `-1` on authentication failure.
 //!
+//! The **handshake-crypto menu** (ADR 0006 P4) — primitives a module needs to drive a TLS 1.3
+//! handshake itself in the *unconstrained* regime; bulk work runs natively here, not in the
+//! interpreter:
+//! - `host_hkdf_extract(salt_ptr, salt_len, ikm_ptr, ikm_len, out_ptr) -> i64` — HKDF-Extract
+//!   (HMAC-SHA256); writes the 32-byte PRK, returns 32. `salt_len` may be 0 (unsalted).
+//! - `host_hkdf_expand(prk_ptr, info_ptr, info_len, out_ptr, out_len) -> i64` — HKDF-Expand
+//!   (SHA-256) of the 32-byte PRK at `prk_ptr`; writes `out_len` bytes (the module builds its own
+//!   `HKDF-Expand-Label` info), returns `out_len`. `out_len` ≤ 255×32.
+//! - `host_aes_gcm_seal(key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64`
+//!   — AES-GCM seal; `key_len` 16 ⇒ AES-128-GCM, 32 ⇒ AES-256-GCM; 12-byte nonce, 16-byte tag.
+//! - `host_aes_gcm_open(key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64`
+//!   — the inverse; `-1` on authentication failure.
+//!
 //! Bulk per-byte crypto runs **natively** through these host functions, not in the interpreter — the
 //! module interprets only its control/framing logic. (Measured: bulk work in the interpreter caps a
 //! flow at <1 Gb/s, whereas sealing via the native AEAD host fn runs >10 Gb/s.)
@@ -49,7 +62,7 @@
 use std::sync::Arc;
 
 use ring::rand::{SecureRandom, SystemRandom};
-use ring::{aead, digest};
+use ring::{aead, digest, hkdf, hmac};
 use wasmi::{
     Caller, Config, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
     TypedFunc,
@@ -74,6 +87,14 @@ const HOST_HASH: &str = "host_hash";
 const HOST_AEAD_SEAL: &str = "host_aead_seal";
 /// Import: ChaCha20-Poly1305 open (`host_aead_open(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr)`).
 const HOST_AEAD_OPEN: &str = "host_aead_open";
+/// Import: HKDF-Extract / HMAC-SHA256 (`host_hkdf_extract(salt_ptr, salt_len, ikm_ptr, ikm_len, out_ptr)`).
+const HOST_HKDF_EXTRACT: &str = "host_hkdf_extract";
+/// Import: HKDF-Expand / SHA-256 (`host_hkdf_expand(prk_ptr, info_ptr, info_len, out_ptr, out_len)`).
+const HOST_HKDF_EXPAND: &str = "host_hkdf_expand";
+/// Import: AES-GCM seal (`host_aes_gcm_seal(key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr)`).
+const HOST_AES_GCM_SEAL: &str = "host_aes_gcm_seal";
+/// Import: AES-GCM open (`host_aes_gcm_open(key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr)`).
+const HOST_AES_GCM_OPEN: &str = "host_aes_gcm_open";
 
 /// Export: the module's linear memory.
 const EXPORT_MEMORY: &str = "memory";
@@ -116,6 +137,10 @@ const AEAD_NONCE_LEN: usize = 12;
 const AEAD_TAG_LEN: usize = 16;
 /// SHA-256 digest length.
 const HASH_LEN: usize = 32;
+/// HKDF-SHA256 pseudo-random-key length (= the hash output).
+const HKDF_PRK_LEN: usize = 32;
+/// HKDF-Expand's output ceiling: 255 × HashLen (RFC 5869).
+const HKDF_MAX_EXPAND_LEN: usize = 255 * HKDF_PRK_LEN;
 
 /// Per-call fuel budget = [`FUEL_BASE`] + `input_len` × [`FUEL_PER_BYTE`]. Fuel meters the module's
 /// own interpreted bytecode (host-fn crypto runs natively and costs no fuel), so this bounds a
@@ -295,6 +320,18 @@ impl Transform {
             .map_err(|e| WasmError::Link(e.to_string()))?;
         linker
             .func_wrap(HOST_MODULE, HOST_AEAD_OPEN, host_aead_open)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        linker
+            .func_wrap(HOST_MODULE, HOST_HKDF_EXTRACT, host_hkdf_extract)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        linker
+            .func_wrap(HOST_MODULE, HOST_HKDF_EXPAND, host_hkdf_expand)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        linker
+            .func_wrap(HOST_MODULE, HOST_AES_GCM_SEAL, host_aes_gcm_seal)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        linker
+            .func_wrap(HOST_MODULE, HOST_AES_GCM_OPEN, host_aes_gcm_open)
             .map_err(|e| WasmError::Link(e.to_string()))?;
 
         let instance = linker
@@ -686,6 +723,258 @@ fn aead_open(
     Ok(plaintext.to_vec())
 }
 
+/// The `host_hkdf_extract(salt_ptr, salt_len, ikm_ptr, ikm_len, out_ptr) -> i64` import: HKDF-Extract
+/// (== HMAC-SHA256 over the IKM keyed by the salt) writing the 32-byte PRK to `out_ptr`. `salt_len`
+/// may be 0 (an unsalted extract, which HMAC pads to the zero key — equivalent to HKDF's default).
+/// Returns 32, or `-1` with a recorded fault.
+fn host_hkdf_extract(
+    mut caller: Caller<HostState>,
+    salt_ptr: i32,
+    salt_len: i32,
+    ikm_ptr: i32,
+    ikm_len: i32,
+    out_ptr: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let prk = match hkdf_extract(&caller, salt_ptr, salt_len, ikm_ptr, ikm_len) {
+        Ok(p) => p,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_hkdf_extract: {msg}"));
+            return -1;
+        }
+    };
+    match write_guest(&mut caller, out_ptr, &prk) {
+        Ok(()) => prk.len() as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_hkdf_extract: {msg}"));
+            -1
+        }
+    }
+}
+
+/// The `host_hkdf_expand(prk_ptr, info_ptr, info_len, out_ptr, out_len) -> i64` import: HKDF-Expand
+/// (SHA-256) of the 32-byte PRK at `prk_ptr` with the `info_len`-byte info at `info_ptr` (the module
+/// builds its own TLS `HKDF-Expand-Label` info), writing `out_len` bytes to `out_ptr`. Returns
+/// `out_len`, or `-1` with a recorded fault (including `out_len` > 255×32, HKDF's ceiling).
+fn host_hkdf_expand(
+    mut caller: Caller<HostState>,
+    prk_ptr: i32,
+    info_ptr: i32,
+    info_len: i32,
+    out_ptr: i32,
+    out_len: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let out = match hkdf_expand(&caller, prk_ptr, info_ptr, info_len, out_len) {
+        Ok(o) => o,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_hkdf_expand: {msg}"));
+            return -1;
+        }
+    };
+    match write_guest(&mut caller, out_ptr, &out) {
+        Ok(()) => out.len() as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_hkdf_expand: {msg}"));
+            -1
+        }
+    }
+}
+
+/// HKDF-Extract via HMAC-SHA256 (the PRK is the HMAC tag), reading salt + IKM from guest memory.
+fn hkdf_extract(
+    caller: &Caller<HostState>,
+    salt_ptr: i32,
+    salt_len: i32,
+    ikm_ptr: i32,
+    ikm_len: i32,
+) -> Result<[u8; HKDF_PRK_LEN], String> {
+    let salt = read_guest(caller, salt_ptr, salt_len)?;
+    let ikm = read_guest(caller, ikm_ptr, ikm_len)?;
+    let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &salt), &ikm);
+    let mut prk = [0u8; HKDF_PRK_LEN];
+    prk.copy_from_slice(tag.as_ref());
+    Ok(prk)
+}
+
+/// HKDF-Expand (SHA-256), reading the 32-byte PRK + info from guest memory. Returns `out_len` bytes.
+fn hkdf_expand(
+    caller: &Caller<HostState>,
+    prk_ptr: i32,
+    info_ptr: i32,
+    info_len: i32,
+    out_len: i32,
+) -> Result<Vec<u8>, String> {
+    if !(0..=HKDF_MAX_EXPAND_LEN as i32).contains(&out_len) {
+        return Err(format!("invalid expand length {out_len}"));
+    }
+    let prk_bytes = read_guest_array::<HKDF_PRK_LEN>(caller, prk_ptr)?;
+    let info = read_guest(caller, info_ptr, info_len)?;
+    let prk = hkdf::Prk::new_less_safe(hkdf::HKDF_SHA256, &prk_bytes);
+    // `info_slices` must outlive `okm` — the returned `Okm` borrows the info until `fill`.
+    let info_slices = [info.as_slice()];
+    let okm = prk
+        .expand(&info_slices, HkdfLen(out_len as usize))
+        .map_err(|_| "expand failed")?;
+    let mut out = vec![0u8; out_len as usize];
+    okm.fill(&mut out).map_err(|_| "fill failed")?;
+    Ok(out)
+}
+
+/// A [`hkdf::KeyType`] for an arbitrary HKDF-Expand output length (ring keys `expand` on the output
+/// type; this lets the module request a raw byte length).
+struct HkdfLen(usize);
+impl hkdf::KeyType for HkdfLen {
+    fn len(&self) -> usize {
+        self.0
+    }
+}
+
+/// The `host_aes_gcm_seal(key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64`
+/// import: AES-GCM seal (`key_len` 16 ⇒ AES-128-GCM, 32 ⇒ AES-256-GCM), 12-byte nonce, writing
+/// `in_len + 16` (ciphertext+tag) bytes to `out_ptr`. Returns the output length, or `-1` with a fault.
+#[allow(clippy::too_many_arguments)]
+fn host_aes_gcm_seal(
+    mut caller: Caller<HostState>,
+    key_ptr: i32,
+    key_len: i32,
+    nonce_ptr: i32,
+    aad_ptr: i32,
+    aad_len: i32,
+    in_ptr: i32,
+    in_len: i32,
+    out_ptr: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let sealed = match aes_gcm_seal(
+        &caller, key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len,
+    ) {
+        Ok(s) => s,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_aes_gcm_seal: {msg}"));
+            return -1;
+        }
+    };
+    match write_guest(&mut caller, out_ptr, &sealed) {
+        Ok(()) => sealed.len() as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_aes_gcm_seal: {msg}"));
+            -1
+        }
+    }
+}
+
+/// The `host_aes_gcm_open(...) -> i64` import: the inverse of [`host_aes_gcm_seal`]. Writes
+/// `in_len - 16` plaintext bytes to `out_ptr`, returns the plaintext length, or `-1` on
+/// authentication failure (a tampered or forged frame fails closed).
+#[allow(clippy::too_many_arguments)]
+fn host_aes_gcm_open(
+    mut caller: Caller<HostState>,
+    key_ptr: i32,
+    key_len: i32,
+    nonce_ptr: i32,
+    aad_ptr: i32,
+    aad_len: i32,
+    in_ptr: i32,
+    in_len: i32,
+    out_ptr: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let plaintext = match aes_gcm_open(
+        &caller, key_ptr, key_len, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len,
+    ) {
+        Ok(p) => p,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_aes_gcm_open: {msg}"));
+            return -1;
+        }
+    };
+    match write_guest(&mut caller, out_ptr, &plaintext) {
+        Ok(()) => plaintext.len() as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_aes_gcm_open: {msg}"));
+            -1
+        }
+    }
+}
+
+/// The AES-GCM algorithm selected by key length: 16 ⇒ AES-128-GCM, 32 ⇒ AES-256-GCM.
+fn aes_gcm_alg(key_len: i32) -> Result<&'static aead::Algorithm, String> {
+    match key_len {
+        16 => Ok(&aead::AES_128_GCM),
+        32 => Ok(&aead::AES_256_GCM),
+        n => Err(format!(
+            "unsupported AES-GCM key length {n} (want 16 or 32)"
+        )),
+    }
+}
+
+/// AES-GCM seal, reading key/nonce/aad/plaintext from guest memory. Returns ciphertext+tag.
+#[allow(clippy::too_many_arguments)]
+fn aes_gcm_seal(
+    caller: &Caller<HostState>,
+    key_ptr: i32,
+    key_len: i32,
+    nonce_ptr: i32,
+    aad_ptr: i32,
+    aad_len: i32,
+    in_ptr: i32,
+    in_len: i32,
+) -> Result<Vec<u8>, String> {
+    let alg = aes_gcm_alg(key_len)?;
+    let key = read_guest(caller, key_ptr, key_len)?;
+    let nonce = read_guest_array::<AEAD_NONCE_LEN>(caller, nonce_ptr)?;
+    let aad = read_guest(caller, aad_ptr, aad_len)?;
+    let mut buf = read_guest(caller, in_ptr, in_len)?;
+    let key = aead::LessSafeKey::new(aead::UnboundKey::new(alg, &key).map_err(|_| "bad key")?);
+    key.seal_in_place_append_tag(
+        aead::Nonce::assume_unique_for_key(nonce),
+        aead::Aad::from(aad.as_slice()),
+        &mut buf,
+    )
+    .map_err(|_| "seal failed")?;
+    Ok(buf)
+}
+
+/// AES-GCM open, reading key/nonce/aad/ciphertext+tag from guest memory. Returns plaintext.
+#[allow(clippy::too_many_arguments)]
+fn aes_gcm_open(
+    caller: &Caller<HostState>,
+    key_ptr: i32,
+    key_len: i32,
+    nonce_ptr: i32,
+    aad_ptr: i32,
+    aad_len: i32,
+    in_ptr: i32,
+    in_len: i32,
+) -> Result<Vec<u8>, String> {
+    let alg = aes_gcm_alg(key_len)?;
+    let key = read_guest(caller, key_ptr, key_len)?;
+    let nonce = read_guest_array::<AEAD_NONCE_LEN>(caller, nonce_ptr)?;
+    let aad = read_guest(caller, aad_ptr, aad_len)?;
+    let mut buf = read_guest(caller, in_ptr, in_len)?;
+    if buf.len() < AEAD_TAG_LEN {
+        return Err("ciphertext shorter than the tag".to_string());
+    }
+    let key = aead::LessSafeKey::new(aead::UnboundKey::new(alg, &key).map_err(|_| "bad key")?);
+    let plaintext = key
+        .open_in_place(
+            aead::Nonce::assume_unique_for_key(nonce),
+            aead::Aad::from(aad.as_slice()),
+            &mut buf,
+        )
+        .map_err(|_| "authentication failed")?;
+    Ok(plaintext.to_vec())
+}
+
 /// Read `len` bytes at `ptr` from the caller's guest memory, range-checking `len` against
 /// [`MAX_TRANSFORM_LEN`] before allocating (the guest is untrusted; a negative `i32` would become a
 /// huge `usize`).
@@ -1030,6 +1319,111 @@ mod tests {
 
     fn aead_module() -> TransformModule {
         TransformModule::load(&wat::parse_str(AEAD_WAT).expect("assemble")).expect("load")
+    }
+
+    // --- ADR 0006 P4: the handshake-crypto host-fn menu (HKDF + AES-GCM) ---
+
+    /// AES-256-GCM round-trip: seal in `transform_out`, open in `transform_in`, both with an
+    /// all-zero 32-byte key (offset 0) + 12-byte nonce (offset 64), no AAD. `out` at 8192.
+    const AES_GCM_WAT: &str = r#"
+(module
+  (import "env" "host_aes_gcm_seal" (func $seal (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)))
+  (import "env" "host_aes_gcm_open" (func $open (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 4)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (local $n i64)
+    (local.set $n (call $seal (i32.const 0) (i32.const 32) (i32.const 64) (i32.const 0) (i32.const 0) (local.get $ptr) (local.get $len) (i32.const 8192)))
+    (i64.or (i64.shl (i64.const 8192) (i64.const 32)) (local.get $n)))
+  (func (export "transform_in") (param $ptr i32) (param $len i32) (result i64)
+    (local $n i64)
+    (local.set $n (call $open (i32.const 0) (i32.const 32) (i32.const 64) (i32.const 0) (i32.const 0) (local.get $ptr) (local.get $len) (i32.const 8192)))
+    (i64.or (i64.shl (i64.const 8192) (i64.const 32)) (local.get $n))))
+"#;
+
+    #[test]
+    fn host_aes_gcm_seals_and_opens() {
+        let module =
+            TransformModule::load(&wat::parse_str(AES_GCM_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let plaintext = b"attack at dawn";
+        let wire = t.transform_out(plaintext).expect("seal");
+        assert_eq!(
+            wire.len(),
+            plaintext.len() + 16,
+            "the 16-byte tag is appended"
+        );
+        assert_ne!(
+            &wire[..plaintext.len()],
+            &plaintext[..],
+            "ciphertext differs"
+        );
+        let recovered = t.transform_in(&wire).expect("open");
+        assert_eq!(
+            recovered.as_slice(),
+            &plaintext[..],
+            "open recovers the plaintext"
+        );
+    }
+
+    #[test]
+    fn host_aes_gcm_open_rejects_a_bad_key_length() {
+        // key_len 24 is neither AES-128 (16) nor AES-256 (32) → recorded fault.
+        const WAT: &str = r#"
+(module
+  (import "env" "host_aes_gcm_seal" (func $seal (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 4)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (drop (call $seal (i32.const 0) (i32.const 24) (i32.const 64) (i32.const 0) (i32.const 0) (local.get $ptr) (local.get $len) (i32.const 8192)))
+    (i64.const 0))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        assert!(matches!(
+            t.transform_out(b"x"),
+            Err(WasmError::HostFault(_))
+        ));
+    }
+
+    /// HKDF (extract→expand) over the input as IKM: unsalted extract → 32-byte PRK at 2048, then
+    /// expand 42 bytes (empty info) to 4096. Returns the 42-byte OKM.
+    const HKDF_WAT: &str = r#"
+(module
+  (import "env" "host_hkdf_extract" (func $extract (param i32 i32 i32 i32 i32) (result i64)))
+  (import "env" "host_hkdf_expand" (func $expand (param i32 i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 4)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (drop (call $extract (i32.const 0) (i32.const 0) (local.get $ptr) (local.get $len) (i32.const 2048)))
+    (drop (call $expand (i32.const 2048) (i32.const 0) (i32.const 0) (i32.const 4096) (i32.const 42)))
+    (i64.or (i64.shl (i64.const 4096) (i64.const 32)) (i64.const 42)))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+
+    #[test]
+    fn host_hkdf_matches_ring() {
+        struct L(usize);
+        impl ring::hkdf::KeyType for L {
+            fn len(&self) -> usize {
+                self.0
+            }
+        }
+        let module =
+            TransformModule::load(&wat::parse_str(HKDF_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let ikm = b"input keying material";
+        let got = t.transform_out(ikm).expect("transform_out");
+
+        // Native HKDF-SHA256: unsalted extract (HMAC empty key) → expand 42 bytes, empty info.
+        let prk_tag = ring::hmac::sign(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &[]), ikm);
+        let prk = ring::hkdf::Prk::new_less_safe(ring::hkdf::HKDF_SHA256, prk_tag.as_ref());
+        let info: [&[u8]; 1] = [&[]];
+        let okm = prk.expand(&info, L(42)).expect("expand");
+        let mut want = vec![0u8; 42];
+        okm.fill(&mut want).expect("fill");
+        assert_eq!(got, want, "host HKDF must equal native HKDF-SHA256");
     }
 
     #[test]
