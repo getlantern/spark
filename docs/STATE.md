@@ -82,16 +82,28 @@ What's DONE (this and prior sessions; all on `main`, pushed):
      from_config builds/rejects bad hex, UDP-unsupported. 10 samizdat tests green; anytls still green;
      clippy/fmt/workspace/default all clean. **The full client stack now compiles + unit-passes; the
      remaining work is purely live verification (no server stood up in this session).**
-   - **NEXT: the live gates (environment-heavy — needs a Samizdat server).**
-     (a) **Interop gate:** stand up a `getlantern/samizdat` (or `lantern-box` `"samizdat"`) server with a
-     known X25519 pubkey + short ID (mirror the AnyTLS DO-droplet recipe), point `[transport.samizdat]`
-     at it, and confirm spark's client reaches a target → HTTP 200. The server side is Go; the client
-     is built (`cargo build -p spark-cli --features samizdat`). Watch for: ALPN must negotiate h2;
-     the full handshake must *complete* with the kID session set (the spike only proved CH emission;
-     completion + live interop are unproven). (b) **`sudo spark run` TUN gate** with an **IP** target
-     (e.g. `curl https://1.1.1.1` — avoids DNS since samizdat is TCP-only). FFI/CH reference:
-     `/tmp/kid-spike`. **Deferred follow-ups (non-blocking):** ClientHello fragmentation/shaping reuse
-     (`shaping/`), a multi-conn pool + idle sweep (currently one shared conn), and UDP-over-CONNECT.
+   - **Chunk 5 — INTEROP GATE PASSED 2026-06-19 (commit `40dcb6e`). ✅✅** The spark client tunneled
+     an HTTP request through a **real `getlantern/samizdat` server** (local harness) and got
+     **`HTTP/1.1 200 OK` + body** back. **Proves the two things the kID spike could not:** (1) boring's
+     kID-session Chrome ClientHello handshake **completes** against a real Go `tls.Server` (the
+     fabricated TLS-1.2 session for injection doesn't break the 1.3 handshake), and (2) the Go server's
+     `VerifySessionID` **accepts** spark's SessionID → wire-exact REALITY auth interop. Client half =
+     `core/examples/samizdat_interop.rs` (`from_config` → `dial` → GET → assert 200; run with
+     `--features samizdat`). **Reproduce the harness** (`/tmp/sz-interop`, throwaway — Go module with a
+     `replace` to the local samizdat checkout): `main.go` = `samizdat.GenerateKeyPair`/`GenerateShortID`
+     + a self-signed ecdsa cert + `samizdat.NewServer{PrivateKey,ShortIDs,CertPEM,KeyPEM,Handler}` where
+     `Handler` dials `destination` + `io.Copy`s both ways (== the unexported `defaultConnHandler`) +
+     an origin `http.Server`; prints `SZ_SERVER/PUBKEY/SHORTID/TARGET`. Then
+     `SZ_*=… cargo run -p spark-core --example samizdat_interop --features samizdat`. Gotcha found+fixed:
+     the client must `shutdown()` (H2 END_STREAM half-close) after writing, else the server's upload
+     copy never EOFs and `read_to_end` hangs.
+   - **NEXT (optional live step): `sudo spark run` TUN gate.** Needs root + a real Samizdat server;
+     use an **IP** target (`curl https://1.1.1.1` — avoids DNS, since samizdat is TCP-only). Lower
+     marginal value now — the netstack→`Transport` seam is transport-agnostic and already TUN-gated for
+     AnyTLS; the interop gate proved the samizdat-specific stack. **Deferred follow-ups (non-blocking):**
+     ClientHello fragmentation/shaping reuse (`shaping/`), a multi-conn pool + idle sweep (currently one
+     shared conn, reactively reconnected), and UDP-over-CONNECT. **MERGE:** branch `samizdat-transport`
+     is ready to PR (client complete + unit-tested + live-gated; ADR 0007 + design doc committed).
 1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
    (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
    `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:
