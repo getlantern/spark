@@ -41,12 +41,14 @@ What's DONE (this and prior sessions; all on `main`, pushed):
 5. **Server-side P5 outer loop** (arrivals oracle, A/B bandit, LLM, signed deploy) — lives in
    **lantern-cloud / Go**, NOT this repo (design §5.5); spark exposes the seam.
 
-**Ephemeral relay status (2026-06-19):** a throwaway anytls-go droplet (`192.34.56.224`, DO id
-`578876805`, tag `spark-gate`) is **running**, baked into `dist/spark-gui-ip-macos-arm64.dmg` so the
-installed app tunnels. It costs ~$6/mo and is NOT reusable next session (password only in the
-build-time scratchpad). **Tear down when done:** `doctl compute droplet delete 578876805 --force`
-(+ remove ssh-key `spark-gate`). Re-provision recipe: see the live-gate entries below (anytls-go
-zip → systemd `:443 -p <pw>` → `[transport.anytls]` config → base64 → `SPARK_CONFIG`).
+**Ephemeral relay status (2026-06-19): TORN DOWN.** The demo anytls-go droplet (`192.34.56.224`, DO
+id `578876805`) + its ssh-key were deleted at session end. So the installed `dist/spark-gui-ip-...dmg`
+app's **Connect now fails** (relay gone) — rebuild + re-provision to use it again. Re-provision recipe
+(≈5 min, see the live-gate entries below): a fresh DO droplet + ephemeral ssh-key → anytls-go
+`v0.0.12` linux-amd64 zip (extract with python3, no `unzip`) → systemd `anytls-server -l 0.0.0.0:443
+-p <pw>` → write `[transport.anytls] server/password/sni` + `[transport.shaping] segment_split =
+sni_boundary` → `base64` it → `SPARK_CONFIG=<b64> ./packaging/macos/build-gui-dmg.sh` → install,
+approve sysext, Connect → IP changes. (No standing infra remains on the Lantern DO account.)
 
 ### Milestone history
 - Milestone: **M7 — control-plane IPC + service split. DONE 2026-06-15** (code + through-the-
