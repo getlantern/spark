@@ -4,6 +4,51 @@
 > decisions log; never rewrite history. (Template + rules: PLAN.md Appendix A / §2.)
 
 ## Current position
+
+**2026-06-19 — PICK UP HERE. The macOS AnyTLS product works end-to-end, with a Lantern-style GUI.**
+
+What's DONE (this and prior sessions; all on `main`, pushed):
+- **Full desktop stack** M1–M7 (TUN → netstack → transports → IPC service), **Android** M9, **Apple**
+  M10 (now *live* — see below), **M11** AnyTLS transport.
+- **ADR 0006 opening-gambit pipeline** (see [[opening-gambit-discovery-pipeline]] memory + the gambit
+  log entries below): genome (`core/src/transport/gambit.rs`), boring executor mapping
+  (`anytls/profile.rs` `for_boring`), Phase-1 wire shaping (`shaping/`), Path-B `compute_gambit` ABI +
+  the P4 crypto menu (HKDF/AES-GCM/X25519 in `wasm/mod.rs`), the GA+JA4 inner loop (`discovery.rs`),
+  and the **anchor/JA4 drift control** (`ja4.rs` + `anytls/anchor.rs`) with a scheduled CI oracle
+  (`.github/workflows/anchor-drift.yml`) — **full JA4 parity with live Chrome, CI-verified**.
+- **Live gates PASSED on macOS:** AnyTLS over both anytls-go (reference) *and* **sing-box** (production),
+  **TCP + UDP/UoT**; egress = the relay.
+- **macOS NE-AnyTLS PRODUCT (Model A)** — the headline: the DMG-installed Flutter app bundles the
+  `SparkTunnel.systemextension`; **one-click Connect → full-tunnel over gambit-shaped AnyTLS → IP
+  changes to the relay** (verified 2026-06-19 at whatismyipaddress.com), no service/sudo/manual routes.
+  Enabled by the config-driven C ABI (`platforms/apple/src/lib.rs` `spark_tunnel_run` takes a TOML
+  config) + `providerConfiguration["config"]` (Swift NE + `gui/macos/SparkVPN.swift`) + Dart `NEBackend`
+  (`--dart-define=SPARK_CONFIG=<base64 TOML>`); `spark-apple` has an `anytls` feature on the macOS
+  xcframework slice. Build: `packaging/macos/build-gui-dmg.sh` (bakes `SPARK_CONFIG`, notarizes).
+- **GUI restyled to the Lantern look** (`gui/lib/main.dart`): light theme (#F8FAFB / cyan #00BDD6),
+  the sliding pill toggle, a fixed **390×760 portrait window** (`MainFlutterWindow.swift` — needs
+  `makeKeyAndOrderFront` or it launches hidden), AppBar + a VPN-status/Protocol/Routing settings card.
+
+**NEXT (in rough priority):**
+1. **GUI profile/settings UI** — the server config is currently *baked at build time* (`SPARK_CONFIG`);
+   the app needs a runtime settings/profile screen to point at a server (and to surface server/region).
+   This is the natural next GUI chunk + unblocks a shippable client.
+2. **A lasting AnyTLS server** (a real deployment) instead of the ephemeral gate droplets the live
+   gates used — so an installed app keeps working.
+3. **iOS** NE-AnyTLS: the macOS slice has `anytls`; iOS returns -1 (BoringSSL-for-iOS unbuilt).
+4. **P4 unconstrained** regime (module emits raw CH bytes + drives the handshake via the crypto menu)
+   — deferred; "build only if constrained can't beat a censor."
+5. **Server-side P5 outer loop** (arrivals oracle, A/B bandit, LLM, signed deploy) — lives in
+   **lantern-cloud / Go**, NOT this repo (design §5.5); spark exposes the seam.
+
+**Ephemeral relay status (2026-06-19):** a throwaway anytls-go droplet (`192.34.56.224`, DO id
+`578876805`, tag `spark-gate`) is **running**, baked into `dist/spark-gui-ip-macos-arm64.dmg` so the
+installed app tunnels. It costs ~$6/mo and is NOT reusable next session (password only in the
+build-time scratchpad). **Tear down when done:** `doctl compute droplet delete 578876805 --force`
+(+ remove ssh-key `spark-gate`). Re-provision recipe: see the live-gate entries below (anytls-go
+zip → systemd `:443 -p <pw>` → `[transport.anytls]` config → base64 → `SPARK_CONFIG`).
+
+### Milestone history
 - Milestone: **M7 — control-plane IPC + service split. DONE 2026-06-15** (code + through-the-
   service gate live-verified on macOS; design in `ipc-service-split-design-m7` memory). The full
   desktop stack (M1–M7) is now live on macOS. **M8 packaging session 1 done 2026-06-15:**
