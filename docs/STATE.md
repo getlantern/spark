@@ -62,13 +62,26 @@ What's DONE (this and prior sessions; all on `main`, pushed):
      offered). clippy/fmt clean; default build unaffected. NOTE: `samizdat` does NOT yet enable the
      `anytls` feature — the next TLS-connect wiring should reuse `anytls/tls.rs`'s Chrome connector
      (add `"anytls"` to the feature then, or extract a shared connector helper).
-   - **NEXT CHUNK: `h2.rs`** — HTTP/2 CONNECT mux over the TLS stream via the **`h2` crate** (new dep,
-     scoped no-hyper exception per ADR 0007 §4 — needs adding `h2` to workspace+core, pulled by the
-     `samizdat` feature). Adapt `(SendStream, RecvStream)` ⇄ `AsyncRead+AsyncWrite`: CONNECT request
-     with `:authority`=target, no `:scheme`/`:path`; spawn the `Connection` driver; `poll_shutdown` →
-     H2 half-close. Test against a local `h2` server doing CONNECT→echo. Then `transport.rs`
-     (build Chrome connector → inject_session_id → tokio_boring2 connect → h2 handshake → CONNECT;
-     impl `Transport`; pool) + config wiring, then interop + TUN gates. FFI reference: `/tmp/kid-spike`.
+   - **Chunk 3 — h2_mux.rs DONE 2026-06-19 (TDD; commit `fe2265e`).** `H2Conn::handshake` (client
+     handshake + driver task aborted on drop) + `H2Conn::connect(target)` (CONNECT with
+     `:authority=target`, no `:scheme`/`:path`); `H2Stream` adapts `(SendStream, RecvStream)` ⇄
+     `AsyncRead+AsyncWrite` with real H2 flow control (reserve/poll_capacity on write,
+     release_capacity on read; `poll_shutdown`→END_STREAM half-close). New deps `h2` + `http`
+     (samizdat feature only). Test = in-process h2 CONNECT→echo round-trip. 5 samizdat tests green.
+     Verified-API note (don't re-verify): h2 0.4.15 / http 1.4.2; CONNECT request = build
+     `Authority` then `Uri::from_parts` (authority-only is valid; `"host:port"` parses ambiguously
+     as a URI); `Pseudo::request` drops scheme/path for CONNECT.
+   - **NEXT CHUNK: `transport.rs` + config wiring.** Tie it together: build the Chrome connector
+     (reuse `anytls::tls`/`anytls::profile` — add `"anytls"` to the `samizdat` feature, OR extract a
+     shared connector helper) → `.configure()` → `session_id::inject_session_id(&mut cfg, &auth_sid)`
+     → `tokio_boring2::connect(cfg, sni, tcp)` (assert ALPN==h2) → `H2Conn::handshake` →
+     `impl Transport::dial(target)` = `H2Conn::connect("host:port") → BoxedStream`; add a conn pool
+     (mirror `AnytlsTransport`'s `Mutex<Vec<Arc<…>>>` + idle sweep). Config: `SamizdatConfig { server,
+     server_pubkey (hex32), short_id (hex8), sni }` + `TransportConfig.samizdat` + `from_config`
+     precedence + the `#[cfg(not(feature="samizdat"))]` hard-error stub (mirror anytls/wasm). Then the
+     live **interop gate** (stand up `getlantern/samizdat` or lantern-box; spark client → HTTP 200) +
+     the `sudo spark run` TUN gate. FFI/CH reference: `/tmp/kid-spike`. NOTE: samizdat is **TCP-only**
+     in v1 — its `UdpTransport` should hard-error/"unsupported" (design §1, §11).
 1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
    (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
    `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:
