@@ -2027,8 +2027,26 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   U1a** (its own focused session — research-led spike, stop-and-report). No code written this turn
   (the next step is the spike, not guessable glue).
 
+- 2026-06-19 (U1a DONE — Swift-bridge spike: bridge PROVEN, pure-Rust objc2): The Tauri-desktop Rust
+  side reaches macOS NetworkExtension **directly via `objc2` + `objc2-network-extension` 0.3.2 — no
+  Swift toolchain, no Tauri Swift plugin, no Xcode.** `cargo run --example ne_probe` (in
+  `gui-tauri/src-tauri`) printed `NEVPNStatus = invalid (0)` via `NETunnelProviderManager::new()` →
+  `connection()` → `status()` — the read path that needs no NE entitlement, so it runs unsigned in dev.
+  **Recommendation = Approach A (pure-Rust objc2)**; the Swift→C shim and Tauri-Swift-plugin options are
+  rejected. Added (macOS target only): deps `objc2` 0.6 + `objc2-network-extension` 0.3; `ne_spike`
+  module + `ne_probe` Tauri command (registered in the invoke handler) + `examples/ne_probe.rs`.
+  fmt+clippy clean; `cargo tree -i openssl-sys` still empty (no regression). **Note for crates.io:**
+  0.3.x exposes all NE classes by default — there are NO per-class features (available: alloc, block2,
+  libc, objc2-security, std). **For U1b:** the WRITE/activate path
+  (`loadAllFromPreferencesWithCompletionHandler` / `saveToPreferences` / `startVPNTunnel` +
+  `OSSystemExtensionRequest`) uses completion-handler **blocks** → add the `block2` feature and await
+  via a oneshot on Tauri's main runloop, and define the `OSSystemExtensionRequestDelegate` with objc2
+  `define_class!`; that write/activate path needs the NE entitlement + provisioning (U1c, human). **Next
+  chunk = U1b** (embed the systemextension + invoke surface + config.toml precedence + MockBackend→
+  TauriBackend; size vs Flutter DMG).
+
 ## Milestone checklist
-- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A; DECOMPOSED → U1a spike / U1b embed+wire / U1c live gate [human provisioning]) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a bridge PROVEN: pure-Rust objc2, NEVPNStatus read on macOS**; next U1b embed+wire / U1c live gate [human provisioning]) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)

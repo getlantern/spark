@@ -23,3 +23,12 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# U1a spike: reach macOS NetworkExtension from Rust directly via objc2 (no Swift
+# toolchain). Proves the Tauri-desktop → NETunnelProviderManager bridge for NE
+# Model A. macOS-only so the other targets don't pull these in.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+# All NE classes are available by default in 0.3.x (no per-class features).
+# `block2` is added at U1b for the loadAllFromPreferences completion-handler path.
+objc2-network-extension = "0.3"
+
