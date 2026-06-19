@@ -1071,6 +1071,24 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
+- **NE-AnyTLS PRODUCT GATE PASSED on macOS (Model A, ADR 0005/0006) 2026-06-19.** The *real* macOS
+  product path now tunnels over AnyTLS: the **DMG-installed Flutter app** (bundled
+  `SparkTunnel.systemextension`) → approve the sysext once → click **Connect** → **full-tunnel over
+  AnyTLS, no service, no sudo, no manual routes** (egress = the droplet). First-ever live run of the
+  NE data path. Enabled by the config-driven C ABI (`ea699e5`): `spark_tunnel_run`'s 3rd arg is now
+  dual-mode (host:port plain relay *or* a full TOML `Config` via `Config::from_toml_str`), threaded
+  through `providerConfiguration["config"]` (Swift NE + gui/macos) and the Dart `NEBackend` (from
+  `--dart-define=SPARK_CONFIG=<base64 TOML>`); `spark-apple` got an `anytls` feature built into the
+  macOS xcframework slice (iOS shares the ABI, returns -1 for AnyTLS until BoringSSL-for-iOS).
+  `build-gui-dmg.sh` bakes `SPARK_CONFIG`; the notarized DMG (sysext + app, Developer-ID + stapled)
+  built clean. The OS-managed full-tunnel (`includedRoutes`) is why Connect needs no manual routes —
+  answering the two product questions from the FrbBackend gate.
+- **GUI restyle → Lantern look 2026-06-19.** `gui/lib/main.dart` home page restyled to match
+  getlantern/lantern: **light theme** (near-white `#F8FAFB`, white cards), the Lantern **cyan brand
+  `#00BDD6`** for connected / grey `#616569` off, and a **large sliding pill toggle** with a white
+  knob + in-knob spinner during transitions (mirrors lantern's `VPNSwitch`/`actionToggle*` palette) —
+  replacing the dark "signal orb" aesthetic. Backend wiring unchanged; `flutter analyze` + widget test
+  + `flutter build macos` green. Applies to both the NE (product) and FrbBackend paths.
 - **SING-BOX INTEROP + UDP GATE PASSED on macOS (ADR 0006 / AnyTLS) 2026-06-19.** spark's clean-room
   Rust anytls client validated against the **production ecosystem server** (not just the anytls-go
   reference): `sing-box 1.13.13` `anytls` inbound on a fresh DO droplet (:443, self-signed EC cert,

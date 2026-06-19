@@ -67,12 +67,16 @@ SYSEXT_SRC="$ARCHIVE/Products/Applications/SparkApp.app/Contents/Library/SystemE
 [[ -d "$SYSEXT_SRC" ]] || { echo "system extension not found in archive: $SYSEXT_SRC" >&2; exit 1; }
 
 # --- 2. build the Flutter controlling app -------------------------------------------------------
-# SPARK_PROXY ("host:port" IP literal), if set, bakes the relay into the app so connect tunnels
-# through it (egress = relay); unset → the app forwards directly.
-PROXY_DEFINE=()
-[[ -n "${SPARK_PROXY:-}" ]] && PROXY_DEFINE=(--dart-define=SPARK_PROXY="$SPARK_PROXY")
-log "flutter build macos --release ${SPARK_PROXY:+(proxy $SPARK_PROXY)}"
-( cd "$GUI_DIR" && flutter build macos --release "${PROXY_DEFINE[@]}" )
+# Bake the data-path config into the app so connect tunnels accordingly (egress = the relay/server):
+#  - SPARK_PROXY ("host:port" IP literal) → a plain relay.
+#  - SPARK_CONFIG (base64 of a full TOML Config — AnyTLS + handshake shaping + gambit) → the whole
+#    transport stack; takes precedence over SPARK_PROXY.
+# Unset → the app forwards directly.
+DART_DEFINES=()
+[[ -n "${SPARK_PROXY:-}" ]] && DART_DEFINES+=(--dart-define=SPARK_PROXY="$SPARK_PROXY")
+[[ -n "${SPARK_CONFIG:-}" ]] && DART_DEFINES+=(--dart-define=SPARK_CONFIG="$SPARK_CONFIG")
+log "flutter build macos --release ${SPARK_CONFIG:+(anytls config baked) }${SPARK_PROXY:+(proxy $SPARK_PROXY)}"
+( cd "$GUI_DIR" && flutter build macos --release "${DART_DEFINES[@]}" )
 FLUTTER_APP="$GUI_DIR/build/macos/Build/Products/Release/$APP_NAME"
 [[ -d "$FLUTTER_APP" ]] || { echo "flutter build did not produce $FLUTTER_APP" >&2; exit 1; }
 rm -rf "$APP"
