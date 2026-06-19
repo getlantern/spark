@@ -28,8 +28,29 @@ What's DONE (this and prior sessions; all on `main`, pushed):
 - **GUI restyled to the Lantern look** (`gui/lib/main.dart`): light theme (#F8FAFB / cyan #00BDD6),
   the sliding pill toggle, a fixed **390×760 portrait window** (`MainFlutterWindow.swift` — needs
   `makeKeyAndOrderFront` or it launches hidden), AppBar + a VPN-status/Protocol/Routing settings card.
+- **Samizdat transport — design + kID spike DONE 2026-06-19 (branch `samizdat-transport`, NOT yet on
+  `main`).** Second M11 transport: client-side, **wire-interop with deployed lantern-box/sing-box
+  `"samizdat"` servers**. Design: `docs/samizdat-transport-design.md` + **ADR 0007**. Decisions —
+  single TLS 1.3 + **H2 CONNECT mux via the `h2` crate** (scoped no-hyper exception; H2 is inside TLS
+  so its fingerprint is moot), REALITY auth in the TLS `legacy_session_id`, reuse the AnyTLS Chrome
+  connector + `shaping/` + `ring` + the session-pool pattern. **kID SessionID-injection spike PASSED**
+  (`/tmp/kid-spike`): a chosen 32-byte `legacy_session_id` reaches the wire in a Chrome-1.3 hello with
+  JA4 intact, on **stock boring2 (NO fork)** — the `boring-sys2` patch is a recorded-but-unused
+  fallback. **Verified API facts (don't re-verify):** the kID recipe = `SSL_SESSION_new(ctx)` →
+  `SSL_SESSION_set_protocol_version(TLS1_2_VERSION)` → `SSL_SESSION_set1_id(&sid32)` →
+  `SSL_SESSION_set_time(now)`/`SSL_SESSION_set_timeout(big)` → `SSL_set_session(ssl, s)` →
+  `SSL_SESSION_free(s)`; BoringSSL classifies kID from id-present + ticketless and emits it as
+  `legacy_session_id` even in a 1.3 hello (NO cipher/master-key setter — neither needed nor exposed by
+  BoringSSL). boring2's `SslRef::as_ptr` needs `foreign_types_shared::ForeignTypeRef` in scope. Client
+  auth needs **no ECDH** — `derivePSK` HKDFs the server pubkey bytes directly as IKM.
 
 **NEXT (in rough priority):**
+0. **Samizdat (branch `samizdat-transport`) — chunked build per §10 of the design doc.** NEXT CHUNK:
+   `core/src/transport/samizdat/auth.rs` — PSK + 32-byte SessionID in pure `ring`
+   (`HKDF-SHA256(ikm=serverPubKey, salt=shortID, info="SAMIZDAT")` → `HMAC-SHA256(PSK, nonce)[:16]`,
+   layout `shortID(8)‖nonce(8)‖tag(16)`), behind a new `samizdat` cargo feature, with vectors
+   cross-checked vs Go `auth.go`. Then `session_id.rs` (the kID recipe above), `h2.rs` (h2-crate
+   CONNECT ⇄ AsyncRead+AsyncWrite), `transport.rs` + config wiring, then interop + TUN gates.
 1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
    (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
    `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:
