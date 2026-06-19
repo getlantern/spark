@@ -114,10 +114,12 @@ impl AsyncRead for H2Stream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        // Serve buffered leftovers from a prior DATA frame first.
+        // Serve buffered leftovers from a prior DATA frame first, releasing flow-control capacity
+        // only for the bytes actually drained — so the receive window tracks real consumption.
         if !this.read_buf.is_empty() {
             let n = this.read_buf.len().min(buf.remaining());
             buf.put_slice(&this.read_buf.split_to(n));
+            let _ = this.recv.flow_control().release_capacity(n);
             return Poll::Ready(Ok(()));
         }
         match this.recv.poll_data(cx) {
@@ -125,11 +127,14 @@ impl AsyncRead for H2Stream {
             Poll::Ready(None) => Poll::Ready(Ok(())), // END_STREAM → EOF
             Poll::Ready(Some(Err(e))) => Poll::Ready(Err(to_io(e))),
             Poll::Ready(Some(Ok(mut data))) => {
-                // Reopen the HTTP/2 flow-control window for everything we now own.
-                let _ = this.recv.flow_control().release_capacity(data.len());
                 let n = data.len().min(buf.remaining());
                 buf.put_slice(&data.split_to(n));
-                this.read_buf = data; // keep any remainder for the next poll
+                // Release only what we hand to the caller now; the remainder's capacity is released
+                // above as it's drained from `read_buf`. Releasing the whole frame here would
+                // re-open the window for bytes the application hasn't consumed yet (weak backpressure
+                // → unbounded buffering under a slow reader).
+                let _ = this.recv.flow_control().release_capacity(n);
+                this.read_buf = data; // remainder kept for the next poll
                 Poll::Ready(Ok(()))
             }
         }
@@ -246,5 +251,43 @@ mod tests {
             &got, payload,
             "the CONNECT tunnel must echo the payload back"
         );
+    }
+
+    #[tokio::test]
+    async fn large_payload_round_trips_across_the_flow_control_window() {
+        // A payload larger than the initial HTTP/2 receive window, read in small chunks while
+        // writing concurrently. This exercises the buffered-remainder path and, crucially, the
+        // incremental capacity release: if `poll_read` over- or under-released the window, the
+        // transfer would stall and this test would hang.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(connect_echo_server(listener));
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let conn = H2Conn::handshake(tcp).await.unwrap();
+        let stream = conn.connect("example.com:1234").await.unwrap();
+
+        // > 64 KiB (the default initial window), so it must span several window refills.
+        let payload: Vec<u8> = (0..200_000).map(|i| (i % 251) as u8).collect();
+
+        // Read and write concurrently (full-duplex) so the echo can drain while the upload streams.
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let upload = payload.clone();
+        let writer = tokio::spawn(async move {
+            wr.write_all(&upload).await.unwrap();
+            wr.shutdown().await.unwrap();
+        });
+
+        let mut got = Vec::new();
+        let mut buf = [0u8; 512]; // small reads force the frame remainder through `read_buf`
+        loop {
+            let n = rd.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        writer.await.unwrap();
+        assert_eq!(got, payload, "the large payload must reassemble exactly");
     }
 }
