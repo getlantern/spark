@@ -100,10 +100,16 @@ What's DONE (this and prior sessions; all on `main`, pushed):
    - **NEXT (optional live step): `sudo spark run` TUN gate.** Needs root + a real Samizdat server;
      use an **IP** target (`curl https://1.1.1.1` — avoids DNS, since samizdat is TCP-only). Lower
      marginal value now — the netstack→`Transport` seam is transport-agnostic and already TUN-gated for
-     AnyTLS; the interop gate proved the samizdat-specific stack. **Deferred follow-ups (non-blocking):**
-     ClientHello fragmentation/shaping reuse (`shaping/`), a multi-conn pool + idle sweep (currently one
-     shared conn, reactively reconnected), and UDP-over-CONNECT. **MERGE:** branch `samizdat-transport`
-     is ready to PR (client complete + unit-tested + live-gated; ADR 0007 + design doc committed).
+     AnyTLS; the interop gate proved the samizdat-specific stack.
+   - **Chunk 6 — shaping reuse DONE 2026-06-19 (commit `e15752a`). ✅** `SamizdatTransport` wraps the
+     TCP in `SegmentShapingStream` per the shared `[transport.shaping]` `WirePlan` (TCP_NODELAY +
+     Geneva ClientHello fragmentation), mirroring AnyTLS — the Go client fragments by default. No-op
+     unless configured. **Re-live-gated with `SZ_SHAPING=sni_boundary`:** a fragmented ClientHello
+     still completes the handshake + interops → HTTP 200. (The example now reads `SZ_SHAPING`.)
+   - **Deferred follow-ups (non-blocking):** a multi-conn pool + idle sweep (currently one shared conn,
+     reactively reconnected), UDP-over-CONNECT, and the optional `sudo spark run` TUN gate. **MERGE:**
+     branch `samizdat-transport` → **PR #1** (https://github.com/getlantern/spark/pull/1); client
+     complete + unit-tested + live-gated (incl. fragmentation); ADR 0007 + design doc committed.
 1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
    (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
    `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:
