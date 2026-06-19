@@ -1,7 +1,8 @@
 # Samizdat transport — design (M11)
 
-- **Status:** Proposed — 2026-06-19. Direction agreed in session; the load-bearing TLS assumption
-  (the `kID` SessionID-injection trick) is being validated by a throwaway spike before commit.
+- **Status:** Proposed — 2026-06-19. Direction agreed in session. The load-bearing TLS assumption
+  (the `kID` SessionID-injection trick) is **VALIDATED** by a throwaway spike (§5) — the no-fork path
+  holds, so the `boring-sys2` patch (§5 fallback) is not needed.
 - **Scope:** Add Lantern's **Samizdat** protocol as a spark `Transport`, **wire-interoperable with the
   deployed `lantern-box` / sing-box `"samizdat"` servers** (client side only; the server stays Go).
 - **Builds on:** ADR 0001 (BoringSSL Chrome-mimicry TLS backend), ADR 0006 (opening-gambit /
@@ -159,18 +160,22 @@ is our 32 auth bytes makes boring emit those bytes as `legacy_session_id` **even
 Chrome hello** — and because boring builds the hello itself, the transcript is correct. Session
 *tickets* (and TLS 1.3 sessions) fall to the random branch and do **not** work — only ID-based.
 
-Construct via public BoringSSL setters (through `boring-sys2` FFI), not internal DER:
-`SSL_SESSION_new` → `SSL_SESSION_set_protocol_version(TLS1_2_VERSION)` →
-`SSL_SESSION_set_cipher(<a cipher already in Chrome's list>)` → `SSL_SESSION_set1_id(<32 auth bytes>)`
-→ `SSL_SESSION_set1_master_key(<dummy>)` + `set_time`/`set_timeout` (so it is "resumable") → wrap as
-`SslSession` → `ConnectConfiguration::set_session(&s)` before connect. The fabricated session is never
-actually resumed (the server negotiates a fresh 1.3 handshake); it only steers the hello field.
+**Validated recipe (no fork)** — pure stock `boring2`, via the `boring-sys2` FFI, before `connect`:
+`SSL_SESSION_new(ctx)` → `SSL_SESSION_set_protocol_version(TLS1_2_VERSION)` →
+`SSL_SESSION_set1_id(<32 auth bytes>)` → `SSL_SESSION_set_time(now)` + `SSL_SESSION_set_timeout(big)`
+→ `SSL_set_session(ssl, sess)` (then `SSL_SESSION_free` our ref). **No cipher / master-key setter is
+needed or even exposed** by BoringSSL — `ssl_session_get_type` returns `kID` from id-present +
+ticketless, and the hello-emission filter checks only server-flag / version / ECH / time / quic /
+renegotiation (none require a cipher). The fabricated session is never actually resumed (the server
+negotiates a fresh 1.3 handshake — the normal resumption-rejected fallback); it only steers the field.
 
-**Spike must confirm (before commit):** (1) the fabricated session classifies as `kID`/resumable and
-its id appears as `legacy_session_id`; (2) offering it leaves `max_version` at 1.3 (no version cap —
-Chrome must still offer 1.3); (3) the JA4 is unchanged (classic 1.2 ID-resumption can nudge the
-cipher list — set the session cipher to one already present and assert JA4 parity via the drift
-check). Throwaway crate at `/tmp/kid-spike` (§ spike).
+**Spike result (2026-06-19, `/tmp/kid-spike`, hermetic capture of spark's real Chrome connector).**
+✅ (1) the kID run's `legacy_session_id` == the chosen 32 bytes (baseline run = random compat id);
+✅ (2) `supported_versions` still includes `0x0304` (no version cap from the 1.2 session);
+✅ (3) cipher list + extension *set* identical to baseline (the order permutes per-connection, as
+real Chrome does — JA4 normalizes order, so JA4 is unchanged). **Still to prove at the integration
+gates** (not blockers): that the full handshake *completes* with the session set, and live interop
+with a real Samizdat server (§9 gates 4–5).
 
 ### Fallback — patch `boring-sys2` (only if the spike fails any check)
 
@@ -268,8 +273,8 @@ evict dead, connect outside the lock, idle sweep — same shape as `AnytlsTransp
 ## 10. Build order (chunks, one per session, green at each boundary)
 
 1. **`auth.rs`** — PSK + SessionID, pure `ring`, vectors vs Go. (No TLS.)
-2. **kID spike** — validate §5 primary; decide primary vs fallback. (Throwaway.)
-3. **`session_id.rs`** — the injection seam realizing the spike's winning method.
+2. ~~**kID spike**~~ — **done 2026-06-19** (`/tmp/kid-spike`): the no-fork kID path validated (§5).
+3. **`session_id.rs`** — the injection seam realizing the validated kID recipe (the FFI calls above).
 4. **`h2.rs`** — H2 CONNECT mux + stream adapter, tested against a local h2 CONNECT echo.
 5. **`transport.rs` + config wiring** — `SamizdatTransport` (pool) impl `Transport`; `[transport.samizdat]`;
    `from_config` precedence + feature stub.
@@ -279,7 +284,8 @@ evict dead, connect outside the lock, idle sweep — same shape as `AnytlsTransp
 
 ## 11. Open questions / risks
 
-- **kID spike outcome** — the whole primary path. If any of the three checks fails → fallback patch.
+- ~~kID spike outcome~~ — **resolved (2026-06-19): passed**, no fork needed (§5). Residual: the full
+  handshake-completes + live-interop checks move to the integration gates (§9 gates 4–5).
 - **UDP** — out for v1 (samizdat is TCP-only). If parity needs UDP-over-samizdat, it is UoT-inside-
   CONNECT and needs server support; revisit as a separate increment.
 - **Server-side `h2` quirks** — the Go server uses stock x/net/http2; confirm spark's `h2` CONNECT
