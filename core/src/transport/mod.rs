@@ -28,6 +28,9 @@ use crate::net::SocketProtector;
 use crate::BoxedStream;
 
 pub mod anytls;
+/// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
+/// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
+pub mod discovery;
 /// The portable, signed gambit genome (ADR 0006 P2): the data-only spec of a flow's *opening*
 /// across the three layers, with Ed25519 verification, anti-rollback, and capability gating.
 pub mod gambit;

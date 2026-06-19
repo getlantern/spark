@@ -1071,8 +1071,31 @@
   ties both. **Build order:** P0 anchor capture/CI drift → P1 socket-layer segment/timing (SNI frag) →
   P2 constrained CH knobs as signed config (lock the genome here) → P3 Path B computes the gambit → P4
   unconstrained byte-builder → P5 the harness. Value lands at P1–P2 (buildable now on the DO relay).
-- **ANCHOR / JA4 drift control (ADR 0006 §4, deferred P0) 2026-06-19 (commit pending).** Two
-  commits. (1) `core/src/transport/ja4.rs` (always-on): a pure ClientHello parser + the **FoxIO JA4**
+- **P5 (chunk 1) — discovery harness inner loop (ADR 0006, design §5.2) 2026-06-19 (commit pending).**
+  The full search loop is **server-side** (§5.5 — servers are sensors, fitness = arrival rate, client
+  stays thin); spark owns the **inner tier** because it has the boring engine. New
+  `core/src/transport/discovery.rs`: (pure, always-on) a seeded `SplitMix64` PRNG + GA **`mutate`**
+  (perturb one Layer-A/B/C knob) and **`crossover`** (recombine A=clienthello / B=records / C=wire —
+  layers are the natural crossover units, §5.1), both deterministic for reproducible/auditable search;
+  (feature `anytls`) `run_inner_loop` — generate a population, **realize each candidate through boring**
+  (`Profile::for_boring` → `capture_client_hello` → `ja4`), score **fidelity to the anchor** (JA4 match
+  + structural distance = GREASE-stripped cipher/ext symmetric-diff + ALPN/version), and select the
+  fittest **distinct-JA4** survivors per generation (novelty pressure, so the population doesn't
+  collapse onto one fingerprint). The reference is always `Profile::default` (genuine Chrome-137), not
+  the seed. This is the cheap, **no-censor-contact** pre-filter that guards the composite fitness's
+  `fidelity_floor` — it does **not** judge evasion (that's the server arrivals oracle); its output is a
+  fidelity-ranked, diverse candidate set for the outer loop to field-trial. **Honest limitation
+  (documented):** for *constrained* gambits the JA4 signal is coarse (boring keeps them Chrome-faithful
+  by construction; only ECH/ALPS/record_size_limit move the JA4) — the scorer earns its keep on the
+  *unconstrained* (P4) regime. **Verified:** 7 tests (PRNG determinism; mutate reproducible+changes;
+  crossover layer-sourcing; population sizing; + `anytls`: seed→anchor distance 0/match, ALPS-off
+  lowers fidelity, loop ranks-faithful-first + stays diverse); all-features 192, clippy `-D warnings`
+  clean default + all-features, fmt + workspace green. **Remaining P5 (server-side, separate repo):**
+  the outer loop — arrivals oracle, A/B bandit over gambits, server rotation, LLM warm-start/
+  reasoning-mutation, signed deploy (lantern-cloud / Go; spark exposes the genome + `for_boring` +
+  `capture`/JA4 + signed gambit modules as the seam).
+- **ANCHOR / JA4 drift control (ADR 0006 §4, deferred P0) 2026-06-19 (committed `3311ab7` + `5415433`,
+  pushed).** Two commits. (1) `core/src/transport/ja4.rs` (always-on): a pure ClientHello parser + the **FoxIO JA4**
   fingerprint (`JA4_a` version/SNI/cipher-count/ext-count/ALPN + `JA4_b` sorted-cipher hash + `JA4_c`
   sorted-extension+sigalg hash; GREASE-stripped, extension-sorted ⇒ invariant to our per-connection
   GREASE+permutation but flips on a real profile change). The spec verified against the pinned FoxIO

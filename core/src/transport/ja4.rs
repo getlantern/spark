@@ -41,7 +41,7 @@ pub struct ClientHelloSummary {
 }
 
 /// `true` for a GREASE-reserved 16-bit value (RFC 8701: both bytes equal and of the form `0x?a`).
-fn is_grease(v: u16) -> bool {
+pub(crate) fn is_grease(v: u16) -> bool {
     let hi = (v >> 8) as u8;
     let lo = (v & 0xff) as u8;
     hi == lo && (lo & 0x0f) == 0x0a
