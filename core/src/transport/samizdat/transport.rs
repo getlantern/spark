@@ -13,6 +13,7 @@ use async_trait::async_trait;
 
 use crate::net::SocketProtector;
 use crate::transport::anytls::profile::Profile;
+use crate::transport::shaping::{SegmentShapingStream, WirePlan};
 use crate::transport::{
     protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, BoxedStream, Transport, UdpTransport,
 };
@@ -30,6 +31,10 @@ pub struct SamizdatTransport {
     short_id: [u8; 8],
     sni: String,
     profile: Profile,
+    /// Opening-handshake shaping for each new TLS connection (ADR 0006 Phase 1): fragment the
+    /// ClientHello across TCP segments (Samizdat's Geneva-style fragmentation). A default plan is a
+    /// no-op, so this is opt-in via `[transport.shaping]`.
+    wire: WirePlan,
     protector: Option<SocketProtector>,
     conn: Mutex<Option<Arc<H2Conn>>>,
 }
@@ -42,6 +47,7 @@ impl SamizdatTransport {
         server_pubkey: [u8; 32],
         short_id: [u8; 8],
         sni: String,
+        wire: WirePlan,
         protector: Option<SocketProtector>,
     ) -> Self {
         Self {
@@ -50,6 +56,7 @@ impl SamizdatTransport {
             short_id,
             sni,
             profile: Profile::default(),
+            wire,
             protector,
             conn: Mutex::new(None),
         }
@@ -59,11 +66,16 @@ impl SamizdatTransport {
     /// the Chrome ClientHello → TLS handshake → HTTP/2 handshake.
     async fn establish(&self) -> io::Result<Arc<H2Conn>> {
         let tcp = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        if self.wire.tcp_nodelay {
+            let _ = tcp.set_nodelay(true); // so each shaped segment leaves as its own packet
+        }
         let session_id_bytes = auth::session_id(&self.server_pubkey, &self.short_id)
             .map_err(|_| io::Error::other("samizdat: generating the auth SessionID failed"))?;
         let mut config = crate::transport::anytls::tls::configure(&self.profile)?;
         session_id::inject_session_id(&mut config, &session_id_bytes)?;
-        let tls = tokio_boring2::connect(config, &self.sni, tcp)
+        // Fragment the ClientHello across TCP segments per the wire plan (no-op by default).
+        let shaped = SegmentShapingStream::new(tcp, self.wire.clone());
+        let tls = tokio_boring2::connect(config, &self.sni, shaped)
             .await
             .map_err(|e| io::Error::other(format!("samizdat tls handshake: {e}")))?;
         if tls.ssl().selected_alpn_protocol() != Some(b"h2") {
@@ -148,6 +160,7 @@ mod tests {
             [0u8; 32],
             [0u8; 8],
             "cover.example".to_owned(),
+            WirePlan::default(),
             None,
         );
         // The Ok tuple (boxed sink/source) isn't `Debug`, so match rather than `expect_err`.

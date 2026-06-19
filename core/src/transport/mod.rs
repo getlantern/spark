@@ -104,9 +104,12 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
         let wire = shaping::WirePlan::from_config(&config.transport.shaping);
         return anytls_transport(anytls, protector, wire);
     }
-    // Samizdat (ADR 0007) — like AnyTLS, takes precedence over the plain `server` tunnel.
+    // Samizdat (ADR 0007) — like AnyTLS, takes precedence over the plain `server` tunnel. It reuses
+    // the shared `[transport.shaping]` plan to fragment the ClientHello (Geneva-style, on by default
+    // in the Go client).
     if let Some(samizdat) = &config.transport.samizdat {
-        return samizdat_transport(samizdat, protector);
+        let wire = shaping::WirePlan::from_config(&config.transport.shaping);
+        return samizdat_transport(samizdat, protector, wire);
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
@@ -300,6 +303,7 @@ fn wasm_transport(
 fn samizdat_transport(
     cfg: &SamizdatConfig,
     protector: Option<SocketProtector>,
+    wire: shaping::WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     let server_pubkey = decode_hex_n::<32>(&cfg.server_pubkey)
         .ok_or_else(|| io::Error::other("transport.samizdat.server_pubkey must be 32-byte hex"))?;
@@ -314,6 +318,7 @@ fn samizdat_transport(
         server_pubkey,
         short_id,
         sni,
+        wire,
         protector,
     ));
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
@@ -325,6 +330,7 @@ fn samizdat_transport(
 fn samizdat_transport(
     _cfg: &SamizdatConfig,
     _protector: Option<SocketProtector>,
+    _wire: shaping::WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.samizdat is configured but spark was built without the `samizdat` feature",

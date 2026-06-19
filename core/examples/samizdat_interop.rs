@@ -8,7 +8,7 @@
 //! This exercises the whole client stack end-to-end against the canonical Go server: the
 //! Chrome ClientHello + kID SessionID auth, TLS-handshake completion, and HTTP/2 CONNECT muxing.
 
-use spark_core::config::{Config, SamizdatConfig, TransportConfig};
+use spark_core::config::{Config, SamizdatConfig, ShapingConfig, TransportConfig};
 use spark_core::transport::from_config;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -22,6 +22,16 @@ async fn main() {
         .parse()
         .expect("SZ_TARGET must be an addr");
 
+    // Optional ClientHello fragmentation, e.g. SZ_SHAPING=sni_boundary (default: none).
+    let shaping = match std::env::var("SZ_SHAPING") {
+        Ok(split) if !split.is_empty() => ShapingConfig {
+            segment_split: split,
+            ..Default::default()
+        },
+        _ => ShapingConfig::default(),
+    };
+    println!("shaping: segment_split={}", shaping.segment_split);
+
     let cfg = Config {
         transport: TransportConfig {
             samizdat: Some(SamizdatConfig {
@@ -30,6 +40,7 @@ async fn main() {
                 short_id,
                 sni: Some("cover.example".to_owned()),
             }),
+            shaping,
             ..Default::default()
         },
         ..Default::default()
