@@ -282,8 +282,9 @@ pub struct WasmConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnytlsConfig {
-    /// The AnyTLS server address.
-    pub server: SocketAddr,
+    /// The AnyTLS server address — `IP:port` or `host:port` (resolved at startup, see
+    /// `docs/bootstrap-resolver-design.md`).
+    pub server: Endpoint,
     /// The shared password — the auth secret (sent `sha256`'d on the wire).
     pub password: String,
     /// TLS SNI to present; defaults to the server's IP literal when omitted.
@@ -310,8 +311,8 @@ pub struct AnytlsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SamizdatConfig {
-    /// The Samizdat server address.
-    pub server: SocketAddr,
+    /// The Samizdat server address — `IP:port` or `host:port` (resolved at startup).
+    pub server: Endpoint,
     /// The server's X25519 public key, hex-encoded (32 bytes) — the HKDF IKM for the auth PSK.
     pub server_pubkey: String,
     /// The pre-shared short ID, hex-encoded (8 bytes).
@@ -629,7 +630,7 @@ mod tests {
     #[test]
     fn endpoint_serde_round_trips() {
         // Endpoint serializes/deserializes as a single string, for both variants. Tested directly
-        // (not via anytls.server, which is still a SocketAddr until Task B2).
+        // and via the anytls.server field (now an Endpoint).
         #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
         struct W {
             e: Endpoint,
@@ -642,5 +643,28 @@ mod tests {
             let back: W = toml::from_str(&toml).unwrap();
             assert_eq!(w, back, "round-trip changed:\n{toml}");
         }
+    }
+
+    #[test]
+    fn anytls_host_server_round_trips_through_toml() {
+        for s in ["1.2.3.4:443", "proxy.example.com:8443"] {
+            let toml = format!("[transport.anytls]\nserver = \"{s}\"\npassword = \"pw\"\n");
+            let c = Config::from_toml_str(&toml).unwrap();
+            let rendered = c.to_toml_string().unwrap();
+            let back = Config::from_toml_str(&rendered).unwrap();
+            assert_eq!(c, back, "round-trip changed:\n{rendered}");
+        }
+        // And the hostname actually lands as Endpoint::Host.
+        let c = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"proxy.example.com:8443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.transport.anytls.unwrap().server,
+            Endpoint::Host {
+                host: "proxy.example.com".into(),
+                port: 8443
+            }
+        );
     }
 }

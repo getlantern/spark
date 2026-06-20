@@ -169,10 +169,8 @@ fn anytls_transport(
     protector: Option<SocketProtector>,
     wire: WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
-    let sni = cfg
-        .sni
-        .clone()
-        .unwrap_or_else(|| cfg.server.ip().to_string());
+    let server = cfg.server.socket_addr()?;
+    let sni = cfg.sni.clone().unwrap_or_else(|| server.ip().to_string());
     // Resolve the inline gambit genome (Layers A/B) onto the boring executor (ADR 0006 P2). Knobs
     // boring2 can't realize are surfaced once here, never silently dropped. This is also the fallback
     // profile when a dynamic gambit module (P3, below) faults or over-reaches.
@@ -187,7 +185,7 @@ fn anytls_transport(
     if let Some(gcfg) = &cfg.gambit {
         let gambit = load_gambit_module(gcfg)?;
         let t = Arc::new(anytls::AnytlsTransport::with_dynamic_gambit(
-            cfg.server,
+            server,
             cfg.password.clone(),
             sni,
             protector,
@@ -206,7 +204,7 @@ fn anytls_transport(
 
     // One transport serves both TCP and UDP (UoT v2), sharing the session pool.
     let t = Arc::new(anytls::AnytlsTransport::new(
-        cfg.server,
+        server,
         cfg.password.clone(),
         sni,
         protector,
@@ -334,12 +332,10 @@ fn samizdat_transport(
         .ok_or_else(|| io::Error::other("transport.samizdat.server_pubkey must be 32-byte hex"))?;
     let short_id = decode_hex_n::<8>(&cfg.short_id)
         .ok_or_else(|| io::Error::other("transport.samizdat.short_id must be 8-byte hex"))?;
-    let sni = cfg
-        .sni
-        .clone()
-        .unwrap_or_else(|| cfg.server.ip().to_string());
+    let server = cfg.server.socket_addr()?;
+    let sni = cfg.sni.clone().unwrap_or_else(|| server.ip().to_string());
     let t = Arc::new(samizdat::SamizdatTransport::new(
-        cfg.server,
+        server,
         server_pubkey,
         short_id,
         sni,
