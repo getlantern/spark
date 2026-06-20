@@ -60,8 +60,8 @@ system-stack = []
 wasm-transport = ["dep:wasmi"]
 # Samizdat transport (ADR 0007): REALITY-style auth in the TLS SessionID + H2 CONNECT mux,
 # interoperable with deployed lantern-box `"samizdat"` servers. `auth.rs` needs only `ring`; the
-# `session_id.rs` kID-injection seam pulls the boring TLS backend + its FFI. (A later chunk adds the
-# `h2` dep for CONNECT muxing.)
+# `session_id.rs` kID-injection seam pulls the boring TLS backend + its FFI; `h2`/`http` provide the
+# CONNECT mux.
 samizdat = [
     "anytls", # reuse the Chrome boring connector (`anytls::tls`) + `anytls::profile::Profile`
     "dep:boring-sys2",

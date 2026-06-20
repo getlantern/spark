@@ -172,9 +172,10 @@ negotiates a fresh 1.3 handshake — the normal resumption-rejected fallback); i
 ✅ (1) the kID run's `legacy_session_id` == the chosen 32 bytes (baseline run = random compat id);
 ✅ (2) `supported_versions` still includes `0x0304` (no version cap from the 1.2 session);
 ✅ (3) cipher list + extension *set* identical to baseline (the order permutes per-connection, as
-real Chrome does — JA4 normalizes order, so JA4 is unchanged). **Still to prove at the integration
-gates** (not blockers): that the full handshake *completes* with the session set, and live interop
-with a real Samizdat server (§9 gates 4–5).
+real Chrome does — JA4 normalizes order, so JA4 is unchanged). The two integration-gate items flagged
+here at spike time — that the full handshake *completes* with the session set, and live interop with a
+real Samizdat server (§9 gates 4–5) — are now **confirmed** end-to-end via
+`core/examples/samizdat_interop.rs` (HTTP 200 through a real getlantern/samizdat server).
 
 ### Fallback — patch `boring-sys2` (only if the spike fails any check)
 

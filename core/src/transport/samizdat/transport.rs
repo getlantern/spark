@@ -67,7 +67,12 @@ impl SamizdatTransport {
     async fn establish(&self) -> io::Result<Arc<H2Conn>> {
         let tcp = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         if self.wire.tcp_nodelay {
-            let _ = tcp.set_nodelay(true); // so each shaped segment leaves as its own packet
+            // Best-effort: TCP_NODELAY keeps each shaped segment in its own packet (no Nagle
+            // coalescing). The shaper flushes per segment regardless, so a failure only weakens the
+            // effect — surface it rather than failing the dial over a non-fatal setsockopt error.
+            if let Err(e) = tcp.set_nodelay(true) {
+                tracing::warn!(error = %e, "samizdat: TCP_NODELAY not set; shaped segments may coalesce");
+            }
         }
         let session_id_bytes = auth::session_id(&self.server_pubkey, &self.short_id)
             .map_err(|_| io::Error::other("samizdat: generating the auth SessionID failed"))?;
