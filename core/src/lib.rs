@@ -26,6 +26,12 @@ pub mod routing;
 pub mod transport;
 pub mod tun;
 
+/// Control-plane name resolution for startup (design: docs/bootstrap-resolver-design.md). Resolves a
+/// proxy `server` hostname to validated IPs via an un-poisoned Chrome-mimicry DoH race, before any
+/// tunnel exists. Behind `bootstrap-dns` (pulls flint-dns/flint-dial + boring).
+#[cfg(feature = "bootstrap-dns")]
+pub mod bootstrap;
+
 /// Marker for a bidirectional async byte stream. Blanket-implemented for every
 /// `AsyncRead + AsyncWrite`, so a surfaced netstack flow and a dialed transport stream can
 /// share one boxed type ([`BoxedStream`]).
