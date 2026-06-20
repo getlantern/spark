@@ -132,6 +132,112 @@ pub mod ne_spike {
             _ => "disconnected",   // invalid / disconnected / disconnecting
         }
     }
+
+    use std::sync::mpsc::Sender;
+    use std::time::Duration;
+
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{ns_string, NSArray, NSDictionary, NSError, NSString};
+    use objc2_network_extension::NETunnelProviderProtocol;
+
+    fn err_str(e: *mut NSError) -> String {
+        // SAFETY: caller passes a non-null framework NSError*.
+        unsafe { (*e).localizedDescription().to_string() }
+    }
+
+    /// U1b-2b: bring the tunnel up. NE completion handlers fire on the main queue
+    /// and NETunnelProviderManager isn't Send, so the whole load→save→reload→start
+    /// chain runs inside the loadAll completion (on the main thread, via nested
+    /// completion blocks); this (worker) thread just waits on a channel for the
+    /// final verdict. `config` is the resolved data-path config (TOML/host:port),
+    /// handed to the extension via providerConfiguration["config"].
+    ///
+    /// Assumes the org.getlantern.spark.tunnel system extension is already
+    /// activated (U1b-2b-ii adds OSSystemExtensionRequest activation for fresh
+    /// installs). Needs the NE entitlement (present in the signed product build).
+    pub fn connect(config: Option<String>) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let outer = RcBlock::new(
+            move |arr: *mut NSArray<NETunnelProviderManager>, _e: *mut NSError| {
+                let mgr: Retained<NETunnelProviderManager> = unsafe {
+                    if !arr.is_null() && (*arr).count() > 0 {
+                        (*arr).objectAtIndex(0)
+                    } else {
+                        NETunnelProviderManager::new()
+                    }
+                };
+                let proto = unsafe { NETunnelProviderProtocol::new() };
+                unsafe {
+                    proto.setProviderBundleIdentifier(Some(ns_string!(
+                        "org.getlantern.spark.tunnel"
+                    )));
+                    proto.setServerAddress(Some(ns_string!("Spark")));
+                    if let Some(ref c) = config {
+                        // providerConfiguration is NSDictionary<NSString, AnyObject>; upcast the
+                        // NSString value (NSString → NSObject → AnyObject) so the value type matches.
+                        let val: Retained<AnyObject> =
+                            NSString::from_str(c).into_super().into_super();
+                        let dict =
+                            NSDictionary::from_retained_objects(&[ns_string!("config")], &[val]);
+                        proto.setProviderConfiguration(Some(&dict));
+                    }
+                    mgr.setProtocolConfiguration(Some(&proto));
+                    mgr.setLocalizedDescription(Some(ns_string!("Spark")));
+                    mgr.setEnabled(true);
+                }
+                // save → (on completion) reload → (on completion) start.
+                let tx_save = tx.clone();
+                let mgr_save = mgr.clone();
+                let save_block = RcBlock::new(move |serr: *mut NSError| {
+                    if !serr.is_null() {
+                        let _ = tx_save.send(Err(format!("save failed: {}", err_str(serr))));
+                        return;
+                    }
+                    let tx_load = tx_save.clone();
+                    let mgr_start = mgr_save.clone();
+                    let load_block = RcBlock::new(move |lerr: *mut NSError| {
+                        if !lerr.is_null() {
+                            let _ = tx_load.send(Err(format!("reload failed: {}", err_str(lerr))));
+                            return;
+                        }
+                        let r = unsafe { mgr_start.connection().startVPNTunnelAndReturnError() }
+                            .map_err(|e| format!("start failed: {e}"));
+                        let _ = tx_load.send(r);
+                    });
+                    unsafe { mgr_save.loadFromPreferencesWithCompletionHandler(&load_block) };
+                });
+                unsafe { mgr.saveToPreferencesWithCompletionHandler(Some(&save_block)) };
+            },
+        );
+        // SAFETY: NE copies the escaping completion block, so it outlives this call.
+        unsafe { NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler(&outer) };
+        rx.recv_timeout(Duration::from_secs(25))
+            .map_err(|_| "connect timed out".to_owned())?
+    }
+
+    /// Bring the tunnel down: stop the first manager's connection (the stop call
+    /// runs inside the loadAll completion, on the main thread).
+    pub fn disconnect() -> Result<(), String> {
+        let (tx, rx): (Sender<Result<(), String>>, _) = std::sync::mpsc::channel();
+        let h = RcBlock::new(
+            move |arr: *mut NSArray<NETunnelProviderManager>, _e: *mut NSError| {
+                let r = unsafe {
+                    if !arr.is_null() && (*arr).count() > 0 {
+                        (*arr).objectAtIndex(0).connection().stopVPNTunnel();
+                        Ok(())
+                    } else {
+                        Err("no tunnel configured".to_owned())
+                    }
+                };
+                let _ = tx.send(r);
+            },
+        );
+        unsafe { NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler(&h) };
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "disconnect timed out".to_owned())?
+    }
 }
 
 /// The SparkBackend status shape the frontend renders (mirrors the TS interface).
@@ -170,23 +276,32 @@ fn spark_status() -> SparkStatus {
     }
 }
 
-// connect/disconnect: the data-path config resolves here (config.toml → baked →
-// proxy → direct); the NETunnelProviderManager save/start + system-extension
-// activation that consume it are U1b-2b (and need the embedded, signed extension
-// + first-run approval). Returns an explicit error until then rather than a silent
-// no-op, so the UI shows the honest state.
+// connect/disconnect (U1b-2b): the data-path config resolves here (config.toml →
+// baked → proxy → direct) and is handed to the system extension via the
+// NETunnelProviderManager save/start chain. Assumes the extension is activated
+// (OSSystemExtensionRequest activation for fresh installs is U1b-2b-ii).
+#[cfg(target_os = "macos")]
 #[tauri::command]
 fn spark_connect() -> Result<(), String> {
-    let has_cfg = config::resolve().is_some();
-    Err(format!(
-        "connect not wired yet (U1b-2b: NETunnelProviderManager save/start + system-extension activation). data-path config: {}",
-        if has_cfg { "resolved" } else { "none (would run direct)" }
-    ))
+    ne_spike::connect(config::resolve())
 }
 
+#[cfg(target_os = "macos")]
 #[tauri::command]
 fn spark_disconnect() -> Result<(), String> {
-    Err("disconnect not wired yet (U1b-2b)".to_owned())
+    ne_spike::disconnect()
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn spark_connect() -> Result<(), String> {
+    Err("connect unsupported on this platform".to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn spark_disconnect() -> Result<(), String> {
+    Err("disconnect unsupported on this platform".to_owned())
 }
 
 // U1b-2a: the UI now drives a real SparkBackend command surface — `spark_status`

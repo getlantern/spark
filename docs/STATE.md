@@ -2110,8 +2110,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   is now RUNTIME-testable** (install, approve the sysext on first launch, test connect vs a relay) rather
   than compile-only-blind. **Next chunk = U1b-2b** (unblocked for real verification).
 
+- 2026-06-20 (U1b-2b code DONE [compile-verified] — connect/disconnect write path wired):
+  `ne_spike::connect(config)` brings the tunnel up via the proven block2 pattern — the
+  load→configure→save→reload→start chain runs INSIDE the loadAll completion (on the main queue;
+  NETunnelProviderManager isn't Send, so nested completion blocks keep every object on main, and the
+  worker command waits on a channel for the verdict): builds NETunnelProviderProtocol
+  (providerBundleIdentifier=`org.getlantern.spark.tunnel`, serverAddress, providerConfiguration["config"]
+  = resolved config, NSString upcast to AnyObject) → setProtocolConfiguration/setEnabled →
+  saveToPreferencesWithCompletionHandler → loadFromPreferencesWithCompletionHandler →
+  connection.startVPNTunnelAndReturnError. `disconnect()` = loadAll → stopVPNTunnel. spark_connect/
+  spark_disconnect now call these (config via config::resolve). cargo build + clippy + fmt clean; 5
+  config tests pass; no openssl. **Compile-verified ONLY** — runtime needs the signed product build
+  (done) + the extension activated + a relay `config.toml` (= U1c). Assumes the extension is already
+  activated (fresh-install OSSystemExtensionRequest activation = U1b-2b-ii, deferred — if connect
+  errors with a "no provider"/activation failure, that's the signal to add it). Building the product
+  DMG with this connect path for the live test.
+
 ## Milestone checklist
-- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b machinery PROVEN; U1b-1 (signed sysext) + U1b-2a (config+spark_status+TauriBackend) + U1b-4 (embedded-extension NOTARIZED DMG 6.1M) DONE**; next U1b-2b objc2 connect write path + OSSystemExtensionRequest activation [now runtime-testable] / U1c live gate) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b + U1b-1 + U1b-2a + U1b-4 DONE; U1b-2b connect/disconnect wired (compile-verified)**; next: U1c live test [approve sysext + relay config.toml] / U1b-2b-ii OSSystemExtensionRequest activation if needed) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)

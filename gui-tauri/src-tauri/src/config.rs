@@ -12,10 +12,7 @@ use std::path::PathBuf;
 /// macOS app-support config path: `~/Library/Application Support/org.getlantern.spark/config.toml`.
 pub fn config_file_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join("Library/Application Support/org.getlantern.spark/config.toml"),
-    )
+    Some(PathBuf::from(home).join("Library/Application Support/org.getlantern.spark/config.toml"))
 }
 
 /// Resolve the data-path config string, or None for a direct (untunneled) run.
