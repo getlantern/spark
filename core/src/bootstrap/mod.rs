@@ -6,10 +6,6 @@
 //! (`flint_dns::resolve`). Neither a blocked strategy nor a blocked individual resolver holds up the
 //! first **validated** answer.
 
-// Import the full set the module uses by the end of Phase C. `Arc`/`Duration`/`Config`/`Endpoint`/
-// `UdpTransport` are used by Tasks C2–C4; they produce harmless unused-import warnings until then
-// (this task's gate is `cargo test`, where warnings don't fail; the `-D warnings` clippy gate runs at
-// the end of Phase C, by which point all are used).
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -119,6 +115,10 @@ impl ProxyResolver {
         let query =
             flint_dns::codec::build_query(host, flint_dns::TYPE_A).map_err(io::Error::other)?;
         sink.send(&query).await?;
+        // 512 = the classic non-EDNS DNS/UDP limit; our query sets no EDNS so the answer fits. A
+        // truncated (TC=1) response isn't retried over TCP — `parse_response` is bounds-checked, so
+        // the worst case is a clean parse error and this upstream losing the race. (v1; ProxyResolver
+        // is the future-facing path and isn't wired into `default_resolver` yet.)
         let mut buf = [0u8; 512];
         let n = tokio::time::timeout(self.deadline, source.recv(&mut buf))
             .await
