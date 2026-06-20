@@ -29,9 +29,9 @@ use crate::BoxedStream;
 use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
 
 /// Build a [`WirePlan`] from the static `[transport.shaping]` config. flint's `WirePlan` is
-/// config-agnostic, so this adapter (formerly `WirePlan::from_config`) lives spark-side. Maps Layer C
-/// only; Layer B `record_fragment` defaults off.
-fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
+/// config-agnostic, so this adapter (the public replacement for the former `WirePlan::from_config`)
+/// lives spark-side. Maps Layer C only; Layer B `record_fragment` defaults off.
+pub fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
     let segment_split = match c.segment_split.trim() {
         "" | "none" => SegmentSplit::None,
         "sni_boundary" => SegmentSplit::SniBoundary,
@@ -50,6 +50,11 @@ fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
         ..Default::default()
     }
 }
+
+/// Back-compat shim: the wire-shaping primitives now live in the `flint-shaping` crate. This keeps
+/// the `crate::transport::shaping::{WirePlan, SegmentSplit, DelaySpec, SegmentShapingStream, …}`
+/// paths working; the former `WirePlan::from_config` is now [`wire_plan_from_config`].
+pub use flint_shaping as shaping;
 
 pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
