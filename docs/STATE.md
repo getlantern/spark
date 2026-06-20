@@ -2126,6 +2126,23 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   errors with a "no provider"/activation failure, that's the signal to add it). Building the product
   DMG with this connect path for the live test.
 
+- 2026-06-20 (UI fidelity pass — match getlantern/lantern's Flutter home, not spark's mockup): Adam
+  wants pixel-fidelity to the REAL Lantern app. Reverse-engineered the lantern repo's Flutter UI
+  (`lib/features/home/home.dart`, `vpn_switch.dart`, `vpn_status.dart`, `core/common/app_colors.dart`,
+  `app_text_styles.dart`, `app_semantic_colors.dart`, `widgets/setting_tile.dart`, `divider_space.dart`)
+  and rebuilt `+page.svelte` to match: **Urbanist** (the real Lantern font — NOT Sora; bundled
+  `@fontsource/urbanist` 400/500/600/700, removed `@fontsource/sora`); the VPNSwitch pill (120×70, 60
+  knob, 5 pad, fully rounded, brand #00BDD6 / off gray7 #616569, white knob, spinner while
+  transitioning); the SettingTile card (radius 16, **teal shadow #19006162 blur 32 offset 0,4**) with
+  two-line rows (icon24 + label [Urbanist 14/400, textSecondary **gray8 #3E464E**] on top; value
+  [16/600, textPrimary gray9] indented 32 below; trailing dot/chevron) — VPN status (globe; "Connected"
+  in **green8 #00531F**; indicator dot), Protocol (lock, AnyTLS), Routing (route, Full tunnel); AppBar
+  = menu + "Spark" wordmark + hairline + soft elevation. Removed the earlier mockup's invented
+  orb/heading/in-pill-text. svelte-check 0 errors; frontend builds. Preview (Urbanist embedded):
+  `docs/mockups/spark-lantern-screen.html`. **Figma:** the Lantern VPN Design System is referenced in
+  `app_text_styles.dart` → figma.com/design/JTguURC2QTtsi904f6mACo (node 2097-43525) — pull exact
+  specs via the Figma MCP once OAuth'd. (App/DMG will carry the new UI on the next build.)
+
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b + U1b-1 + U1b-2a + U1b-4 DONE; U1b-2b connect/disconnect wired (compile-verified)**; next: U1c live test [approve sysext + relay config.toml] / U1b-2b-ii OSSystemExtensionRequest activation if needed) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
