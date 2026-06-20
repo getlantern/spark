@@ -398,6 +398,20 @@ impl Config {
     pub fn to_toml_string(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
     }
+
+    /// The first proxy `server` configured as a hostname needing resolution (`"host:port"`), or
+    /// `None` if every configured server is an IP literal. Used to fail fast when a hostname is
+    /// configured but the resolver wasn't built in (no `bootstrap-dns` feature).
+    pub fn first_unresolved_host(&self) -> Option<String> {
+        let servers = [
+            self.transport.anytls.as_ref().map(|c| &c.server),
+            self.transport.samizdat.as_ref().map(|c| &c.server),
+        ];
+        servers
+            .into_iter()
+            .flatten()
+            .find_map(|ep| ep.unresolved().map(|(h, p)| format!("{h}:{p}")))
+    }
 }
 
 #[cfg(test)]
@@ -643,6 +657,24 @@ mod tests {
             let back: W = toml::from_str(&toml).unwrap();
             assert_eq!(w, back, "round-trip changed:\n{toml}");
         }
+    }
+
+    #[test]
+    fn first_unresolved_host_finds_a_hostname() {
+        let c = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"proxy.example.com:443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.first_unresolved_host().as_deref(),
+            Some("proxy.example.com:443")
+        );
+
+        let c2 = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"1.2.3.4:443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        assert_eq!(c2.first_unresolved_host(), None);
     }
 
     #[test]
