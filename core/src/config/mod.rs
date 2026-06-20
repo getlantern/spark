@@ -28,6 +28,89 @@ use serde::{Deserialize, Serialize};
 
 use flint_tls::gambit::{ClientHello, Records};
 
+/// A proxy server address: a literal `IP:port` ([`Endpoint::Ip`], the unchanged path with no startup
+/// DNS) or a `host:port` to resolve before dialing ([`Endpoint::Host`], requires the `bootstrap-dns`
+/// feature). Deserializes from a single TOML string. See `docs/bootstrap-resolver-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Endpoint {
+    /// An already-resolved socket address — dialed directly.
+    Ip(SocketAddr),
+    /// A hostname + port resolved at startup by the bootstrap resolver.
+    Host {
+        /// The hostname to resolve.
+        host: String,
+        /// The port to pair with the resolved address.
+        port: u16,
+    },
+}
+
+impl Endpoint {
+    /// The resolved [`SocketAddr`], or an error if this is still an unresolved [`Endpoint::Host`].
+    /// The bootstrap phase resolves every `Host` to an `Ip` before the transport is built, so a `Host`
+    /// reaching here means resolution didn't run (e.g. built without the `bootstrap-dns` feature).
+    pub fn socket_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Endpoint::Ip(addr) => Ok(*addr),
+            Endpoint::Host { host, port } => Err(io::Error::other(format!(
+                "endpoint {host}:{port} was not resolved (build with the `bootstrap-dns` feature to resolve hostnames)"
+            ))),
+        }
+    }
+
+    /// `(host, port)` when this needs resolution; `None` when it is already an [`Endpoint::Ip`].
+    pub fn unresolved(&self) -> Option<(&str, u16)> {
+        match self {
+            Endpoint::Host { host, port } => Some((host.as_str(), *port)),
+            Endpoint::Ip(_) => None,
+        }
+    }
+}
+
+impl std::str::FromStr for Endpoint {
+    type Err = EndpointParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            return Ok(Endpoint::Ip(addr));
+        }
+        let (host, port) = s.rsplit_once(':').ok_or(EndpointParseError)?;
+        let port: u16 = port.parse().map_err(|_| EndpointParseError)?;
+        if host.is_empty() {
+            return Err(EndpointParseError);
+        }
+        Ok(Endpoint::Host {
+            host: host.to_owned(),
+            port,
+        })
+    }
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Endpoint::Ip(addr) => write!(f, "{addr}"),
+            Endpoint::Host { host, port } => write!(f, "{host}:{port}"),
+        }
+    }
+}
+
+/// A `[transport.*].server` string was neither `IP:port` nor `host:port`.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("endpoint must be `IP:port` or `host:port`")]
+pub struct EndpointParseError;
+
+impl<'de> Deserialize<'de> for Endpoint {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for Endpoint {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
 /// Top-level configuration. Each section has defaults, so missing sections and fields fall
 /// back rather than erroring.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -507,5 +590,57 @@ mod tests {
         assert_eq!(g.module, PathBuf::from("/etc/spark/opening.spkw"));
         assert_eq!(g.min_version, 4);
         assert_eq!(g.floor_path, None);
+    }
+
+    #[test]
+    fn endpoint_parses_ip_and_host() {
+        assert_eq!(
+            "1.2.3.4:443".parse::<Endpoint>().unwrap(),
+            Endpoint::Ip("1.2.3.4:443".parse().unwrap())
+        );
+        assert_eq!(
+            "[2001:db8::1]:443".parse::<Endpoint>().unwrap(),
+            Endpoint::Ip("[2001:db8::1]:443".parse().unwrap())
+        );
+        assert_eq!(
+            "proxy.example.com:443".parse::<Endpoint>().unwrap(),
+            Endpoint::Host {
+                host: "proxy.example.com".into(),
+                port: 443
+            }
+        );
+        // junk: no port, empty host, or non-numeric port.
+        assert!("notanaddress".parse::<Endpoint>().is_err());
+        assert!(":443".parse::<Endpoint>().is_err());
+        assert!("host:notaport".parse::<Endpoint>().is_err());
+    }
+
+    #[test]
+    fn endpoint_socket_addr_and_unresolved() {
+        let ip: Endpoint = "1.2.3.4:443".parse().unwrap();
+        assert_eq!(ip.socket_addr().unwrap(), "1.2.3.4:443".parse().unwrap());
+        assert_eq!(ip.unresolved(), None);
+
+        let host: Endpoint = "h.example:80".parse().unwrap();
+        assert!(host.socket_addr().is_err());
+        assert_eq!(host.unresolved(), Some(("h.example", 80)));
+    }
+
+    #[test]
+    fn endpoint_serde_round_trips() {
+        // Endpoint serializes/deserializes as a single string, for both variants. Tested directly
+        // (not via anytls.server, which is still a SocketAddr until Task B2).
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct W {
+            e: Endpoint,
+        }
+        for s in ["1.2.3.4:443", "proxy.example.com:8443"] {
+            let w = W {
+                e: s.parse().unwrap(),
+            };
+            let toml = toml::to_string(&w).unwrap();
+            let back: W = toml::from_str(&toml).unwrap();
+            assert_eq!(w, back, "round-trip changed:\n{toml}");
+        }
     }
 }
