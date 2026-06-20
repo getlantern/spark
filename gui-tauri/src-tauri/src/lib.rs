@@ -1,3 +1,5 @@
+mod config;
+
 // U1a spike (NE Model A): prove the Tauri-desktop Rust side can reach macOS
 // NetworkExtension directly via objc2 — no Swift toolchain. We read the tunnel
 // connection status synchronously (NETunnelProviderManager → connection →
@@ -85,32 +87,121 @@ pub mod ne_spike {
         }
         rx.try_recv().unwrap_or((0, -2))
     }
+
+    /// App-context status read: same async `loadAllFromPreferences`, but instead of
+    /// driving a run loop it blocks the *calling* (worker) thread on a channel —
+    /// the Tauri app's own main loop services the main-queue completion. Use this
+    /// from a Tauri command (never the main thread). Returns (count, first_status).
+    pub fn load_first_status(timeout: std::time::Duration) -> (usize, isize) {
+        use std::sync::mpsc::channel;
+
+        use block2::RcBlock;
+        use objc2_foundation::{NSArray, NSError};
+
+        let (tx, rx) = channel::<(usize, isize)>();
+        let handler = RcBlock::new(
+            move |arr: *mut NSArray<NETunnelProviderManager>, _err: *mut NSError| {
+                // SAFETY: `arr` is the framework-owned managers array (or null).
+                let result = unsafe {
+                    if arr.is_null() {
+                        (0usize, -1isize)
+                    } else {
+                        let arr = &*arr;
+                        let count = arr.count();
+                        let status = if count > 0 {
+                            arr.objectAtIndex(0).connection().status().0
+                        } else {
+                            -1
+                        };
+                        (count, status)
+                    }
+                };
+                let _ = tx.send(result);
+            },
+        );
+        // SAFETY: standard NE async-read API; the handler outlives the call via RcBlock.
+        unsafe { NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler(&handler) };
+        rx.recv_timeout(timeout).unwrap_or((0, -2))
+    }
+
+    /// Map a raw NEVPNStatus to the four UI states the frontend SparkBackend uses.
+    pub fn ui_state(raw: isize) -> &'static str {
+        match raw {
+            3 => "connected",
+            2 | 4 => "connecting", // connecting / reasserting
+            _ => "disconnected",   // invalid / disconnected / disconnecting
+        }
+    }
 }
 
-/// Spike command: returns the macOS NE connection status (proves the bridge).
-/// macOS only; U1b grows this into the real SparkBackend command surface.
+/// The SparkBackend status shape the frontend renders (mirrors the TS interface).
+#[derive(serde::Serialize)]
+struct SparkStatus {
+    state: String,
+    protocol: String,
+    routing: String,
+    #[serde(rename = "failOpen")]
+    fail_open: bool,
+}
+
+/// Real tunnel status: read the live NE connection state (U1b machinery). macOS
+/// reads NETunnelProviderManager; elsewhere it's a stub until those platforms land.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn ne_probe() -> String {
-    let raw = ne_spike::probe_status_raw();
-    format!("{} ({})", ne_spike::status_name(raw), raw)
+fn spark_status() -> SparkStatus {
+    let (_count, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(3));
+    let state = ne_spike::ui_state(raw);
+    SparkStatus {
+        state: state.to_owned(),
+        protocol: "AnyTLS".to_owned(),
+        routing: "Full tunnel".to_owned(),
+        fail_open: state != "connected",
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn ne_probe() -> String {
-    "unsupported on this platform".to_owned()
+fn spark_status() -> SparkStatus {
+    SparkStatus {
+        state: "disconnected".to_owned(),
+        protocol: "AnyTLS".to_owned(),
+        routing: "Full tunnel".to_owned(),
+        fail_open: true,
+    }
 }
 
-// U0: shell only — the UI runs against a TypeScript MockBackend. U1a adds the
-// `ne_probe` spike command; U1b adds the real SparkBackend command surface
-// (status/connect/disconnect) driving NETunnelProviderManager via the same
-// objc2 binding (NE Model A — system extension, no spark-ipc on macOS).
+// connect/disconnect: the data-path config resolves here (config.toml → baked →
+// proxy → direct); the NETunnelProviderManager save/start + system-extension
+// activation that consume it are U1b-2b (and need the embedded, signed extension
+// + first-run approval). Returns an explicit error until then rather than a silent
+// no-op, so the UI shows the honest state.
+#[tauri::command]
+fn spark_connect() -> Result<(), String> {
+    let has_cfg = config::resolve().is_some();
+    Err(format!(
+        "connect not wired yet (U1b-2b: NETunnelProviderManager save/start + system-extension activation). data-path config: {}",
+        if has_cfg { "resolved" } else { "none (would run direct)" }
+    ))
+}
+
+#[tauri::command]
+fn spark_disconnect() -> Result<(), String> {
+    Err("disconnect not wired yet (U1b-2b)".to_owned())
+}
+
+// U1b-2a: the UI now drives a real SparkBackend command surface — `spark_status`
+// reads the live NE connection state; `spark_connect`/`spark_disconnect` resolve
+// config and report honest "pending" until the U1b-2b write path lands. (The U1a
+// `ne_probe` diagnostic now lives only in examples/.)
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![ne_probe])
+        .invoke_handler(tauri::generate_handler![
+            spark_status,
+            spark_connect,
+            spark_disconnect
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

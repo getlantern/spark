@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { MockBackend, type SparkBackend, type SparkStatus } from "$lib/spark_backend";
+  import { TauriBackend, isTauri } from "$lib/tauri_backend";
 
-  // U0: mock backend. U1 swaps this for a TauriBackend over invoke() — nothing
-  // else in this file changes.
-  const backend: SparkBackend = new MockBackend();
+  // Real backend inside the Tauri app (drives the NE command surface); the mock
+  // in a plain browser (`npm run dev`). The UI is identical either way.
+  const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
   let status = $state<SparkStatus>({
     state: "disconnected",
@@ -13,6 +14,7 @@
     failOpen: true,
   });
   let busy = $state(false);
+  let errorMsg = $state<string | null>(null);
   let poll: ReturnType<typeof setInterval>;
 
   const connected = $derived(status.state === "connected");
@@ -40,10 +42,13 @@
   async function toggle() {
     if (busy || connecting) return;
     busy = true;
+    errorMsg = null;
     try {
       if (connected) await backend.disconnect();
       else await backend.connect();
       await refresh();
+    } catch (e) {
+      errorMsg = String(e);
     } finally {
       busy = false;
     }
@@ -51,7 +56,7 @@
 
   onMount(() => {
     refresh();
-    poll = setInterval(refresh, 500); // mirrors the real service-polling cadence
+    poll = setInterval(refresh, 2000); // poll the live NE status (Flutter app's cadence)
   });
   onDestroy(() => clearInterval(poll));
 </script>
@@ -73,7 +78,7 @@
     </div>
     <div class="status-line">
       <div class="status">{heading}</div>
-      <div class="substatus">{sub}</div>
+      <div class="substatus" class:error={errorMsg}>{errorMsg ?? sub}</div>
     </div>
     <button class="pill" role="switch" aria-checked={connected} aria-busy={connecting} onclick={toggle}>
       <span class="pill-label">{pillLabel}</span>
@@ -194,6 +199,7 @@
   .status-line { text-align: center; }
   .status { font-size: 20px; font-weight: 700; letter-spacing: -0.2px; }
   .substatus { margin-top: 6px; font-size: 14px; line-height: 1.4; color: var(--text-secondary); }
+  .substatus.error { color: var(--danger); }
 
   .pill {
     width: 230px; height: 60px; border-radius: 30px;

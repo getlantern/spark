@@ -2080,8 +2080,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   + app profile + sign + notarize → product DMG (sign+notarize pipeline already proven on the shell DMG).
   **Next chunk = U1b-2.**
 
+- 2026-06-20 (U1b-2a DONE — config precedence + real status command + frontend TauriBackend swap):
+  Added `gui-tauri/src-tauri/src/config.rs` — data-path config precedence (config.toml → SPARK_CONFIG
+  → SPARK_PROXY → direct), 5 unit tests. Added `ne_spike::load_first_status(timeout)` (recv_timeout,
+  app-context variant of the proven loadAll — no run-loop drive; the Tauri main loop services the
+  completion) + `ui_state` mapping. Command surface: **`spark_status`** (real live NE state),
+  `spark_connect`/`spark_disconnect` (resolve config, return an explicit "pending U1b-2b" error — no
+  silent no-op). Frontend: `tauri_backend.ts` (`TauriBackend` over invoke + `isTauri()`); `+page.svelte`
+  picks TauriBackend in the app / MockBackend in a plain browser, polls 2s, surfaces connect errors in
+  the substatus. Verified: cargo build + clippy clean; **5 config tests pass; svelte-check 0 errors**;
+  full **signed** `tauri build` → Spark.app/DMG 3.9M. **Remaining U1b-2b** (the last compile-only piece;
+  runtime-testable only after embed+sign + first-run approval = U1c): NETunnelProviderManager write path
+  (NETunnelProviderProtocol providerBundleIdentifier=`org.getlantern.spark.tunnel` +
+  providerConfiguration["config"] → save → start; connection.stopVPNTunnel) + OSSystemExtensionRequest
+  activation via objc2 `define_class!` OSSystemExtensionRequestDelegate. Then **U1b-4**: embed the
+  systemextension into the Tauri .app + Release.entitlements + app profile + notarize → product DMG.
+
 ## Milestone checklist
-- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b machinery PROVEN; U1b-1 DONE: signed systemextension builds, provisioning unblocked (47D77D profiles)**; next U1b-2 objc2 write path / U1b-3 config+frontend / U1b-4 embed+notarize / U1c live gate) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b machinery PROVEN; U1b-1 DONE (signed systemextension, provisioning unblocked); U1b-2a DONE (config + real spark_status + TauriBackend; signed DMG 3.9M)**; next U1b-2b objc2 write path+activation / U1b-4 embed+notarize / U1c live gate) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
