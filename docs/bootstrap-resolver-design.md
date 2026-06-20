@@ -34,9 +34,12 @@ this sub-project wires in.
 
 ## 2. Goal & scope
 
-**In scope:** a reusable spark-core component that resolves a hostname to **validated** IPs over
-`flint-dns` (un-poisoned, Chrome-mimicry DoH), plus its first consumer — letting a proxy `server` be
-named by **hostname** (not only an IP), resolved at startup before dialing.
+**In scope:** a reusable spark-core component that resolves a hostname to **validated** IPs via a
+**happy-eyeballs race over independent resolution strategies** — `flint-dns` un-poisoned Chrome-mimicry
+DoH (the always-available path) and, when a proxy is configured **by IP**, resolving **through that
+proxy** (dial it, tunnel a DNS query, the exit resolves upstream un-poisoned). First validated answer
+wins. Plus its first consumer — letting a proxy `server` be named by **hostname** (not only an IP),
+resolved at startup before dialing.
 
 **First consumer (this doc):** proxy-server hostnames in `[transport.anytls]` / `[transport.samizdat]`.
 
@@ -58,12 +61,27 @@ dials.
 feature that pulls `flint-dns` with its `boring` feature. The base build is unaffected.
 
 - **`trait NameResolver`** — `async fn resolve(&self, host: &str, port: u16) -> io::Result<SocketAddr>`
-  (the first validated address). A trait so the wiring is unit-testable with a fake (no network), and
-  so future callers (proxyless API dialing) depend on the abstraction, not a concrete pool.
-- **`FlintResolver`** — the production impl: wraps `flint_dns::resolve_cached` over
-  `flint_dns::default_pool()` with a held `flint_dns::ResolverCache` (per-network winner cache for
-  one-shot steady-state startup). Returns the first **validated** (non-bogon) IP. A/AAAA selection is
-  v1-simple (A first); richer policy is a follow-up.
+  (the first validated address). A trait so the wiring is unit-testable with a fake (no network), each
+  resolution *strategy* is one impl, and future callers (proxyless API dialing) depend on the
+  abstraction, not a concrete pool.
+- **`RacingResolver`** — `resolve`'s public face: holds an ordered set of strategy `NameResolver`s and
+  races them happy-eyeballs via the already-public `flint_dial::race_with`, returning the first
+  **validated** answer; errors only if every strategy fails.
+- **Strategies (each a `NameResolver`):**
+  - **`DohResolver`** — wraps `flint_dns::resolve_cached` over `flint_dns::default_pool()` with a held
+    `flint_dns::ResolverCache` (per-network winner cache → one-shot steady state). The always-present,
+    un-poisoned direct path.
+  - **`ProxyResolver`** — given a configured proxy **by IP** (its `UdpTransport`), `dial_udp` a public
+    resolver and run a query via `flint_dns`'s codec + answer validation; the exit resolves upstream.
+    Added once per IP-addressed proxy. Independent of the data-plane tunnel — it only uses the
+    transport client, so it works even when the TUN/netstack isn't running.
+
+**Why exit-resolution is safe here.** The earlier WeChat-locality caveat does *not* apply to
+control-plane names: a proxy/API host is reachable infra, not a GeoDNS-sensitive domestic service, so
+exit-location answers are fine. Bogon validation still rejects poisoned/sentinel answers on every
+strategy. **Chicken-and-egg:** a proxy named *by hostname* can't resolve *itself* through a proxy, so
+`DohResolver` is the always-available path and `ProxyResolver` only adds racers when an IP-addressed
+proxy exists. A/AAAA selection is v1-simple (A first); richer policy is a follow-up.
 
 ### 3.2 `config::Endpoint`
 
@@ -92,7 +110,8 @@ constructed once per startup and reused (its cache persists for the process).
 
 ```
 load Config (server may be Host)
-   → [feature bootstrap-dns] resolve Host → Ip   (flint-dns: race pool → validate → cache)
+   → [feature bootstrap-dns] resolve Host → Ip via RacingResolver:
+        race( DohResolver(flint pool) , ProxyResolver(each IP proxy) , … ) → first validated
    → Config with IPs
    → transport::from_config  → dial
 apps' in-tunnel DNS: unchanged (still tunnelled to the exit)
@@ -110,9 +129,13 @@ apps' in-tunnel DNS: unchanged (still tunnelled to the exit)
 ## 6. Testing
 
 - `Endpoint` serde round-trip: `"1.2.3.4:443"` → `Ip`, `"proxy.example.com:443"` → `Host`; junk → error.
-- Bootstrap phase: resolves `Host → Ip` against a **fake** `NameResolver` (unit, no network);
-  an all-fail fake → the startup error; feature-off + `Host` → the explicit feature error.
-- Live-gated `#[ignore]` e2e: `FlintResolver` resolves a real hostname to a public (non-bogon) IP —
+- `RacingResolver` (unit, no network, fake strategies): first validated wins; an immediately-failing
+  strategy doesn't beat a good one; all strategies fail → error.
+- `ProxyResolver` (unit, no network): against a **fake `UdpTransport`** that returns a canned DNS
+  response, it parses + validates to the right `SocketAddr`; a bogon answer is rejected.
+- Bootstrap phase: resolves `Host → Ip` against a **fake** `NameResolver`; all-fail → the startup
+  error; feature-off + `Host` → the explicit feature error.
+- Live-gated `#[ignore]` e2e: `DohResolver` resolves a real hostname to a public (non-bogon) IP —
   needs `boring` + network, mirroring `flint-dns`'s own live test.
 
 ## 7. Roadmap (context — not built here)
