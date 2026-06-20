@@ -352,4 +352,19 @@ mod tests {
         let resolver = RacingResolver::new(vec![fail()]);
         assert!(resolve_endpoints(&mut cfg, &resolver).await.is_err());
     }
+
+    /// Live end-to-end: `DohResolver` resolves a real hostname to a public (non-bogon) address.
+    /// Requires network egress + boring; `#[ignore]`d in CI, mirroring flint-dns's own live test.
+    /// Run with: `cargo test -p spark-core --features bootstrap-dns -- --ignored doh_resolves_live`
+    #[tokio::test]
+    #[ignore = "live: requires network egress to public DoH resolvers"]
+    async fn doh_resolves_live() {
+        let r = DohResolver::default();
+        let addr = r
+            .resolve("one.one.one.one", 443)
+            .await
+            .expect("resolve via DoH");
+        assert_eq!(addr.port(), 443);
+        assert!(!flint_dns::validate::is_bogon(addr.ip()));
+    }
 }
