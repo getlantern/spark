@@ -32,6 +32,59 @@ pub mod ne_spike {
             _ => "unknown",
         }
     }
+
+    /// U1b machinery proof: enumerate the app's saved tunnel managers via the
+    /// async `loadAllFromPreferences` completion handler — the real status source
+    /// (U1a's synchronous `new()` was only a bridge probe). The completion fires on
+    /// the main queue, so the caller must service the main run loop; this drives it
+    /// in 0.1s slices for up to ~3s. Returns (manager_count, first_status_raw);
+    /// first_status_raw is -1 when there are no managers. The same completion-block
+    /// pattern carries connect/disconnect (saveToPreferences/startVPNTunnel) in U1c.
+    ///
+    /// MUST be called on the main thread (the example does; in the Tauri app the
+    /// command hops to the main thread). Needs no NE entitlement — read-only.
+    pub fn load_first_status_blocking() -> (usize, isize) {
+        use std::sync::mpsc::channel;
+
+        use block2::RcBlock;
+        use objc2_foundation::{NSArray, NSDate, NSDefaultRunLoopMode, NSError, NSRunLoop};
+
+        let (tx, rx) = channel::<(usize, isize)>();
+        let handler = RcBlock::new(
+            move |arr: *mut NSArray<NETunnelProviderManager>, _err: *mut NSError| {
+                // SAFETY: `arr` is the framework-owned managers array (or null).
+                let result = unsafe {
+                    if arr.is_null() {
+                        (0usize, -1isize)
+                    } else {
+                        let arr = &*arr;
+                        let count = arr.count();
+                        let status = if count > 0 {
+                            arr.objectAtIndex(0).connection().status().0
+                        } else {
+                            -1
+                        };
+                        (count, status)
+                    }
+                };
+                let _ = tx.send(result);
+            },
+        );
+
+        // SAFETY: standard NE async-read API; the handler outlives the call via RcBlock.
+        unsafe { NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler(&handler) };
+
+        // Drive the main run loop until the main-queue completion fires (~3s cap).
+        let run_loop = NSRunLoop::currentRunLoop();
+        for _ in 0..30 {
+            if let Ok(v) = rx.try_recv() {
+                return v;
+            }
+            let until = NSDate::dateWithTimeIntervalSinceNow(0.1);
+            unsafe { run_loop.runMode_beforeDate(NSDefaultRunLoopMode, &until) };
+        }
+        rx.try_recv().unwrap_or((0, -2))
+    }
 }
 
 /// Spike command: returns the macOS NE connection status (proves the bridge).

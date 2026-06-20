@@ -2045,8 +2045,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   chunk = U1b** (embed the systemextension + invoke surface + config.toml precedence + MockBackend→
   TauriBackend; size vs Flutter DMG).
 
+- 2026-06-19 (U1b machinery PROVEN — async loadAllFromPreferences via block2 + run loop): Built the
+  real status source (U1a's synchronous `new()` was only a bridge probe). `ne_spike::
+  load_first_status_blocking()` calls `NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler`
+  with a `block2::RcBlock` completion, then drives `NSRunLoop::currentRunLoop().runMode_beforeDate` in
+  0.1s slices (~3s cap) so the main-queue completion fires; reads `objectAtIndex(0).connection().status()`.
+  `cargo run --example ne_probe_async` printed **"2 saved manager(s); first status = connected (3)"** —
+  i.e. it read the machine's *real* `org.getlantern.spark` NE configs (one live), proving the block2 +
+  run-loop completion machinery that connect/disconnect (saveToPreferences/startVPNTunnel) will reuse.
+  Added (macOS): deps `block2` 0.6 + `objc2-foundation` 0.3 (feature `block2`); `objc2-network-extension`
+  gains feature `block2`; `examples/ne_probe_async.rs`. clippy `-D warnings` + fmt clean; `cargo tree -i
+  openssl-sys` still empty. **Still TODO in U1b** (not yet built): hop the `status` Tauri command to the
+  main thread + return this; `connect`/`disconnect` write path = `define_class!`
+  `OSSystemExtensionRequestDelegate` + saveToPreferences/startVPNTunnel; config.toml precedence;
+  MockBackend→TauriBackend swap; embed the `platforms/apple` systemextension + adapt build-gui-dmg.sh.
+  **Write/activate needs the NE entitlement + provisioning (U1c, human-blocked).**
+
 ## Milestone checklist
-- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a bridge PROVEN: pure-Rust objc2, NEVPNStatus read on macOS**; next U1b embed+wire / U1c live gate [human provisioning]) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a bridge + U1b async-read machinery PROVEN (read 2 real managers, "connected")**; next U1b: command surface + write path [define_class delegate] + systemextension embed / U1c live gate [human provisioning]) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
