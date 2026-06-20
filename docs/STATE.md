@@ -2143,6 +2143,25 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   `app_text_styles.dart` → figma.com/design/JTguURC2QTtsi904f6mACo (node 2097-43525) — pull exact
   specs via the Figma MCP once OAuth'd. (App/DMG will carry the new UI on the next build.)
 
+- 2026-06-20 (UI fidelity pass 2 — Figma-MCP token verification + VPNSwitch geometry FIX): Figma is
+  connected; pulled the canonical design-system tokens via the MCP. The Lantern VPN Design System file
+  (`JTguURC2QTtsi904f6mACo`) only exposes a Cover page + the **Text Scale** node (`2097:43525`); the
+  assembled home-screen mockup lives in a separate product file we don't have a key for, so the
+  **Flutter source remains ground truth**. `get_variable_defs` confirmed the type scale exactly
+  (Urbanist; Label/Large 14/500, Subtitle/Medium=titleMedium 16/600, etc.) and `get_libraries`
+  confirmed only the one team library. Re-read the Flutter source and **corrected the VPNSwitch
+  geometry**: `vpn_switch.dart` uses `indicatorSize 60` + `spacing 10` + wrapper `padding 5` ⇒ track
+  is **140×70 (not 120×70)** with knob travel **70px (not 50)**, and the connecting spinner is
+  `strokeWidth 8` inside the 60 indicator with `padding 8` ⇒ **44px ring, 8px stroke** (was 50/6).
+  Verified the rest already matched the shipping app: labelLarge **14/400** (`app_text_styles.dart`,
+  not the design-system's 500), titleMedium 16/600, statusSuccessText green8 only when `connected`
+  (else textPrimary), divider gray2, card teal shadow `rgba(0,97,98,.098)` blur 32 offset 0,4,
+  toggle colors (brand blue4 / disabled gray7 / knob gray0). Card bottom gap 16→10 (`SizedBox(10.h)`).
+  Wordmark stays "Spark" (Adam OK'd "spark instead of lantern for now"). svelte-check 0 errors. Preview
+  regenerated with embedded Urbanist + 3 states (disconnected/connecting/connected) via
+  `docs/mockups/gen-preview.mjs` → `spark-lantern-screen.html`. **Main screen is now geometry-exact to
+  the Flutter home.** (App/DMG carries it on next build.)
+
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b + U1b-1 + U1b-2a + U1b-4 DONE; U1b-2b connect/disconnect wired (compile-verified)**; next: U1c live test [approve sysext + relay config.toml] / U1b-2b-ii OSSystemExtensionRequest activation if needed) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)

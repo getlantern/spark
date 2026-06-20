@@ -195,10 +195,12 @@
   /* Hero with the toggle vertically centered above the card */
   .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
 
-  /* VPNSwitch — track 120×70, knob 60, 5px padding, fully rounded */
+  /* VPNSwitch — animated_toggle_switch geometry: indicator 60, spacing 10,
+     wrapper padding 5 ⇒ track 140×70 (2·60 + 10 + 2·5), knob travel 70 (60 + 10).
+     Matches getlantern/lantern vpn_switch.dart (desktop height 70). */
   .track {
     position: relative;
-    width: 120px; height: 70px;
+    width: 140px; height: 70px;
     border: none; padding: 0; cursor: pointer;
     border-radius: 35px;
     background: var(--off);
@@ -212,11 +214,13 @@
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
     transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
   }
-  .track.on .knob { transform: translateX(50px); }
+  .track.on .knob { transform: translateX(70px); }
+  /* Spinner replaces the knob while (dis)connecting: CircularProgressIndicator
+     strokeWidth 8 inside the 60px indicator with padding 8 ⇒ 44px ring. */
   .spinner {
-    position: absolute; top: 10px; left: 10px;
-    width: 50px; height: 50px; border-radius: 50%;
-    border: 6px solid rgba(255, 255, 255, 0.35);
+    position: absolute; top: 13px; left: 13px;
+    width: 44px; height: 44px; border-radius: 50%;
+    border: 8px solid rgba(255, 255, 255, 0.35);
     border-top-color: var(--knob);
     animation: spin 0.8s linear infinite;
   }
@@ -229,7 +233,7 @@
 
   /* Settings card */
   .card {
-    margin: 0 0 16px;
+    margin: 0 0 10px;
     background: var(--surface);
     border-radius: 16px;
     box-shadow: 0 4px 32px var(--shadow);
