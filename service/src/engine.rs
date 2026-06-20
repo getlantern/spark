@@ -85,7 +85,11 @@ impl CoreEngine {
 
 #[async_trait]
 impl TunnelEngine for CoreEngine {
-    async fn start(&mut self, mut config: Config, exit: mpsc::Sender<()>) -> Result<(), EngineError> {
+    async fn start(
+        &mut self,
+        mut config: Config,
+        exit: mpsc::Sender<()>,
+    ) -> Result<(), EngineError> {
         if self.tun.is_some() {
             return Ok(()); // already running
         }
