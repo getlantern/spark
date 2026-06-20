@@ -44,8 +44,10 @@ impl RacingResolver {
 #[async_trait]
 impl NameResolver for RacingResolver {
     async fn resolve(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
-        match flint_dial::race_with(self.strategies.len(), |i| self.strategies[i].resolve(host, port))
-            .await
+        match flint_dial::race_with(self.strategies.len(), |i| {
+            self.strategies[i].resolve(host, port)
+        })
+        .await
         {
             Ok((_winner, addr)) => Ok(addr),
             Err(errors) => Err(io::Error::other(format!(
@@ -65,7 +67,9 @@ pub struct DohResolver {
 
 impl Default for DohResolver {
     fn default() -> Self {
-        Self { pool: flint_dns::default_pool() }
+        Self {
+            pool: flint_dns::default_pool(),
+        }
     }
 }
 
@@ -98,17 +102,29 @@ impl ProxyResolver {
     /// A `ProxyResolver` that races `upstreams` (public recursive resolvers, e.g. `8.8.8.8:53`) over
     /// `udp`. Each attempt is bounded by a 5s deadline so an all-fail returns promptly.
     pub fn new(udp: Arc<dyn UdpTransport>, upstreams: Vec<SocketAddr>) -> Self {
-        Self { udp, upstreams, deadline: Duration::from_secs(5) }
+        Self {
+            udp,
+            upstreams,
+            deadline: Duration::from_secs(5),
+        }
     }
 
-    async fn query_one(&self, upstream: SocketAddr, host: &str, port: u16) -> io::Result<SocketAddr> {
+    async fn query_one(
+        &self,
+        upstream: SocketAddr,
+        host: &str,
+        port: u16,
+    ) -> io::Result<SocketAddr> {
         let (mut sink, mut source) = self.udp.dial_udp(upstream).await?;
-        let query = flint_dns::codec::build_query(host, flint_dns::TYPE_A).map_err(io::Error::other)?;
+        let query =
+            flint_dns::codec::build_query(host, flint_dns::TYPE_A).map_err(io::Error::other)?;
         sink.send(&query).await?;
         let mut buf = [0u8; 512];
         let n = tokio::time::timeout(self.deadline, source.recv(&mut buf))
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "DNS-through-proxy timed out"))??;
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "DNS-through-proxy timed out")
+            })??;
         let answers = flint_dns::codec::parse_response(&buf[..n]).map_err(io::Error::other)?;
         let validated = flint_dns::validate::validate_answers(answers).map_err(io::Error::other)?;
         let ip = validated
@@ -136,9 +152,43 @@ impl NameResolver for ProxyResolver {
     }
 }
 
+/// Resolve every `Endpoint::Host` proxy `server` in `config` to an `Endpoint::Ip` via `resolver`
+/// (design §3.3). An already-resolved `Ip` is left untouched. Errors with a clear message if any host
+/// fails to resolve — **no silent fallthrough** to a poisoned/system lookup.
+pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver) -> io::Result<()> {
+    let mut servers: Vec<&mut Endpoint> = Vec::new();
+    if let Some(anytls) = config.transport.anytls.as_mut() {
+        servers.push(&mut anytls.server);
+    }
+    if let Some(samizdat) = config.transport.samizdat.as_mut() {
+        servers.push(&mut samizdat.server);
+    }
+    for ep in servers {
+        if let Some((host, port)) = ep.unresolved() {
+            let host = host.to_owned();
+            let addr = resolver
+                .resolve(&host, port)
+                .await
+                .map_err(|e| io::Error::other(format!("couldn't resolve {host}:{port}: {e}")))?;
+            *ep = Endpoint::Ip(addr);
+        }
+    }
+    Ok(())
+}
+
+/// Build the default startup resolver. v1: DoH only — it is the always-available, un-poisoned path.
+/// `ProxyResolver` needs an IP-addressed proxy to tunnel a query through, but with spark's current
+/// single-proxy config a proxy named by *hostname* is exactly the case being resolved, so there is no
+/// IP proxy to add here (chicken-and-egg, design §3.1). `ProxyResolver` is built + tested for the
+/// future multi-proxy / API config-fetch consumer, which will construct it directly.
+pub fn default_resolver(_config: &Config) -> RacingResolver {
+    RacingResolver::new(vec![Box::new(DohResolver::default())])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AnytlsConfig, TransportConfig};
     use crate::transport::{BoxedPacketSink, BoxedPacketSource, PacketSink, PacketSource};
 
     /// A canned A-record response for `name` → `ip`, matching `flint_dns::codec::parse_response`
@@ -177,7 +227,9 @@ mod tests {
         ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
             Ok((
                 Box::new(FakeSink),
-                Box::new(FakeSource { response: self.response.clone() }),
+                Box::new(FakeSource {
+                    response: self.response.clone(),
+                }),
             ))
         }
     }
@@ -242,12 +294,62 @@ mod tests {
     #[tokio::test]
     async fn first_validated_wins() {
         let r = RacingResolver::new(vec![fail(), ok("1.2.3.4:443")]);
-        assert_eq!(r.resolve("h", 443).await.unwrap(), "1.2.3.4:443".parse().unwrap());
+        assert_eq!(
+            r.resolve("h", 443).await.unwrap(),
+            "1.2.3.4:443".parse().unwrap()
+        );
     }
 
     #[tokio::test]
     async fn all_fail_is_an_error() {
         let r = RacingResolver::new(vec![fail(), fail()]);
         assert!(r.resolve("h", 443).await.is_err());
+    }
+
+    fn anytls_cfg(server: &str) -> Config {
+        Config {
+            transport: TransportConfig {
+                anytls: Some(AnytlsConfig {
+                    server: server.parse().unwrap(),
+                    password: "pw".into(),
+                    sni: None,
+                    clienthello: Default::default(),
+                    records: Default::default(),
+                    gambit: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_endpoints_rewrites_host_to_ip() {
+        let mut cfg = anytls_cfg("proxy.example.com:443");
+        let resolver = RacingResolver::new(vec![ok("5.6.7.8:443")]);
+        resolve_endpoints(&mut cfg, &resolver).await.unwrap();
+        assert_eq!(
+            cfg.transport.anytls.unwrap().server,
+            Endpoint::Ip("5.6.7.8:443".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_endpoints_leaves_ip_untouched() {
+        let mut cfg = anytls_cfg("1.2.3.4:443");
+        // A resolver that would fail if called — proves an Ip endpoint never hits it.
+        let resolver = RacingResolver::new(vec![fail()]);
+        resolve_endpoints(&mut cfg, &resolver).await.unwrap();
+        assert_eq!(
+            cfg.transport.anytls.unwrap().server,
+            Endpoint::Ip("1.2.3.4:443".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_endpoints_all_fail_is_an_error() {
+        let mut cfg = anytls_cfg("proxy.example.com:443");
+        let resolver = RacingResolver::new(vec![fail()]);
+        assert!(resolve_endpoints(&mut cfg, &resolver).await.is_err());
     }
 }
