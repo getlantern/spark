@@ -124,8 +124,12 @@ impl Transport for SamizdatTransport {
         let conn = self.conn().await?;
         match conn.connect(&authority).await {
             Ok(stream) => Ok(Box::new(stream)),
+            // A CONNECT rejection (non-200) is stream-level: the shared connection is healthy and
+            // still serves other tunnels, and retrying a refused target won't help — surface it.
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => Err(e),
+            // Any other error means the shared connection likely died — drop it and retry once on a
+            // fresh one.
             Err(_) => {
-                // The shared connection may have died; drop it and retry once on a fresh one.
                 self.invalidate(&conn);
                 let conn = self.conn().await?;
                 Ok(Box::new(conn.connect(&authority).await?))

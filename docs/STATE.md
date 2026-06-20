@@ -28,8 +28,8 @@ What's DONE (this and prior sessions; all on `main`, pushed):
 - **GUI restyled to the Lantern look** (`gui/lib/main.dart`): light theme (#F8FAFB / cyan #00BDD6),
   the sliding pill toggle, a fixed **390×760 portrait window** (`MainFlutterWindow.swift` — needs
   `makeKeyAndOrderFront` or it launches hidden), AppBar + a VPN-status/Protocol/Routing settings card.
-- **Samizdat transport — design + kID spike DONE 2026-06-19 (branch `samizdat-transport`, NOT yet on
-  `main`).** Second M11 transport: client-side, **wire-interop with deployed lantern-box/sing-box
+- **Samizdat transport — design + kID spike DONE 2026-06-19 (branch `samizdat-transport`, PR #1).**
+  Second M11 transport: client-side, **wire-interop with deployed lantern-box/sing-box
   `"samizdat"` servers**. Design: `docs/samizdat-transport-design.md` + **ADR 0007**. Decisions —
   single TLS 1.3 + **H2 CONNECT mux via the `h2` crate** (scoped no-hyper exception; H2 is inside TLS
   so its fingerprint is moot), REALITY auth in the TLS `legacy_session_id`, reuse the AnyTLS Chrome

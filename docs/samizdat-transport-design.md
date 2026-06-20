@@ -1,8 +1,8 @@
 # Samizdat transport — design (M11)
 
-- **Status:** Proposed — 2026-06-19. Direction agreed in session. The load-bearing TLS assumption
-  (the `kID` SessionID-injection trick) is **VALIDATED** by a throwaway spike (§5) — the no-fork path
-  holds, so the `boring-sys2` patch (§5 fallback) is not needed.
+- **Status:** Accepted — implemented in PR #1 (2026-06-19) and **live-gated end-to-end** against the
+  real Go server (§9). The load-bearing `kID` SessionID-injection trick holds on stock boring2 (no
+  fork), so the `boring-sys2` patch (§5 fallback) is unused. Decision recorded in ADR 0007.
 - **Scope:** Add Lantern's **Samizdat** protocol as a spark `Transport`, **wire-interoperable with the
   deployed `lantern-box` / sing-box `"samizdat"` servers** (client side only; the server stays Go).
 - **Builds on:** ADR 0001 (BoringSSL Chrome-mimicry TLS backend), ADR 0006 (opening-gambit /

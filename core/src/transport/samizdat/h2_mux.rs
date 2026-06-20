@@ -77,10 +77,16 @@ impl H2Conn {
         let (response, send) = send_request.send_request(request, false).map_err(to_io)?;
         let response = response.await.map_err(to_io)?;
         if response.status() != StatusCode::OK {
-            return Err(io::Error::other(format!(
-                "samizdat: CONNECT rejected with status {}",
-                response.status()
-            )));
+            // A non-200 is a stream-level rejection — the connection itself is healthy. Tag it
+            // distinctly (`ConnectionRefused`) so the transport doesn't tear down the shared
+            // connection (which serves other tunnels) over one refused target.
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!(
+                    "samizdat: CONNECT rejected with status {}",
+                    response.status()
+                ),
+            ));
         }
         Ok(H2Stream::new(send, response.into_body()))
     }
@@ -289,5 +295,30 @@ mod tests {
         }
         writer.await.unwrap();
         assert_eq!(got, payload, "the large payload must reassemble exactly");
+    }
+
+    #[tokio::test]
+    async fn connect_rejection_maps_to_connection_refused() {
+        // A non-200 CONNECT response is a stream-level rejection (the connection stays healthy),
+        // surfaced as `ErrorKind::ConnectionRefused` so the transport keeps the shared connection.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut conn = h2::server::handshake(tcp).await.unwrap();
+            while let Some(accepted) = conn.accept().await {
+                let (request, mut respond) = accepted.unwrap();
+                assert_eq!(request.method(), Method::CONNECT);
+                let _ =
+                    respond.send_response(Response::builder().status(502).body(()).unwrap(), true);
+            }
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let conn = H2Conn::handshake(tcp).await.unwrap();
+        match conn.connect("example.com:1234").await {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused),
+            Ok(_) => panic!("a non-200 CONNECT must be rejected"),
+        }
     }
 }
