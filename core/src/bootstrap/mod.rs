@@ -56,6 +56,33 @@ impl NameResolver for RacingResolver {
     }
 }
 
+/// The always-available strategy: resolve over `flint_dns`'s un-poisoned DoH pool (the inner race).
+/// Takes the first validated A record. The per-network winner cache is intentionally **not** used
+/// here (design §3.1) — bootstrap is infrequent and a stale cached winner could eat a timeout.
+pub struct DohResolver {
+    pool: Vec<flint_dns::Resolver>,
+}
+
+impl Default for DohResolver {
+    fn default() -> Self {
+        Self { pool: flint_dns::default_pool() }
+    }
+}
+
+#[async_trait]
+impl NameResolver for DohResolver {
+    async fn resolve(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
+        let ips = flint_dns::resolve(host, flint_dns::TYPE_A, &self.pool)
+            .await
+            .map_err(io::Error::other)?;
+        let ip = ips
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("DoH returned no A records"))?;
+        Ok(SocketAddr::new(ip, port))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
