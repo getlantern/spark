@@ -30,12 +30,12 @@ md-5.workspace = true
 postcard.workspace = true
 # Opening-handshake wire shaping (tcp_split + record_fragment), extracted to the reusable flint crate.
 # Non-optional: the gambit genome (always compiled) bridges its Layer C to flint_shaping::WirePlan.
-flint-shaping = { git = "https://github.com/getlantern/flint", rev = "56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7" }
+flint-shaping = { git = "https://github.com/getlantern/flint", rev = "1c209e5ba555e41a8dc8cd8b604a9bbfba704fca" }
 # Chrome-mimicry TLS: the gambit ClientHello genome, JA4, the boring Chrome connector + Profile + the
 # JA4 anchor — extracted to flint. Non-optional (gambit/ja4/profile are always compiled, e.g. by
 # `config` and `discovery`); the boring connector rides flint-tls's `boring` feature, enabled by
 # spark's `anytls`. Pinned to the same rev as flint-shaping (flint-tls path-depends on it).
-flint-tls = { git = "https://github.com/getlantern/flint", rev = "56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7" }
+flint-tls = { git = "https://github.com/getlantern/flint", rev = "1c209e5ba555e41a8dc8cd8b604a9bbfba704fca" }
 # AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
 # `pq-experimental` exposes Chrome's post-quantum group X25519MLKEM768; `cert-compression` exposes
 # brotli cert compression — both part of the Chrome ClientHello profile.
@@ -52,7 +52,13 @@ http = { workspace = true, optional = true }
 wasmi = { workspace = true, optional = true }
 # Signed-blob verification (Ed25519 + versioned framing + anti-rollback), extracted from this crate's
 # wasm `signing.rs` into the reusable flint crate. Only the `wasm-transport` feature pulls it.
-flint-verify = { git = "https://github.com/getlantern/flint", rev = "56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7", optional = true }
+flint-verify = { git = "https://github.com/getlantern/flint", rev = "1c209e5ba555e41a8dc8cd8b604a9bbfba704fca", optional = true }
+# Bootstrap control-plane name resolution (design: docs/bootstrap-resolver-design.md). flint-dial
+# supplies happy-eyeballs racing (race_with / race_windowed); flint-dns supplies the un-poisoned DoH
+# resolver + the A/AAAA codec + answer validation. Both optional — only the `bootstrap-dns` feature
+# pulls them (and the boring Chrome connector they dial over). Same rev as the other flint crates.
+flint-dial = { git = "https://github.com/getlantern/flint", rev = "1c209e5ba555e41a8dc8cd8b604a9bbfba704fca", optional = true }
+flint-dns = { git = "https://github.com/getlantern/flint", rev = "1c209e5ba555e41a8dc8cd8b604a9bbfba704fca", optional = true }
 
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
@@ -69,6 +75,10 @@ system-stack = []
 # Path B dynamic transport (ADR 0003): a wasmi-hosted byte-transform module. Off by default so the
 # base build carries no WASM runtime. See docs/dynamic-transports-design.md §8.4.
 wasm-transport = ["dep:wasmi", "dep:flint-verify"]
+# Un-poisoned control-plane DNS for startup (design: docs/bootstrap-resolver-design.md). Pulls
+# flint-dns/flint-dial with their boring Chrome-mimicry connector, so a proxy `server` can be a
+# hostname resolved before the tunnel exists. Off by default — the base build stays boring/cmake-free.
+bootstrap-dns = ["dep:flint-dial", "dep:flint-dns", "flint-dial/boring", "flint-dns/boring"]
 # Samizdat transport (ADR 0007): REALITY-style auth in the TLS SessionID + H2 CONNECT mux,
 # interoperable with deployed lantern-box `"samizdat"` servers. `auth.rs` needs only `ring`; the
 # `session_id.rs` kID-injection seam pulls the boring TLS backend + its FFI; `h2`/`http` provide the
