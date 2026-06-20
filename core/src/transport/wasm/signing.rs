@@ -8,7 +8,10 @@
 //! the wasm. lantern-water's SHA-256-only integrity check is insufficient for this; a hash proves the
 //! bytes arrived intact, not that *we* authored them.
 //!
-//! # Artifact layout
+//! The signature + versioned framing + anti-rollback are the generic [`flint_verify`]
+//! `SignedBlobVerifier` (extracted from this module); this file keeps only the WASM-specific layer:
+//! the pinned key, and compiling the authenticated payload into a [`TransformModule`]. The artifact
+//! layout is flint's, with spark's `SPKW` magic:
 //!
 //! ```text
 //! ┌─────────── signed payload (the signature covers exactly this) ───────────┐
@@ -19,19 +22,16 @@
 //! Signing happens in trusted tooling (which holds the private key); this module only **assembles**
 //! ([`signing_payload`], [`build_artifact`]) and **verifies**. The private key never lives here.
 
-use ring::signature::{UnparsedPublicKey, ED25519};
+use flint_verify::{SignedBlobVerifier, VerifyError};
 
 use super::{TransformModule, WasmError};
 
-/// Artifact magic ("spark wasm").
-const MAGIC: &[u8; 4] = b"SPKW";
+/// Artifact magic ("spark wasm"). Namespaces spark's module artifacts within flint's generic format.
+const MAGIC: [u8; 4] = *b"SPKW";
 /// Ed25519 signature length.
 const SIG_LEN: usize = 64;
 /// Ed25519 public-key length.
 const PUBKEY_LEN: usize = 32;
-/// Smallest possible artifact: the fixed header (magic+version+name_len+wasm_len) with an empty name
-/// and empty wasm, plus the trailing signature.
-const MIN_ARTIFACT_LEN: usize = 4 + 4 + 2 + 4 + SIG_LEN;
 
 /// The **development** module-signing public key — the fallback when no production key is pinned at
 /// build time. Its private half lives only in tests/tooling, never in a shipped binary, so it must
@@ -121,6 +121,20 @@ pub enum ModuleError {
     Compile(#[from] WasmError),
 }
 
+/// Map flint's generic verification errors onto this module's WASM-flavored variants, so the public
+/// error surface (and its callers/tests) is unchanged by the extraction.
+impl From<VerifyError> for ModuleError {
+    fn from(e: VerifyError) -> Self {
+        match e {
+            VerifyError::Truncated => ModuleError::Truncated,
+            VerifyError::BadMagic => ModuleError::BadMagic,
+            VerifyError::BadSignature => ModuleError::BadSignature,
+            VerifyError::BadName => ModuleError::BadName,
+            VerifyError::Rollback { version, floor } => ModuleError::Rollback { version, floor },
+        }
+    }
+}
+
 /// A verified, compiled module together with its authenticated identity. The caller uses
 /// [`SignedModule::version`] to advance its anti-rollback floor.
 pub struct SignedModule {
@@ -175,35 +189,16 @@ impl ModuleVerifier {
     ///
     /// `min_version` is the anti-rollback floor — the highest module version installed so far; an
     /// artifact carrying a lower version is rejected. The signature is checked over the whole payload
-    /// **before** any field is parsed, so the length-prefixed `name`/`wasm` fields are authenticated
-    /// before they are acted on.
+    /// (by [`flint_verify`]) **before** any field is parsed, so the length-prefixed `name`/`wasm`
+    /// fields are authenticated before they are acted on.
     pub fn verify(&self, artifact: &[u8], min_version: u32) -> Result<SignedModule, ModuleError> {
-        if artifact.len() < MIN_ARTIFACT_LEN {
-            return Err(ModuleError::Truncated);
-        }
-        let (payload, signature) = artifact.split_at(artifact.len() - SIG_LEN);
-
-        // 1. Authenticate the entire payload before trusting any byte of it.
-        UnparsedPublicKey::new(&ED25519, &self.public_key)
-            .verify(payload, signature)
-            .map_err(|_| ModuleError::BadSignature)?;
-
-        // 2. Parse the now-authenticated payload.
-        let (name, version, wasm) = parse_payload(payload)?;
-
-        // 3. Reject rollbacks (a correctly-signed but stale module).
-        if version < min_version {
-            return Err(ModuleError::Rollback {
-                version,
-                floor: min_version,
-            });
-        }
-
-        // 4. Compile.
-        let module = TransformModule::load(wasm)?;
+        // 1. Authenticate + parse the framed artifact (signature checked before any field is trusted).
+        let blob = SignedBlobVerifier::new(self.public_key, MAGIC).verify(artifact, min_version)?;
+        // 2. Compile the now-authenticated wasm payload.
+        let module = TransformModule::load(blob.payload)?;
         Ok(SignedModule {
-            name: name.to_string(),
-            version,
+            name: blob.name.to_string(),
+            version: blob.version,
             module,
         })
     }
@@ -212,63 +207,13 @@ impl ModuleVerifier {
 /// Assemble the bytes a signature must cover: `MAGIC || version || name || wasm`. The detached
 /// signature over this is appended to form a full artifact ([`build_artifact`]).
 pub fn signing_payload(name: &str, version: u32, wasm: &[u8]) -> Vec<u8> {
-    let name = name.as_bytes();
-    let mut out = Vec::with_capacity(4 + 4 + 2 + name.len() + 4 + wasm.len());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&version.to_be_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_be_bytes());
-    out.extend_from_slice(name);
-    out.extend_from_slice(&(wasm.len() as u32).to_be_bytes());
-    out.extend_from_slice(wasm);
-    out
+    flint_verify::signing_payload(&MAGIC, name, version, wasm)
 }
 
 /// Assemble a complete signed artifact from its parts. `signature` must be the detached Ed25519
 /// signature over `signing_payload(name, version, wasm)`.
 pub fn build_artifact(name: &str, version: u32, wasm: &[u8], signature: &[u8; SIG_LEN]) -> Vec<u8> {
-    let mut out = signing_payload(name, version, wasm);
-    out.extend_from_slice(signature);
-    out
-}
-
-/// Parse an authenticated payload into `(name, version, wasm)`. All lengths are bounds-checked
-/// against the payload, so a length running past the end is a [`ModuleError::Truncated`].
-fn parse_payload(payload: &[u8]) -> Result<(&str, u32, &[u8]), ModuleError> {
-    let mut cur = payload;
-    if take(&mut cur, 4)? != MAGIC {
-        return Err(ModuleError::BadMagic);
-    }
-    let version = take_u32(&mut cur)?;
-    let name_len = take_u16(&mut cur)? as usize;
-    let name = std::str::from_utf8(take(&mut cur, name_len)?).map_err(|_| ModuleError::BadName)?;
-    let wasm_len = take_u32(&mut cur)? as usize;
-    let wasm = take(&mut cur, wasm_len)?;
-    if !cur.is_empty() {
-        return Err(ModuleError::Truncated); // trailing bytes the layout doesn't account for
-    }
-    Ok((name, version, wasm))
-}
-
-/// Split `n` bytes off the front of `cur`, advancing it. Errors if fewer than `n` remain.
-fn take<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8], ModuleError> {
-    if cur.len() < n {
-        return Err(ModuleError::Truncated);
-    }
-    let (head, tail) = cur.split_at(n);
-    *cur = tail;
-    Ok(head)
-}
-
-/// Read a big-endian `u32` off the front of `cur`.
-fn take_u32(cur: &mut &[u8]) -> Result<u32, ModuleError> {
-    let b = take(cur, 4)?;
-    Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-}
-
-/// Read a big-endian `u16` off the front of `cur`.
-fn take_u16(cur: &mut &[u8]) -> Result<u16, ModuleError> {
-    let b = take(cur, 2)?;
-    Ok(u16::from_be_bytes([b[0], b[1]]))
+    flint_verify::build_artifact(&MAGIC, name, version, wasm, signature)
 }
 
 #[cfg(test)]
