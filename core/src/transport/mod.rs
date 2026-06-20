@@ -23,22 +23,52 @@ use async_trait::async_trait;
 use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
-use crate::config::{AnytlsConfig, Config, WasmConfig};
+use crate::config::{AnytlsConfig, Config, SamizdatConfig, WasmConfig};
 use crate::net::SocketProtector;
 use crate::BoxedStream;
+use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
+
+/// Build a [`WirePlan`] from the static `[transport.shaping]` config. flint's `WirePlan` is
+/// config-agnostic, so this adapter (the public replacement for the former `WirePlan::from_config`)
+/// lives spark-side. Maps Layer C only; Layer B `record_fragment` defaults off.
+pub fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
+    let segment_split = match c.segment_split.trim() {
+        "" | "none" => SegmentSplit::None,
+        "sni_boundary" => SegmentSplit::SniBoundary,
+        list => SegmentSplit::Explicit(
+            list.split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect(),
+        ),
+    };
+    WirePlan {
+        segment_split,
+        inter_segment_delay: c.delay_ms.map_or(DelaySpec::None, |ms| {
+            DelaySpec::Fixed(std::time::Duration::from_millis(ms))
+        }),
+        tcp_nodelay: c.tcp_nodelay,
+        ..Default::default()
+    }
+}
+
+/// Back-compat shim: the wire-shaping primitives now live in the `flint-shaping` crate. This keeps
+/// the `crate::transport::shaping::{WirePlan, SegmentSplit, DelaySpec, SegmentShapingStream, …}`
+/// paths working; the former `WirePlan::from_config` is now [`wire_plan_from_config`].
+pub use flint_shaping as shaping;
+
+/// Back-compat shim: the gambit ClientHello genome and JA4 fingerprinting now live in the `flint-tls`
+/// crate. Keeps the `crate::transport::{gambit, ja4}::…` import paths working.
+pub use flint_tls::{gambit, ja4};
 
 pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
-/// The portable, signed gambit genome (ADR 0006 P2): the data-only spec of a flow's *opening*
-/// across the three layers, with Ed25519 verification, anti-rollback, and capability gating.
-pub mod gambit;
-/// JA4 TLS-client fingerprinting (ADR 0006 §4): the anchor drift check over a ClientHello record.
-pub mod ja4;
-/// Socket-layer opening-handshake framing/timing (ADR 0006 Phase 1): fragment the ClientHello
-/// across TCP segments (e.g. at the SNI boundary) with optional inter-segment delay.
-pub mod shaping;
+/// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
+/// mux, wire-interoperable with deployed lantern-box `"samizdat"` servers. Behind the `samizdat`
+/// feature so the base build pulls neither the boring TLS backend nor the `h2` dependency.
+#[cfg(feature = "samizdat")]
+pub mod samizdat;
 pub mod tcp_tunnel;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.
@@ -96,8 +126,15 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
     };
     // AnyTLS takes precedence over the plain `server` tunnel when configured.
     if let Some(anytls) = &config.transport.anytls {
-        let wire = shaping::WirePlan::from_config(&config.transport.shaping);
+        let wire = wire_plan_from_config(&config.transport.shaping);
         return anytls_transport(anytls, protector, wire);
+    }
+    // Samizdat (ADR 0007) — like AnyTLS, takes precedence over the plain `server` tunnel. It reuses
+    // the shared `[transport.shaping]` plan to fragment the ClientHello (Geneva-style, on by default
+    // in the Go client).
+    if let Some(samizdat) = &config.transport.samizdat {
+        let wire = wire_plan_from_config(&config.transport.shaping);
+        return samizdat_transport(samizdat, protector, wire);
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
@@ -130,7 +167,7 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
 fn anytls_transport(
     cfg: &AnytlsConfig,
     protector: Option<SocketProtector>,
-    wire: shaping::WirePlan,
+    wire: WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     let sni = cfg
         .sni
@@ -139,7 +176,7 @@ fn anytls_transport(
     // Resolve the inline gambit genome (Layers A/B) onto the boring executor (ADR 0006 P2). Knobs
     // boring2 can't realize are surfaced once here, never silently dropped. This is also the fallback
     // profile when a dynamic gambit module (P3, below) faults or over-reaches.
-    let resolved = anytls::profile::Profile::resolve(&cfg.clienthello, &cfg.records);
+    let resolved = flint_tls::Profile::resolve(&cfg.clienthello, &cfg.records);
     for note in &resolved.unrealizable {
         tracing::warn!(knob = note, "anytls gambit knob not realizable on boring");
     }
@@ -218,7 +255,7 @@ fn load_gambit_module(cfg: &crate::config::GambitModuleConfig) -> io::Result<was
 fn anytls_transport(
     _cfg: &AnytlsConfig,
     _protector: Option<SocketProtector>,
-    _wire: shaping::WirePlan,
+    _wire: WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.anytls is configured but spark was built without the `anytls` feature",
@@ -283,6 +320,59 @@ fn wasm_transport(
     Err(io::Error::other(
         "transport.wasm is configured but spark was built without the `wasm-transport` feature",
     ))
+}
+
+/// Build the Samizdat transport (feature `samizdat`): decode the pinned server public key + short
+/// ID, then a [`samizdat::SamizdatTransport`] (TCP only; its `UdpTransport` reports unsupported).
+#[cfg(feature = "samizdat")]
+fn samizdat_transport(
+    cfg: &SamizdatConfig,
+    protector: Option<SocketProtector>,
+    wire: WirePlan,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let server_pubkey = decode_hex_n::<32>(&cfg.server_pubkey)
+        .ok_or_else(|| io::Error::other("transport.samizdat.server_pubkey must be 32-byte hex"))?;
+    let short_id = decode_hex_n::<8>(&cfg.short_id)
+        .ok_or_else(|| io::Error::other("transport.samizdat.short_id must be 8-byte hex"))?;
+    let sni = cfg
+        .sni
+        .clone()
+        .unwrap_or_else(|| cfg.server.ip().to_string());
+    let t = Arc::new(samizdat::SamizdatTransport::new(
+        cfg.server,
+        server_pubkey,
+        short_id,
+        sni,
+        wire,
+        protector,
+    ));
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `samizdat` feature, a configured Samizdat transport is a hard error (mirroring
+/// AnyTLS/wasm) rather than a silent fallback.
+#[cfg(not(feature = "samizdat"))]
+fn samizdat_transport(
+    _cfg: &SamizdatConfig,
+    _protector: Option<SocketProtector>,
+    _wire: WirePlan,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.samizdat is configured but spark was built without the `samizdat` feature",
+    ))
+}
+
+/// Decode an even-length hex string into exactly `N` bytes (`None` on wrong length or non-hex).
+#[cfg(feature = "samizdat")]
+fn decode_hex_n<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != 2 * N {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Decode an even-length hex string into bytes (no `hex` crate dependency).
@@ -552,13 +642,58 @@ mod wasm_config_tests {
     }
 }
 
+/// Samizdat config wiring (ADR 0007): `from_config` builds the transport and validates the
+/// hex-encoded server public key + short ID.
+#[cfg(all(test, feature = "samizdat"))]
+mod samizdat_config_tests {
+    use super::*;
+    use crate::config::{Config, SamizdatConfig, TransportConfig};
+
+    fn config_with(server_pubkey: &str, short_id: &str) -> Config {
+        Config {
+            transport: TransportConfig {
+                samizdat: Some(SamizdatConfig {
+                    server: "192.0.2.1:443".parse().unwrap(),
+                    server_pubkey: server_pubkey.to_owned(),
+                    short_id: short_id.to_owned(),
+                    sni: Some("cover.example".to_owned()),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn builds_a_samizdat_transport() {
+        // 32-byte pubkey + 8-byte short id, valid hex.
+        from_config(&config_with(&"a0".repeat(32), &"10".repeat(8)))
+            .expect("from_config should build the samizdat transport");
+    }
+
+    #[test]
+    fn rejects_a_wrong_length_server_pubkey() {
+        assert!(from_config(&config_with(&"a0".repeat(31), &"10".repeat(8))).is_err());
+    }
+
+    #[test]
+    fn rejects_a_wrong_length_short_id() {
+        assert!(from_config(&config_with(&"a0".repeat(32), &"10".repeat(4))).is_err());
+    }
+
+    #[test]
+    fn rejects_non_hex() {
+        assert!(from_config(&config_with(&"zz".repeat(32), &"10".repeat(8))).is_err());
+    }
+}
+
 /// AnyTLS + dynamic-gambit config wiring (ADR 0006 P3): a signed Path-B gambit module loaded via
 /// `[transport.anytls.gambit]` and attached to the AnyTLS transport.
 #[cfg(all(test, feature = "anytls", feature = "wasm-transport"))]
 mod anytls_gambit_config_tests {
     use super::*;
     use crate::config::{AnytlsConfig, Config, GambitModuleConfig, TransportConfig};
-    use crate::transport::gambit::Gambit;
+    use flint_tls::gambit::Gambit;
     use ring::signature::Ed25519KeyPair;
     use std::sync::atomic::{AtomicU32, Ordering};
     use wasm::testutil::dev_keypair;

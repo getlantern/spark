@@ -805,6 +805,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "flint-shaping"
+version = "0.0.0"
+source = "git+https://github.com/getlantern/flint?rev=56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7#56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7"
+dependencies = [
+ "ring",
+ "tokio",
+]
+
+[[package]]
+name = "flint-tls"
+version = "0.0.0"
+source = "git+https://github.com/getlantern/flint?rev=56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7#56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7"
+dependencies = [
+ "boring2",
+ "flint-shaping",
+ "postcard",
+ "ring",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-boring2",
+]
+
+[[package]]
 name = "flint-verify"
 version = "0.0.0"
 source = "git+https://github.com/getlantern/flint?rev=56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7#56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7"
@@ -866,6 +890,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
@@ -1093,6 +1123,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "hash32"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1172,6 +1221,16 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "http"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+dependencies = [
+ "bytes",
+ "itoa",
+]
 
 [[package]]
 name = "indexmap"
@@ -2040,10 +2099,16 @@ name = "spark-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "boring-sys2",
  "boring2",
  "bytes",
+ "flint-shaping",
+ "flint-tls",
  "flint-verify",
+ "foreign-types-shared",
  "futures",
+ "h2",
+ "http",
  "libc",
  "md-5",
  "netstack-smoltcp",
