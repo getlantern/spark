@@ -103,6 +103,7 @@ impl RunArgs {
                 // AnyTLS, the wasm transport, and handshake shaping are configured via a TOML file
                 // (`run --config`), not the bare flags.
                 anytls: None,
+                samizdat: None,
                 wasm: None,
                 shaping: config::ShapingConfig::default(),
             },

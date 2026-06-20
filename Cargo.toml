@@ -49,6 +49,20 @@ md-5 = "0.10"
 # default builds stay rustls/ring-only. boring2/tokio-boring2 is the maintained impersonation fork.
 boring2 = "4.15"
 tokio-boring2 = "4.15"
+# FFI access to the already-present boring2, for the Samizdat `kID` SessionID-injection seam (ADR
+# 0007 §5): boring-sys2 = the raw SSL_SESSION_* symbols; foreign-types-shared = the ForeignTypeRef
+# trait that provides `SslRef::as_ptr`. Pulled ONLY by the `samizdat` feature — not new external
+# surface, just the FFI layer of an already-approved dependency.
+boring-sys2 = "4.15"
+foreign-types-shared = "0.3"
+# HTTP/2 for the Samizdat CONNECT-stream mux (ADR 0007 §4). The sans-hyper `h2` crate: we drive
+# SETTINGS/streams directly, no `http`-server/`tower`/openssl baggage. A scoped, documented exception
+# to the no-hyper rule (H2 lives inside TLS, so its fingerprint is encrypted and not an evasion
+# surface). Pulled ONLY by the `samizdat` feature.
+h2 = "0.4"
+# `http` request/response types for building the CONNECT request driven through `h2` (types only;
+# already transitive via h2). Pulled ONLY by the `samizdat` feature.
+http = "1"
 # wasmi: pure-Rust, no-JIT WebAssembly interpreter — the dynamic-transport (Path B) runtime
 # (ADR 0003). Pinned to the exact pre-release the design was validated against. Pulled ONLY by the
 # `wasm-transport` feature, so default builds carry no WASM runtime. No-JIT → iOS-safe.
