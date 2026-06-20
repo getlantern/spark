@@ -39,7 +39,9 @@ this sub-project wires in.
 DoH (the always-available path) and, when a proxy is configured **by IP**, resolving **through that
 proxy** (dial it, tunnel a DNS query, the exit resolves upstream un-poisoned). First validated answer
 wins. Plus its first consumer — letting a proxy `server` be named by **hostname** (not only an IP),
-resolved at startup before dialing.
+resolved at startup before dialing. This sub-project also lands a small **`flint` enhancement**:
+bounded-concurrency (**windowed**) racing — `flint_dial::race_windowed` — used by `flint_dns::resolve`
+so the pool race runs in batches rather than opening every resolver at once.
 
 **First consumer (this doc):** proxy-server hostnames in `[transport.anytls]` / `[transport.samizdat]`.
 
@@ -66,20 +68,25 @@ feature that pulls `flint-dns` with its `boring` feature. The base build is unaf
   abstraction, not a concrete pool.
 Resolution races at **two levels**: the *outer* race across strategies (DoH vs via-proxy), and the
 *inner* race within DoH across the resolver pool. So neither a blocked strategy nor a blocked
-individual resolver holds up the result.
+individual resolver holds up the result — and the inner race runs in **bounded batches** (a
+concurrency window) so it never opens the whole pool at once. (The outer race is small — DoH plus a
+few proxies — so it fires unbounded.)
 
 - **`RacingResolver`** — `resolve`'s public face (the *outer* race): holds an ordered set of strategy
   `NameResolver`s and races them happy-eyeballs via the already-public `flint_dial::race_with`,
   returning the first **validated** answer; errors only if every strategy fails.
 - **Strategies (each a `NameResolver`):**
   - **`DohResolver`** — `flint_dns::resolve` over `flint_dns::default_pool()` (the *inner* race): it
-    fans out across the **whole** pool concurrently and takes the first **validated** answer, so a
-    blocked or slow resolver never holds up the result. The always-present, un-poisoned direct path.
-    *Note:* the per-network winner **cache** (`resolve_cached`) is intentionally **not** used here —
+    races the pool in **bounded batches** — a concurrency window of K attempts, refilling as each
+    finishes — and takes the first **validated** answer. So a blocked/slow resolver never holds up a
+    winner, *and* we never fire all ~8 boring TLS handshakes at once (which matters on memory-capped
+    mobile network extensions). The always-present, un-poisoned direct path. **Prereq:** a small flint
+    enhancement — windowed racing (`flint_dial::race_windowed(count, window, dial_one)`, used by
+    `flint_dns::resolve`); today `resolve` fires the whole pool unbounded.
+    *Cache note:* the per-network winner cache (`resolve_cached`) is intentionally **not** used here —
     its try-cached-then-fallback would let a newly-blocked cached resolver eat a full timeout before
-    the pool race starts, and bootstrap is infrequent enough that racing the whole pool every time is
-    cheap and stall-free. Caching belongs in the high-frequency data-plane resolver (#3), where it
-    must bias order via a **staggered head-start**, not gate behind one resolver.
+    the pool race starts, and bootstrap is infrequent. Caching belongs in the high-frequency
+    data-plane resolver (#3), where it must bias order via a **staggered head-start**, not gate.
   - **`ProxyResolver`** — given a configured proxy **by IP** (its `UdpTransport`), `dial_udp` a public
     resolver and run a query via `flint_dns`'s codec + answer validation; the exit resolves upstream.
     Added once per IP-addressed proxy. Independent of the data-plane tunnel — it only uses the
@@ -141,6 +148,8 @@ apps' in-tunnel DNS: unchanged (still tunnelled to the exit)
 - `Endpoint` serde round-trip: `"1.2.3.4:443"` → `Ip`, `"proxy.example.com:443"` → `Host`; junk → error.
 - `RacingResolver` (unit, no network, fake strategies): first validated wins; an immediately-failing
   strategy doesn't beat a good one; all strategies fail → error.
+- (flint) `race_windowed` (unit, no network): never more than `window` attempts in flight; refills as
+  they finish; first `Ok` wins; all-fail collects every error.
 - `ProxyResolver` (unit, no network): against a **fake `UdpTransport`** that returns a canned DNS
   response, it parses + validates to the right `SocketAddr`; a bogon answer is rejected.
 - Bootstrap phase: resolves `Host → Ip` against a **fake** `NameResolver`; all-fail → the startup
