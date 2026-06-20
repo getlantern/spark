@@ -64,13 +64,22 @@ feature that pulls `flint-dns` with its `boring` feature. The base build is unaf
   (the first validated address). A trait so the wiring is unit-testable with a fake (no network), each
   resolution *strategy* is one impl, and future callers (proxyless API dialing) depend on the
   abstraction, not a concrete pool.
-- **`RacingResolver`** — `resolve`'s public face: holds an ordered set of strategy `NameResolver`s and
-  races them happy-eyeballs via the already-public `flint_dial::race_with`, returning the first
-  **validated** answer; errors only if every strategy fails.
+Resolution races at **two levels**: the *outer* race across strategies (DoH vs via-proxy), and the
+*inner* race within DoH across the resolver pool. So neither a blocked strategy nor a blocked
+individual resolver holds up the result.
+
+- **`RacingResolver`** — `resolve`'s public face (the *outer* race): holds an ordered set of strategy
+  `NameResolver`s and races them happy-eyeballs via the already-public `flint_dial::race_with`,
+  returning the first **validated** answer; errors only if every strategy fails.
 - **Strategies (each a `NameResolver`):**
-  - **`DohResolver`** — wraps `flint_dns::resolve_cached` over `flint_dns::default_pool()` with a held
-    `flint_dns::ResolverCache` (per-network winner cache → one-shot steady state). The always-present,
-    un-poisoned direct path.
+  - **`DohResolver`** — `flint_dns::resolve` over `flint_dns::default_pool()` (the *inner* race): it
+    fans out across the **whole** pool concurrently and takes the first **validated** answer, so a
+    blocked or slow resolver never holds up the result. The always-present, un-poisoned direct path.
+    *Note:* the per-network winner **cache** (`resolve_cached`) is intentionally **not** used here —
+    its try-cached-then-fallback would let a newly-blocked cached resolver eat a full timeout before
+    the pool race starts, and bootstrap is infrequent enough that racing the whole pool every time is
+    cheap and stall-free. Caching belongs in the high-frequency data-plane resolver (#3), where it
+    must bias order via a **staggered head-start**, not gate behind one resolver.
   - **`ProxyResolver`** — given a configured proxy **by IP** (its `UdpTransport`), `dial_udp` a public
     resolver and run a query via `flint_dns`'s codec + answer validation; the exit resolves upstream.
     Added once per IP-addressed proxy. Independent of the data-plane tunnel — it only uses the
@@ -124,7 +133,8 @@ apps' in-tunnel DNS: unchanged (still tunnelled to the exit)
 - A `Host` is configured but spark was built **without** `bootstrap-dns` → an explicit error at the
   resolve step (`hostname <host> requires the bootstrap-dns feature`), never a silent skip.
 - An `Endpoint::Ip` never touches the resolver (works with the feature off).
-- Per-network `ResolverCache` keeps steady-state startup to a single dial.
+- A blocked/slow resolver never delays a winner (it just loses the race); each attempt is bounded by a
+  deadline so the **all-fail** case returns promptly instead of hanging on the slowest resolver.
 
 ## 6. Testing
 
