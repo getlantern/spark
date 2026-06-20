@@ -2184,6 +2184,20 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   spinner → macOS prompts to approve the Spark extension → approve → activation completes → tunnel
   starts. **Next:** live retest (does the sysext prompt appear + approval lead to a real tunnel?).
 
+- 2026-06-20 (U1c CONNECT PROVEN live + e2e relay groundwork): Live retest of the activation DMG
+  **connected** — the system extension activated/approved and the tunnel came up (no VPN re-prompt;
+  config already approved). Now standing up a relay for a real-traffic e2e. Mapped the wire protocol
+  (plain `tcp_tunnel`): TCP = `[Address]` header → splice; UDP = sentinel + `[target Address]` then
+  connect-mode `[u16 len][payload]` frames. **No relay server existed** (CLI is client-only), so wrote
+  **`cli/src/bin/relay.rs`** (`spark-relay`) reusing the core codec (`read_header`/`Address`/
+  `udp_associate_sentinel`) for wire-compat: TCP splice + connect-mode UDP relay, `--listen`. Builds +
+  clippy clean (`cargo build -p spark-cli --bin relay`). Decision (Adam): run it on a **remote
+  DigitalOcean droplet** (remote avoids the full-tunnel routing loop a local relay would hit). **Blocked
+  on:** DO access in this session (no `doctl`, no token). Deploy plan: cross-compile to Linux (Docker is
+  running) → scp single binary → run on droplet → open the port → write `config.toml` with `[transport]
+  server="<droplet-ip>:9000"`, `protect_interface="en1"` (en1 = active iface, 192.168.4.25). **Next:** get
+  DO token or an existing droplet+SSH, deploy, generate config, user reconnects + curls through it.
+
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b + U1b-1 + U1b-2a + U1b-4 DONE; U1b-2b connect/disconnect wired (compile-verified)**; next: U1c live test [approve sysext + relay config.toml] / U1b-2b-ii OSSystemExtensionRequest activation if needed) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
