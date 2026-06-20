@@ -19,7 +19,7 @@
 //! - `transform_in(ptr: i32, len: i32) -> i64` — the inverse (wire → application), same packing.
 //! - `compute_gambit(ctx_ptr: i32, ctx_len: i32) -> i64` — *gambit-compute mode* (ADR 0006 P3);
 //!   invoked once per connection with a (reserved) per-connection context, returns a
-//!   **postcard-encoded [`crate::transport::gambit::Gambit`]** packed the same way — the opening
+//!   **postcard-encoded [`flint_tls::gambit::Gambit`]** packed the same way — the opening
 //!   *plan* (CH knobs + record/segment framing), not stream bytes. The host decodes it and runs it
 //!   through the boring executor (`Profile::for_boring`), which stays the TLS engine. Lets a gambit
 //!   be **computed per connection** (adaptive/stateful) rather than shipped as static signed config.
@@ -74,7 +74,7 @@ use wasmi::{
     TypedFunc,
 };
 
-use crate::transport::gambit::Gambit;
+use flint_tls::gambit::Gambit;
 
 mod signing;
 mod stream;
@@ -1913,7 +1913,7 @@ mod tests {
     }
 
     fn sample_gambit() -> Gambit {
-        use crate::transport::gambit::{Capability, ClientHello, EchMode, Records, Wire};
+        use flint_tls::gambit::{Capability, ClientHello, EchMode, Records, Wire};
         Gambit {
             genome_version: 1,
             version: 5,
@@ -1978,7 +1978,7 @@ mod tests {
     #[cfg(feature = "anytls")]
     #[test]
     fn computed_gambit_resolves_on_the_boring_executor() {
-        use crate::transport::anytls::profile::Profile;
+        use flint_tls::Profile;
         let module = gambit_module_emitting(&sample_gambit());
         let mut t = module.instantiate().expect("instantiate");
         let gambit = t.compute_gambit(&[]).expect("compute gambit");

@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::transport::gambit::{ClientHello, Records};
+use flint_tls::gambit::{ClientHello, Records};
 
 /// Top-level configuration. Each section has defaults, so missing sections and fields fall
 /// back rather than erroring.
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn parses_inline_anytls_gambit_knobs() {
-        use crate::transport::gambit::EchMode;
+        use flint_tls::gambit::EchMode;
         let c = Config::from_toml_str(
             r#"
             [transport.anytls]

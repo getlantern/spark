@@ -20,7 +20,8 @@
 //! - [`auth`] — the client auth record (SHA-256, via `ring`).
 //! - [`settings`] — the `cmdSettings` builder/parser ([`Settings`]) (the `padding-md5` value is
 //!   computed via the `md-5` crate; `ring` has no MD5).
-//! - `tls` — the Chrome-mimicking BoringSSL connector (feature `anytls`).
+//! - the Chrome-mimicking BoringSSL connector, the gambit→boring `Profile` mapping, and the JA4
+//!   anchor now live in the reusable `flint-tls` crate (was `tls`/`profile`/`anchor` here).
 //! - `transport` — the [`super::Transport`]/[`super::UdpTransport`] impl over a pool of
 //!   reconnecting TLS sessions (feature `anytls`).
 //! - `udp` — UDP-over-TCP v2 (sing-box UoT) over a session stream (feature `anytls`).
@@ -38,15 +39,9 @@ pub mod io;
 pub mod padding;
 pub mod session;
 pub mod settings;
-// The BoringSSL TLS connector + the `Transport` impl are behind the `anytls` feature (the C build).
-// `profile` (the gambit→boring executor mapping) rides with them — its only consumers are `tls`/
-// `transport`, and `BORING_CAPABILITIES` is boring-specific.
-#[cfg(feature = "anytls")]
-pub mod anchor;
-#[cfg(feature = "anytls")]
-pub mod profile;
-#[cfg(feature = "anytls")]
-pub mod tls;
+// The `Transport`/`UdpTransport` impls are behind the `anytls` feature (the C build). The Chrome
+// boring connector, the gambit→boring `Profile` executor mapping, and the JA4 anchor now live in the
+// reusable `flint-tls` crate (feature `flint-tls/boring`, which `anytls` enables).
 #[cfg(feature = "anytls")]
 pub mod transport;
 #[cfg(feature = "anytls")]
