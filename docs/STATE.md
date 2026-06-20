@@ -2061,8 +2061,27 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   MockBackend→TauriBackend swap; embed the `platforms/apple` systemextension + adapt build-gui-dmg.sh.
   **Write/activate needs the NE entitlement + provisioning (U1c, human-blocked).**
 
+- 2026-06-20 (U1b-1 DONE + PROVISIONING UNBLOCKED — system extension builds & signs): The M10-era
+  provisioning blocker is cleared. Root cause was a Developer ID cert mismatch: the "Spark macOS
+  App"/"Spark macOS Tunnel" profiles pinned Developer ID Application serial `52097FEB` (exp May 2030),
+  but this Mac's only codesigning private key is serial `47D77D` (exp Feb 2030). Confirmed `52097FEB`'s
+  key is nowhere here (no .p12 in Downloads/Desktop/Documents/home; importing its public .cer added a
+  keyless cert, no new identity). Fix (Adam, portal): regenerated both profiles selecting the
+  **Feb-2030 / 47D77D** "Developer ID Application" cert (NOT the "Developer ID Installer" rows — those
+  sign .pkg, not the app/extension). Reinstalled them into the Xcode store (UUIDs f19f7cab = App,
+  470ae1fc = Tunnel), removed the stale 52097FEB ones (0571d9e8/2ce5e0e9). `xcodebuild archive SparkApp`
+  now SUCCEEDS → `org.getlantern.spark.tunnel.systemextension` (3.7 MB) signed Developer ID
+  (ACZRKC3LQ9) + hardened runtime, NE entitlements baked (packet-tunnel-provider-systemextension +
+  group.org.getlantern.spark). Also committed `edad6bc`: build-xcframework.sh bash-3.2 unbound-array
+  fix (`${feat[@]+…}`) — latent since the full archive had never run here. **Remaining U1b:** U1b-2 =
+  objc2 connect/disconnect/status write path (OSSystemExtensionRequest activate via `define_class!`
+  delegate + NETunnelProviderManager save/start/stop); U1b-3 = config.toml precedence +
+  MockBackend→TauriBackend; U1b-4 = embed the .systemextension into the Tauri .app + Release.entitlements
+  + app profile + sign + notarize → product DMG (sign+notarize pipeline already proven on the shell DMG).
+  **Next chunk = U1b-2.**
+
 ## Milestone checklist
-- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a bridge + U1b async-read machinery PROVEN (read 2 real managers, "connected")**; next U1b: command surface + write path [define_class delegate] + systemextension embed / U1c live gate [human provisioning]) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b machinery PROVEN; U1b-1 DONE: signed systemextension builds, provisioning unblocked (47D77D profiles)**; next U1b-2 objc2 write path / U1b-3 config+frontend / U1b-4 embed+notarize / U1c live gate) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
