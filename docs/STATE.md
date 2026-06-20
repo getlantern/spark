@@ -2162,6 +2162,28 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   `docs/mockups/gen-preview.mjs` → `spark-lantern-screen.html`. **Main screen is now geometry-exact to
   the Flutter home.** (App/DMG carries it on next build.)
 
+- 2026-06-20 (U1c live finding + main-thread fix + U1b-2b-ii activation): First live test of the
+  notarized DMG surfaced two things. (1) **UI froze / force-quit.** Root cause: `spark_status`/
+  `spark_connect`/`spark_disconnect` were synchronous `#[tauri::command]`s → ran on the **main
+  thread**, but every NE call blocks on a channel waiting for a completion delivered **on the main
+  queue** → main thread deadlocks on its own callback. Fixed by marking all three
+  `#[tauri::command(async)]` (off-main), so the run loop stays free to fire the completions; also
+  show the toggle spinner while `busy`. (commit b8ffb6e.) (2) After that fix, connect got far enough
+  to trigger the **"Spark would like to add VPN configurations"** prompt (= `saveToPreferences`
+  succeeded) but **no system-extension approval prompt** and the tunnel didn't come up, no error —
+  because `startVPNTunnel` returns ok (request accepted) while the provider can't launch: the
+  **system extension was never activated**. Implemented **U1b-2b-ii**: added `objc2-system-extensions`
+  + `dispatch2` deps; an `OSSystemExtensionRequestDelegate` via `define_class!`
+  (`SparkSysExtDelegate`, ivar = result `Sender`); `ne_spike::activate_extension()` submits
+  `OSSystemExtensionRequest::activationRequestForExtension_queue(id, DispatchQueue::main())`, sets the
+  delegate, waits (150s, off-main) for didFinish/didFail — `replace`→Replace, `needsUserApproval`
+  logged, request+delegate held alive across the approval window so a pending approval can complete.
+  `connect()` now calls `activate_extension()?` before the save/start chain. cargo check + clippy +
+  svelte-check: 0 errors/warnings. Verified the API against docs.rs (objc2-system-extensions 0.3.2,
+  objc2 0.6, dispatch2 0.3) before writing — no guessing. **Expected first-run flow:** tap Connect →
+  spinner → macOS prompts to approve the Spark extension → approve → activation completes → tunnel
+  starts. **Next:** live retest (does the sysext prompt appear + approval lead to a real tunnel?).
+
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b + U1b-1 + U1b-2a + U1b-4 DONE; U1b-2b connect/disconnect wired (compile-verified)**; next: U1c live test [approve sysext + relay config.toml] / U1b-2b-ii OSSystemExtensionRequest activation if needed) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)

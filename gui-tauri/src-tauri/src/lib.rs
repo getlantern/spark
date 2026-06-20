@@ -137,14 +137,120 @@ pub mod ne_spike {
     use std::time::Duration;
 
     use block2::RcBlock;
+    use dispatch2::DispatchQueue;
     use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
-    use objc2_foundation::{ns_string, NSArray, NSDictionary, NSError, NSString};
+    use objc2::runtime::{AnyObject, ProtocolObject};
+    use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
+    use objc2_foundation::{ns_string, NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
     use objc2_network_extension::NETunnelProviderProtocol;
+    use objc2_system_extensions::{
+        OSSystemExtensionManager, OSSystemExtensionProperties, OSSystemExtensionReplacementAction,
+        OSSystemExtensionRequest, OSSystemExtensionRequestDelegate, OSSystemExtensionRequestResult,
+    };
 
     fn err_str(e: *mut NSError) -> String {
         // SAFETY: caller passes a non-null framework NSError*.
         unsafe { (*e).localizedDescription().to_string() }
+    }
+
+    /// Bundle identifier of the packet-tunnel system extension embedded in the app.
+    const TUNNEL_SYSEXT_ID: &str = "org.getlantern.spark.tunnel";
+
+    /// Ivars for the activation delegate: a channel to report the terminal outcome
+    /// (Ok once activated, Err on failure) back to the waiting worker thread.
+    struct ActIvars {
+        tx: Sender<Result<(), String>>,
+    }
+
+    define_class!(
+        // SAFETY: plain NSObject subclass — no subclassing requirements, no Drop.
+        #[unsafe(super(NSObject))]
+        #[name = "SparkSysExtDelegate"]
+        #[ivars = ActIvars]
+        struct ActDelegate;
+
+        unsafe impl NSObjectProtocol for ActDelegate {}
+
+        // OSSystemExtensionRequestDelegate. Callbacks arrive on the queue passed to
+        // the request (the main queue); they just forward the verdict on the channel.
+        unsafe impl OSSystemExtensionRequestDelegate for ActDelegate {
+            // An older copy of the extension exists — replace it with the one we ship.
+            #[unsafe(method(request:actionForReplacingExtension:withExtension:))]
+            fn action_for_replacing(
+                &self,
+                _request: &OSSystemExtensionRequest,
+                _existing: &OSSystemExtensionProperties,
+                _ext: &OSSystemExtensionProperties,
+            ) -> OSSystemExtensionReplacementAction {
+                OSSystemExtensionReplacementAction::Replace
+            }
+
+            // Pending user approval (System Settings → Login Items & Extensions). The
+            // request stays pending until the user approves; we keep waiting.
+            #[unsafe(method(requestNeedsUserApproval:))]
+            fn needs_user_approval(&self, _request: &OSSystemExtensionRequest) {
+                eprintln!(
+                    "[spark] system extension needs approval in System Settings → \
+                     General → Login Items & Extensions"
+                );
+            }
+
+            #[unsafe(method(request:didFinishWithResult:))]
+            fn did_finish(
+                &self,
+                _request: &OSSystemExtensionRequest,
+                _result: OSSystemExtensionRequestResult,
+            ) {
+                let _ = self.ivars().tx.send(Ok(()));
+            }
+
+            #[unsafe(method(request:didFailWithError:))]
+            fn did_fail(&self, _request: &OSSystemExtensionRequest, error: &NSError) {
+                let _ = self
+                    .ivars()
+                    .tx
+                    .send(Err(format!("activation failed: {}", error.localizedDescription())));
+            }
+        }
+    );
+
+    impl ActDelegate {
+        fn new(tx: Sender<Result<(), String>>) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(ActIvars { tx });
+            // SAFETY: NSObject's designated initializer.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// U1b-2b-ii: ensure the embedded packet-tunnel system extension is activated,
+    /// prompting the user to approve it on first run (`OSSystemExtensionRequest`).
+    /// Delegate callbacks fire on the main queue, so this (worker) thread waits on a
+    /// channel while the app's main run loop services them — same model as `connect`.
+    /// Returns Ok once the extension is active; once approved this completes
+    /// immediately on subsequent calls. Needs the `system-extension.install` +
+    /// packet-tunnel entitlements (present in the signed product build).
+    pub fn activate_extension() -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let delegate = ActDelegate::new(tx);
+        let ident = NSString::from_str(TUNNEL_SYSEXT_ID);
+        let queue = DispatchQueue::main();
+        // SAFETY: standard SystemExtensions activation API; `queue` is the main queue.
+        let request =
+            unsafe { OSSystemExtensionRequest::activationRequestForExtension_queue(&ident, queue) };
+        unsafe { request.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
+        let manager = unsafe { OSSystemExtensionManager::sharedManager() };
+        unsafe { manager.submitRequest(&request) };
+        // Wait for a terminal callback. `request`/`delegate` stay alive on this frame
+        // for the whole window so a pending approval can still complete (dropping the
+        // request cancels it). Generous timeout to let the user approve in Settings.
+        let outcome = rx.recv_timeout(Duration::from_secs(150)).unwrap_or_else(|_| {
+            Err("system extension approval timed out — approve Spark in System \
+                 Settings → General → Login Items & Extensions, then tap Connect again"
+                .to_owned())
+        });
+        drop(request);
+        drop(delegate);
+        outcome
     }
 
     /// U1b-2b: bring the tunnel up. NE completion handlers fire on the main queue
@@ -154,10 +260,12 @@ pub mod ne_spike {
     /// final verdict. `config` is the resolved data-path config (TOML/host:port),
     /// handed to the extension via providerConfiguration["config"].
     ///
-    /// Assumes the org.getlantern.spark.tunnel system extension is already
-    /// activated (U1b-2b-ii adds OSSystemExtensionRequest activation for fresh
-    /// installs). Needs the NE entitlement (present in the signed product build).
+    /// First activates the org.getlantern.spark.tunnel system extension (U1b-2b-ii,
+    /// prompting approval on first run) so there's a provider to start, then runs the
+    /// save/start chain. Needs the NE entitlement (present in the signed product build).
     pub fn connect(config: Option<String>) -> Result<(), String> {
+        // No provider can start until the extension is activated + user-approved.
+        activate_extension()?;
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let outer = RcBlock::new(
             move |arr: *mut NSArray<NETunnelProviderManager>, _e: *mut NSError| {

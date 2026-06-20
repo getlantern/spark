@@ -1398,9 +1398,11 @@ name = "gui-tauri"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "dispatch2",
  "objc2",
  "objc2-foundation",
  "objc2-network-extension",
+ "objc2-system-extensions",
  "serde",
  "serde_json",
  "tauri",
@@ -2253,6 +2255,17 @@ dependencies = [
  "bitflags 2.13.0",
  "objc2",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-system-extensions"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00ca10e1fd778a1dd13d579afb37168422ef4bbb36b6723179c2228f6b8372c"
+dependencies = [
+ "dispatch2",
+ "objc2",
+ "objc2-foundation",
 ]
 
 [[package]]
