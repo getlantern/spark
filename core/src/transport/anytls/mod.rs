@@ -47,6 +47,12 @@ pub mod transport;
 #[cfg(feature = "anytls")]
 pub mod udp;
 
+/// Back-compat shim: the Chrome boring connector, the gambit→boring `Profile` executor mapping, and
+/// the JA4 anchor moved to the `flint-tls` crate. Keeps the `anytls::{tls, profile, anchor}` paths
+/// working (`tls` is flint's `connector`).
+#[cfg(feature = "anytls")]
+pub use flint_tls::{anchor, connector as tls, profile};
+
 pub use auth::encode_auth;
 pub use frame::{Command, Frame, FrameError};
 pub use padding::{shape_records, PaddingError, PaddingScheme, Seg, SizeSampler, SystemSampler};

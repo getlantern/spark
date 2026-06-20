@@ -56,6 +56,10 @@ pub fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
 /// paths working; the former `WirePlan::from_config` is now [`wire_plan_from_config`].
 pub use flint_shaping as shaping;
 
+/// Back-compat shim: the gambit ClientHello genome and JA4 fingerprinting now live in the `flint-tls`
+/// crate. Keeps the `crate::transport::{gambit, ja4}::…` import paths working.
+pub use flint_tls::{gambit, ja4};
+
 pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
