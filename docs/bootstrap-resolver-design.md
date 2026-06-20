@@ -69,8 +69,9 @@ feature that pulls `flint-dns` with its `boring` feature. The base build is unaf
 Resolution races at **two levels**: the *outer* race across strategies (DoH vs via-proxy), and the
 *inner* race within DoH across the resolver pool. So neither a blocked strategy nor a blocked
 individual resolver holds up the result — and the inner race runs in **bounded batches** (a
-concurrency window) so it never opens the whole pool at once. (The outer race is small — DoH plus a
-few proxies — so it fires unbounded.)
+concurrency window) so in-flight attempts stay capped even as the pool grows to hundreds of IPs
+(today's ~8 fit within one window, so it's effectively all-at-once). (The outer race is small — DoH
+plus a few proxies — so it fires unbounded.)
 
 - **`RacingResolver`** — `resolve`'s public face (the *outer* race): holds an ordered set of strategy
   `NameResolver`s and races them happy-eyeballs via the already-public `flint_dial::race_with`,
@@ -78,11 +79,14 @@ few proxies — so it fires unbounded.)
 - **Strategies (each a `NameResolver`):**
   - **`DohResolver`** — `flint_dns::resolve` over `flint_dns::default_pool()` (the *inner* race): it
     races the pool in **bounded batches** — a concurrency window of K attempts, refilling as each
-    finishes — and takes the first **validated** answer. So a blocked/slow resolver never holds up a
-    winner, *and* we never fire all ~8 boring TLS handshakes at once (which matters on memory-capped
-    mobile network extensions). The always-present, un-poisoned direct path. **Prereq:** a small flint
-    enhancement — windowed racing (`flint_dial::race_windowed(count, window, dial_one)`, used by
-    `flint_dns::resolve`); today `resolve` fires the whole pool unbounded.
+    finishes — and takes the first **validated** answer, so a blocked/slow resolver never holds up a
+    winner. The window's real purpose is **scaling to large lists**: the pool may grow to *hundreds*
+    of raw DoH IPs / dial targets (shipping many raw resolver IPs was always anticipated), and the
+    window caps in-flight attempts regardless of list length. For today's ~8-entry pool, K ≥ pool size
+    so it's effectively all-at-once (8 concurrent is fine); the cap only bites once lists get large.
+    The always-present, un-poisoned direct path. **Prereq:** a small flint enhancement — windowed
+    racing (`flint_dial::race_windowed(count, window, dial_one)`, used by `flint_dns::resolve`); today
+    `resolve` fires the whole pool unbounded.
     *Cache note:* the per-network winner cache (`resolve_cached`) is intentionally **not** used here —
     its try-cached-then-fallback would let a newly-blocked cached resolver eat a full timeout before
     the pool race starts, and bootstrap is infrequent. Caching belongs in the high-frequency
