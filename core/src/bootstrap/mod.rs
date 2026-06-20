@@ -83,9 +83,143 @@ impl NameResolver for DohResolver {
     }
 }
 
+/// Resolve a name by tunnelling a plain DNS/UDP query **through a proxy** addressed by IP: the exit
+/// resolves upstream un-poisoned. Reuses `flint_dns`'s codec + answer validation. Independent of the
+/// data-plane tunnel — it only needs the transport's UDP client. Chicken-and-egg (design §3.1): a
+/// proxy named by *hostname* can't resolve itself through a proxy, so this only adds racers for
+/// already-IP-addressed proxies.
+pub struct ProxyResolver {
+    udp: Arc<dyn UdpTransport>,
+    upstreams: Vec<SocketAddr>,
+    deadline: Duration,
+}
+
+impl ProxyResolver {
+    /// A `ProxyResolver` that races `upstreams` (public recursive resolvers, e.g. `8.8.8.8:53`) over
+    /// `udp`. Each attempt is bounded by a 5s deadline so an all-fail returns promptly.
+    pub fn new(udp: Arc<dyn UdpTransport>, upstreams: Vec<SocketAddr>) -> Self {
+        Self { udp, upstreams, deadline: Duration::from_secs(5) }
+    }
+
+    async fn query_one(&self, upstream: SocketAddr, host: &str, port: u16) -> io::Result<SocketAddr> {
+        let (mut sink, mut source) = self.udp.dial_udp(upstream).await?;
+        let query = flint_dns::codec::build_query(host, flint_dns::TYPE_A).map_err(io::Error::other)?;
+        sink.send(&query).await?;
+        let mut buf = [0u8; 512];
+        let n = tokio::time::timeout(self.deadline, source.recv(&mut buf))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "DNS-through-proxy timed out"))??;
+        let answers = flint_dns::codec::parse_response(&buf[..n]).map_err(io::Error::other)?;
+        let validated = flint_dns::validate::validate_answers(answers).map_err(io::Error::other)?;
+        let ip = validated
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::other("no validated A records"))?;
+        Ok(SocketAddr::new(ip, port))
+    }
+}
+
+#[async_trait]
+impl NameResolver for ProxyResolver {
+    async fn resolve(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
+        match flint_dial::race_with(self.upstreams.len(), |i| {
+            self.query_one(self.upstreams[i], host, port)
+        })
+        .await
+        {
+            Ok((_winner, addr)) => Ok(addr),
+            Err(errors) => Err(io::Error::other(format!(
+                "all {} proxy upstreams failed for {host}: {errors:?}",
+                self.upstreams.len()
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::{BoxedPacketSink, BoxedPacketSource, PacketSink, PacketSource};
+
+    /// A canned A-record response for `name` → `ip`, matching `flint_dns::codec::parse_response`
+    /// (header, one question, one answer with a 0xC00C name pointer).
+    fn dns_response_a(name: &str, ip: [u8; 4]) -> Vec<u8> {
+        let mut m = Vec::new();
+        m.extend_from_slice(&[0x00, 0x00]); // ID
+        m.extend_from_slice(&[0x81, 0x80]); // QR=1, RD=1, RA=1, rcode=0
+        m.extend_from_slice(&[0x00, 0x01]); // QDCOUNT
+        m.extend_from_slice(&[0x00, 0x01]); // ANCOUNT
+        m.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // NS/AR
+        for label in name.split('.') {
+            m.push(label.len() as u8);
+            m.extend_from_slice(label.as_bytes());
+        }
+        m.push(0);
+        m.extend_from_slice(&[0x00, 0x01]); // QTYPE A
+        m.extend_from_slice(&[0x00, 0x01]); // QCLASS IN
+        m.extend_from_slice(&[0xc0, 0x0c]); // answer NAME → pointer to the question
+        m.extend_from_slice(&[0x00, 0x01]); // TYPE A
+        m.extend_from_slice(&[0x00, 0x01]); // CLASS IN
+        m.extend_from_slice(&[0x00, 0x00, 0x01, 0x2c]); // TTL 300
+        m.extend_from_slice(&[0x00, 0x04]); // RDLENGTH 4
+        m.extend_from_slice(&ip);
+        m
+    }
+
+    struct FakeUdp {
+        response: Vec<u8>,
+    }
+    #[async_trait]
+    impl UdpTransport for FakeUdp {
+        async fn dial_udp(
+            &self,
+            _target: SocketAddr,
+        ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            Ok((
+                Box::new(FakeSink),
+                Box::new(FakeSource { response: self.response.clone() }),
+            ))
+        }
+    }
+    struct FakeSink;
+    #[async_trait]
+    impl PacketSink for FakeSink {
+        async fn send(&mut self, _payload: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    struct FakeSource {
+        response: Vec<u8>,
+    }
+    #[async_trait]
+    impl PacketSource for FakeSource {
+        async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.response.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.response[..n]);
+            Ok(n)
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_resolver_parses_and_validates() {
+        let udp: Arc<dyn UdpTransport> = Arc::new(FakeUdp {
+            response: dns_response_a("example.com", [93, 184, 216, 34]),
+        });
+        let r = ProxyResolver::new(udp, vec!["8.8.8.8:53".parse().unwrap()]);
+        assert_eq!(
+            r.resolve("example.com", 443).await.unwrap(),
+            "93.184.216.34:443".parse().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_resolver_rejects_a_bogon() {
+        let udp: Arc<dyn UdpTransport> = Arc::new(FakeUdp {
+            response: dns_response_a("example.com", [0, 0, 0, 0]), // 0.0.0.0 is a bogon
+        });
+        let r = ProxyResolver::new(udp, vec!["8.8.8.8:53".parse().unwrap()]);
+        assert!(r.resolve("example.com", 443).await.is_err());
+    }
 
     struct Fixed(io::Result<SocketAddr>);
     #[async_trait]
