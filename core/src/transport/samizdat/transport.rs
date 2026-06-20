@@ -1,7 +1,7 @@
 //! The Samizdat [`Transport`] (ADR 0007): one Chrome-fingerprinted TLS session per server
 //! connection, REALITY auth in the ClientHello `legacy_session_id`, and proxied flows multiplexed
 //! as HTTP/2 CONNECT streams. Ties together [`auth`], [`session_id`], and [`super::h2_mux`], reusing
-//! the AnyTLS boring connector ([`crate::transport::anytls::tls::configure`]) for the Chrome hello.
+//! the AnyTLS boring connector ([`flint_tls::configure`]) for the Chrome hello.
 //!
 //! TCP only (v1). UDP is reported unsupported — see ADR 0007 §1 / the design doc §11.
 
@@ -12,11 +12,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::net::SocketProtector;
-use crate::transport::anytls::profile::Profile;
 use crate::transport::{
     protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, BoxedStream, Transport, UdpTransport,
 };
 use flint_shaping::{SegmentShapingStream, WirePlan};
+use flint_tls::Profile;
 
 use super::auth;
 use super::h2_mux::H2Conn;
@@ -76,7 +76,7 @@ impl SamizdatTransport {
         }
         let session_id_bytes = auth::session_id(&self.server_pubkey, &self.short_id)
             .map_err(|_| io::Error::other("samizdat: generating the auth SessionID failed"))?;
-        let mut config = crate::transport::anytls::tls::configure(&self.profile)?;
+        let mut config = flint_tls::configure(&self.profile)?;
         session_id::inject_session_id(&mut config, &session_id_bytes)?;
         // Fragment the ClientHello across TCP segments per the wire plan (no-op by default).
         let shaped = SegmentShapingStream::new(tcp, self.wire.clone());

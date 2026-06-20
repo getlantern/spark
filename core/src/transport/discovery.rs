@@ -17,7 +17,7 @@
 //! The GA operators are pure and deterministic given a seed (reproducible search + auditability,
 //! per §5.5); the realize/score half is behind the `anytls` feature (it needs boring).
 
-use crate::transport::gambit::{ClientHello, EchMode, Gambit, Perm};
+use flint_tls::gambit::{ClientHello, EchMode, Gambit, Perm};
 
 /// A small, seedable PRNG (SplitMix64) — dependency-free and **deterministic** so a search run (and
 /// its tests) reproduce exactly from a seed. Not cryptographic; only steers mutation choices.
@@ -149,10 +149,16 @@ pub use realize::{run_inner_loop, Fidelity, Scored};
 #[cfg(feature = "anytls")]
 mod realize {
     use super::*;
-    use crate::transport::anytls::anchor::capture_client_hello;
-    use crate::transport::anytls::profile::Profile;
-    use crate::transport::ja4::{self, ja4, parse_client_hello, ClientHelloSummary};
+    use flint_tls::anchor::capture_client_hello;
+    use flint_tls::ja4::{ja4, parse_client_hello, ClientHelloSummary};
+    use flint_tls::Profile;
     use std::collections::BTreeSet;
+
+    /// RFC 8701 GREASE check, mirroring `flint_tls::ja4`'s internal filter (not public): a
+    /// GREASE-reserved 16-bit value has both bytes equal and of the form `0x?a`.
+    fn is_grease(v: u16) -> bool {
+        (v >> 8) as u8 == (v & 0xff) as u8 && (v & 0x0f) == 0x0a
+    }
 
     /// A candidate's fidelity to the anchor, from realizing it through boring.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,17 +182,13 @@ mod realize {
     }
 
     fn nongrease_set(values: &[u16]) -> BTreeSet<u16> {
-        values
-            .iter()
-            .copied()
-            .filter(|v| !ja4::is_grease(*v))
-            .collect()
+        values.iter().copied().filter(|v| !is_grease(*v)).collect()
     }
 
     fn highest_version(s: &ClientHelloSummary) -> u16 {
         s.supported_versions
             .as_ref()
-            .and_then(|v| v.iter().copied().filter(|x| !ja4::is_grease(*x)).max())
+            .and_then(|v| v.iter().copied().filter(|x| !is_grease(*x)).max())
             .unwrap_or(s.legacy_version)
     }
 
@@ -319,7 +321,7 @@ mod realize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::gambit::{Records, Wire};
+    use flint_tls::gambit::{Records, Wire};
 
     fn seed() -> Gambit {
         Gambit {
@@ -383,8 +385,8 @@ mod tests {
 #[cfg(all(test, feature = "anytls"))]
 mod realize_tests {
     use super::*;
-    use crate::transport::anytls::anchor::ANCHOR_JA4;
-    use crate::transport::gambit::{Records, Wire};
+    use flint_tls::anchor::ANCHOR_JA4;
+    use flint_tls::gambit::{Records, Wire};
 
     fn seed() -> Gambit {
         Gambit {

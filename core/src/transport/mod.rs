@@ -56,15 +56,14 @@ pub fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
 /// paths working; the former `WirePlan::from_config` is now [`wire_plan_from_config`].
 pub use flint_shaping as shaping;
 
+/// Back-compat shim: the gambit ClientHello genome and JA4 fingerprinting now live in the `flint-tls`
+/// crate. Keeps the `crate::transport::{gambit, ja4}::…` import paths working.
+pub use flint_tls::{gambit, ja4};
+
 pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
-/// The portable, signed gambit genome (ADR 0006 P2): the data-only spec of a flow's *opening*
-/// across the three layers, with Ed25519 verification, anti-rollback, and capability gating.
-pub mod gambit;
-/// JA4 TLS-client fingerprinting (ADR 0006 §4): the anchor drift check over a ClientHello record.
-pub mod ja4;
 /// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
 /// mux, wire-interoperable with deployed lantern-box `"samizdat"` servers. Behind the `samizdat`
 /// feature so the base build pulls neither the boring TLS backend nor the `h2` dependency.
@@ -177,7 +176,7 @@ fn anytls_transport(
     // Resolve the inline gambit genome (Layers A/B) onto the boring executor (ADR 0006 P2). Knobs
     // boring2 can't realize are surfaced once here, never silently dropped. This is also the fallback
     // profile when a dynamic gambit module (P3, below) faults or over-reaches.
-    let resolved = anytls::profile::Profile::resolve(&cfg.clienthello, &cfg.records);
+    let resolved = flint_tls::Profile::resolve(&cfg.clienthello, &cfg.records);
     for note in &resolved.unrealizable {
         tracing::warn!(knob = note, "anytls gambit knob not realizable on boring");
     }
@@ -694,7 +693,7 @@ mod samizdat_config_tests {
 mod anytls_gambit_config_tests {
     use super::*;
     use crate::config::{AnytlsConfig, Config, GambitModuleConfig, TransportConfig};
-    use crate::transport::gambit::Gambit;
+    use flint_tls::gambit::Gambit;
     use ring::signature::Ed25519KeyPair;
     use std::sync::atomic::{AtomicU32, Ordering};
     use wasm::testutil::dev_keypair;

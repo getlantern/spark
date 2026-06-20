@@ -2,13 +2,13 @@
 //!
 //! Run: `cargo run -p spark-core --example capture_clienthello --features anytls -- [sni]`
 //! (defaults SNI to `www.example.com`). Use it to refresh the anchor or eyeball the fingerprint;
-//! the `anchor::ANCHOR_JA4` test is the CI drift guard.
+//! the `flint_tls::anchor::ANCHOR_JA4` test is the CI drift guard.
 
 #[cfg(feature = "anytls")]
 fn main() {
-    use spark_core::transport::anytls::anchor::{capture_client_hello, ANCHOR_JA4};
-    use spark_core::transport::anytls::profile::Profile;
-    use spark_core::transport::ja4::ja4_of_record;
+    use flint_tls::anchor::{capture_client_hello, ANCHOR_JA4};
+    use flint_tls::ja4::ja4_of_record;
+    use flint_tls::Profile;
 
     let sni = std::env::args()
         .nth(1)

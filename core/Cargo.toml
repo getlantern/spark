@@ -31,6 +31,11 @@ postcard.workspace = true
 # Opening-handshake wire shaping (tcp_split + record_fragment), extracted to the reusable flint crate.
 # Non-optional: the gambit genome (always compiled) bridges its Layer C to flint_shaping::WirePlan.
 flint-shaping = { git = "https://github.com/getlantern/flint", rev = "56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7" }
+# Chrome-mimicry TLS: the gambit ClientHello genome, JA4, the boring Chrome connector + Profile + the
+# JA4 anchor — extracted to flint. Non-optional (gambit/ja4/profile are always compiled, e.g. by
+# `config` and `discovery`); the boring connector rides flint-tls's `boring` feature, enabled by
+# spark's `anytls`. Pinned to the same rev as flint-shaping (flint-tls path-depends on it).
+flint-tls = { git = "https://github.com/getlantern/flint", rev = "56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7" }
 # AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
 # `pq-experimental` exposes Chrome's post-quantum group X25519MLKEM768; `cert-compression` exposes
 # brotli cert compression — both part of the Chrome ClientHello profile.
@@ -53,7 +58,7 @@ wat.workspace = true
 [features]
 # AnyTLS-over-BoringSSL transport (ADR 0001). Off by default so the base build stays rustls/ring-only
 # and free of the C/cmake BoringSSL build.
-anytls = ["dep:boring2", "dep:tokio-boring2"]
+anytls = ["dep:boring2", "dep:tokio-boring2", "flint-tls/boring"]
 # System (kernel-TCP) netstack — a second Netstack impl (NAT redirect gateway to a kernel listener).
 # Off by default; needs a Linux/macOS-style tun fd (Linux, macOS, Android via VpnService — not iOS).
 # See docs/system-stack-design.md.
@@ -66,7 +71,7 @@ wasm-transport = ["dep:wasmi"]
 # `session_id.rs` kID-injection seam pulls the boring TLS backend + its FFI; `h2`/`http` provide the
 # CONNECT mux.
 samizdat = [
-    "anytls", # reuse the Chrome boring connector (`anytls::tls`) + `anytls::profile::Profile`
+    "anytls", # reuse the Chrome boring connector (`flint_tls::connector`) + `flint_tls::Profile`
     "dep:boring-sys2",
     "dep:foreign-types-shared",
     "dep:h2",
