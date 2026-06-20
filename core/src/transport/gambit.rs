@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 
-use crate::transport::shaping::{DelaySpec, SegmentSplit, WirePlan};
+use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
 
 /// Errors decoding, verifying, or gating a gambit.
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +167,7 @@ impl Wire {
             segment_split,
             inter_segment_delay,
             tcp_nodelay: self.tcp_nodelay,
+            ..Default::default()
         }
     }
 }

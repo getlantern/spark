@@ -13,10 +13,10 @@ use async_trait::async_trait;
 
 use crate::net::SocketProtector;
 use crate::transport::anytls::profile::Profile;
-use crate::transport::shaping::{SegmentShapingStream, WirePlan};
 use crate::transport::{
     protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, BoxedStream, Transport, UdpTransport,
 };
+use flint_shaping::{SegmentShapingStream, WirePlan};
 
 use super::auth;
 use super::h2_mux::H2Conn;
