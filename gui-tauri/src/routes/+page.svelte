@@ -74,10 +74,10 @@
         class:on={connected}
         role="switch"
         aria-checked={connected}
-        aria-busy={connecting}
+        aria-busy={connecting || busy}
         onclick={toggle}
       >
-        {#if connecting}
+        {#if connecting || busy}
           <span class="spinner"></span>
         {:else}
           <span class="knob"></span>

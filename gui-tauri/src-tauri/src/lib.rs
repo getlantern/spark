@@ -252,8 +252,13 @@ struct SparkStatus {
 
 /// Real tunnel status: read the live NE connection state (U1b machinery). macOS
 /// reads NETunnelProviderManager; elsewhere it's a stub until those platforms land.
+// `command(async)` runs these OFF the main thread. Critical: the NE completion
+// handlers (loadAll/save/start) are delivered on the main queue, and each call
+// blocks on a channel waiting for them — so if the command ran on the main thread
+// it would deadlock the run loop (UI freeze / force-quit). Off-main, the main run
+// loop stays free to fire the completions and the worker channel unblocks.
 #[cfg(target_os = "macos")]
-#[tauri::command]
+#[tauri::command(async)]
 fn spark_status() -> SparkStatus {
     let (_count, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(3));
     let state = ne_spike::ui_state(raw);
@@ -281,13 +286,13 @@ fn spark_status() -> SparkStatus {
 // NETunnelProviderManager save/start chain. Assumes the extension is activated
 // (OSSystemExtensionRequest activation for fresh installs is U1b-2b-ii).
 #[cfg(target_os = "macos")]
-#[tauri::command]
+#[tauri::command(async)]
 fn spark_connect() -> Result<(), String> {
     ne_spike::connect(config::resolve())
 }
 
 #[cfg(target_os = "macos")]
-#[tauri::command]
+#[tauri::command(async)]
 fn spark_disconnect() -> Result<(), String> {
     ne_spike::disconnect()
 }
