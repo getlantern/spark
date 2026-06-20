@@ -28,6 +28,9 @@ md-5.workspace = true
 # Canonical (deterministic) encoding of a gambit genome for Ed25519 signing (ADR 0006 P2). Same codec
 # as the control plane; cross-fleet (Go) canonicalization is a noted open question in the design doc.
 postcard.workspace = true
+# Opening-handshake wire shaping (tcp_split + record_fragment), extracted to the reusable flint crate.
+# Non-optional: the gambit genome (always compiled) bridges its Layer C to flint_shaping::WirePlan.
+flint-shaping = { git = "https://github.com/getlantern/flint", rev = "56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7" }
 # AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
 # `pq-experimental` exposes Chrome's post-quantum group X25519MLKEM768; `cert-compression` exposes
 # brotli cert compression — both part of the Chrome ClientHello profile.

@@ -74,7 +74,7 @@ fn ssl(e: boring2::error::ErrorStack, what: &str) -> io::Error {
 /// them, and [`Profile`](super::profile::Profile)'s defaults reproduce the genuine Chrome handshake
 /// (so [`Profile::default`](super::profile::Profile::default) ⇒ byte-identical to the prior hardcode).
 ///
-/// Generic over the carrier so a [`crate::transport::shaping::SegmentShapingStream`] can sit between
+/// Generic over the carrier so a [`flint_shaping::SegmentShapingStream`] can sit between
 /// boring and the socket (ADR 0006 Phase 1) to fragment the ClientHello.
 pub async fn connect<S>(
     stream: S,

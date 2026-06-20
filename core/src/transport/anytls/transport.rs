@@ -17,12 +17,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
 use crate::net::SocketProtector;
-use crate::transport::shaping::{SegmentShapingStream, WirePlan};
 use crate::transport::tcp_tunnel::header::Address;
 use crate::transport::{
     protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport,
 };
 use crate::BoxedStream;
+use flint_shaping::{SegmentShapingStream, WirePlan};
 
 use super::profile::Profile;
 use super::{tls, udp, PaddingScheme, Session};

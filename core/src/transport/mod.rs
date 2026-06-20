@@ -26,6 +26,30 @@ use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use crate::config::{AnytlsConfig, Config, SamizdatConfig, WasmConfig};
 use crate::net::SocketProtector;
 use crate::BoxedStream;
+use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
+
+/// Build a [`WirePlan`] from the static `[transport.shaping]` config. flint's `WirePlan` is
+/// config-agnostic, so this adapter (formerly `WirePlan::from_config`) lives spark-side. Maps Layer C
+/// only; Layer B `record_fragment` defaults off.
+fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
+    let segment_split = match c.segment_split.trim() {
+        "" | "none" => SegmentSplit::None,
+        "sni_boundary" => SegmentSplit::SniBoundary,
+        list => SegmentSplit::Explicit(
+            list.split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect(),
+        ),
+    };
+    WirePlan {
+        segment_split,
+        inter_segment_delay: c.delay_ms.map_or(DelaySpec::None, |ms| {
+            DelaySpec::Fixed(std::time::Duration::from_millis(ms))
+        }),
+        tcp_nodelay: c.tcp_nodelay,
+        ..Default::default()
+    }
+}
 
 pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
@@ -41,9 +65,6 @@ pub mod ja4;
 /// feature so the base build pulls neither the boring TLS backend nor the `h2` dependency.
 #[cfg(feature = "samizdat")]
 pub mod samizdat;
-/// Socket-layer opening-handshake framing/timing (ADR 0006 Phase 1): fragment the ClientHello
-/// across TCP segments (e.g. at the SNI boundary) with optional inter-segment delay.
-pub mod shaping;
 pub mod tcp_tunnel;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.
@@ -101,14 +122,14 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
     };
     // AnyTLS takes precedence over the plain `server` tunnel when configured.
     if let Some(anytls) = &config.transport.anytls {
-        let wire = shaping::WirePlan::from_config(&config.transport.shaping);
+        let wire = wire_plan_from_config(&config.transport.shaping);
         return anytls_transport(anytls, protector, wire);
     }
     // Samizdat (ADR 0007) — like AnyTLS, takes precedence over the plain `server` tunnel. It reuses
     // the shared `[transport.shaping]` plan to fragment the ClientHello (Geneva-style, on by default
     // in the Go client).
     if let Some(samizdat) = &config.transport.samizdat {
-        let wire = shaping::WirePlan::from_config(&config.transport.shaping);
+        let wire = wire_plan_from_config(&config.transport.shaping);
         return samizdat_transport(samizdat, protector, wire);
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
@@ -142,7 +163,7 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
 fn anytls_transport(
     cfg: &AnytlsConfig,
     protector: Option<SocketProtector>,
-    wire: shaping::WirePlan,
+    wire: WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     let sni = cfg
         .sni
@@ -230,7 +251,7 @@ fn load_gambit_module(cfg: &crate::config::GambitModuleConfig) -> io::Result<was
 fn anytls_transport(
     _cfg: &AnytlsConfig,
     _protector: Option<SocketProtector>,
-    _wire: shaping::WirePlan,
+    _wire: WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.anytls is configured but spark was built without the `anytls` feature",
@@ -303,7 +324,7 @@ fn wasm_transport(
 fn samizdat_transport(
     cfg: &SamizdatConfig,
     protector: Option<SocketProtector>,
-    wire: shaping::WirePlan,
+    wire: WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     let server_pubkey = decode_hex_n::<32>(&cfg.server_pubkey)
         .ok_or_else(|| io::Error::other("transport.samizdat.server_pubkey must be 32-byte hex"))?;
@@ -330,7 +351,7 @@ fn samizdat_transport(
 fn samizdat_transport(
     _cfg: &SamizdatConfig,
     _protector: Option<SocketProtector>,
-    _wire: shaping::WirePlan,
+    _wire: WirePlan,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.samizdat is configured but spark was built without the `samizdat` feature",
