@@ -172,6 +172,11 @@ fn build_selecting(
                 io::Error::other("transport.servers requires a callback_url (global or per-entry)")
             })?;
         let callback = CallbackUrl::parse(raw)?;
+        if callback.tls && !cfg!(feature = "anytls") {
+            return Err(io::Error::other(format!(
+                "https callback `{raw}` requires the `anytls` feature (TLS backend); use an http:// callback or build with anytls"
+            )));
+        }
         let (transport, udp) = build_one(&entry.spec, protector.as_ref(), &wire)?;
         members.push(Member::new(transport, udp, callback));
     }
@@ -789,6 +794,29 @@ mod pool_config_tests {
             ..Default::default()
         };
         from_config(&cfg).expect("from_config should build the selecting transport");
+    }
+
+    #[cfg(not(feature = "anytls"))]
+    #[tokio::test]
+    async fn https_callback_without_anytls_is_a_clear_error() {
+        let cfg = Config {
+            transport: TransportConfig {
+                servers: vec![ServerEntry {
+                    spec: ServerSpec::Tunnel(TunnelConfig {
+                        server: "1.2.3.4:443".parse().unwrap(),
+                        sni: None,
+                    }),
+                    callback_url: None,
+                }],
+                callback_url: Some("https://canary.example/x".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = from_config(&cfg)
+            .err()
+            .expect("https callback without anytls must error");
+        assert!(err.to_string().contains("anytls"), "error was: {err}");
     }
 
     #[tokio::test]

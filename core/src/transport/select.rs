@@ -55,8 +55,13 @@ impl SelectingTransport {
     /// then re-probes every `interval`; `window` bounds probe concurrency.
     pub(crate) fn new(members: Vec<Member>, interval: std::time::Duration, window: usize) -> Self {
         let members = Arc::new(members);
-        let selection = Arc::new(Mutex::new(Selection::default()));
+        // Seed with config order so flows can dial (with failover) before the first probe round; an
+        // empty ranking would make startup dials fail with "no healthy server".
+        let seeded = (0..members.len()).collect();
+        let selection = Arc::new(Mutex::new(Selection { ranked: seeded }));
         let reprobe = Arc::new(tokio::sync::Notify::new());
+        // Clamp to ≥1s so a misconfigured `probe_interval_secs = 0` can't spin the prober.
+        let interval = interval.max(std::time::Duration::from_secs(1));
         let task = tokio::spawn(prober_loop(
             Arc::clone(&members),
             Arc::clone(&selection),
@@ -161,6 +166,7 @@ async fn prober_loop(
 ) {
     use crate::transport::probe::probe;
     let per_probe = interval.min(std::time::Duration::from_secs(10));
+    let mut measured = false;
     loop {
         let outcomes = flint_dial::probe_windowed(members.len(), window, |i| {
             // Clone the (cheap) Arc + CallbackUrl into the future so it borrows nothing from `members`.
@@ -171,8 +177,13 @@ async fn prober_loop(
         .await;
         {
             let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
-            sel.ranked = next_order(&sel.ranked, &outcomes);
+            sel.ranked = if measured {
+                next_order(&sel.ranked, &outcomes)
+            } else {
+                rank(&outcomes)
+            };
         }
+        measured = true;
         tracing::debug!(
             healthy = outcomes.iter().filter(|(_, o)| o.healthy).count(),
             pool = members.len(),
@@ -266,19 +277,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_probes_and_populates_selection() {
-        let members = vec![member_serving_204(), member_serving_204()];
+    async fn new_seeds_config_order_before_probing() {
+        let st = SelectingTransport::new(
+            vec![member(true), member(true)],
+            std::time::Duration::from_secs(300),
+            8,
+        );
+        assert_eq!(st.order(), vec![0, 1]); // seeded synchronously; prober hasn't run yet
+    }
+
+    #[tokio::test]
+    async fn new_probes_and_drops_unhealthy() {
+        // 0 serves 204 (healthy), 1's dial fails (unhealthy). After the first probe round the prober
+        // re-ranks to [0] (1 dropped).
+        let members = vec![member_serving_204(), member(false)];
         let st = SelectingTransport::new(members, std::time::Duration::from_secs(300), 8);
-        // Give the spawned prober a moment to run its initial round.
-        for _ in 0..50 {
-            if !st.order().is_empty() {
+        for _ in 0..100 {
+            if st.order() == vec![0] {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(
-            !st.order().is_empty(),
-            "prober should have selected a healthy server"
+        assert_eq!(
+            st.order(),
+            vec![0],
+            "prober should drop the unhealthy server"
         );
     }
 

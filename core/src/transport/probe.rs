@@ -71,9 +71,14 @@ pub(crate) async fn http_get_ok<S>(mut stream: S, url: &CallbackUrl) -> io::Resu
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let host_header = if (url.tls && url.port == 443) || (!url.tls && url.port == 80) {
+        url.host.clone()
+    } else {
+        format!("{}:{}", url.host, url.port)
+    };
     let req = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: spark-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-        url.path, url.host
+        url.path, host_header
     );
     stream.write_all(req.as_bytes()).await?;
     stream.flush().await?;
@@ -139,12 +144,7 @@ pub async fn probe(
 }
 
 async fn probe_inner(transport: &Arc<dyn Transport>, url: &CallbackUrl) -> io::Result<bool> {
-    let target: std::net::SocketAddr =
-        format!("{}:{}", url.host, url.port).parse().map_err(|_| {
-            io::Error::other(
-                "callback host must be an IP literal (not a hostname); e.g. 1.2.3.4:80",
-            )
-        })?;
+    let target = resolve_callback_addr(&url.host, url.port).await?;
     let stream = transport.dial(target).await?;
     if url.tls {
         let tls = tls_wrap(stream, &url.host).await?;
@@ -152,6 +152,21 @@ async fn probe_inner(transport: &Arc<dyn Transport>, url: &CallbackUrl) -> io::R
     } else {
         http_get_ok(stream, url).await
     }
+}
+
+/// Resolve a callback host to a dial address: an IP literal is used directly; a hostname is resolved
+/// via the local resolver. The dial then rides the tunnel to that address, and the original hostname
+/// is kept for the TLS SNI + `Host:` header. Probes re-resolve each round (DNS changes are picked up).
+/// Local resolution of a public canary is fine for a health check — a poisoned/missing record just
+/// marks the server unhealthy this round; no real traffic is routed on the result.
+async fn resolve_callback_addr(host: &str, port: u16) -> io::Result<std::net::SocketAddr> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(std::net::SocketAddr::new(ip, port));
+    }
+    tokio::net::lookup_host((host, port))
+        .await?
+        .next()
+        .ok_or_else(|| io::Error::other(format!("callback host `{host}` resolved to no addresses")))
 }
 
 /// Wrap `stream` in client TLS for the callback host. Reuses the boring backend linked by
@@ -315,6 +330,40 @@ mod tests {
         assert!(CallbackUrl::parse("ftp://h/x").is_err());
         assert!(CallbackUrl::parse("notaurl").is_err());
         assert!(CallbackUrl::parse("https://:443/x").is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_callback_addr_handles_ip_and_localhost() {
+        assert_eq!(
+            resolve_callback_addr("1.2.3.4", 443).await.unwrap(),
+            "1.2.3.4:443".parse().unwrap()
+        );
+        let a = resolve_callback_addr("localhost", 80).await.unwrap();
+        assert!(a.ip().is_loopback());
+        assert_eq!(a.port(), 80);
+    }
+
+    #[tokio::test]
+    async fn http_get_includes_nondefault_port_in_host() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let url = CallbackUrl {
+            tls: false,
+            host: "h.example".into(),
+            port: 8080,
+            path: "/".into(),
+        };
+        let server_task = tokio::spawn(async move {
+            let mut buf = vec![0u8; 1024];
+            let n = server.read(&mut buf).await.unwrap();
+            server
+                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+        let _ = http_get_ok(client, &url).await.unwrap();
+        let req = server_task.await.unwrap();
+        assert!(req.contains("Host: h.example:8080\r\n"), "req was: {req}");
     }
 
     /// Live e2e: probe a real callback through a direct (no-proxy) transport. Set
