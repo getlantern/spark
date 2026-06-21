@@ -33,7 +33,13 @@
   );
 
   async function refresh() {
-    status = await backend.status();
+    // Polled on a timer, so swallow/surface failures here — an unhandled rejection
+    // would otherwise fire every interval and the UI would never record the error.
+    try {
+      status = await backend.status();
+    } catch (e) {
+      errorMsg = String(e);
+    }
   }
   async function toggle() {
     if (busy || connecting) return;

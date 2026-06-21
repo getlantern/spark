@@ -83,7 +83,11 @@ async fn handle_tcp(
 
 /// UDP relay (connect-mode): read the target (announced once after the sentinel), open a
 /// connected UDP socket, then shuttle `[u16 len][payload]` frames each way.
-async fn handle_udp(mut conn: TcpStream, mut buf: BytesMut, peer: SocketAddr) -> anyhow::Result<()> {
+async fn handle_udp(
+    mut conn: TcpStream,
+    mut buf: BytesMut,
+    peer: SocketAddr,
+) -> anyhow::Result<()> {
     let target = read_address(&mut conn, &mut buf).await?;
     let addr = resolve(&target).await?;
     eprintln!("[relay] UDP {peer} -> {addr}");
@@ -93,7 +97,9 @@ async fn handle_udp(mut conn: TcpStream, mut buf: BytesMut, peer: SocketAddr) ->
         "[::]:0".parse().expect("valid bind addr")
     };
     let udp = UdpSocket::bind(bind).await?;
-    udp.connect(addr).await.with_context(|| format!("udp connect {addr}"))?;
+    udp.connect(addr)
+        .await
+        .with_context(|| format!("udp connect {addr}"))?;
     let udp = Arc::new(udp);
     let (mut rd, mut wr) = conn.into_split();
 
@@ -161,7 +167,10 @@ async fn read_address(conn: &mut TcpStream, buf: &mut BytesMut) -> anyhow::Resul
 }
 
 /// Append one read into `buf`; returns `false` on EOF.
-async fn read_more<R: AsyncReadExt + Unpin>(rd: &mut R, buf: &mut BytesMut) -> anyhow::Result<bool> {
+async fn read_more<R: AsyncReadExt + Unpin>(
+    rd: &mut R,
+    buf: &mut BytesMut,
+) -> anyhow::Result<bool> {
     let mut chunk = [0u8; 2048];
     let n = rd.read(&mut chunk).await?;
     if n == 0 {

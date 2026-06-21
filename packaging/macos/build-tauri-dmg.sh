@@ -19,6 +19,7 @@ TEAM_ID="ACZRKC3LQ9"
 SYSEXT_ID="org.getlantern.spark.tunnel"
 VOLNAME="Spark"
 WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 ARCHIVE="$WORK/SparkApp.xcarchive"
 OUT="${OUTPUT_DIR:-$REPO_ROOT/dist}"; mkdir -p "$OUT"
 APP="$OUT/Spark.app"
