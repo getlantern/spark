@@ -122,15 +122,27 @@ A probe:
    times "ready". This is the ranking latency and a liveness/blocking signal (a blocked/throttled
    server fails or times out).
 2. **Verifies end-to-end** — open a proxied flow to the callback host and run a minimal **HTTP/1.1
-   GET** of the callback URL over it (TLS via `rustls` when `https://`); **`healthy = 2xx`.** This uses
-   the transport's stream surface (`Transport::dial`), which works for any transport that proxies TCP
-   — *including* UDP/QUIC-based ones such as hysteria2, which carry TCP flows over their UDP transport
-   (the QUIC handshake is folded into the dial latency). A hypothetical **UDP-only** transport (no TCP
-   surface at all) would need a UDP-based health check (e.g. a DNS query or QUIC echo to the callback);
-   that variant is a clean extension of the probe, noted in the roadmap, and not built here.
+   GET** of the callback URL over it; **`healthy = 2xx`.** This uses the transport's stream surface
+   (`Transport::dial`), which works for any transport that proxies TCP — *including* UDP/QUIC-based
+   ones such as hysteria2, which carry TCP flows over their UDP transport (the QUIC handshake is folded
+   into the dial latency). A hypothetical **UDP-only** transport (no TCP surface at all) would need a
+   UDP-based health check (e.g. a DNS query or QUIC echo to the callback); that variant is a clean
+   extension of the probe, noted in the roadmap, and not built here.
+
+**TLS for the callback (binary-budget decision).** `rustls` is **not** in spark's base build (only
+`ring`), and the <3 MB base budget rules out adding it just for a health check. So:
+- **`http://`** callbacks → plain HTTP/1.1 over the transport stream; works in **every** build.
+- **`https://`** callbacks → TLS via the **boring** backend already linked by the transport features
+  (a plain `tokio-boring2` `SslConnector` — no Chrome mimicry needed, since this TLS rides *inside* the
+  tunnel where the censor can't see it). Gated `#[cfg(feature = "anytls")]` (which `samizdat` implies,
+  and which any real anytls/samizdat pool already enables).
+- An `https://` callback configured in a build **without** a boring-bearing feature → a clear error at
+  probe time (mirroring the existing "feature not built" errors), never a silent skip.
 
 The HTTP client is a tiny hand-rolled GET-status reader over the transport stream — consistent with
-spark's "raw `rustls` + `tokio`, no `hyper`/`reqwest`" rule (cf. `flint-dns`'s hand-rolled DoH/h2).
+spark's "raw TLS + `tokio`, no `hyper`/`reqwest`" rule (cf. `flint-dns`'s hand-rolled DoH/h2). The
+multi-server core (config, `SelectingTransport`, prober, the `http://` probe path) is **not**
+feature-gated; only the `https://` TLS step rides `anytls`.
 Each probe is bounded by a deadline so a hung dial can't stall a batch (same lesson as the bootstrap
 resolver's per-attempt timeout).
 
