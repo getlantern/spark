@@ -20,7 +20,7 @@ export class TauriBackend implements SparkBackend {
   }
 }
 
-/// True when running inside the Tauri webview (vs a plain browser at `npm run dev`).
+// True when running inside the Tauri webview (vs a plain browser at `npm run dev`).
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }

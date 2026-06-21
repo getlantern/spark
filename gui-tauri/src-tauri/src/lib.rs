@@ -299,6 +299,12 @@ pub mod ne_spike {
                         let dict =
                             NSDictionary::from_retained_objects(&[ns_string!("config")], &[val]);
                         proto.setProviderConfiguration(Some(&dict));
+                    } else {
+                        // Direct (None): explicitly clear any provider config so a reused
+                        // manager can't keep tunnelling through a stale relay. (The proto
+                        // is fresh here, but this makes the direct path unambiguous and
+                        // robust to future refactors that reuse the existing protocol.)
+                        proto.setProviderConfiguration(None);
                     }
                     mgr.setProtocolConfiguration(Some(&proto));
                     mgr.setLocalizedDescription(Some(ns_string!("Spark")));
