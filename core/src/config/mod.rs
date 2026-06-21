@@ -294,8 +294,9 @@ pub struct AnytlsConfig {
     pub server: Endpoint,
     /// The shared password — the auth secret (sent `sha256`'d on the wire).
     pub password: String,
-    /// TLS SNI to present. When omitted, the bootstrap phase defaults it to the configured hostname
-    /// (for a `host:port` server) or the server's IP literal (for an `IP:port` server).
+    /// TLS SNI to present. When omitted: for a `host:port` server the bootstrap phase fills it with
+    /// the hostname (before resolving it away); for an `IP:port` server the transport builder defaults
+    /// it to the IP literal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
     /// Inline Layer-A ClientHello knobs (ADR 0006 P2 gambit genome). Default = the Chrome-137
@@ -325,8 +326,9 @@ pub struct SamizdatConfig {
     pub server_pubkey: String,
     /// The pre-shared short ID, hex-encoded (8 bytes).
     pub short_id: String,
-    /// TLS SNI (cover-site name) to present. When omitted, the bootstrap phase defaults it to the
-    /// configured hostname (for a `host:port` server) or the server's IP literal (for an `IP:port`).
+    /// TLS SNI (cover-site name) to present. When omitted: for a `host:port` server the bootstrap
+    /// phase fills it with the hostname (before resolving it away); for an `IP:port` server the
+    /// transport builder defaults it to the IP literal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
 }
