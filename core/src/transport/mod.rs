@@ -70,6 +70,10 @@ pub mod discovery;
 /// feature so the base build pulls neither the boring TLS backend nor the `h2` dependency.
 #[cfg(feature = "samizdat")]
 pub mod samizdat;
+/// Latency-selecting transport over a multi-server pool (design: docs/multi-server-selection-design.md).
+/// Gated behind `multi-server` so the base build pulls no `flint-dial` dependency.
+#[cfg(feature = "multi-server")]
+pub mod select;
 pub mod tcp_tunnel;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.

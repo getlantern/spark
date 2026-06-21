@@ -90,3 +90,6 @@ samizdat = [
     "dep:h2",
     "dep:http",
 ]
+# Latency-selecting multi-server pool (design: docs/multi-server-selection-design.md). Pulls
+# flint-dial for windowed probing. https callbacks additionally need `anytls` (boring TLS).
+multi-server = ["dep:flint-dial"]
