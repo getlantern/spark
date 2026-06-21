@@ -150,6 +150,45 @@ pub(crate) fn build_one(
     }
 }
 
+/// Build a `SelectingTransport` over `config.transport.servers`. Each entry's callback URL is its
+/// per-entry override or the global `transport.callback_url`; the pool needs at least one callback.
+#[cfg(feature = "multi-server")]
+fn build_selecting(
+    config: &Config,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    use crate::transport::probe::CallbackUrl;
+    use crate::transport::select::{Member, SelectingTransport};
+    let wire = wire_plan_from_config(&config.transport.shaping);
+    let mut members = Vec::with_capacity(config.transport.servers.len());
+    for entry in &config.transport.servers {
+        let raw = entry
+            .callback_url
+            .as_deref()
+            .or(config.transport.callback_url.as_deref())
+            .ok_or_else(|| io::Error::other("transport.servers requires a callback_url (global or per-entry)"))?;
+        let callback = CallbackUrl::parse(raw)?;
+        let (transport, udp) = build_one(&entry.spec, protector.as_ref(), &wire)?;
+        members.push(Member::new(transport, udp, callback));
+    }
+    let st = Arc::new(SelectingTransport::new(
+        members,
+        std::time::Duration::from_secs(config.transport.probe_interval_secs),
+        config.transport.probe_window,
+    ));
+    Ok((st.clone() as Arc<dyn Transport>, st as Arc<dyn UdpTransport>))
+}
+
+#[cfg(not(feature = "multi-server"))]
+fn build_selecting(
+    _config: &Config,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.servers is configured but spark was built without the `multi-server` feature",
+    ))
+}
+
 /// Build the TCP + UDP transports from `config`: a tunnel client when `transport.server` is
 /// set, otherwise direct; both pinned to `transport.protect_interface` when configured.
 pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
@@ -157,6 +196,11 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
         Some(name) => Some(SocketProtector::for_interface(name)?),
         None => None,
     };
+    // A configured server pool supersedes the single-transport fields: build a latency-selecting
+    // transport over it.
+    if !config.transport.servers.is_empty() {
+        return build_selecting(config, protector);
+    }
     // AnyTLS takes precedence over the plain `server` tunnel when configured.
     if let Some(anytls) = &config.transport.anytls {
         let wire = wire_plan_from_config(&config.transport.shaping);
@@ -713,6 +757,44 @@ mod samizdat_config_tests {
     #[test]
     fn rejects_non_hex() {
         assert!(from_config(&config_with(&"zz".repeat(32), &"10".repeat(8))).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "multi-server"))]
+mod pool_config_tests {
+    use super::*;
+    use crate::config::{Config, ServerEntry, ServerSpec, TransportConfig, TunnelConfig};
+
+    #[tokio::test]
+    async fn from_config_builds_a_selecting_transport_for_a_pool() {
+        let cfg = Config {
+            transport: TransportConfig {
+                servers: vec![ServerEntry {
+                    spec: ServerSpec::Tunnel(TunnelConfig { server: "1.2.3.4:443".parse().unwrap(), sni: None }),
+                    callback_url: None,
+                }],
+                callback_url: Some("http://127.0.0.1:80/ok".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        from_config(&cfg).expect("from_config should build the selecting transport");
+    }
+
+    #[tokio::test]
+    async fn pool_without_callback_url_is_an_error() {
+        let cfg = Config {
+            transport: TransportConfig {
+                servers: vec![ServerEntry {
+                    spec: ServerSpec::Tunnel(TunnelConfig { server: "1.2.3.4:443".parse().unwrap(), sni: None }),
+                    callback_url: None,
+                }],
+                callback_url: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(from_config(&cfg).is_err());
     }
 }
 

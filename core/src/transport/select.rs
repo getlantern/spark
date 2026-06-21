@@ -21,6 +21,12 @@ pub(crate) struct Member {
     pub(crate) callback: CallbackUrl,
 }
 
+impl Member {
+    pub(crate) fn new(transport: Arc<dyn Transport>, udp: Arc<dyn UdpTransport>, callback: CallbackUrl) -> Self {
+        Member { transport, udp, callback }
+    }
+}
+
 /// Ranked selection: indices into the pool, best-first; empty = nothing healthy.
 #[derive(Default)]
 struct Selection {
