@@ -35,6 +35,21 @@ pub struct SelectingTransport {
 }
 
 impl SelectingTransport {
+    /// Build a selecting transport over `members`, spawning a background prober. Must be called inside
+    /// a tokio runtime (as `from_config`'s callers are). The prober runs an initial round immediately,
+    /// then re-probes every `interval`; `window` bounds probe concurrency.
+    pub(crate) fn new(members: Vec<Member>, interval: std::time::Duration, window: usize) -> Self {
+        let members = Arc::new(members);
+        let selection = Arc::new(Mutex::new(Selection::default()));
+        let task = tokio::spawn(prober_loop(
+            Arc::clone(&members),
+            Arc::clone(&selection),
+            interval,
+            window.max(1),
+        ));
+        SelectingTransport { members, selection, prober: Mutex::new(Some(task)) }
+    }
+
     /// Current best-first order (snapshot; lock not held across `.await`).
     fn order(&self) -> Vec<usize> {
         self.selection.lock().expect("selection mutex").ranked.clone()
@@ -82,6 +97,38 @@ impl Drop for SelectingTransport {
         if let Some(h) = self.prober.lock().expect("prober mutex").take() {
             h.abort();
         }
+    }
+}
+
+/// Background prober: probe the pool (windowed), update the ranked selection (with hysteresis), then
+/// wait `interval` and repeat. Per-probe deadline = `interval` capped at 10s so a slow server can't
+/// stall a whole round on a short interval.
+async fn prober_loop(
+    members: Arc<Vec<Member>>,
+    selection: Arc<Mutex<Selection>>,
+    interval: std::time::Duration,
+    window: usize,
+) {
+    use crate::transport::probe::probe;
+    let per_probe = interval.min(std::time::Duration::from_secs(10));
+    loop {
+        let outcomes = flint_dial::probe_windowed(members.len(), window, |i| {
+            // Clone the (cheap) Arc + CallbackUrl into the future so it borrows nothing from `members`.
+            let transport = Arc::clone(&members[i].transport);
+            let callback = members[i].callback.clone();
+            async move { probe(&transport, &callback, per_probe).await }
+        })
+        .await;
+        {
+            let mut sel = selection.lock().expect("selection mutex");
+            sel.ranked = next_order(&sel.ranked, &outcomes);
+        }
+        tracing::debug!(
+            healthy = outcomes.iter().filter(|(_, o)| o.healthy).count(),
+            pool = members.len(),
+            "pool re-probed"
+        );
+        tokio::time::sleep(interval).await;
     }
 }
 
@@ -134,6 +181,44 @@ fn next_order(current: &[usize], fresh: &[(usize, ProbeOutcome)]) -> Vec<usize> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Serve204;
+    #[async_trait]
+    impl Transport for Serve204 {
+        async fn dial(&self, _t: SocketAddr) -> io::Result<BoxedStream> {
+            let (client, mut server) = tokio::io::duplex(4096);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut b = vec![0u8; 1024];
+                let _ = server.read(&mut b).await;
+                let _ = server.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
+            });
+            Ok(Box::new(client))
+        }
+    }
+    fn member_serving_204() -> Member {
+        Member {
+            transport: Arc::new(Serve204),
+            udp: Arc::new(NoUdp),
+            // host must be an IP literal (the probe dials by SocketAddr); the fake transport ignores
+            // the target, so 127.0.0.1 just has to parse.
+            callback: CallbackUrl { tls: false, host: "127.0.0.1".into(), port: 80, path: "/".into() },
+        }
+    }
+
+    #[tokio::test]
+    async fn new_probes_and_populates_selection() {
+        let members = vec![member_serving_204(), member_serving_204()];
+        let st = SelectingTransport::new(members, std::time::Duration::from_secs(300), 8);
+        // Give the spawned prober a moment to run its initial round.
+        for _ in 0..50 {
+            if !st.order().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!st.order().is_empty(), "prober should have selected a healthy server");
+    }
 
     // A fake transport: dial always errors, or always yields a dummy stream.
     struct FakeT { ok: bool }
