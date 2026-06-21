@@ -202,7 +202,7 @@ impl Default for TunConfig {
 }
 
 /// How upstream traffic is reached.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TransportConfig {
     /// Tunnel server address. When set, flows are tunneled through it; when `None`, flows
@@ -235,6 +235,37 @@ pub struct TransportConfig {
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
     /// handshake. Default: no shaping.
     pub shaping: ShapingConfig,
+    /// A pool of servers to probe and select among by latency (see
+    /// `docs/multi-server-selection-design.md`). When non-empty, supersedes the single-transport
+    /// fields above; spark builds a latency-selecting transport over the pool. Empty = the legacy
+    /// single-transport path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<ServerEntry>,
+    /// Default health-check URL fetched *through* each server to confirm it works end-to-end
+    /// (per-entry `callback_url` overrides). Required when `servers` is non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+    /// Seconds between full pool re-probes.
+    pub probe_interval_secs: u64,
+    /// Max probes in flight at once (bounded concurrency for large pools).
+    pub probe_window: usize,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            server: None,
+            protect_interface: None,
+            anytls: None,
+            wasm: None,
+            samizdat: None,
+            shaping: ShapingConfig::default(),
+            servers: Vec::new(),
+            callback_url: None,
+            probe_interval_secs: 300,
+            probe_window: 8,
+        }
+    }
 }
 
 /// Opening-handshake framing/timing (ADR 0006 Phase 1, genome Layer C). Shapes only the opening
@@ -359,6 +390,19 @@ pub enum ServerSpec {
     Wasm(WasmConfig),
     /// Plain `tcp_tunnel` client.
     Tunnel(TunnelConfig),
+}
+
+/// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
+/// to `transport.callback_url`). `#[serde(flatten)]` puts the spec's `kind` + fields and the
+/// `callback_url` at the same TOML level. (`deny_unknown_fields` is incompatible with `flatten`.)
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ServerEntry {
+    /// The transport kind + its config.
+    #[serde(flatten)]
+    pub spec: ServerSpec,
+    /// Per-entry health-check URL; overrides `transport.callback_url` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
 }
 
 /// A signed Path-B module that computes a gambit per connection (ADR 0006 P3). Verified by the same
@@ -533,6 +577,10 @@ mod tests {
                         delay_ms: Some(12),
                         tcp_nodelay: true,
                     },
+                    servers: Vec::new(),
+                    callback_url: None,
+                    probe_interval_secs: 300,
+                    probe_window: 8,
                 },
                 udp: UdpConfig {
                     idle_timeout_secs: 30,
@@ -720,6 +768,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c2.first_unresolved_host(), None);
+    }
+
+    #[test]
+    fn parses_a_server_pool_with_callbacks_and_knobs() {
+        let c = Config::from_toml_str(
+            r#"
+            [transport]
+            callback_url = "https://canary.example/generate_204"
+            probe_interval_secs = 120
+            probe_window = 4
+
+            [[transport.servers]]
+            kind = "anytls"
+            server = "proxy-a.example.com:443"
+            password = "pw"
+
+            [[transport.servers]]
+            kind = "samizdat"
+            server = "203.0.113.7:443"
+            server_pubkey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+            short_id = "1011121314151617"
+            callback_url = "https://other.example/ok"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.transport.callback_url.as_deref(), Some("https://canary.example/generate_204"));
+        assert_eq!(c.transport.probe_interval_secs, 120);
+        assert_eq!(c.transport.probe_window, 4);
+        let servers = &c.transport.servers;
+        assert_eq!(servers.len(), 2);
+        assert!(matches!(servers[0].spec, ServerSpec::Anytls(_)));
+        assert_eq!(servers[0].callback_url, None); // falls back to the global default
+        assert_eq!(servers[1].callback_url.as_deref(), Some("https://other.example/ok"));
+    }
+
+    #[test]
+    fn pool_defaults_when_absent() {
+        let c = Config::default();
+        assert!(c.transport.servers.is_empty());
+        assert_eq!(c.transport.probe_interval_secs, 300);
+        assert_eq!(c.transport.probe_window, 8);
+        assert_eq!(c.transport.callback_url, None);
     }
 
     #[test]
