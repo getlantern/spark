@@ -19,6 +19,10 @@ path = "src/lib.rs"
 # config. Built for the macOS slice (boring builds for the host arch); the iOS slices stay off
 # (BoringSSL-for-iOS is a separate concern), so an AnyTLS config on iOS returns -1 until then.
 anytls = ["spark-core/anytls"]
+# Latency-selecting multi-server pool (docs/multi-server-selection-design.md): enable spark-core's
+# `multi-server` so the NE provider can run a `[[transport.servers]]` pool (probe + rank + failover).
+# boring-free (flint-dial happy-eyeballs), enabled on the macOS slice alongside anytls.
+multi-server = ["spark-core/multi-server"]
 
 [dependencies]
 spark-core = { path = "../../core" }
