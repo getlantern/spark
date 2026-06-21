@@ -99,6 +99,12 @@ fn build_one(entry: &ServerEntry, protector: Option<&SocketProtector>, wire: &Wi
   `(Arc<dyn Transport>, Arc<dyn UdpTransport>)` pair (no forwarder change);
 - else → the existing single-transport path (one `build_one` on the desugared lone entry).
 
+**Extensibility (more transports are coming — e.g. hysteria2/QUIC).** `build_one` is the single seam
+for transport kinds. Adding a transport is: a new `ServerEntry` variant + a `build_one` branch
+(returning its `Transport`/`UdpTransport`); the `SelectingTransport`, prober, and probe are
+kind-agnostic and need no change. A UDP-native transport returns a real `UdpTransport` (and a
+TCP-over-its-transport `Transport` if it proxies TCP, as hysteria2 does).
+
 ### 3.3 Health probe (`core/src/transport/probe.rs`)
 
 ```
@@ -110,12 +116,18 @@ async fn probe(transport: &Arc<dyn Transport>, callback: &CallbackUrl) -> ProbeO
 with the no-new-deps rule and `flint-dns`'s hand-rolled codecs); parsing happens once at config load.
 
 A probe:
-1. **Times the transport handshake** — establish the transport session (TCP + TLS/Chrome-mimicry +
-   auth) to "ready". This is the ranking latency and a liveness/blocking signal (a blocked/throttled
+1. **Times the transport establish** — bring the transport session to "ready". The *establish*
+   is kind-specific (a TCP+TLS/Chrome-mimicry+auth handshake for anytls/samizdat/tunnel, a QUIC
+   handshake for a future UDP/QUIC transport like hysteria2) — the prober doesn't care which; it just
+   times "ready". This is the ranking latency and a liveness/blocking signal (a blocked/throttled
    server fails or times out).
-2. **Verifies end-to-end** — `transport.dial(callback_host:port)` (a stream *through* the tunnel to
-   the exit and on to the callback host), then a minimal **HTTP/1.1 GET** of the callback URL over it
-   (TLS via `rustls` when `https://`). **`healthy = 2xx`.**
+2. **Verifies end-to-end** — open a proxied flow to the callback host and run a minimal **HTTP/1.1
+   GET** of the callback URL over it (TLS via `rustls` when `https://`); **`healthy = 2xx`.** This uses
+   the transport's stream surface (`Transport::dial`), which works for any transport that proxies TCP
+   — *including* UDP/QUIC-based ones such as hysteria2, which carry TCP flows over their UDP transport
+   (the QUIC handshake is folded into the dial latency). A hypothetical **UDP-only** transport (no TCP
+   surface at all) would need a UDP-based health check (e.g. a DNS query or QUIC echo to the callback);
+   that variant is a clean extension of the probe, noted in the roadmap, and not built here.
 
 The HTTP client is a tiny hand-rolled GET-status reader over the transport stream — consistent with
 spark's "raw `rustls` + `tokio`, no `hyper`/`reqwest`" rule (cf. `flint-dns`'s hand-rolled DoH/h2).
@@ -132,9 +144,17 @@ resolver's per-attempt timeout).
 
 `dial`/`dial_udp` delegate to the **current best**; on a dial error the call **fails over** to the
 next-best in rank order for that flow and **demotes** the failed server (triggering an off-cycle
-re-probe). Existing connections are never migrated — only *new* flows see a swap. UDP rides the same
-selected server and inherits that transport's UDP capability — e.g. a TCP-only `samizdat` entry's
-`dial_udp` reports unsupported, exactly as today; ranking is on the (always-present) TCP probe.
+re-probe). Existing connections are never migrated — only *new* flows see a swap.
+
+**L4 capability & selection (forward-looking).** v1 keeps one current-best shared by TCP and UDP, and
+ranks on the proxied-flow probe above; UDP rides the same selected server and inherits its UDP
+capability (e.g. a TCP-only `samizdat` entry's `dial_udp` reports unsupported, exactly as today). This
+is fine for today's kinds (anytls/wasm/tunnel carry both; samizdat is TCP-only). As **UDP-native**
+transports arrive (hysteria2/QUIC) and kinds diverge in L4 support, selection becomes
+**capability-aware**: rank only UDP-capable servers for the UDP best, independently from the TCP best
+(two current-bests rather than one). The `ServerEntry`/`build_one`/prober seams already isolate this —
+it's an internal change to ranking, not to the config or the forwarder. Tracked in the roadmap; not
+built here.
 
 **Prober** (uses `flint_dial::probe_windowed`):
 - **Initial selection:** probe the pool in windowed batches; pick the lowest-latency healthy server
@@ -226,9 +246,12 @@ every probe_interval_secs:  probe_windowed(pool) → re-rank → swap if ≥20% 
 | # | Follow-up | Depends on |
 |---|---|---|
 | 1 | **Multi-server selection (this doc)** | transport layer, bootstrap resolver, flint-dial |
-| 2 | Server pool fetched from the Lantern API (proxyless/fronted config-fetch) | 1 + bootstrap resolver + flint-dial |
-| 3 | Expected-response-body match on the health check (beyond 2xx) | 1 |
-| 4 | Adaptive probe cadence (backoff when stable, faster when unstable) | 1 |
+| 2 | More transport kinds, incl. **UDP-native** (hysteria2/QUIC): new `ServerEntry` variant + `build_one` branch | 1 |
+| 3 | **Capability-aware selection** — independent UDP-best vs TCP-best once kinds diverge in L4 support | 1 + 2 |
+| 4 | **UDP-based health check** for UDP-only transports (DNS/QUIC-echo callback) | 1 + 2 |
+| 5 | Server pool fetched from the Lantern API (proxyless/fronted config-fetch) | 1 + bootstrap resolver + flint-dial |
+| 6 | Expected-response-body match on the health check (beyond 2xx) | 1 |
+| 7 | Adaptive probe cadence (backoff when stable, faster when unstable) | 1 |
 
 ## 8. References
 
