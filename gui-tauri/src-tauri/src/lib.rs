@@ -287,9 +287,7 @@ pub mod ne_spike {
                 };
                 let proto = unsafe { NETunnelProviderProtocol::new() };
                 unsafe {
-                    proto.setProviderBundleIdentifier(Some(ns_string!(
-                        "org.getlantern.spark.tunnel"
-                    )));
+                    proto.setProviderBundleIdentifier(Some(&NSString::from_str(TUNNEL_SYSEXT_ID)));
                     proto.setServerAddress(Some(ns_string!("Spark")));
                     if let Some(ref c) = config {
                         // providerConfiguration is NSDictionary<NSString, AnyObject>; upcast the

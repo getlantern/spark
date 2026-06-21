@@ -20,6 +20,7 @@
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
   let poll: ReturnType<typeof setInterval>;
+  let refreshing = false; // re-entrancy guard: status() can block ~3s, longer than the 2s poll
 
   const connected = $derived(status.state === "connected");
   const connecting = $derived(status.state === "connecting");
@@ -33,13 +34,19 @@
   );
 
   async function refresh() {
-    // Polled on a timer, so swallow/surface failures here — an unhandled rejection
-    // would otherwise fire every interval and the UI would never record the error.
+    // status() can block ~3s (longer than the 2s poll), so skip a tick if one is
+    // still in-flight — avoids overlapping calls racing status/errorMsg and stacking
+    // pending invoke()s. Failures are caught so a rejected poll isn't an unhandled
+    // rejection every interval.
+    if (refreshing) return;
+    refreshing = true;
     try {
       status = await backend.status();
       errorMsg = null; // clear a prior (transient) error once the backend recovers
     } catch (e) {
       errorMsg = String(e);
+    } finally {
+      refreshing = false;
     }
   }
   async function toggle() {
