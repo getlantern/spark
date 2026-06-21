@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021 (MSRV 1.85), tokio, `async-trait`, `serde`/`toml`, the public `getlantern/flint` crates (`flint-dial`, `flint-dns`) over boring2 Chrome-mimicry TLS. Spec: `docs/bootstrap-resolver-design.md`.
 
-**Worktree:** all spark work happens in `/Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver` (branch `bootstrap-resolver`). flint work happens in `/Users/afisk/go/src/github.com/getlantern/flint` (branch `main`). The spark *main checkout* (`.../spark`) is **behind** this worktree (pre-flint-extraction) — never edit it.
+**Worktree:** do the spark work in a dedicated git worktree on a feature branch (e.g. `git worktree add ../spark-bootstrap-resolver -b bootstrap-resolver`), and the flint changes in a separate worktree/branch of `getlantern/flint`. Paths below are written relative to each repo root; substitute your own worktree locations. (This plan was first executed against worktrees under `~/go/src/github.com/getlantern/…`; those absolute paths are illustrative, not required.)
 
 ---
 
@@ -142,28 +142,25 @@ where
     let window = window.max(1);
     let mut set = FuturesUnordered::new();
     let mut next = 0;
-    while next < count && set.len() < window {
-        let i = next;
-        let fut = dial_one(i);
-        set.push(async move { (i, fut.await) });
-        next += 1;
-    }
     let mut errors = Vec::new();
-    while let Some((i, res)) = set.next().await {
-        match res {
-            Ok(v) => return Ok((i, v)),
-            Err(e) => {
-                errors.push(e);
-                if next < count {
-                    let i = next;
-                    let fut = dial_one(i);
-                    set.push(async move { (i, fut.await) });
-                    next += 1;
-                }
-            }
+    loop {
+        // Refill the window up to capacity. There is exactly ONE `async move` push site in this
+        // function on purpose: two syntactically-distinct `async move` blocks are two anonymous
+        // types, which `FuturesUnordered<Fut>` (one element type) rejects (E0308). Keeping a single
+        // push site also keeps the wrapper future `Send` when `Fut`/`T` are — no boxing — which the
+        // downstream `#[async_trait]` resolvers require. Do NOT box with `LocalBoxFuture` (not `Send`).
+        while next < count && set.len() < window {
+            let i = next;
+            next += 1;
+            let fut = dial_one(i);
+            set.push(async move { (i, fut.await) });
+        }
+        match set.next().await {
+            Some((i, Ok(v))) => return Ok((i, v)),
+            Some((_, Err(e))) => errors.push(e),
+            None => return Err(errors), // window empty and nothing left to start → all failed
         }
     }
-    Err(errors)
 }
 ```
 
@@ -207,7 +204,7 @@ Add this test inside the existing `mod tests` block in `crates/flint-dns/src/lib
 Run: `cd /Users/afisk/go/src/github.com/getlantern/flint && cargo test -p flint-dns resolve_on_an_empty_pool`
 Expected: PASS even now (the current `resolve` already returns `AllFailed{0}` for an empty pool). This behavior must survive the internals swap to `race_windowed` + timeout — note it and proceed.
 
-- [ ] **Step 3: Enable the tokio `time` feature in flint-dns**
+- [ ] **Step 3: Enable the tokio `time` (and `rt`) features in flint-dns**
 
 In `crates/flint-dns/Cargo.toml`, in `[dependencies]`, change:
 
@@ -218,8 +215,10 @@ tokio = { version = "1", default-features = false, features = ["io-util"] }
 to:
 
 ```toml
-tokio = { version = "1", default-features = false, features = ["io-util", "time"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "rt", "time"] }
 ```
+
+(`time` is for the new `ATTEMPT_TIMEOUT`. `rt` is also added: `doh.rs` uses `tokio::spawn` + `JoinHandle` in non-test code, which need `rt` — the original manifest omitted it and only compiled because spark unifies tokio's `rt` downstream. Declaring it honestly lets flint-dns build standalone.)
 
 - [ ] **Step 4: Switch `resolve` and `resolve_cached` to windowed + timeout-bounded racing**
 
@@ -380,14 +379,18 @@ Add to the `mod tests` block in `core/src/config/mod.rs`:
     }
 
     #[test]
-    fn endpoint_round_trips_through_toml_via_anytls() {
-        // serde round-trip on a real config field (Endpoint serializes/deserializes as one string).
+    fn endpoint_serde_round_trips() {
+        // Endpoint serializes/deserializes as a single string, for both variants. Tested directly
+        // (not via anytls.server, which is still a SocketAddr until Task B2).
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct W {
+            e: Endpoint,
+        }
         for s in ["1.2.3.4:443", "proxy.example.com:8443"] {
-            let toml = format!("[transport.anytls]\nserver = \"{s}\"\npassword = \"pw\"\n");
-            let c = Config::from_toml_str(&toml).unwrap();
-            let rendered = c.to_toml_string().unwrap();
-            let back = Config::from_toml_str(&rendered).unwrap();
-            assert_eq!(c, back, "round-trip changed:\n{rendered}");
+            let w = W { e: s.parse().unwrap() };
+            let toml = toml::to_string(&w).unwrap();
+            let back: W = toml::from_str(&toml).unwrap();
+            assert_eq!(w, back, "round-trip changed:\n{toml}");
         }
     }
 ```
@@ -577,7 +580,7 @@ with:
         server,
 ```
 
-- [ ] **Step 4: Fix the in-file config-test constructors and the config-module tests**
+- [ ] **Step 4: Fix the in-file config-test constructors and add the through-config round-trip**
 
 The `.parse().unwrap()` constructors already produce `Endpoint::Ip` via `FromStr`, so most need no change. Verify the assertion-style comparisons still type-check. In `core/src/config/mod.rs` tests, the `parses_samizdat_config` test asserts:
 
@@ -586,6 +589,30 @@ The `.parse().unwrap()` constructors already produce `Endpoint::Ip` via `FromStr
 ```
 
 This still works (both sides infer `Endpoint`). The `parses_inline_anytls_gambit_knobs` / `parses_anytls_dynamic_gambit_module` tests don't read `.server`, so they're unaffected. No edits expected here — but run the build to confirm, and only if a constructor fails to infer, annotate it (e.g. `server: "192.0.2.1:443".parse::<Endpoint>().unwrap()`).
+
+Now that `anytls.server` is an `Endpoint`, add a test confirming a **hostname** server round-trips through the real config (this is the case Task B1 couldn't test yet). Add to the `mod tests` block in `core/src/config/mod.rs`:
+
+```rust
+    #[test]
+    fn anytls_host_server_round_trips_through_toml() {
+        for s in ["1.2.3.4:443", "proxy.example.com:8443"] {
+            let toml = format!("[transport.anytls]\nserver = \"{s}\"\npassword = \"pw\"\n");
+            let c = Config::from_toml_str(&toml).unwrap();
+            let rendered = c.to_toml_string().unwrap();
+            let back = Config::from_toml_str(&rendered).unwrap();
+            assert_eq!(c, back, "round-trip changed:\n{rendered}");
+        }
+        // And the hostname actually lands as Endpoint::Host.
+        let c = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"proxy.example.com:8443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.transport.anytls.unwrap().server,
+            Endpoint::Host { host: "proxy.example.com".into(), port: 8443 }
+        );
+    }
+```
 
 - [ ] **Step 5: Run the full feature build + tests**
 
@@ -1147,12 +1174,14 @@ pub async fn resolve_bootstrap(config: &mut config::Config) -> std::io::Result<(
 pub async fn resolve_bootstrap(config: &mut config::Config) -> std::io::Result<()> {
     if let Some(host) = config.first_unresolved_host() {
         return Err(std::io::Error::other(format!(
-            "proxy server `{host}` is a hostname, which requires the `bootstrap-dns` feature"
+            "proxy server `{host}` is a hostname, which requires the bootstrap-dns feature"
         )));
     }
     Ok(())
 }
 ```
+
+(Note: `bootstrap-dns` is intentionally *not* backtick-wrapped in the message so it matches the test's `contains("bootstrap-dns feature")` assertion below.)
 
 - [ ] **Step 5: Add a feature-off behavior test for the shim**
 

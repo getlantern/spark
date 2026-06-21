@@ -52,7 +52,9 @@ impl Endpoint {
         match self {
             Endpoint::Ip(addr) => Ok(*addr),
             Endpoint::Host { host, port } => Err(io::Error::other(format!(
-                "endpoint {host}:{port} was not resolved (build with the `bootstrap-dns` feature to resolve hostnames)"
+                "endpoint {host}:{port} is an unresolved hostname — the bootstrap phase \
+                 (resolve_bootstrap) must run before the transport is built, and the binary must be \
+                 built with the `bootstrap-dns` feature to resolve hostnames"
             ))),
         }
     }
@@ -74,7 +76,11 @@ impl std::str::FromStr for Endpoint {
         }
         let (host, port) = s.rsplit_once(':').ok_or(EndpointParseError)?;
         let port: u16 = port.parse().map_err(|_| EndpointParseError)?;
-        if host.is_empty() {
+        // Reject an empty host or any leftover `:` in the host. A bracketed IPv6 literal already
+        // parsed via the `SocketAddr` branch above, so a `:` here means an unbracketed IPv6
+        // (`2001:db8::1:443`) or a double-port typo (`host:443:80`) — fail fast at parse time rather
+        // than letting it masquerade as a hostname and blow up confusingly during resolution.
+        if host.is_empty() || host.contains(':') {
             return Err(EndpointParseError);
         }
         Ok(Endpoint::Host {
@@ -628,6 +634,9 @@ mod tests {
         assert!("notanaddress".parse::<Endpoint>().is_err());
         assert!(":443".parse::<Endpoint>().is_err());
         assert!("host:notaport".parse::<Endpoint>().is_err());
+        // a stray `:` in the host (unbracketed IPv6 or a double-port typo) is rejected at parse time.
+        assert!("2001:db8::1:443".parse::<Endpoint>().is_err());
+        assert!("host:443:80".parse::<Endpoint>().is_err());
     }
 
     #[test]
