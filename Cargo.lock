@@ -807,7 +807,7 @@ dependencies = [
 [[package]]
 name = "flint-dial"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=897f1927d9c6b98b934e08bae313dec27d71357f#897f1927d9c6b98b934e08bae313dec27d71357f"
+source = "git+https://github.com/getlantern/flint?rev=40733ff63045b9952fa2b64f91aab56bfe1c5691#40733ff63045b9952fa2b64f91aab56bfe1c5691"
 dependencies = [
  "flint-shaping",
  "flint-tls",
@@ -819,7 +819,7 @@ dependencies = [
 [[package]]
 name = "flint-dns"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=897f1927d9c6b98b934e08bae313dec27d71357f#897f1927d9c6b98b934e08bae313dec27d71357f"
+source = "git+https://github.com/getlantern/flint?rev=40733ff63045b9952fa2b64f91aab56bfe1c5691#40733ff63045b9952fa2b64f91aab56bfe1c5691"
 dependencies = [
  "bytes",
  "flint-dial",
@@ -836,7 +836,7 @@ dependencies = [
 [[package]]
 name = "flint-shaping"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=897f1927d9c6b98b934e08bae313dec27d71357f#897f1927d9c6b98b934e08bae313dec27d71357f"
+source = "git+https://github.com/getlantern/flint?rev=40733ff63045b9952fa2b64f91aab56bfe1c5691#40733ff63045b9952fa2b64f91aab56bfe1c5691"
 dependencies = [
  "ring",
  "tokio",
@@ -845,7 +845,7 @@ dependencies = [
 [[package]]
 name = "flint-tls"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=897f1927d9c6b98b934e08bae313dec27d71357f#897f1927d9c6b98b934e08bae313dec27d71357f"
+source = "git+https://github.com/getlantern/flint?rev=40733ff63045b9952fa2b64f91aab56bfe1c5691#40733ff63045b9952fa2b64f91aab56bfe1c5691"
 dependencies = [
  "boring2",
  "flint-shaping",
@@ -860,7 +860,7 @@ dependencies = [
 [[package]]
 name = "flint-verify"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=897f1927d9c6b98b934e08bae313dec27d71357f#897f1927d9c6b98b934e08bae313dec27d71357f"
+source = "git+https://github.com/getlantern/flint?rev=40733ff63045b9952fa2b64f91aab56bfe1c5691#40733ff63045b9952fa2b64f91aab56bfe1c5691"
 dependencies = [
  "ring",
  "thiserror",
