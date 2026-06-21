@@ -17,15 +17,15 @@ use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
 use crate::net::SocketProtector;
-use crate::transport::shaping::{SegmentShapingStream, WirePlan};
 use crate::transport::tcp_tunnel::header::Address;
 use crate::transport::{
     protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport,
 };
 use crate::BoxedStream;
+use flint_shaping::{SegmentShapingStream, WirePlan};
 
-use super::profile::Profile;
-use super::{tls, udp, PaddingScheme, Session};
+use super::{udp, PaddingScheme, Session};
+use flint_tls::Profile;
 
 /// Open a new session once a session is carrying this many streams (spreads load / bounds HOL).
 const MAX_STREAMS_PER_SESSION: usize = 64;
@@ -150,7 +150,7 @@ impl Inner {
         // by sitting between boring and the socket (ADR 0006 Phase 1).
         let shaped = SegmentShapingStream::new(tcp, self.wire.clone());
         let profile = self.resolve_profile();
-        let tls = tls::connect(shaped, &self.sni, &profile).await?;
+        let tls = flint_tls::connect(shaped, &self.sni, &profile).await?;
         let session = Arc::new(Session::client(
             tls,
             &self.password,
@@ -178,7 +178,7 @@ impl Inner {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let ctx = crate::transport::gambit::GambitContext { unix_secs }.encode();
+        let ctx = flint_tls::gambit::GambitContext { unix_secs }.encode();
         match transform.compute_gambit(&ctx) {
             Ok(gambit) => match Profile::for_boring(&gambit) {
                 Ok(resolved) => {
@@ -266,8 +266,8 @@ impl UdpTransport for AnytlsTransport {
 #[cfg(all(test, feature = "wasm-transport"))]
 mod tests {
     use super::*;
-    use crate::transport::gambit::{Capability, ClientHello, EchMode, Gambit, Records};
     use crate::transport::wasm::{Transform, TransformModule};
+    use flint_tls::gambit::{Capability, ClientHello, EchMode, Gambit, Records};
 
     /// A Path-B module that, on `compute_gambit`, returns the postcard encoding of `g`.
     fn gambit_transform(g: &Gambit) -> Transform {

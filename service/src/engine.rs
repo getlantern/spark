@@ -85,10 +85,17 @@ impl CoreEngine {
 
 #[async_trait]
 impl TunnelEngine for CoreEngine {
-    async fn start(&mut self, config: Config, exit: mpsc::Sender<()>) -> Result<(), EngineError> {
+    async fn start(
+        &mut self,
+        mut config: Config,
+        exit: mpsc::Sender<()>,
+    ) -> Result<(), EngineError> {
         if self.tun.is_some() {
             return Ok(()); // already running
         }
+        spark_core::resolve_bootstrap(&mut config)
+            .await
+            .map_err(|e| EngineError(format!("resolving bootstrap endpoints: {e}")))?;
         let tun = Arc::new(
             Tun::open(TunConfig {
                 name: config.tun.name.clone(),

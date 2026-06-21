@@ -100,6 +100,8 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
     register(&stop);
     let waiter = Arc::clone(&stop);
     let result = runtime.block_on(async move {
+        let mut config = config;
+        crate::resolve_bootstrap(&mut config).await?;
         // SAFETY: `fd` is the TUN fd from the OS (Android `establish()`/`detachFd`, or the Apple
         // NE utun fd); the host side transfers ownership to native for the tunnel's lifetime.
         let tun = Arc::new(

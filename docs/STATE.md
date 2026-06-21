@@ -28,8 +28,88 @@ What's DONE (this and prior sessions; all on `main`, pushed):
 - **GUI restyled to the Lantern look** (`gui/lib/main.dart`): light theme (#F8FAFB / cyan #00BDD6),
   the sliding pill toggle, a fixed **390×760 portrait window** (`MainFlutterWindow.swift` — needs
   `makeKeyAndOrderFront` or it launches hidden), AppBar + a VPN-status/Protocol/Routing settings card.
+- **Samizdat transport — design + kID spike DONE 2026-06-19 (branch `samizdat-transport`, PR #1).**
+  Second M11 transport: client-side, **wire-interop with deployed lantern-box/sing-box
+  `"samizdat"` servers**. Design: `docs/samizdat-transport-design.md` + **ADR 0007**. Decisions —
+  single TLS 1.3 + **H2 CONNECT mux via the `h2` crate** (scoped no-hyper exception; H2 is inside TLS
+  so its fingerprint is moot), REALITY auth in the TLS `legacy_session_id`, reuse the AnyTLS Chrome
+  connector + `shaping/` + `ring` + the session-pool pattern. **kID SessionID-injection spike PASSED**
+  (`/tmp/kid-spike`): a chosen 32-byte `legacy_session_id` reaches the wire in a Chrome TLS-1.3 ClientHello with
+  JA4 intact, on **stock boring2 (NO fork)** — the `boring-sys2` patch is a recorded-but-unused
+  fallback. **Verified API facts (don't re-verify):** the kID recipe = `SSL_SESSION_new(ctx)` →
+  `SSL_SESSION_set_protocol_version(TLS1_2_VERSION)` → `SSL_SESSION_set1_id(&sid32)` →
+  `SSL_SESSION_set_time(now)`/`SSL_SESSION_set_timeout(big)` → `SSL_set_session(ssl, s)` →
+  `SSL_SESSION_free(s)`; BoringSSL classifies kID from id-present + ticketless and emits it as
+  `legacy_session_id` even in a 1.3 hello (NO cipher/master-key setter — neither needed nor exposed by
+  BoringSSL). boring2's `SslRef::as_ptr` needs `foreign_types_shared::ForeignTypeRef` in scope. Client
+  auth needs **no ECDH** — `derivePSK` HKDFs the server pubkey bytes directly as IKM.
 
 **NEXT (in rough priority):**
+0. **Samizdat (branch `samizdat-transport`) — chunked build per §10 of the design doc.**
+   - **Chunk 1 — auth.rs DONE 2026-06-19 (TDD; commit `977242e`).** New `samizdat = []` cargo feature
+     gates `core/src/transport/samizdat/`. `auth.rs` = PSK + 32-byte SessionID in pure `ring`
+     (`HKDF-SHA256(ikm=serverPubKey, salt=shortID, info="SAMIZDAT")` → `HMAC-SHA256(PSK, nonce)[:16]`,
+     layout `shortID(8)‖nonce(8)‖tag(16)`). 3 tests vs vectors captured from Go `auth.go` +
+     cross-checked through the package's `VerifySessionID` (ok=true; generator `/tmp/sz-vec`). clippy
+     -Dwarnings + fmt clean (feature on/off); default build unaffected.
+   - **Chunk 2 — session_id.rs DONE 2026-06-19 (TDD; commit `aff48c8`).** `inject_session_id(config,
+     &id)` installs the 32-byte auth SessionID as the ClientHello `legacy_session_id` via the kID
+     trick on stock boring2 (FFI: `SSL_SESSION_new`→`set_protocol_version(TLS1_2)`→`set1_id`→
+     `set_time`/`set_timeout`→`SSL_set_session`+`SSL_SESSION_free`). `samizdat` feature now =
+     `["dep:boring2","dep:tokio-boring2","dep:boring-sys2","dep:foreign-types-shared"]`
+     (added `boring-sys2` + `foreign-types-shared` to workspace deps — FFI access to the already-present
+     boring2). Test = in-tree hermetic ClientHello capture (asserts the id lands + TLS 1.3 still
+     offered). clippy/fmt clean; default build unaffected. NOTE: `samizdat` does NOT yet enable the
+     `anytls` feature — the next TLS-connect wiring should reuse `anytls/tls.rs`'s Chrome connector
+     (add `"anytls"` to the feature then, or extract a shared connector helper).
+   - **Chunk 3 — h2_mux.rs DONE 2026-06-19 (TDD; commit `fe2265e`).** `H2Conn::handshake` (client
+     handshake + driver task aborted on drop) + `H2Conn::connect(target)` (CONNECT with
+     `:authority=target`, no `:scheme`/`:path`); `H2Stream` adapts `(SendStream, RecvStream)` ⇄
+     `AsyncRead+AsyncWrite` with real H2 flow control (reserve/poll_capacity on write,
+     release_capacity on read; `poll_shutdown`→END_STREAM half-close). New deps `h2` + `http`
+     (samizdat feature only). Test = in-process h2 CONNECT→echo round-trip. 5 samizdat tests green.
+     Verified-API note (don't re-verify): h2 0.4.15 / http 1.4.2; CONNECT request = build
+     `Authority` then `Uri::from_parts` (authority-only is valid; `"host:port"` parses ambiguously
+     as a URI); `Pseudo::request` drops scheme/path for CONNECT.
+   - **Chunk 4 — transport.rs + config wiring DONE 2026-06-19 (commit `f95e8b2`).** `SamizdatTransport`
+     impls `Transport` (one shared, reactively-reconnecting `H2Conn` multiplexes all CONNECT tunnels)
+     + `UdpTransport` (Unsupported, TCP-only v1). `establish()` = TCP → `inject_session_id` into the
+     Chrome ClientHello → `tokio_boring2::connect` (assert ALPN==h2) → `H2Conn::handshake`. Reuse:
+     **extracted `anytls::tls::configure()`** (behavior-preserving split of `connect()`) so samizdat
+     shares the JA4-verified connector; `samizdat` feature now enables `anytls`. Config
+     `SamizdatConfig{server,server_pubkey hex32,short_id hex8,sni}` + `TransportConfig.samizdat` +
+     `from_config` precedence (after anytls) + `not(samizdat)` hard-error stub. Tests: TOML parse,
+     from_config builds/rejects bad hex, UDP-unsupported. 10 samizdat tests green; anytls still green;
+     clippy/fmt/workspace/default all clean. **The full client stack now compiles + unit-passes; the
+     remaining work is purely live verification (no server stood up in this session).**
+   - **Chunk 5 — INTEROP GATE PASSED 2026-06-19 (commit `40dcb6e`). ✅✅** The spark client tunneled
+     an HTTP request through a **real `getlantern/samizdat` server** (local harness) and got
+     **`HTTP/1.1 200 OK` + body** back. **Proves the two things the kID spike could not:** (1) boring's
+     kID-session Chrome ClientHello handshake **completes** against a real Go `tls.Server` (the
+     fabricated TLS-1.2 session for injection doesn't break the 1.3 handshake), and (2) the Go server's
+     `VerifySessionID` **accepts** spark's SessionID → wire-exact REALITY auth interop. Client half =
+     `core/examples/samizdat_interop.rs` (`from_config` → `dial` → GET → assert 200; run with
+     `--features samizdat`). **Reproduce the harness** (`/tmp/sz-interop`, throwaway — Go module with a
+     `replace` to the local samizdat checkout): `main.go` = `samizdat.GenerateKeyPair`/`GenerateShortID`
+     + a self-signed ecdsa cert + `samizdat.NewServer{PrivateKey,ShortIDs,CertPEM,KeyPEM,Handler}` where
+     `Handler` dials `destination` + `io.Copy`s both ways (== the unexported `defaultConnHandler`) +
+     an origin `http.Server`; prints `SZ_SERVER/PUBKEY/SHORTID/TARGET`. Then
+     `SZ_*=… cargo run -p spark-core --example samizdat_interop --features samizdat`. Gotcha found+fixed:
+     the client must `shutdown()` (H2 END_STREAM half-close) after writing, else the server's upload
+     copy never EOFs and `read_to_end` hangs.
+   - **NEXT (optional live step): `sudo spark run` TUN gate.** Needs root + a real Samizdat server;
+     use an **IP** target (`curl https://1.1.1.1` — avoids DNS, since samizdat is TCP-only). Lower
+     marginal value now — the netstack→`Transport` seam is transport-agnostic and already TUN-gated for
+     AnyTLS; the interop gate proved the samizdat-specific stack.
+   - **Chunk 6 — shaping reuse DONE 2026-06-19 (commit `e15752a`). ✅** `SamizdatTransport` wraps the
+     TCP in `SegmentShapingStream` per the shared `[transport.shaping]` `WirePlan` (TCP_NODELAY +
+     Geneva ClientHello fragmentation), mirroring AnyTLS — the Go client fragments by default. No-op
+     unless configured. **Re-live-gated with `SZ_SHAPING=sni_boundary`:** a fragmented ClientHello
+     still completes the handshake + interops → HTTP 200. (The example now reads `SZ_SHAPING`.)
+   - **Deferred follow-ups (non-blocking):** a multi-conn pool + idle sweep (currently one shared conn,
+     reactively reconnected), UDP-over-CONNECT, and the optional `sudo spark run` TUN gate. **MERGE:**
+     branch `samizdat-transport` → **PR #1** (https://github.com/getlantern/spark/pull/1); client
+     complete + unit-tested + live-gated (incl. fragmentation); ADR 0007 + design doc committed.
 1. **Runtime relay config — file-read DONE 2026-06-19; verify + harden next.** `NEBackend`
    (`gui/lib/ne_backend.dart`) now reads a runtime **`config.toml`** from the app-support dir (macOS:
    `~/Library/Application Support/org.getlantern.spark/config.toml`) on connect, precedence:

@@ -26,7 +26,97 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::transport::gambit::{ClientHello, Records};
+use flint_tls::gambit::{ClientHello, Records};
+
+/// A proxy server address: a literal `IP:port` ([`Endpoint::Ip`], the unchanged path with no startup
+/// DNS) or a `host:port` to resolve before dialing ([`Endpoint::Host`], requires the `bootstrap-dns`
+/// feature). Deserializes from a single TOML string. See `docs/bootstrap-resolver-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Endpoint {
+    /// An already-resolved socket address — dialed directly.
+    Ip(SocketAddr),
+    /// A hostname + port resolved at startup by the bootstrap resolver.
+    Host {
+        /// The hostname to resolve.
+        host: String,
+        /// The port to pair with the resolved address.
+        port: u16,
+    },
+}
+
+impl Endpoint {
+    /// The resolved [`SocketAddr`], or an error if this is still an unresolved [`Endpoint::Host`].
+    /// The bootstrap phase resolves every `Host` to an `Ip` before the transport is built, so a `Host`
+    /// reaching here means resolution didn't run (e.g. built without the `bootstrap-dns` feature).
+    pub fn socket_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Endpoint::Ip(addr) => Ok(*addr),
+            Endpoint::Host { host, port } => Err(io::Error::other(format!(
+                "endpoint {host}:{port} is an unresolved hostname — the bootstrap phase \
+                 (resolve_bootstrap) must run before the transport is built, and the binary must be \
+                 built with the `bootstrap-dns` feature to resolve hostnames"
+            ))),
+        }
+    }
+
+    /// `(host, port)` when this needs resolution; `None` when it is already an [`Endpoint::Ip`].
+    pub fn unresolved(&self) -> Option<(&str, u16)> {
+        match self {
+            Endpoint::Host { host, port } => Some((host.as_str(), *port)),
+            Endpoint::Ip(_) => None,
+        }
+    }
+}
+
+impl std::str::FromStr for Endpoint {
+    type Err = EndpointParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            return Ok(Endpoint::Ip(addr));
+        }
+        let (host, port) = s.rsplit_once(':').ok_or(EndpointParseError)?;
+        let port: u16 = port.parse().map_err(|_| EndpointParseError)?;
+        // Reject an empty host, any leftover `:`, or embedded whitespace. A bracketed IPv6 literal
+        // already parsed via the `SocketAddr` branch above, so a `:` here means an unbracketed IPv6
+        // (`2001:db8::1:443`) or a double-port typo (`host:443:80`); whitespace (`" host:443"`,
+        // `"host :443"`) is an invalid hostname. Fail fast at parse time rather than letting any of
+        // these masquerade as a hostname and blow up confusingly during resolution.
+        if host.is_empty() || host.contains(':') || host.chars().any(char::is_whitespace) {
+            return Err(EndpointParseError);
+        }
+        Ok(Endpoint::Host {
+            host: host.to_owned(),
+            port,
+        })
+    }
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Endpoint::Ip(addr) => write!(f, "{addr}"),
+            Endpoint::Host { host, port } => write!(f, "{host}:{port}"),
+        }
+    }
+}
+
+/// A `[transport.*].server` string was neither `IP:port` nor `host:port`.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("endpoint must be `IP:port` or `host:port`")]
+pub struct EndpointParseError;
+
+impl<'de> Deserialize<'de> for Endpoint {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for Endpoint {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
 
 /// Top-level configuration. Each section has defaults, so missing sections and fields fall
 /// back rather than erroring.
@@ -135,6 +225,12 @@ pub struct TransportConfig {
     /// (else `from_config` errors).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wasm: Option<WasmConfig>,
+    /// Samizdat transport (ADR 0007): when set, flows tunnel through this Samizdat server as HTTP/2
+    /// CONNECT streams over one Chrome-fingerprinted TLS session, authenticated by a REALITY-style
+    /// SessionID in the TLS `legacy_session_id`. Takes precedence over the plain `server` tunnel.
+    /// Requires the `samizdat` build feature (else `from_config` errors). TCP only (v1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub samizdat: Option<SamizdatConfig>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
     /// handshake. Default: no shaping.
@@ -193,11 +289,14 @@ pub struct WasmConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnytlsConfig {
-    /// The AnyTLS server address.
-    pub server: SocketAddr,
+    /// The AnyTLS server address — `IP:port` or `host:port` (resolved at startup, see
+    /// `docs/bootstrap-resolver-design.md`).
+    pub server: Endpoint,
     /// The shared password — the auth secret (sent `sha256`'d on the wire).
     pub password: String,
-    /// TLS SNI to present; defaults to the server's IP literal when omitted.
+    /// TLS SNI to present. When omitted: for a `host:port` server the bootstrap phase fills it with
+    /// the hostname (before resolving it away); for an `IP:port` server the transport builder defaults
+    /// it to the IP literal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
     /// Inline Layer-A ClientHello knobs (ADR 0006 P2 gambit genome). Default = the Chrome-137
@@ -213,6 +312,25 @@ pub struct AnytlsConfig {
     /// faults or yields a gambit boring can't realize). Requires the `wasm-transport` feature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gambit: Option<GambitModuleConfig>,
+}
+
+/// Samizdat transport configuration (ADR 0007). REALITY-style auth in the TLS `legacy_session_id`
+/// plus an HTTP/2 CONNECT mux over one Chrome-fingerprinted TLS session; wire-interoperable with
+/// deployed `lantern-box` `"samizdat"` servers. TCP only (v1) — see `docs/samizdat-transport-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamizdatConfig {
+    /// The Samizdat server address — `IP:port` or `host:port` (resolved at startup).
+    pub server: Endpoint,
+    /// The server's X25519 public key, hex-encoded (32 bytes) — the HKDF IKM for the auth PSK.
+    pub server_pubkey: String,
+    /// The pre-shared short ID, hex-encoded (8 bytes).
+    pub short_id: String,
+    /// TLS SNI (cover-site name) to present. When omitted: for a `host:port` server the bootstrap
+    /// phase fills it with the hostname (before resolving it away); for an `IP:port` server the
+    /// transport builder defaults it to the IP literal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
 }
 
 /// A signed Path-B module that computes a gambit per connection (ADR 0006 P3). Verified by the same
@@ -291,6 +409,20 @@ impl Config {
     pub fn to_toml_string(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
     }
+
+    /// The first proxy `server` configured as a hostname needing resolution (`"host:port"`), or
+    /// `None` if every configured server is an IP literal. Used to fail fast when a hostname is
+    /// configured but the resolver wasn't built in (no `bootstrap-dns` feature).
+    pub fn first_unresolved_host(&self) -> Option<String> {
+        let servers = [
+            self.transport.anytls.as_ref().map(|c| &c.server),
+            self.transport.samizdat.as_ref().map(|c| &c.server),
+        ];
+        servers
+            .into_iter()
+            .flatten()
+            .find_map(|ep| ep.unresolved().map(|(h, p)| format!("{h}:{p}")))
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +492,7 @@ mod tests {
                     server: Some("[2001:db8::1]:443".parse().unwrap()),
                     protect_interface: Some("en0".into()),
                     anytls: None,
+                    samizdat: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
@@ -413,8 +546,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_samizdat_config() {
+        let c = Config::from_toml_str(
+            r#"
+            [transport.samizdat]
+            server = "192.0.2.1:443"
+            server_pubkey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+            short_id = "1011121314151617"
+            sni = "ok.example"
+        "#,
+        )
+        .unwrap();
+        let s = c.transport.samizdat.expect("samizdat config");
+        assert_eq!(s.server, "192.0.2.1:443".parse().unwrap());
+        assert_eq!(s.server_pubkey.len(), 64); // 32 bytes, hex
+        assert_eq!(s.short_id, "1011121314151617");
+        assert_eq!(s.sni.as_deref(), Some("ok.example"));
+    }
+
+    #[test]
     fn parses_inline_anytls_gambit_knobs() {
-        use crate::transport::gambit::EchMode;
+        use flint_tls::gambit::EchMode;
         let c = Config::from_toml_str(
             r#"
             [transport.anytls]
@@ -464,5 +616,104 @@ mod tests {
         assert_eq!(g.module, PathBuf::from("/etc/spark/opening.spkw"));
         assert_eq!(g.min_version, 4);
         assert_eq!(g.floor_path, None);
+    }
+
+    #[test]
+    fn endpoint_parses_ip_and_host() {
+        assert_eq!(
+            "1.2.3.4:443".parse::<Endpoint>().unwrap(),
+            Endpoint::Ip("1.2.3.4:443".parse().unwrap())
+        );
+        assert_eq!(
+            "[2001:db8::1]:443".parse::<Endpoint>().unwrap(),
+            Endpoint::Ip("[2001:db8::1]:443".parse().unwrap())
+        );
+        assert_eq!(
+            "proxy.example.com:443".parse::<Endpoint>().unwrap(),
+            Endpoint::Host {
+                host: "proxy.example.com".into(),
+                port: 443
+            }
+        );
+        // junk: no port, empty host, or non-numeric port.
+        assert!("notanaddress".parse::<Endpoint>().is_err());
+        assert!(":443".parse::<Endpoint>().is_err());
+        assert!("host:notaport".parse::<Endpoint>().is_err());
+        // a stray `:` in the host (unbracketed IPv6 or a double-port typo) is rejected at parse time.
+        assert!("2001:db8::1:443".parse::<Endpoint>().is_err());
+        assert!("host:443:80".parse::<Endpoint>().is_err());
+        // whitespace in the host is an invalid hostname, rejected at parse time.
+        assert!(" proxy.example.com:443".parse::<Endpoint>().is_err());
+        assert!("proxy.example.com :443".parse::<Endpoint>().is_err());
+    }
+
+    #[test]
+    fn endpoint_socket_addr_and_unresolved() {
+        let ip: Endpoint = "1.2.3.4:443".parse().unwrap();
+        assert_eq!(ip.socket_addr().unwrap(), "1.2.3.4:443".parse().unwrap());
+        assert_eq!(ip.unresolved(), None);
+
+        let host: Endpoint = "h.example:80".parse().unwrap();
+        assert!(host.socket_addr().is_err());
+        assert_eq!(host.unresolved(), Some(("h.example", 80)));
+    }
+
+    #[test]
+    fn endpoint_serde_round_trips() {
+        // Endpoint serializes/deserializes as a single string, for both variants. Tested directly
+        // and via the anytls.server field (now an Endpoint).
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct W {
+            e: Endpoint,
+        }
+        for s in ["1.2.3.4:443", "proxy.example.com:8443"] {
+            let w = W {
+                e: s.parse().unwrap(),
+            };
+            let toml = toml::to_string(&w).unwrap();
+            let back: W = toml::from_str(&toml).unwrap();
+            assert_eq!(w, back, "round-trip changed:\n{toml}");
+        }
+    }
+
+    #[test]
+    fn first_unresolved_host_finds_a_hostname() {
+        let c = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"proxy.example.com:443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.first_unresolved_host().as_deref(),
+            Some("proxy.example.com:443")
+        );
+
+        let c2 = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"1.2.3.4:443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        assert_eq!(c2.first_unresolved_host(), None);
+    }
+
+    #[test]
+    fn anytls_host_server_round_trips_through_toml() {
+        for s in ["1.2.3.4:443", "proxy.example.com:8443"] {
+            let toml = format!("[transport.anytls]\nserver = \"{s}\"\npassword = \"pw\"\n");
+            let c = Config::from_toml_str(&toml).unwrap();
+            let rendered = c.to_toml_string().unwrap();
+            let back = Config::from_toml_str(&rendered).unwrap();
+            assert_eq!(c, back, "round-trip changed:\n{rendered}");
+        }
+        // And the hostname actually lands as Endpoint::Host.
+        let c = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"proxy.example.com:8443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.transport.anytls.unwrap().server,
+            Endpoint::Host {
+                host: "proxy.example.com".into(),
+                port: 8443
+            }
+        );
     }
 }
