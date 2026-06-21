@@ -295,17 +295,19 @@ mod tests {
         // 0 serves 204 (healthy), 1's dial fails (unhealthy). After the first probe round the prober
         // re-ranks to [0] (1 dropped).
         let members = vec![member_serving_204(), member(false)];
-        let st = SelectingTransport::new(members, std::time::Duration::from_secs(300), 8);
-        for _ in 0..100 {
-            if st.order().as_ref() == [0usize].as_slice() {
-                break;
-            }
+        // Short interval so the per-probe deadline (min(interval, 10s)) is small, and poll against a
+        // generous 10s wall-clock deadline — comfortably longer than a probe round even on a slow,
+        // loaded CI runner (the probes are in-memory and finish in ms; the budget just can't be
+        // tighter than the round, which the old 1s budget was — that flaked on windows-latest).
+        let st = SelectingTransport::new(members, std::time::Duration::from_secs(1), 8);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while st.order().as_ref() != [0usize].as_slice() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(
             &*st.order(),
             &[0usize][..],
-            "prober should drop the unhealthy server"
+            "prober should drop the unhealthy server within 10s"
         );
     }
 
