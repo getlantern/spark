@@ -124,7 +124,9 @@ fn protected_udp_socket(
 
 /// Build one server entry's transport pair from its [`ServerSpec`]. The single seam for transport
 /// kinds — adding a kind is a new `ServerSpec` variant + a match arm here. `protector` is cloned per
-/// entry (it is `Clone`); `wire` is the shared opening-shaping plan.
+/// entry (it is `Clone`); `wire` is the shared opening-shaping plan. Only the multi-server pool path
+/// (`build_selecting`) uses this, so it's gated to keep the base build free of dead code.
+#[cfg(feature = "multi-server")]
 pub(crate) fn build_one(
     spec: &crate::config::ServerSpec,
     protector: Option<&SocketProtector>,
