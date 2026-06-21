@@ -45,6 +45,7 @@ struct Selection {
 pub struct SelectingTransport {
     members: Arc<Vec<Member>>,
     selection: Arc<Mutex<Selection>>,
+    reprobe: Arc<tokio::sync::Notify>,
     prober: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -55,15 +56,18 @@ impl SelectingTransport {
     pub(crate) fn new(members: Vec<Member>, interval: std::time::Duration, window: usize) -> Self {
         let members = Arc::new(members);
         let selection = Arc::new(Mutex::new(Selection::default()));
+        let reprobe = Arc::new(tokio::sync::Notify::new());
         let task = tokio::spawn(prober_loop(
             Arc::clone(&members),
             Arc::clone(&selection),
+            Arc::clone(&reprobe),
             interval,
             window.max(1),
         ));
         SelectingTransport {
             members,
             selection,
+            reprobe,
             prober: Mutex::new(Some(task)),
         }
     }
@@ -72,9 +76,23 @@ impl SelectingTransport {
     fn order(&self) -> Vec<usize> {
         self.selection
             .lock()
-            .expect("selection mutex")
+            .unwrap_or_else(|e| e.into_inner())
             .ranked
             .clone()
+    }
+
+    /// Move a failed member to the back of the ranking (so new flows stop trying it first) and wake
+    /// the prober for an immediate off-cycle re-probe. A transient reorder; the next probe round
+    /// re-ranks properly (a truly-dead server fails its health check and drops out).
+    fn demote(&self, member: usize) {
+        {
+            let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pos) = sel.ranked.iter().position(|&i| i == member) {
+                sel.ranked.remove(pos);
+                sel.ranked.push(member);
+            }
+        }
+        self.reprobe.notify_one();
     }
 }
 
@@ -89,7 +107,10 @@ impl Transport for SelectingTransport {
         for i in order {
             match self.members[i].transport.dial(target).await {
                 Ok(s) => return Ok(s),
-                Err(e) => last_err = Some(e), // failover to next-best
+                Err(e) => {
+                    self.demote(i);
+                    last_err = Some(e); // failover to next-best
+                }
             }
         }
         Err(last_err.unwrap_or_else(|| io::Error::other("no healthy server in the pool")))
@@ -110,7 +131,10 @@ impl UdpTransport for SelectingTransport {
         for i in order {
             match self.members[i].udp.dial_udp(target).await {
                 Ok(p) => return Ok(p),
-                Err(e) => last_err = Some(e),
+                Err(e) => {
+                    self.demote(i);
+                    last_err = Some(e);
+                }
             }
         }
         Err(last_err.unwrap_or_else(|| io::Error::other("no healthy server in the pool")))
@@ -119,18 +143,19 @@ impl UdpTransport for SelectingTransport {
 
 impl Drop for SelectingTransport {
     fn drop(&mut self) {
-        if let Some(h) = self.prober.lock().expect("prober mutex").take() {
+        if let Some(h) = self.prober.lock().unwrap_or_else(|e| e.into_inner()).take() {
             h.abort();
         }
     }
 }
 
 /// Background prober: probe the pool (windowed), update the ranked selection (with hysteresis), then
-/// wait `interval` and repeat. Per-probe deadline = `interval` capped at 10s so a slow server can't
-/// stall a whole round on a short interval.
+/// wait `interval` (or until a demotion wakes it early) and repeat. Per-probe deadline = `interval`
+/// capped at 10s so a slow server can't stall a whole round on a short interval.
 async fn prober_loop(
     members: Arc<Vec<Member>>,
     selection: Arc<Mutex<Selection>>,
+    reprobe: Arc<tokio::sync::Notify>,
     interval: std::time::Duration,
     window: usize,
 ) {
@@ -145,7 +170,7 @@ async fn prober_loop(
         })
         .await;
         {
-            let mut sel = selection.lock().expect("selection mutex");
+            let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
             sel.ranked = next_order(&sel.ranked, &outcomes);
         }
         tracing::debug!(
@@ -153,7 +178,10 @@ async fn prober_loop(
             pool = members.len(),
             "pool re-probed"
         );
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = reprobe.notified() => {}
+        }
     }
 }
 
@@ -294,6 +322,7 @@ mod tests {
         SelectingTransport {
             members: Arc::new(members),
             selection: Arc::new(Mutex::new(Selection { ranked })),
+            reprobe: Arc::new(tokio::sync::Notify::new()),
             prober: Mutex::new(None),
         }
     }
@@ -314,6 +343,15 @@ mod tests {
     async fn dial_errors_when_all_down() {
         let t = selecting(vec![member(false), member(false)], vec![0, 1]);
         assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn dial_demotes_a_failed_best() {
+        // best (0) is down, 1 is up. After a dial, 0 should be demoted behind 1.
+        let t = selecting(vec![member(false), member(true)], vec![0, 1]);
+        assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_ok()); // fails over 0→1
+                                                                      // 0 was demoted to the back; the live order now leads with 1.
+        assert_eq!(t.order(), vec![1, 0]);
     }
 
     #[test]
