@@ -190,6 +190,14 @@ pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver)
     if let Some(samizdat) = config.transport.samizdat.as_mut() {
         entries.push((&mut samizdat.server, &mut samizdat.sni));
     }
+    for entry in config.transport.servers.iter_mut() {
+        match &mut entry.spec {
+            crate::config::ServerSpec::Anytls(c) => entries.push((&mut c.server, &mut c.sni)),
+            crate::config::ServerSpec::Samizdat(c) => entries.push((&mut c.server, &mut c.sni)),
+            crate::config::ServerSpec::Tunnel(c) => entries.push((&mut c.server, &mut c.sni)),
+            crate::config::ServerSpec::Wasm(_) => {} // wasm.server is a SocketAddr, never a hostname
+        }
+    }
     for (ep, sni) in entries {
         if let Some((host, port)) = ep.unresolved() {
             let host = host.to_owned();
@@ -419,6 +427,34 @@ mod tests {
         let mut cfg = anytls_cfg("proxy.example.com:443");
         let resolver = RacingResolver::new(vec![fail()]);
         assert!(resolve_endpoints(&mut cfg, &resolver).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_endpoints_rewrites_pool_entries() {
+        use crate::config::{ServerEntry, ServerSpec, TunnelConfig};
+        let mut cfg = Config {
+            transport: crate::config::TransportConfig {
+                servers: vec![ServerEntry {
+                    spec: ServerSpec::Tunnel(TunnelConfig {
+                        server: "proxy.example.com:443".parse().unwrap(),
+                        sni: None,
+                    }),
+                    callback_url: None,
+                }],
+                callback_url: Some("http://127.0.0.1/ok".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolver = RacingResolver::new(vec![ok("9.9.9.9:443")]);
+        resolve_endpoints(&mut cfg, &resolver).await.unwrap();
+        match &cfg.transport.servers[0].spec {
+            ServerSpec::Tunnel(t) => assert_eq!(
+                t.server,
+                crate::config::Endpoint::Ip("9.9.9.9:443".parse().unwrap())
+            ),
+            _ => panic!("expected tunnel"),
+        }
     }
 
     /// Live end-to-end: `DohResolver` resolves a real hostname to a public (non-bogon) address.
