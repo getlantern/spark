@@ -72,11 +72,13 @@ short_id = "..."
 callback_url = "https://other-canary.example/ok"   # per-entry override of the global default
 ```
 
-- **`ServerEntry`** is a serde-tagged enum (`kind = "anytls" | "samizdat" | "wasm" | "tunnel"`)
-  wrapping the existing `AnytlsConfig` / `SamizdatConfig` / `WasmConfig` (and a `tunnel` variant = the
-  plain `tcp_tunnel` client to a `server` address), plus `callback_url: Option<String>` (overrides
-  `transport.callback_url`). The no-server `DirectTransport` is **not** a pool kind — there is nothing
-  to rank, and "no tunnel" is the kill-switch fail-open behavior, not a server in the pool.
+- **`ServerEntry`** is a struct: a `#[serde(flatten)]`ed **`ServerSpec`** (an internally-tagged enum,
+  `kind = "anytls" | "samizdat" | "wasm" | "tunnel"`, wrapping the existing `AnytlsConfig` /
+  `SamizdatConfig` / `WasmConfig` — and a `tunnel` variant = the plain `tcp_tunnel` client to a
+  `server` address) plus `callback_url: Option<String>` (overrides `transport.callback_url`). In TOML
+  that's `kind = "…"` + the kind's fields + an optional `callback_url`, all at one level. The no-server
+  `DirectTransport` is **not** a pool kind — there is nothing to rank, and "no tunnel" is the
+  kill-switch fail-open behavior, not a server in the pool.
 - **`server` fields stay `Endpoint`** (the bootstrap resolver resolves every `Host` entry to an `Ip`
   before probing — §3.5).
 - **Backward compatibility:** when `transport.servers` is absent, the existing single-transport
@@ -90,7 +92,7 @@ callback_url = "https://other-canary.example/ok"   # per-entry override of the g
 Today's per-kind branches of `from_config` are extracted into:
 
 ```
-fn build_one(entry: &ServerEntry, protector: Option<&SocketProtector>, wire: &WirePlan)
+fn build_one(spec: &ServerSpec, protector: Option<&SocketProtector>, wire: &WirePlan)
     -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)>
 ```
 
@@ -100,7 +102,7 @@ fn build_one(entry: &ServerEntry, protector: Option<&SocketProtector>, wire: &Wi
 - else → the existing single-transport path (one `build_one` on the desugared lone entry).
 
 **Extensibility (more transports are coming — e.g. hysteria2/QUIC).** `build_one` is the single seam
-for transport kinds. Adding a transport is: a new `ServerEntry` variant + a `build_one` branch
+for transport kinds. Adding a transport is: a new `ServerSpec` variant + a `build_one` branch
 (returning its `Transport`/`UdpTransport`); the `SelectingTransport`, prober, and probe are
 kind-agnostic and need no change. A UDP-native transport returns a real `UdpTransport` (and a
 TCP-over-its-transport `Transport` if it proxies TCP, as hysteria2 does).
@@ -264,7 +266,7 @@ every probe_interval_secs:  probe_windowed(pool) → re-rank → swap if ≥20% 
 | # | Follow-up | Depends on |
 |---|---|---|
 | 1 | **Multi-server selection (this doc)** | transport layer, bootstrap resolver, flint-dial |
-| 2 | More transport kinds, incl. **UDP-native** (hysteria2/QUIC): new `ServerEntry` variant + `build_one` branch | 1 |
+| 2 | More transport kinds, incl. **UDP-native** (hysteria2/QUIC): new `ServerSpec` variant + `build_one` branch | 1 |
 | 3 | **Capability-aware selection** — independent UDP-best vs TCP-best once kinds diverge in L4 support | 1 + 2 |
 | 4 | **UDP-based health check** for UDP-only transports (DNS/QUIC-echo callback) | 1 + 2 |
 | 5 | Server pool fetched from the Lantern API (proxyless/fronted config-fetch) | 1 + bootstrap resolver + flint-dial |

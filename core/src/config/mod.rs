@@ -233,7 +233,7 @@ pub struct TransportConfig {
     pub samizdat: Option<SamizdatConfig>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
-    /// handshake. Default: no shaping.
+    /// and Samizdat handshakes (both build their `WirePlan` from this). Default: no shaping.
     pub shaping: ShapingConfig,
     /// A pool of servers to probe and select among by latency (see
     /// `docs/multi-server-selection-design.md`). When non-empty, supersedes the single-transport
