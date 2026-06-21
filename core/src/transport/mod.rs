@@ -117,6 +117,34 @@ fn protected_udp_socket(
     Ok(socket)
 }
 
+/// Build one server entry's transport pair from its [`ServerSpec`]. The single seam for transport
+/// kinds — adding a kind is a new `ServerSpec` variant + a match arm here. `protector` is cloned per
+/// entry (it is `Clone`); `wire` is the shared opening-shaping plan.
+pub(crate) fn build_one(
+    spec: &crate::config::ServerSpec,
+    protector: Option<&SocketProtector>,
+    wire: &WirePlan,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    use crate::config::ServerSpec;
+    match spec {
+        ServerSpec::Anytls(cfg) => anytls_transport(cfg, protector.cloned(), wire.clone()),
+        ServerSpec::Samizdat(cfg) => samizdat_transport(cfg, protector.cloned(), wire.clone()),
+        ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
+        ServerSpec::Tunnel(cfg) => {
+            let server = cfg.server.socket_addr()?;
+            let mut client = tcp_tunnel::client::TunnelClient::new(server);
+            if let Some(p) = protector.cloned() {
+                client = client.with_socket_protection(p);
+            }
+            let client = Arc::new(client);
+            Ok((
+                client.clone() as Arc<dyn Transport>,
+                client as Arc<dyn UdpTransport>,
+            ))
+        }
+    }
+}
+
 /// Build the TCP + UDP transports from `config`: a tunnel client when `transport.server` is
 /// set, otherwise direct; both pinned to `transport.protect_interface` when configured.
 pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
