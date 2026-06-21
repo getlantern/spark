@@ -17,7 +17,10 @@ for t in "${TARGETS[@]}"; do
     # only the macOS slice gets `anytls` — the iOS slices share the ABI but return -1 for AnyTLS.
     feat=()
     [[ "$t" == *darwin* ]] && feat=(--features anytls)
-    cargo build --release -p spark-apple --target "$t" "${feat[@]}" >&2
+    # ${feat[@]+...} guards the empty-array expansion so `set -u` doesn't trip on
+    # macOS's stock bash 3.2 (where `env bash` resolves), which errors on
+    # "${empty[@]}" unlike bash >=4.4.
+    cargo build --release -p spark-apple --target "$t" ${feat[@]+"${feat[@]}"} >&2
 done
 
 rm -rf "$OUT"

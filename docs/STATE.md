@@ -2055,7 +2055,251 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 - FFI (mobile): **uniffi-rs** preferred (confirm at M10).
 - Config format: TOML (alternate import formats deferred).
 
+- 2026-06-19 (UI — DECIDED: migrate the GUI from Flutter → **Tauri v2**; ADR 0008): After a wholesale
+  re-eval of UI frameworks with Adam (client priorities Android > Windows > iOS > macOS > Linux;
+  install size first-class), chose **Tauri v2** over Compose Multiplatform and over keeping Flutter.
+  Rationale: Tauri uses the **system WebView** (no bundled engine → smallest install, on-ethos with
+  the <3 MB core), its backend **is** Rust (the core links in directly; collapses today's two bindings
+  — `flutter_rust_bridge` desktop + platform-channels mobile — into one `invoke()`/event surface), and
+  the Lantern look is pure CSS (proven: `docs/mockups/spark-tauri-lantern-look.html` reproduces
+  `gui/lib/main.dart`'s `_Palette` exactly). Compose was runner-up (best Android polish, reuses
+  Kotlin/UniFFI) but its desktop path needs a bundled JVM (fights the size goal). **Scope = UI shell
+  only:** `core/`, netstack, transports, `ipc/`, `spark-ffi`/UniFFI, the privileged `spark-service`,
+  and the `platforms/{android,apple}` tunnel shims are all reused unchanged; the process/privilege
+  model (ADR 0005) is unchanged (Tauri app = unprivileged client). Migration = UI track **U0–U4** in
+  PLAN.md §4 (macOS-first proof → Android → Windows/iOS/Linux; retire `gui/` only at parity). Open
+  sub-decision deferred to U0: front-end stack (Svelte+Vite recommended, vanilla TS fallback). **Hard
+  constraint:** the Tauri dep tree must not pull `openssl-sys` (verify at U0); keep Tauri out of `core/`.
+
+- 2026-06-19 (U0 DONE — Tauri shell + Lantern web UI, mock backend): Scaffolded `gui-tauri/`
+  (Tauri **v2.11.3** + **SvelteKit/svelte-ts**, adapter-static SPA, `ssr=false`; Svelte 5 runes).
+  Ported the Lantern connect screen from `docs/mockups/spark-tauri-lantern-look.html` into
+  `src/routes/+page.svelte` (the `_Palette` tokens verbatim; window 390×760 non-resizable, title
+  "Spark", identifier `org.getlantern.spark`). Added the `SparkBackend` TS seam + `MockBackend`
+  (`src/lib/spark_backend.ts`); the screen polls `status()` every 500ms exactly as it will against
+  the real service. `src-tauri/src/lib.rs` is shell-only (no commands yet). Root `Cargo.toml`
+  `exclude`s `gui-tauri/src-tauri` so Tauri stays out of the core workspace graph. **Gate PASSED:**
+  `npm run tauri build` green on macOS → `Spark.app` **8.3 MB** / `Spark_0.1.0_aarch64.dmg` **2.9 MB**
+  (vs Flutter's bundled-engine floor — direct Flutter-DMG comparison deferred to U1); `cargo tree -i
+  openssl-sys` empty (CLAUDE.md hard rule holds — no openssl/native-tls in the tree); `cargo fmt
+  --check` + `cargo clippy --release` clean; SPA bundle ~4.8 kB JS + 4.4 kB CSS. Not done in U0:
+  bundle the Sora font (system fallback for now), CSP hardening (left `csp:null`), a visual
+  screenshot (UI is a verbatim port of the rendered mockup). **Next chunk = U1** (macOS to parity:
+  real `invoke()` command surface implementing SparkBackend over `spark` core / `spark-ipc`, runtime
+  `config.toml` precedence, connect-e2e gate + Flutter-DMG size delta).
+
+- 2026-06-19 (U1 DECISION + decomposition — macOS = NE Model A, spike-first): Adam chose **NE Model A**
+  (one-click, no sudo) for the macOS Tauri app over the `spark-service` daemon path. So `connect()`
+  drives `NETunnelProviderManager` (Swift port of `gui/macos/Runner/SparkVPN.swift`), **not**
+  `spark-backend`/`spark-ipc`. Code-grounded findings: the `SparkTunnel` **system-extension** target in
+  `platforms/apple` (project.yml; links `SparkCore.xcframework`, NE + system-extension.install
+  entitlements) and the embed/sign/notarize recipe in `packaging/macos/build-gui-dmg.sh` (build
+  `.systemextension` → copy into `App.app/Contents/Library/SystemExtensions/` → re-sign with NE
+  entitlements → notarize) are **reused as-is**; data-path config flows via
+  `providerConfiguration["config"]`. **The unproven part** (do NOT guess — CLAUDE.md): Tauri's macOS
+  *desktop* build is not Xcode-based, so calling Swift `NETunnelProviderManager` from a Tauri
+  `invoke()` command is unverified. U1 is decomposed in PLAN.md §4: **U1a** = Swift-bridge spike (prove
+  the Rust→Swift→NE path; smallest-first: C-ABI NE fns in `platforms/apple` / Swift staticlib via
+  build.rs / Tauri-v2 Swift plugin-on-desktop) → **U1b** = embed+sign+wire (invoke surface, config.toml
+  precedence, swap MockBackend→TauriBackend, adapt build-gui-dmg.sh for the Tauri .app; size vs Flutter
+  DMG) → **U1c** = live connect-e2e gate. **Human-blocked:** U1c needs the NE provisioning profile
+  (team `ACZRKC3LQ9`, distribution-only) — same blocker as M10; added to PLAN.md §3. **Next chunk =
+  U1a** (its own focused session — research-led spike, stop-and-report). No code written this turn
+  (the next step is the spike, not guessable glue).
+
+- 2026-06-19 (U1a DONE — Swift-bridge spike: bridge PROVEN, pure-Rust objc2): The Tauri-desktop Rust
+  side reaches macOS NetworkExtension **directly via `objc2` + `objc2-network-extension` 0.3.2 — no
+  Swift toolchain, no Tauri Swift plugin, no Xcode.** `cargo run --example ne_probe` (in
+  `gui-tauri/src-tauri`) printed `NEVPNStatus = invalid (0)` via `NETunnelProviderManager::new()` →
+  `connection()` → `status()` — the read path that needs no NE entitlement, so it runs unsigned in dev.
+  **Recommendation = Approach A (pure-Rust objc2)**; the Swift→C shim and Tauri-Swift-plugin options are
+  rejected. Added (macOS target only): deps `objc2` 0.6 + `objc2-network-extension` 0.3; `ne_spike`
+  module + `ne_probe` Tauri command (registered in the invoke handler) + `examples/ne_probe.rs`.
+  fmt+clippy clean; `cargo tree -i openssl-sys` still empty (no regression). **Note for crates.io:**
+  0.3.x exposes all NE classes by default — there are NO per-class features (available: alloc, block2,
+  libc, objc2-security, std). **For U1b:** the WRITE/activate path
+  (`loadAllFromPreferencesWithCompletionHandler` / `saveToPreferences` / `startVPNTunnel` +
+  `OSSystemExtensionRequest`) uses completion-handler **blocks** → add the `block2` feature and await
+  via a oneshot on Tauri's main runloop, and define the `OSSystemExtensionRequestDelegate` with objc2
+  `define_class!`; that write/activate path needs the NE entitlement + provisioning (U1c, human). **Next
+  chunk = U1b** (embed the systemextension + invoke surface + config.toml precedence + MockBackend→
+  TauriBackend; size vs Flutter DMG).
+
+- 2026-06-19 (U1b machinery PROVEN — async loadAllFromPreferences via block2 + run loop): Built the
+  real status source (U1a's synchronous `new()` was only a bridge probe). `ne_spike::
+  load_first_status_blocking()` calls `NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler`
+  with a `block2::RcBlock` completion, then drives `NSRunLoop::currentRunLoop().runMode_beforeDate` in
+  0.1s slices (~3s cap) so the main-queue completion fires; reads `objectAtIndex(0).connection().status()`.
+  `cargo run --example ne_probe_async` printed **"2 saved manager(s); first status = connected (3)"** —
+  i.e. it read the machine's *real* `org.getlantern.spark` NE configs (one live), proving the block2 +
+  run-loop completion machinery that connect/disconnect (saveToPreferences/startVPNTunnel) will reuse.
+  Added (macOS): deps `block2` 0.6 + `objc2-foundation` 0.3 (feature `block2`); `objc2-network-extension`
+  gains feature `block2`; `examples/ne_probe_async.rs`. clippy `-D warnings` + fmt clean; `cargo tree -i
+  openssl-sys` still empty. **Still TODO in U1b** (not yet built): hop the `status` Tauri command to the
+  main thread + return this; `connect`/`disconnect` write path = `define_class!`
+  `OSSystemExtensionRequestDelegate` + saveToPreferences/startVPNTunnel; config.toml precedence;
+  MockBackend→TauriBackend swap; embed the `platforms/apple` systemextension + adapt build-gui-dmg.sh.
+  **Write/activate needs the NE entitlement + provisioning (U1c, human-blocked).**
+
+- 2026-06-20 (U1b-1 DONE + PROVISIONING UNBLOCKED — system extension builds & signs): The M10-era
+  provisioning blocker is cleared. Root cause was a Developer ID cert mismatch: the "Spark macOS
+  App"/"Spark macOS Tunnel" profiles pinned Developer ID Application serial `52097FEB` (exp May 2030),
+  but this Mac's only codesigning private key is serial `47D77D` (exp Feb 2030). Confirmed `52097FEB`'s
+  key is nowhere here (no .p12 in Downloads/Desktop/Documents/home; importing its public .cer added a
+  keyless cert, no new identity). Fix (Adam, portal): regenerated both profiles selecting the
+  **Feb-2030 / 47D77D** "Developer ID Application" cert (NOT the "Developer ID Installer" rows — those
+  sign .pkg, not the app/extension). Reinstalled them into the Xcode store (UUIDs f19f7cab = App,
+  470ae1fc = Tunnel), removed the stale 52097FEB ones (0571d9e8/2ce5e0e9). `xcodebuild archive SparkApp`
+  now SUCCEEDS → `org.getlantern.spark.tunnel.systemextension` (3.7 MB) signed Developer ID
+  (ACZRKC3LQ9) + hardened runtime, NE entitlements baked (packet-tunnel-provider-systemextension +
+  group.org.getlantern.spark). Also committed `edad6bc`: build-xcframework.sh bash-3.2 unbound-array
+  fix (`${feat[@]+…}`) — latent since the full archive had never run here. **Remaining U1b:** U1b-2 =
+  objc2 connect/disconnect/status write path (OSSystemExtensionRequest activate via `define_class!`
+  delegate + NETunnelProviderManager save/start/stop); U1b-3 = config.toml precedence +
+  MockBackend→TauriBackend; U1b-4 = embed the .systemextension into the Tauri .app + Release.entitlements
+  + app profile + sign + notarize → product DMG (sign+notarize pipeline already proven on the shell DMG).
+  **Next chunk = U1b-2.**
+
+- 2026-06-20 (U1b-2a DONE — config precedence + real status command + frontend TauriBackend swap):
+  Added `gui-tauri/src-tauri/src/config.rs` — data-path config precedence (config.toml → SPARK_CONFIG
+  → SPARK_PROXY → direct), 5 unit tests. Added `ne_spike::load_first_status(timeout)` (recv_timeout,
+  app-context variant of the proven loadAll — no run-loop drive; the Tauri main loop services the
+  completion) + `ui_state` mapping. Command surface: **`spark_status`** (real live NE state),
+  `spark_connect`/`spark_disconnect` (resolve config, return an explicit "pending U1b-2b" error — no
+  silent no-op). Frontend: `tauri_backend.ts` (`TauriBackend` over invoke + `isTauri()`); `+page.svelte`
+  picks TauriBackend in the app / MockBackend in a plain browser, polls 2s, surfaces connect errors in
+  the substatus. Verified: cargo build + clippy clean; **5 config tests pass; svelte-check 0 errors**;
+  full **signed** `tauri build` → Spark.app/DMG 3.9M. **Remaining U1b-2b** (the last compile-only piece;
+  runtime-testable only after embed+sign + first-run approval = U1c): NETunnelProviderManager write path
+  (NETunnelProviderProtocol providerBundleIdentifier=`org.getlantern.spark.tunnel` +
+  providerConfiguration["config"] → save → start; connection.stopVPNTunnel) + OSSystemExtensionRequest
+  activation via objc2 `define_class!` OSSystemExtensionRequestDelegate. Then **U1b-4**: embed the
+  systemextension into the Tauri .app + Release.entitlements + app profile + notarize → product DMG.
+
+- 2026-06-20 (U1b-4 DONE — product-structured NOTARIZED DMG: Tauri app + embedded system extension):
+  Embedded `org.getlantern.spark.tunnel.systemextension` (3.7M) + the "Spark macOS App"
+  provisioning profile into the Tauri Spark.app; re-signed with `gui-tauri/src-tauri/Release.entitlements`
+  (NE packet-tunnel-provider-systemextension + system-extension.install + group.org.getlantern.spark) +
+  Developer ID + hardened runtime; **notarized + stapled BOTH the app and the DMG** (notary: Accepted).
+  Gatekeeper: app "accepted, source=Notarized Developer ID"; `stapler validate` OK. Sizes: app **12M**
+  (8.3M shell + 3.7M extension), **DMG 6.1M**. Codified as reusable `packaging/macos/build-tauri-dmg.sh`
+  (Tauri analogue of build-gui-dmg.sh: build sysext → build Tauri app → embed + profile → re-sign →
+  notarize/staple app → dmg → notarize/staple; env SIGN_IDENTITY/APP_PROFILE auto-detected,
+  NOTARY_PROFILE | AC_USERNAME+AC_PASSWORD, SKIP_NOTARIZE). **The app now carries the NE entitlement +
+  the embedded extension → U1b-2b (connect/disconnect write path + OSSystemExtensionRequest activation)
+  is now RUNTIME-testable** (install, approve the sysext on first launch, test connect vs a relay) rather
+  than compile-only-blind. **Next chunk = U1b-2b** (unblocked for real verification).
+
+- 2026-06-20 (U1b-2b code DONE [compile-verified] — connect/disconnect write path wired):
+  `ne_spike::connect(config)` brings the tunnel up via the proven block2 pattern — the
+  load→configure→save→reload→start chain runs INSIDE the loadAll completion (on the main queue;
+  NETunnelProviderManager isn't Send, so nested completion blocks keep every object on main, and the
+  worker command waits on a channel for the verdict): builds NETunnelProviderProtocol
+  (providerBundleIdentifier=`org.getlantern.spark.tunnel`, serverAddress, providerConfiguration["config"]
+  = resolved config, NSString upcast to AnyObject) → setProtocolConfiguration/setEnabled →
+  saveToPreferencesWithCompletionHandler → loadFromPreferencesWithCompletionHandler →
+  connection.startVPNTunnelAndReturnError. `disconnect()` = loadAll → stopVPNTunnel. spark_connect/
+  spark_disconnect now call these (config via config::resolve). cargo build + clippy + fmt clean; 5
+  config tests pass; no openssl. **Compile-verified ONLY** — runtime needs the signed product build
+  (done) + the extension activated + a relay `config.toml` (= U1c). Assumes the extension is already
+  activated (fresh-install OSSystemExtensionRequest activation = U1b-2b-ii, deferred — if connect
+  errors with a "no provider"/activation failure, that's the signal to add it). Building the product
+  DMG with this connect path for the live test.
+
+- 2026-06-20 (UI fidelity pass — match getlantern/lantern's Flutter home, not spark's mockup): Adam
+  wants pixel-fidelity to the REAL Lantern app. Reverse-engineered the lantern repo's Flutter UI
+  (`lib/features/home/home.dart`, `vpn_switch.dart`, `vpn_status.dart`, `core/common/app_colors.dart`,
+  `app_text_styles.dart`, `app_semantic_colors.dart`, `widgets/setting_tile.dart`, `divider_space.dart`)
+  and rebuilt `+page.svelte` to match: **Urbanist** (the real Lantern font — NOT Sora; bundled
+  `@fontsource/urbanist` 400/500/600/700, removed `@fontsource/sora`); the VPNSwitch pill (120×70, 60
+  knob, 5 pad, fully rounded, brand #00BDD6 / off gray7 #616569, white knob, spinner while
+  transitioning); the SettingTile card (radius 16, **teal shadow #19006162 blur 32 offset 0,4**) with
+  two-line rows (icon24 + label [Urbanist 14/400, textSecondary **gray8 #3E464E**] on top; value
+  [16/600, textPrimary gray9] indented 32 below; trailing dot/chevron) — VPN status (globe; "Connected"
+  in **green8 #00531F**; indicator dot), Protocol (lock, AnyTLS), Routing (route, Full tunnel); AppBar
+  = menu + "Spark" wordmark + hairline + soft elevation. Removed the earlier mockup's invented
+  orb/heading/in-pill-text. svelte-check 0 errors; frontend builds. Preview (Urbanist embedded):
+  `docs/mockups/spark-lantern-screen.html`. **Figma:** the Lantern VPN Design System is referenced in
+  `app_text_styles.dart` → figma.com/design/JTguURC2QTtsi904f6mACo (node 2097-43525) — pull exact
+  specs via the Figma MCP once OAuth'd. (App/DMG will carry the new UI on the next build.)
+
+- 2026-06-20 (UI fidelity pass 2 — Figma-MCP token verification + VPNSwitch geometry FIX): Figma is
+  connected; pulled the canonical design-system tokens via the MCP. The Lantern VPN Design System file
+  (`JTguURC2QTtsi904f6mACo`) only exposes a Cover page + the **Text Scale** node (`2097:43525`); the
+  assembled home-screen mockup lives in a separate product file we don't have a key for, so the
+  **Flutter source remains ground truth**. `get_variable_defs` confirmed the type scale exactly
+  (Urbanist; Label/Large 14/500, Subtitle/Medium=titleMedium 16/600, etc.) and `get_libraries`
+  confirmed only the one team library. Re-read the Flutter source and **corrected the VPNSwitch
+  geometry**: `vpn_switch.dart` uses `indicatorSize 60` + `spacing 10` + wrapper `padding 5` ⇒ track
+  is **140×70 (not 120×70)** with knob travel **70px (not 50)**, and the connecting spinner is
+  `strokeWidth 8` inside the 60 indicator with `padding 8` ⇒ **44px ring, 8px stroke** (was 50/6).
+  Verified the rest already matched the shipping app: labelLarge **14/400** (`app_text_styles.dart`,
+  not the design-system's 500), titleMedium 16/600, statusSuccessText green8 only when `connected`
+  (else textPrimary), divider gray2, card teal shadow `rgba(0,97,98,.098)` blur 32 offset 0,4,
+  toggle colors (brand blue4 / disabled gray7 / knob gray0). Card bottom gap 16→10 (`SizedBox(10.h)`).
+  Wordmark stays "Spark" (Adam OK'd "spark instead of lantern for now"). svelte-check 0 errors. Preview
+  regenerated with embedded Urbanist + 3 states (disconnected/connecting/connected) via
+  `docs/mockups/gen-preview.mjs` → `spark-lantern-screen.html`. **Main screen is now geometry-exact to
+  the Flutter home.** (App/DMG carries it on next build.)
+
+- 2026-06-20 (U1c live finding + main-thread fix + U1b-2b-ii activation): First live test of the
+  notarized DMG surfaced two things. (1) **UI froze / force-quit.** Root cause: `spark_status`/
+  `spark_connect`/`spark_disconnect` were synchronous `#[tauri::command]`s → ran on the **main
+  thread**, but every NE call blocks on a channel waiting for a completion delivered **on the main
+  queue** → main thread deadlocks on its own callback. Fixed by marking all three
+  `#[tauri::command(async)]` (off-main), so the run loop stays free to fire the completions; also
+  show the toggle spinner while `busy`. (commit b8ffb6e.) (2) After that fix, connect got far enough
+  to trigger the **"Spark would like to add VPN configurations"** prompt (= `saveToPreferences`
+  succeeded) but **no system-extension approval prompt** and the tunnel didn't come up, no error —
+  because `startVPNTunnel` returns ok (request accepted) while the provider can't launch: the
+  **system extension was never activated**. Implemented **U1b-2b-ii**: added `objc2-system-extensions`
+  + `dispatch2` deps; an `OSSystemExtensionRequestDelegate` via `define_class!`
+  (`SparkSysExtDelegate`, ivar = result `Sender`); `ne_spike::activate_extension()` submits
+  `OSSystemExtensionRequest::activationRequestForExtension_queue(id, DispatchQueue::main())`, sets the
+  delegate, waits (150s, off-main) for didFinish/didFail — `replace`→Replace, `needsUserApproval`
+  logged, request+delegate held alive across the approval window so a pending approval can complete.
+  `connect()` now calls `activate_extension()?` before the save/start chain. cargo check + clippy +
+  svelte-check: 0 errors/warnings. Verified the API against docs.rs (objc2-system-extensions 0.3.2,
+  objc2 0.6, dispatch2 0.3) before writing — no guessing. **Expected first-run flow:** tap Connect →
+  spinner → macOS prompts to approve the Spark extension → approve → activation completes → tunnel
+  starts. **Next:** live retest (does the sysext prompt appear + approval lead to a real tunnel?).
+
+- 2026-06-20 (U1c CONNECT PROVEN live + e2e relay groundwork): Live retest of the activation DMG
+  **connected** — the system extension activated/approved and the tunnel came up (no VPN re-prompt;
+  config already approved). Now standing up a relay for a real-traffic e2e. Mapped the wire protocol
+  (plain `tcp_tunnel`): TCP = `[Address]` header → splice; UDP = sentinel + `[target Address]` then
+  connect-mode `[u16 len][payload]` frames. **No relay server existed** (CLI is client-only), so wrote
+  **`cli/src/bin/relay.rs`** (`spark-relay`) reusing the core codec (`read_header`/`Address`/
+  `udp_associate_sentinel`) for wire-compat: TCP splice + connect-mode UDP relay, `--listen`. Builds +
+  clippy clean (`cargo build -p spark-cli --bin relay`). Decision (Adam): run it on a **remote
+  DigitalOcean droplet** (remote avoids the full-tunnel routing loop a local relay would hit). **Blocked
+  on:** DO access in this session (no `doctl`, no token). Deploy plan: cross-compile to Linux (Docker is
+  running) → scp single binary → run on droplet → open the port → write `config.toml` with `[transport]
+  server="<droplet-ip>:9000"`, `protect_interface="en1"` (en1 = active iface, 192.168.4.25). **Next:** get
+  DO token or an existing droplet+SSH, deploy, generate config, user reconnects + curls through it.
+
+- 2026-06-21 (U1c FULLY PROVEN — real traffic e2e through a remote relay): Deployed `spark-relay`
+  to a DigitalOcean droplet and ran the full end-to-end test. **doctl** installed via brew + authed
+  (Lantern team, see [[digitalocean-access]]); droplet `spark-relay-test` (s-1vcpu-1gb, nyc3,
+  `<droplet-ip>`) with a cloud firewall locking SSH+9000 to Adam's IP (<client-ip>) and outbound
+  open. Relay **cross-compiled to x86_64-linux with `cargo zigbuild`** (cross/Docker-emulation both
+  failed; zigbuild on the Mac worked — 37s, 885KB ELF), scp'd + run as a systemd unit
+  (`spark-relay.service`, `--listen 0.0.0.0:9000`). Wrote `~/Library/Application Support/
+  org.getlantern.spark/config.toml` = `[transport] server="<droplet-ip>:9000"
+  protect_interface="en1"`. Adam reconnected Spark; **the relay log showed hundreds of live TCP+UDP
+  flows** from <client-ip> to real destinations (Google/Cloudflare/Apple/Telegram on :443), QUIC
+  included. This proves the whole NE Model A data path end-to-end: app → utun (sysext
+  `org.getlantern.spark.tunnel`) → core netstack → plain `tcp_tunnel` client → remote relay →
+  internet, both directions, TCP + UDP/DNS. **The Flutter→Tauri macOS migration (U1) is functionally
+  complete and validated against a real server.** Cleanup pending: tear down the droplet+firewall
+  (`doctl compute droplet delete spark-relay-test`) when done testing.
+
 ## Milestone checklist
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
+- [x] U1 (NE Model A — **DONE + PROVEN e2e 2026-06-21**: U1a/U1b/U1b-1/U1b-2a/U1b-4 + U1b-2b connect/disconnect + U1b-2b-ii OSSystemExtensionRequest activation; live test through a remote DO relay showed real TCP+UDP traffic egressing via the tunnel. Notarized DMG carries the Lantern-matched UI.)
+- [ ] U2
+- [ ] U3
+- [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)

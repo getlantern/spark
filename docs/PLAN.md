@@ -97,6 +97,11 @@ for them and **stop and request** them if a milestone needs one that's missing.
   crypto.
 - **Test server.** A simple TCP relay/echo server reachable from the dev box, for M3+
   integration tests. Minimal setup in Appendix B. Needed at M3.
+- **macOS NE provisioning profile (UI track).** The Developer-ID provisioning profile for
+  `org.getlantern.spark` carrying the `packet-tunnel-provider-systemextension` + `system-extension.install`
+  + app-group entitlements, under team `ACZRKC3LQ9` (distribution-only, so no automatic signing). The
+  same blocker as M10; required for the **U1c** live connect-e2e gate (and reused by the eventual iOS
+  work). Spike + scaffold (U1a/U1b) can proceed without it.
 
 ---
 
@@ -286,6 +291,90 @@ report" at every checkpoint.
     pooled, reconnecting sessions. e2e verified against a real anytls-go server on DigitalOcean
     (full `spark run tun` gate → HTTP 301; DNS over the UoT path → valid response). See ADR
     `docs/adr/0001-chrome-mimicry-tls-backend.md` and the STATE.md M11 entries for detail.
+
+### UI Migration Track (Flutter → Tauri v2): U0–U4
+
+> Per **ADR 0008**. Replaces the `gui/` Flutter app + its two core bindings (`flutter_rust_bridge`
+> desktop + platform-channels mobile) with one **Tauri v2** app: web frontend → Rust backend via
+> `invoke()` + events. Everything below the shell (core, netstack, transports, `ipc/`,
+> `spark-ffi`/UniFFI, the privileged service, the `platforms/{android,apple}` tunnel shims) is reused
+> unchanged; the process/privilege model (ADR 0005) is unchanged (Tauri app = unprivileged client).
+> Android-weighted but **macOS-first** for the lowest-risk proof. Do **not** delete `gui/` until
+> per-platform parity (U4). Keep Tauri confined to the UI-shell crate — `core/` stays Tauri-free.
+
+#### U0 — Tauri shell + Lantern web UI (mock backend)
+- **Goal:** A Tauri v2 app that builds and renders the Lantern connect screen against a mock backend.
+- **In:** new `gui-tauri/` (Tauri v2 + Svelte+Vite — confirm stack here); port the screen + settings
+  from `docs/mockups/spark-tauri-lantern-look.html`; a `SparkBackend` TS interface with a mock impl.
+- **Out:** real core wiring; any mobile target.
+- **Deliverables:** `gui-tauri/`, the web UI, the mock backend.
+- **Gate:** `cargo tauri build` runs on macOS; the screen matches the mockup; **`cargo tree -i
+  openssl-sys` is empty** (CLAUDE.md hard rule); shell bundle size reported.
+- **Sessions:** 1–2.
+- **Checkpoint:** confirm the front-end stack (Svelte vs vanilla TS) and the no-`openssl-sys` result.
+
+#### U1 — macOS to parity (NE Model A: one-click, no sudo) — DECOMPOSED, spike-first
+- **Goal:** One-click Connect on macOS equal to today's Flutter product (Model A — system extension,
+  no per-connect sudo), over the real core, from the Tauri app.
+- **Decision (2026-06-19, with Adam):** macOS uses **NE Model A**, not the `spark-service` daemon
+  path. So `connect()` drives `NETunnelProviderManager` (a Swift port of `gui/macos/Runner/SparkVPN.swift`),
+  **not** `spark-backend`/`spark-ipc`. Rationale + tradeoffs: ADR 0008 + the U1 decision-log entry.
+- **Reused as-is:** the `SparkTunnel` **system-extension** target in `platforms/apple` (project.yml —
+  links the `SparkCore.xcframework`, carries the NE + system-extension.install entitlements; built via
+  `xcodebuild`), and the embed/sign/notarize recipe in `packaging/macos/build-gui-dmg.sh` (build the
+  `.systemextension` → copy into `App.app/Contents/Library/SystemExtensions/` → re-sign with the NE
+  entitlements → notarize). The data-path config flows in via `providerConfiguration["config"]`.
+- **The real new work (why this is spike-first):** Tauri's macOS *desktop* build is **not** Xcode-based,
+  so calling Swift `NETunnelProviderManager` from a Tauri `invoke()` command is **unproven** — do NOT
+  guess at this glue (CLAUDE.md verification discipline). Split:
+  - **U1a — Swift-bridge spike (the unknown).** Prove the Tauri Rust side can drive the NE-management
+    Swift (activate the system extension via `OSSystemExtensionRequest`, then
+    `NETunnelProviderManager` load/save/start/stop/status). Candidate approaches to evaluate, smallest
+    first: (i) add C-callable NE-management fns to `platforms/apple` (Swift→C ABI, alongside
+    `spark_tunnel_run`) and call them from the Rust command; (ii) a Swift static lib/framework linked
+    via `build.rs` + an objc/C shim; (iii) a Tauri plugin with Swift (verify Tauri v2 supports Swift on
+    macOS *desktop*, not just iOS). **Gate:** a throwaway Tauri command toggles a real
+    `NETunnelProviderManager` preference / reads `connection.status` on macOS — proving the path —
+    plus a written recommendation. Stop and report.
+  - **U1b — embed + sign + wire.** Implement the `invoke()` command surface (status/connect/disconnect
+    + status event stream) over the chosen bridge; runtime `config.toml` precedence (file → baked
+    `SPARK_CONFIG` → `SPARK_PROXY` → direct, matching `NEBackend`); swap the frontend `MockBackend` →
+    `TauriBackend`; adapt `build-gui-dmg.sh` to embed the `.systemextension` into the **Tauri** `.app`
+    and sign with the NE entitlements. **Gate:** the signed Tauri `.app` installs the system extension
+    (approval prompt) and reaches `connecting`; **macOS app-bundle size measured vs the Flutter DMG**.
+  - **U1c — live connect-e2e gate.** Connect e2e on macOS (IP changes to the relay, as in the current
+    macOS gate). **Blocked on the human-owned NE provisioning profile (see §3)** — same blocker as M10.
+- **Sessions:** U1a 1–2 (spike) · U1b 2–3 · U1c 1 (after provisioning).
+- **Checkpoint:** after U1a, record the chosen Swift-bridge approach + evidence before U1b.
+
+#### U2 — Android (priority platform)
+- **Goal:** Connect e2e on Android via Tauri mobile.
+- **In:** the Tauri v2 Android project; a **Tauri plugin** wrapping the existing `platforms/android`
+  `VpnService` + UniFFI (M9); the same web UI.
+- **Out:** iOS, Windows, Linux.
+- **Deliverables:** the Android Tauri project + the VpnService plugin bridge.
+- **Gate:** builds for `aarch64-linux-android`; browse/connect test passes on device/emulator; **APK
+  size measured vs the Flutter APK**.
+- **Sessions:** 2–4 (the plugin bridge is the main unknown).
+- **Checkpoint:** note the plugin architecture, NDK pins, and the size.
+
+#### U3 — Windows → iOS → Linux to parity
+- **Goal:** each remaining platform to connect-parity, one at a time.
+- **In:** Windows (WinTun/service path, WebView2); iOS (Tauri iOS + the NE plugin — **verify the NE
+  extension packages inside the Tauri iOS project**); Linux (WebKitGTK + service path).
+- **Gate (per platform):** connect e2e + size measured. iOS additionally: the NE entitlement/extension
+  loads under the Tauri iOS project.
+- **Sessions:** 2–3 each.
+- **Checkpoint:** per platform; flag any WebView rendering fixes.
+
+#### U4 — Retire Flutter; switch packaging + docs
+- **Goal:** Tauri is the only client; Flutter removed.
+- **In:** retire `gui/`; retarget `packaging/` to the Tauri bundler on all platforms; update
+  README/STATE; produce the final five-platform size table.
+- **Gate:** all five platforms ship from the Tauri app; `gui/` is out of the build; STATE + PLAN
+  reflect it; final Flutter→Tauri size table recorded.
+- **Sessions:** 1–2.
+- **Checkpoint:** the final per-platform size comparison.
 
 ---
 

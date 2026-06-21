@@ -5,7 +5,10 @@ members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/appl
 #  - vendor/netstack-smoltcp: depended on by `path`, but its examples/tests/dev-deps
 #    (tun2, structopt, socket2-ext, …) should not be built as part of our workspace.
 #  - netstack-spike, circ-tool: standalone scratch crates, not part of the product.
-exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool"]
+#  - gui-tauri/src-tauri: the Tauri UI shell (ADR 0008). Kept out so Tauri's large
+#    dep tree never enters the core workspace graph or the size-tuned release profile;
+#    it builds standalone via its own `npm run tauri build` / `cargo build`.
+exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
