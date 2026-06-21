@@ -37,6 +37,7 @@
     // would otherwise fire every interval and the UI would never record the error.
     try {
       status = await backend.status();
+      errorMsg = null; // clear a prior (transient) error once the backend recovers
     } catch (e) {
       errorMsg = String(e);
     }

@@ -28,8 +28,10 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 #[derive(Parser)]
 #[command(about = "Minimal spark tunnel relay (plain tcp_tunnel protocol) for e2e testing")]
 struct Args {
-    /// Address to listen on.
-    #[arg(long, default_value = "0.0.0.0:9000")]
+    /// Address to listen on. Defaults to localhost; this is an unauthenticated
+    /// relay, so pass `--listen 0.0.0.0:9000` explicitly to expose it externally
+    /// (and only on a host firewalled to trusted clients).
+    #[arg(long, default_value = "127.0.0.1:9000")]
     listen: SocketAddr,
 }
 
