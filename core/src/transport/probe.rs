@@ -32,7 +32,11 @@ impl CallbackUrl {
         let (tls, default_port) = match scheme {
             "https" => (true, 443),
             "http" => (false, 80),
-            other => return Err(io::Error::other(format!("unsupported callback scheme `{other}`"))),
+            other => {
+                return Err(io::Error::other(format!(
+                    "unsupported callback scheme `{other}`"
+                )))
+            }
         };
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
@@ -52,7 +56,12 @@ impl CallbackUrl {
         if host.is_empty() {
             return Err(io::Error::other(format!("callback url missing host: {s}")));
         }
-        Ok(CallbackUrl { tls, host, port, path: path.to_owned() })
+        Ok(CallbackUrl {
+            tls,
+            host,
+            port,
+            path: path.to_owned(),
+        })
     }
 }
 
@@ -104,25 +113,38 @@ pub struct ProbeOutcome {
 
 impl ProbeOutcome {
     fn unhealthy() -> Self {
-        ProbeOutcome { latency: Duration::MAX, healthy: false }
+        ProbeOutcome {
+            latency: Duration::MAX,
+            healthy: false,
+        }
     }
 }
 
 /// Probe one transport: dial the callback host through it (timing establish + callback),
 /// run the HTTP GET, and report health + latency. The whole attempt is bounded by `deadline`.
 /// Never panics; any error results in an unhealthy outcome (disqualified from ranking).
-pub async fn probe(transport: &Arc<dyn Transport>, url: &CallbackUrl, deadline: Duration) -> ProbeOutcome {
+pub async fn probe(
+    transport: &Arc<dyn Transport>,
+    url: &CallbackUrl,
+    deadline: Duration,
+) -> ProbeOutcome {
     let started = Instant::now();
     match tokio::time::timeout(deadline, probe_inner(transport, url)).await {
-        Ok(Ok(true)) => ProbeOutcome { latency: started.elapsed(), healthy: true },
+        Ok(Ok(true)) => ProbeOutcome {
+            latency: started.elapsed(),
+            healthy: true,
+        },
         _ => ProbeOutcome::unhealthy(),
     }
 }
 
 async fn probe_inner(transport: &Arc<dyn Transport>, url: &CallbackUrl) -> io::Result<bool> {
-    let target: std::net::SocketAddr = format!("{}:{}", url.host, url.port)
-        .parse()
-        .map_err(|_| io::Error::other("callback host must be an IP literal (not a hostname); e.g. 1.2.3.4:80"))?;
+    let target: std::net::SocketAddr =
+        format!("{}:{}", url.host, url.port).parse().map_err(|_| {
+            io::Error::other(
+                "callback host must be an IP literal (not a hostname); e.g. 1.2.3.4:80",
+            )
+        })?;
     let stream = transport.dial(target).await?;
     if url.tls {
         let tls = tls_wrap(stream, &url.host).await?;
@@ -193,30 +215,50 @@ mod tests {
 
     #[tokio::test]
     async fn probe_healthy_on_2xx_with_latency() {
-        let t: Arc<dyn Transport> =
-            Arc::new(FakeTransport { status: b"HTTP/1.1 204 No Content\r\n\r\n" });
-        let url = CallbackUrl { tls: false, host: "127.0.0.1".into(), port: 80, path: "/".into() };
+        let t: Arc<dyn Transport> = Arc::new(FakeTransport {
+            status: b"HTTP/1.1 204 No Content\r\n\r\n",
+        });
+        let url = CallbackUrl {
+            tls: false,
+            host: "127.0.0.1".into(),
+            port: 80,
+            path: "/".into(),
+        };
         let out = probe(&t, &url, Duration::from_secs(5)).await;
         assert!(out.healthy);
     }
 
     #[tokio::test]
     async fn probe_unhealthy_on_non_2xx() {
-        let t: Arc<dyn Transport> =
-            Arc::new(FakeTransport { status: b"HTTP/1.1 500 Err\r\n\r\n" });
-        let url = CallbackUrl { tls: false, host: "127.0.0.1".into(), port: 80, path: "/".into() };
+        let t: Arc<dyn Transport> = Arc::new(FakeTransport {
+            status: b"HTTP/1.1 500 Err\r\n\r\n",
+        });
+        let url = CallbackUrl {
+            tls: false,
+            host: "127.0.0.1".into(),
+            port: 80,
+            path: "/".into(),
+        };
         assert!(!probe(&t, &url, Duration::from_secs(5)).await.healthy);
     }
 
     #[tokio::test]
     async fn http_get_reads_2xx_and_sends_request() {
         let (client, mut server) = tokio::io::duplex(4096);
-        let url = CallbackUrl { tls: false, host: "h.example".into(), port: 80, path: "/ok".into() };
+        let url = CallbackUrl {
+            tls: false,
+            host: "h.example".into(),
+            port: 80,
+            path: "/ok".into(),
+        };
         let server_task = tokio::spawn(async move {
             let mut buf = vec![0u8; 1024];
             let n = server.read(&mut buf).await.unwrap();
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            server.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            server
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
             req
         });
         let ok = http_get_ok(client, &url).await.unwrap();
@@ -229,11 +271,19 @@ mod tests {
     #[tokio::test]
     async fn http_get_rejects_non_2xx() {
         let (client, mut server) = tokio::io::duplex(4096);
-        let url = CallbackUrl { tls: false, host: "h.example".into(), port: 80, path: "/".into() };
+        let url = CallbackUrl {
+            tls: false,
+            host: "h.example".into(),
+            port: 80,
+            path: "/".into(),
+        };
         tokio::spawn(async move {
             let mut buf = vec![0u8; 1024];
             let _ = server.read(&mut buf).await.unwrap();
-            server.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            server
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
         });
         assert!(!http_get_ok(client, &url).await.unwrap());
     }
@@ -241,9 +291,25 @@ mod tests {
     #[test]
     fn parses_callback_urls() {
         let u = CallbackUrl::parse("https://canary.example/generate_204").unwrap();
-        assert_eq!(u, CallbackUrl { tls: true, host: "canary.example".into(), port: 443, path: "/generate_204".into() });
+        assert_eq!(
+            u,
+            CallbackUrl {
+                tls: true,
+                host: "canary.example".into(),
+                port: 443,
+                path: "/generate_204".into()
+            }
+        );
         let u = CallbackUrl::parse("http://1.2.3.4:8080/ok").unwrap();
-        assert_eq!(u, CallbackUrl { tls: false, host: "1.2.3.4".into(), port: 8080, path: "/ok".into() });
+        assert_eq!(
+            u,
+            CallbackUrl {
+                tls: false,
+                host: "1.2.3.4".into(),
+                port: 8080,
+                path: "/ok".into()
+            }
+        );
         let u = CallbackUrl::parse("https://h.example").unwrap();
         assert_eq!(u.path, "/");
         assert!(CallbackUrl::parse("ftp://h/x").is_err());
@@ -258,7 +324,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: needs network + SPARK_LIVE_CALLBACK"]
     async fn live_probe() {
-        let Ok(raw) = std::env::var("SPARK_LIVE_CALLBACK") else { return };
+        let Ok(raw) = std::env::var("SPARK_LIVE_CALLBACK") else {
+            return;
+        };
         let url = CallbackUrl::parse(&raw).expect("valid SPARK_LIVE_CALLBACK");
         let direct: std::sync::Arc<dyn crate::transport::Transport> =
             std::sync::Arc::new(crate::transport::DirectTransport::new(None));

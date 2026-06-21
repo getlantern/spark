@@ -793,14 +793,20 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(c.transport.callback_url.as_deref(), Some("https://canary.example/generate_204"));
+        assert_eq!(
+            c.transport.callback_url.as_deref(),
+            Some("https://canary.example/generate_204")
+        );
         assert_eq!(c.transport.probe_interval_secs, 120);
         assert_eq!(c.transport.probe_window, 4);
         let servers = &c.transport.servers;
         assert_eq!(servers.len(), 2);
         assert!(matches!(servers[0].spec, ServerSpec::Anytls(_)));
         assert_eq!(servers[0].callback_url, None); // falls back to the global default
-        assert_eq!(servers[1].callback_url.as_deref(), Some("https://other.example/ok"));
+        assert_eq!(
+            servers[1].callback_url.as_deref(),
+            Some("https://other.example/ok")
+        );
     }
 
     #[test]
@@ -815,9 +821,12 @@ mod tests {
     #[test]
     fn server_spec_parses_each_kind() {
         // internally-tagged by `kind`, flat fields.
-        let anytls: ServerSpec = toml::from_str("kind = \"anytls\"\nserver = \"1.2.3.4:443\"\npassword = \"pw\"\n").unwrap();
+        let anytls: ServerSpec =
+            toml::from_str("kind = \"anytls\"\nserver = \"1.2.3.4:443\"\npassword = \"pw\"\n")
+                .unwrap();
         assert!(matches!(anytls, ServerSpec::Anytls(_)));
-        let tunnel: ServerSpec = toml::from_str("kind = \"tunnel\"\nserver = \"5.6.7.8:443\"\n").unwrap();
+        let tunnel: ServerSpec =
+            toml::from_str("kind = \"tunnel\"\nserver = \"5.6.7.8:443\"\n").unwrap();
         assert!(matches!(tunnel, ServerSpec::Tunnel(_)));
         // unknown kind is rejected.
         assert!(toml::from_str::<ServerSpec>("kind = \"bogus\"\n").is_err());

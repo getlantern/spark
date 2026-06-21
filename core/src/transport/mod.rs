@@ -61,10 +61,10 @@ pub use flint_shaping as shaping;
 pub use flint_tls::{gambit, ja4};
 
 pub mod anytls;
-pub mod probe;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
+pub mod probe;
 /// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
 /// mux, wire-interoperable with deployed lantern-box `"samizdat"` servers. Behind the `samizdat`
 /// feature so the base build pulls neither the boring TLS backend nor the `h2` dependency.

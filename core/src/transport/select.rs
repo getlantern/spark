@@ -47,12 +47,20 @@ impl SelectingTransport {
             interval,
             window.max(1),
         ));
-        SelectingTransport { members, selection, prober: Mutex::new(Some(task)) }
+        SelectingTransport {
+            members,
+            selection,
+            prober: Mutex::new(Some(task)),
+        }
     }
 
     /// Current best-first order (snapshot; lock not held across `.await`).
     fn order(&self) -> Vec<usize> {
-        self.selection.lock().expect("selection mutex").ranked.clone()
+        self.selection
+            .lock()
+            .expect("selection mutex")
+            .ranked
+            .clone()
     }
 }
 
@@ -76,7 +84,10 @@ impl Transport for SelectingTransport {
 
 #[async_trait]
 impl UdpTransport for SelectingTransport {
-    async fn dial_udp(&self, target: SocketAddr) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+    async fn dial_udp(
+        &self,
+        target: SocketAddr,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         let order = self.order();
         if order.is_empty() {
             return Err(io::Error::other("no healthy server in the pool"));
@@ -137,7 +148,8 @@ const SWITCH_MARGIN: f64 = 0.20;
 
 /// Healthy members, best (lowest latency) first; unhealthy dropped.
 fn rank(outcomes: &[(usize, ProbeOutcome)]) -> Vec<usize> {
-    let mut healthy: Vec<&(usize, ProbeOutcome)> = outcomes.iter().filter(|(_, o)| o.healthy).collect();
+    let mut healthy: Vec<&(usize, ProbeOutcome)> =
+        outcomes.iter().filter(|(_, o)| o.healthy).collect();
     healthy.sort_by_key(|(_, o)| o.latency);
     healthy.iter().map(|(i, _)| *i).collect()
 }
@@ -202,7 +214,12 @@ mod tests {
             udp: Arc::new(NoUdp),
             // host must be an IP literal (the probe dials by SocketAddr); the fake transport ignores
             // the target, so 127.0.0.1 just has to parse.
-            callback: CallbackUrl { tls: false, host: "127.0.0.1".into(), port: 80, path: "/".into() },
+            callback: CallbackUrl {
+                tls: false,
+                host: "127.0.0.1".into(),
+                port: 80,
+                path: "/".into(),
+            },
         }
     }
 
@@ -217,21 +234,33 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(!st.order().is_empty(), "prober should have selected a healthy server");
+        assert!(
+            !st.order().is_empty(),
+            "prober should have selected a healthy server"
+        );
     }
 
     // A fake transport: dial always errors, or always yields a dummy stream.
-    struct FakeT { ok: bool }
+    struct FakeT {
+        ok: bool,
+    }
     #[async_trait]
     impl Transport for FakeT {
         async fn dial(&self, _t: SocketAddr) -> io::Result<BoxedStream> {
-            if self.ok { Ok(Box::new(tokio::io::duplex(16).0)) } else { Err(io::Error::other("down")) }
+            if self.ok {
+                Ok(Box::new(tokio::io::duplex(16).0))
+            } else {
+                Err(io::Error::other("down"))
+            }
         }
     }
     struct NoUdp;
     #[async_trait]
     impl UdpTransport for NoUdp {
-        async fn dial_udp(&self, _t: SocketAddr) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        async fn dial_udp(
+            &self,
+            _t: SocketAddr,
+        ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
             Err(io::Error::other("no udp"))
         }
     }
@@ -239,7 +268,12 @@ mod tests {
         Member {
             transport: Arc::new(FakeT { ok }),
             udp: Arc::new(NoUdp),
-            callback: CallbackUrl { tls: false, host: "h".into(), port: 80, path: "/".into() },
+            callback: CallbackUrl {
+                tls: false,
+                host: "h".into(),
+                port: 80,
+                path: "/".into(),
+            },
         }
     }
     fn selecting(members: Vec<Member>, ranked: Vec<usize>) -> SelectingTransport {
@@ -273,9 +307,27 @@ mod tests {
         use crate::transport::probe::ProbeOutcome;
         use std::time::Duration;
         let outs = vec![
-            (0, ProbeOutcome { latency: Duration::from_millis(80), healthy: true }),
-            (1, ProbeOutcome { latency: Duration::MAX, healthy: false }),
-            (2, ProbeOutcome { latency: Duration::from_millis(20), healthy: true }),
+            (
+                0,
+                ProbeOutcome {
+                    latency: Duration::from_millis(80),
+                    healthy: true,
+                },
+            ),
+            (
+                1,
+                ProbeOutcome {
+                    latency: Duration::MAX,
+                    healthy: false,
+                },
+            ),
+            (
+                2,
+                ProbeOutcome {
+                    latency: Duration::from_millis(20),
+                    healthy: true,
+                },
+            ),
         ];
         assert_eq!(rank(&outs), vec![2, 0]); // 20ms before 80ms; index 1 dropped
     }
@@ -287,20 +339,56 @@ mod tests {
         let current = vec![0];
         // index 0 = 100ms (current), index 2 = 90ms challenger: only 10% better → keep 0 first.
         let fresh = vec![
-            (0, ProbeOutcome { latency: Duration::from_millis(100), healthy: true }),
-            (2, ProbeOutcome { latency: Duration::from_millis(90), healthy: true }),
+            (
+                0,
+                ProbeOutcome {
+                    latency: Duration::from_millis(100),
+                    healthy: true,
+                },
+            ),
+            (
+                2,
+                ProbeOutcome {
+                    latency: Duration::from_millis(90),
+                    healthy: true,
+                },
+            ),
         ];
         assert_eq!(next_order(&current, &fresh)[0], 0);
         // index 2 = 70ms: 30% better → it leads.
         let fresh = vec![
-            (0, ProbeOutcome { latency: Duration::from_millis(100), healthy: true }),
-            (2, ProbeOutcome { latency: Duration::from_millis(70), healthy: true }),
+            (
+                0,
+                ProbeOutcome {
+                    latency: Duration::from_millis(100),
+                    healthy: true,
+                },
+            ),
+            (
+                2,
+                ProbeOutcome {
+                    latency: Duration::from_millis(70),
+                    healthy: true,
+                },
+            ),
         ];
         assert_eq!(next_order(&current, &fresh)[0], 2);
         // current became unhealthy → challenger leads regardless of margin.
         let fresh = vec![
-            (0, ProbeOutcome { latency: Duration::MAX, healthy: false }),
-            (2, ProbeOutcome { latency: Duration::from_millis(99), healthy: true }),
+            (
+                0,
+                ProbeOutcome {
+                    latency: Duration::MAX,
+                    healthy: false,
+                },
+            ),
+            (
+                2,
+                ProbeOutcome {
+                    latency: Duration::from_millis(99),
+                    healthy: true,
+                },
+            ),
         ];
         assert_eq!(next_order(&current, &fresh)[0], 2);
     }

@@ -749,7 +749,7 @@ Mirrors the bootstrap resolver's `#[ignore]` live test. It probes a real callbac
     }
 ```
 
-- [ ] **Step 2: Verify it compiles + is skipped.** Run: `cd <spark> && cargo test -p spark-core --features multi-server,anytls live_probe -- --list`. Expected: `live_probe` is listed (compiles) and not run.
+- [ ] **Step 2: Verify it compiles + is skipped.** Run: `cd <spark> && cargo test -p spark-core --features anytls live_probe -- --list`. Expected: `live_probe` is listed (compiles) and not run. (`anytls` so the https TLS path compiles; the `multi-server` feature isn't needed here — `probe`/`DirectTransport` are base, only `select.rs` is gated.)
 
 - [ ] **Step 3: Commit.**
 ```bash
@@ -1130,28 +1130,29 @@ git add core/src/transport/select.rs
 git commit -m "feat(transport): prober loop + SelectingTransport::new (windowed probe + re-rank)"
 ```
 
-### Task E4: verify both builds + lint the module
+### Task E4: verify builds + fmt the module
 
-**Files:** none (verification; the `multi-server` feature + gating were added in Task E1).
+**Files:** none (verification + `cargo fmt`; the `multi-server` feature + gating were added in Task E1).
 
-- [ ] **Step 1: Verify base is unaffected and the feature builds clean.** Run:
+> **Note:** do NOT run `clippy -D warnings` here. The module's entry points (`SelectingTransport::new`, `build_one`, and transitively `rank`/`next_order`/`prober_loop`/`SWITCH_MARGIN`/`Member.callback`) are only *used* once `from_config` calls `build_selecting` — that's **Task F1**. Until then they're legitimately dead code, so `-D warnings` would fail on expected dead-code. The clippy gate runs in **Task F3** (after wiring). Here we just confirm builds + tests + formatting.
+
+- [ ] **Step 1: Format + verify builds and tests.** Run:
 ```bash
 cd <spark>
+cargo fmt
+cargo fmt --check
 cargo build -p spark-core                                   # base: select not compiled
 cargo build -p spark-core --features multi-server           # pool path compiles
 cargo build -p spark-core --features multi-server,anytls    # + https probe TLS
 cargo test -p spark-core --features multi-server select:: probe::
-cargo clippy -p spark-core --features multi-server,anytls --all-targets -- -D warnings
-cargo fmt --check
 ```
-Expected: all succeed; clippy clean now that every `select.rs`/`probe.rs` symbol is used (E1–E3 + D complete). If clippy flags a genuinely-unused import, remove it.
+Expected: fmt clean after `cargo fmt`; all three builds succeed; select + probe tests pass.
 
-- [ ] **Step 2: Commit any lint fixes.**
+- [ ] **Step 2: Commit the formatting.**
 ```bash
 git add -A
-git commit -m "chore(transport): lint-clean the multi-server module"
+git commit -m "style(transport): rustfmt the multi-server + probe modules"
 ```
-(If there was nothing to fix, skip the commit.)
 
 ---
 
