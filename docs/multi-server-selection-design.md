@@ -140,9 +140,14 @@ A probe:
   probe time (mirroring the existing "feature not built" errors), never a silent skip.
 
 The HTTP client is a tiny hand-rolled GET-status reader over the transport stream — consistent with
-spark's "raw TLS + `tokio`, no `hyper`/`reqwest`" rule (cf. `flint-dns`'s hand-rolled DoH/h2). The
-multi-server core (config, `SelectingTransport`, prober, the `http://` probe path) is **not**
-feature-gated; only the `https://` TLS step rides `anytls`.
+spark's "raw TLS + `tokio`, no `hyper`/`reqwest`" rule (cf. `flint-dns`'s hand-rolled DoH/h2).
+
+**Feature gating.** The `config` types (`ServerSpec`/`ServerEntry`/pool fields) are always compiled,
+but the selection machinery — `transport::select`, `build_one`, and `build_selecting` — rides a
+`multi-server` feature (it pulls `flint-dial` for `probe_windowed`; the base build adds no
+`flint-dial`). With the feature off, a configured `transport.servers` is a **clear error** from
+`from_config` (it never silently falls back). The `probe` module's `http://` path is base; only the
+`https://` TLS step additionally rides `anytls`.
 Each probe is bounded by a deadline so a hung dial can't stall a batch (same lesson as the bootstrap
 resolver's per-attempt timeout).
 
@@ -169,9 +174,10 @@ it's an internal change to ranking, not to the config or the forwarder. Tracked 
 built here.
 
 **Prober** (uses `flint_dial::probe_windowed`):
-- **Initial selection:** probe the pool in windowed batches; pick the lowest-latency healthy server
-  from the first batch(es) that yield a healthy candidate — so connect isn't blocked on a huge pool —
-  then keep ranking the rest in the background and swap to the global best (subject to hysteresis).
+- **Initial selection (v1):** probe the whole pool once in bounded (windowed) batches, then set the
+  current best from that round. The window already caps in-flight probes, so even a large pool's first
+  round is bounded; **incremental "select from the first healthy batch, keep ranking the rest"** is a
+  follow-up optimization (roadmap), not v1 — v1 awaits the full first round before the first selection.
 - **Periodic:** every `probe_interval_secs`, re-probe the pool (windowed) and re-rank.
 - **Switch policy — failover + hysteresis:** immediate failover when the active server errors/dies; on
   a periodic re-rank, switch only if a challenger is **≥ 20% lower latency** *or* the current server is
@@ -207,7 +213,7 @@ load Config (transport.servers: pool of full transport configs)
   → bootstrap: resolve every Endpoint::Host across all entries → Ip  (default SNI = hostname)
   → build pool (build_one per entry)
   → SelectingTransport::new → spawn prober
-        initial: probe_windowed → first healthy lowest-latency = current best  (fast connect)
+        initial (v1): probe_windowed full round → lowest-latency healthy = current best
         background: finish ranking → swap to global best (hysteresis)
   → hand SelectingTransport to the forwarder (as Arc<dyn Transport>/<dyn UdpTransport>)
 

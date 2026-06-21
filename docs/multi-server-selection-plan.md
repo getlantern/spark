@@ -1,6 +1,6 @@
 # Multi-Server Selection Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Implementation plan** — written for task-by-task execution (originally driven by an automation workflow). Steps use checkbox (`- [ ]`) syntax so progress can be tracked; tackle them in order and commit after each. `<spark>` and `<flint>` below are placeholders for your local checkout/worktree roots.
 
 **Goal:** Let a spark config carry a **pool of servers**; spark probes each (handshake latency + a callback-URL health check *through* the transport), routes new flows through the lowest-latency healthy one, fails over on error, and periodically re-probes (in bounded batches) to track the best.
 
@@ -1377,6 +1377,6 @@ PR body: summarize the pool config, `SelectingTransport` (current-best hot-swap,
 - **One flint rev everywhere** (Task A2): all five flint deps pinned to `<FLINTREV>`; `cargo tree -i flint-shaping` shows one node.
 - **Three verification points** (CLAUDE.md Verification Discipline) flagged inline: (1) the `toml` internally-tagged-enum round-trip (B1 test confirms it), (2) the `tokio-boring2` client-connect API in `tls_wrap` (D3 — mirror `flint-tls`/samizdat), (3) `WirePlan: Clone` (C1). Resolve each by checking the actual API, not guessing.
 - **No `MutexGuard` across `.await`** — `SelectingTransport::order()` clones the ranked vec inside the lock and drops the guard before any dial. Keep it that way.
-- **Probe-by-IP (option a)** is assumed for callback hosts (`probe_inner` parses the host as an IP). If a hostname callback is needed, resolve it once at startup (bootstrap) and thread the `SocketAddr` through — noted in D3.
+- **Callback hosts resolve each probe round** — `probe_inner` calls `resolve_callback_addr` (IP literal used directly; hostname via `tokio::net::lookup_host`), keeping the hostname for SNI/`Host:`. Bracketed IPv6 (`[addr]`/`[addr]:port`) is accepted; unbracketed IPv6 is rejected.
 - **YAGNI**: no per-flow racing, no live-connection migration, no adaptive cadence, no expected-body match, no capability-aware UDP/TCP split — all roadmapped in the design, none built here.
 - **Crate/bin names:** core = `spark-core`/`spark_core`; CLI = `spark-cli`/bin `spark`; service = `spark-service`.

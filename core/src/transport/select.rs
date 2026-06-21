@@ -265,8 +265,8 @@ mod tests {
         Member {
             transport: Arc::new(Serve204),
             udp: Arc::new(NoUdp),
-            // host must be an IP literal (the probe dials by SocketAddr); the fake transport ignores
-            // the target, so 127.0.0.1 just has to parse.
+            // An IP literal keeps the test offline (no DNS lookup in `resolve_callback_addr`); the
+            // probe does resolve hostnames, but the fake transport ignores the target regardless.
             callback: CallbackUrl {
                 tls: false,
                 host: "127.0.0.1".into(),

@@ -45,17 +45,7 @@ impl CallbackUrl {
         if authority.is_empty() {
             return Err(io::Error::other(format!("callback url missing host: {s}")));
         }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((h, p)) => (
-                h.to_owned(),
-                p.parse::<u16>()
-                    .map_err(|_| io::Error::other(format!("bad callback port: {authority}")))?,
-            ),
-            None => (authority.to_owned(), default_port),
-        };
-        if host.is_empty() {
-            return Err(io::Error::other(format!("callback url missing host: {s}")));
-        }
+        let (host, port) = parse_authority(authority, default_port)?;
         Ok(CallbackUrl {
             tls,
             host,
@@ -65,16 +55,68 @@ impl CallbackUrl {
     }
 }
 
+/// Split an authority into `(host, port)`. Handles bracketed IPv6 (`[2001:db8::1]` / `[2001:db8::1]:443`,
+/// brackets stripped from the stored host), `host:port`, and bare `host` (default port). Rejects an
+/// **unbracketed** IPv6 literal (ambiguous with the port separator) — use `[addr]` instead.
+fn parse_authority(authority: &str, default_port: u16) -> io::Result<(String, u16)> {
+    if let Some(after_open) = authority.strip_prefix('[') {
+        // Bracketed IPv6: "[addr]" or "[addr]:port".
+        let (addr, rest) = after_open.split_once(']').ok_or_else(|| {
+            io::Error::other(format!(
+                "callback url: unterminated IPv6 bracket: {authority}"
+            ))
+        })?;
+        if addr.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(io::Error::other(format!(
+                "callback url: invalid IPv6 literal `{addr}`"
+            )));
+        }
+        let port = match rest {
+            "" => default_port,
+            r => r
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .ok_or_else(|| {
+                    io::Error::other(format!("callback url: bad port after IPv6 `{authority}`"))
+                })?,
+        };
+        Ok((addr.to_owned(), port))
+    } else if let Some((h, p)) = authority.rsplit_once(':') {
+        if h.contains(':') {
+            return Err(io::Error::other(format!(
+                "callback url: unbracketed IPv6 host `{authority}` — write it as `[addr]` or `[addr]:port`"
+            )));
+        }
+        if h.is_empty() {
+            return Err(io::Error::other(format!(
+                "callback url missing host: {authority}"
+            )));
+        }
+        let port = p
+            .parse::<u16>()
+            .map_err(|_| io::Error::other(format!("bad callback port: {authority}")))?;
+        Ok((h.to_owned(), port))
+    } else {
+        Ok((authority.to_owned(), default_port))
+    }
+}
+
 /// Send `GET {path}` over `stream`, read the status line, and return `true` iff the status is 2xx.
 /// `Connection: close` so the server ends the body; we only parse the status line.
 pub(crate) async fn http_get_ok<S>(mut stream: S, url: &CallbackUrl) -> io::Result<bool>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let host_header = if (url.tls && url.port == 443) || (!url.tls && url.port == 80) {
-        url.host.clone()
+    // Bracket an IPv6 host for the `Host:` header (e.g. `[2001:db8::1]` / `[2001:db8::1]:8080`).
+    let host_for_header = if url.host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{}]", url.host)
     } else {
-        format!("{}:{}", url.host, url.port)
+        url.host.clone()
+    };
+    let host_header = if (url.tls && url.port == 443) || (!url.tls && url.port == 80) {
+        host_for_header
+    } else {
+        format!("{host_for_header}:{}", url.port)
     };
     let req = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: spark-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n",
@@ -332,6 +374,42 @@ mod tests {
         assert!(CallbackUrl::parse("https://:443/x").is_err());
     }
 
+    #[test]
+    fn parses_bracketed_ipv6_and_rejects_unbracketed() {
+        // bracketed IPv6, brackets stripped from the stored host; default + explicit port.
+        let u = CallbackUrl::parse("https://[2001:db8::1]/p").unwrap();
+        assert_eq!(
+            u,
+            CallbackUrl {
+                tls: true,
+                host: "2001:db8::1".into(),
+                port: 443,
+                path: "/p".into()
+            }
+        );
+        let u = CallbackUrl::parse("http://[2001:db8::1]:8080/").unwrap();
+        assert_eq!(
+            u,
+            CallbackUrl {
+                tls: false,
+                host: "2001:db8::1".into(),
+                port: 8080,
+                path: "/".into()
+            }
+        );
+        // the stored host parses back as an IpAddr (so resolve_callback_addr uses the IP fast path).
+        assert!(CallbackUrl::parse("https://[2001:db8::1]/p")
+            .unwrap()
+            .host
+            .parse::<std::net::IpAddr>()
+            .is_ok());
+        // unbracketed IPv6 is ambiguous with the port separator → rejected.
+        assert!(CallbackUrl::parse("http://2001:db8::1/x").is_err());
+        // malformed brackets / bad literal.
+        assert!(CallbackUrl::parse("http://[2001:db8::1/x").is_err());
+        assert!(CallbackUrl::parse("http://[notv6]/x").is_err());
+    }
+
     #[tokio::test]
     async fn resolve_callback_addr_handles_ip_and_localhost() {
         assert_eq!(
@@ -367,8 +445,8 @@ mod tests {
     }
 
     /// Live e2e: probe a real callback through a direct (no-proxy) transport. Set
-    /// `SPARK_LIVE_CALLBACK` to an IP-host URL (the probe dials by `SocketAddr`), e.g.
-    /// `SPARK_LIVE_CALLBACK=https://<ip>:443/generate_204`. https needs the `anytls` feature.
+    /// `SPARK_LIVE_CALLBACK` to any reachable `http(s)://` URL — hostname or IP (the probe resolves
+    /// hostnames), e.g. `SPARK_LIVE_CALLBACK=https://www.gstatic.com/generate_204`. https needs `anytls`.
     /// Run: `SPARK_LIVE_CALLBACK=... cargo test -p spark-core --features anytls -- --ignored live_probe`
     #[tokio::test]
     #[ignore = "live: needs network + SPARK_LIVE_CALLBACK"]
