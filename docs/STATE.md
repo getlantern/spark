@@ -2198,8 +2198,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   server="<droplet-ip>:9000"`, `protect_interface="en1"` (en1 = active iface, 192.168.4.25). **Next:** get
   DO token or an existing droplet+SSH, deploy, generate config, user reconnects + curls through it.
 
+- 2026-06-21 (U1c FULLY PROVEN — real traffic e2e through a remote relay): Deployed `spark-relay`
+  to a DigitalOcean droplet and ran the full end-to-end test. **doctl** installed via brew + authed
+  (Lantern team, see [[digitalocean-access]]); droplet `spark-relay-test` (s-1vcpu-1gb, nyc3,
+  `159.203.78.86`) with a cloud firewall locking SSH+9000 to Adam's IP (97.118.56.88) and outbound
+  open. Relay **cross-compiled to x86_64-linux with `cargo zigbuild`** (cross/Docker-emulation both
+  failed; zigbuild on the Mac worked — 37s, 885KB ELF), scp'd + run as a systemd unit
+  (`spark-relay.service`, `--listen 0.0.0.0:9000`). Wrote `~/Library/Application Support/
+  org.getlantern.spark/config.toml` = `[transport] server="159.203.78.86:9000"
+  protect_interface="en1"`. Adam reconnected Spark; **the relay log showed hundreds of live TCP+UDP
+  flows** from 97.118.56.88 to real destinations (Google/Cloudflare/Apple/Telegram on :443), QUIC
+  included. This proves the whole NE Model A data path end-to-end: app → utun (sysext
+  `org.getlantern.spark.tunnel`) → core netstack → plain `tcp_tunnel` client → remote relay →
+  internet, both directions, TCP + UDP/DNS. **The Flutter→Tauri macOS migration (U1) is functionally
+  complete and validated against a real server.** Cleanup pending: tear down the droplet+firewall
+  (`doctl compute droplet delete spark-relay-test`) when done testing.
+
 ## Milestone checklist
-- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [~] U1 (NE Model A — **U1a/U1b + U1b-1 + U1b-2a + U1b-4 DONE; U1b-2b connect/disconnect wired (compile-verified)**; next: U1c live test [approve sysext + relay config.toml] / U1b-2b-ii OSSystemExtensionRequest activation if needed) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
+- [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)  [x] U1 (NE Model A — **DONE + PROVEN e2e 2026-06-21**: U1a/U1b/U1b-1/U1b-2a/U1b-4 + U1b-2b connect/disconnect + U1b-2b-ii OSSystemExtensionRequest activation; live test through a remote DO relay showed real TCP+UDP traffic egressing via the tunnel. Notarized DMG carries the Lantern-matched UI.) [ ] U2 [ ] U3 [ ] U4 (UI: Flutter→Tauri migration — ADR 0008, PLAN.md §4)
 - [x] M0  [x] M1 (code+tests green; **live ICMP gate PASSED on macOS 2026-06-15**)
   [x] M2 (bridge+forwarder; **live curl gate PASSED on macOS 2026-06-15** via --protect-interface)
   [x] M3a (address codec + header)  [x] M3b (relay stream + client — integration-tested)
