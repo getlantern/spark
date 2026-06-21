@@ -15,7 +15,7 @@ cd "$(dirname "$0")/../.."
 REPO_ROOT="$PWD"
 APPLE_DIR="$REPO_ROOT/platforms/apple"
 GUI="$REPO_ROOT/gui-tauri"
-TEAM_ID="ACZRKC3LQ9"
+TEAM_ID="${TEAM_ID:-ACZRKC3LQ9}"
 SYSEXT_ID="org.getlantern.spark.tunnel"
 VOLNAME="Spark"
 WORK="$(mktemp -d)"
@@ -29,8 +29,10 @@ SKIP_NOTARIZE="${SKIP_NOTARIZE:-0}"
 
 log() { echo "[build-tauri-dmg] $*" >&2; }
 
+# Pick the Developer ID Application identity for TEAM_ID (not just the first one —
+# avoids signing with the wrong cert when multiple teams are in the keychain).
 SIGN_IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning \
-  | awk -F'"' '/Developer ID Application/{print $2; exit}')}"
+  | awk -F'"' -v t="$TEAM_ID" '/Developer ID Application/ && $0 ~ t {print $2; exit}')}"
 [[ -n "$SIGN_IDENTITY" ]] || { echo "no Developer ID Application identity in the keychain" >&2; exit 1; }
 
 NOTARY_ARGS=()

@@ -43,8 +43,10 @@ pub mod ne_spike {
     /// first_status_raw is -1 when there are no managers. The same completion-block
     /// pattern carries connect/disconnect (saveToPreferences/startVPNTunnel) in U1c.
     ///
-    /// MUST be called on the main thread (the example does; in the Tauri app the
-    /// command hops to the main thread). Needs no NE entitlement — read-only.
+    /// MUST be called on the main thread (the example's `ne_probe` does, driving the
+    /// run loop itself). The Tauri app instead uses `load_first_status` from an
+    /// off-main `#[tauri::command(async)]`, so its own run loop services the main-queue
+    /// completion. Needs no NE entitlement — read-only.
     pub fn load_first_status_blocking() -> (usize, isize) {
         use std::sync::mpsc::channel;
 
@@ -328,7 +330,10 @@ pub mod ne_spike {
         );
         // SAFETY: NE copies the escaping completion block, so it outlives this call.
         unsafe { NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler(&outer) };
-        rx.recv_timeout(Duration::from_secs(25))
+        // Generous: a first-run connect can block on the interactive "add VPN
+        // configurations" approval prompt (saveToPreferences), which the user may
+        // take a while to accept — a short timeout would falsely report failure.
+        rx.recv_timeout(Duration::from_secs(120))
             .map_err(|_| "connect timed out".to_owned())?
     }
 

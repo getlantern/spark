@@ -1,8 +1,8 @@
 // The real backend: drives the Rust command surface (spark_status /
 // spark_connect / spark_disconnect) over Tauri's invoke(). status() reflects the
-// live NE connection state; connect()/disconnect() reject with the Rust error
-// until the U1b-2b write path lands. Same SparkBackend shape as MockBackend, so
-// the UI is unchanged.
+// live NE connection state; connect()/disconnect() drive the real NE write path
+// (NETunnelProviderManager save/load/start/stop). Same SparkBackend shape as
+// MockBackend, so the UI is unchanged.
 
 import { invoke } from "@tauri-apps/api/core";
 

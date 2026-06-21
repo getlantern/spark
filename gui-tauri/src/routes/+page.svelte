@@ -79,6 +79,7 @@
       <button
         class="track"
         class:on={connected}
+        aria-label="Toggle VPN connection"
         role="switch"
         aria-checked={connected}
         aria-busy={connecting || busy}
