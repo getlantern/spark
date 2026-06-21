@@ -159,13 +159,16 @@ async fn main() -> anyhow::Result<()> {
 
 /// The in-process driver (the former all-in-one behavior).
 async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
-    let config = match &args.config {
+    let mut config = match &args.config {
         Some(path) => Config::from_path(path)
             .with_context(|| format!("loading config from {}", path.display()))?,
         None => args.to_config(),
     };
 
     init_tracing(config.log.debug);
+    spark_core::resolve_bootstrap(&mut config)
+        .await
+        .context("resolving bootstrap endpoints")?;
 
     let tun = Arc::new(
         Tun::open(spark_core::tun::TunConfig {

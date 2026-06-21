@@ -17,6 +17,7 @@ path = "src/main.rs"
 # AnyTLS transport (ADR 0001): enable spark-core's `anytls` so the service can run an AnyTLS profile.
 # Off by default — the base service stays rustls/ring-only with no C/cmake BoringSSL build.
 anytls = ["spark-core/anytls"]
+bootstrap-dns = ["spark-core/bootstrap-dns"]
 
 [dependencies]
 spark-ipc = { path = "../ipc", features = ["stream"] }

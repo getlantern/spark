@@ -26,6 +26,12 @@ pub mod routing;
 pub mod transport;
 pub mod tun;
 
+/// Control-plane name resolution for startup (design: docs/bootstrap-resolver-design.md). Resolves a
+/// proxy `server` hostname to validated IPs via an un-poisoned Chrome-mimicry DoH race, before any
+/// tunnel exists. Behind `bootstrap-dns` (pulls flint-dns/flint-dial + boring).
+#[cfg(feature = "bootstrap-dns")]
+pub mod bootstrap;
+
 /// Marker for a bidirectional async byte stream. Blanket-implemented for every
 /// `AsyncRead + AsyncWrite`, so a surfaced netstack flow and a dialed transport stream can
 /// share one boxed type ([`BoxedStream`]).
@@ -35,3 +41,50 @@ impl<T: AsyncRead + AsyncWrite> AsyncReadWrite for T {}
 /// An owned, boxed bidirectional stream — the currency between netstack flows
 /// ([`netstack::TcpFlow`]) and transports ([`transport::Transport::dial`]).
 pub type BoxedStream = Box<dyn AsyncReadWrite + Unpin + Send>;
+
+/// Bootstrap phase: resolve every `Endpoint::Host` proxy `server` in `config` to an `Endpoint::Ip`
+/// before the transport is built (design §3.3). With `bootstrap-dns` this uses the un-poisoned
+/// Chrome-mimicry resolver; without it, a configured hostname is a hard error — never a silent
+/// system-DNS fallback. An all-IP config is a no-op (and works with the feature off).
+#[cfg(feature = "bootstrap-dns")]
+pub async fn resolve_bootstrap(config: &mut config::Config) -> std::io::Result<()> {
+    let resolver = bootstrap::default_resolver(config);
+    bootstrap::resolve_endpoints(config, &resolver).await
+}
+
+/// See the `bootstrap-dns` variant. Without the feature, a configured hostname is rejected explicitly.
+#[cfg(not(feature = "bootstrap-dns"))]
+pub async fn resolve_bootstrap(config: &mut config::Config) -> std::io::Result<()> {
+    if let Some(host) = config.first_unresolved_host() {
+        return Err(std::io::Error::other(format!(
+            "proxy server `{host}` is a hostname, which requires the bootstrap-dns feature"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, not(feature = "bootstrap-dns")))]
+mod resolve_bootstrap_tests {
+    use crate::config::Config;
+
+    #[tokio::test]
+    async fn host_without_the_feature_is_an_explicit_error() {
+        let mut cfg = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"proxy.example.com:443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        let err = super::resolve_bootstrap(&mut cfg).await.unwrap_err();
+        assert!(err.to_string().contains("bootstrap-dns feature"));
+    }
+
+    #[tokio::test]
+    async fn all_ip_config_is_a_noop() {
+        let mut cfg = Config::from_toml_str(
+            "[transport.anytls]\nserver = \"1.2.3.4:443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        super::resolve_bootstrap(&mut cfg)
+            .await
+            .expect("all-IP config resolves trivially");
+    }
+}
