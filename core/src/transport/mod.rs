@@ -168,7 +168,9 @@ fn build_selecting(
             .callback_url
             .as_deref()
             .or(config.transport.callback_url.as_deref())
-            .ok_or_else(|| io::Error::other("transport.servers requires a callback_url (global or per-entry)"))?;
+            .ok_or_else(|| {
+                io::Error::other("transport.servers requires a callback_url (global or per-entry)")
+            })?;
         let callback = CallbackUrl::parse(raw)?;
         let (transport, udp) = build_one(&entry.spec, protector.as_ref(), &wire)?;
         members.push(Member::new(transport, udp, callback));
@@ -178,7 +180,10 @@ fn build_selecting(
         std::time::Duration::from_secs(config.transport.probe_interval_secs),
         config.transport.probe_window,
     ));
-    Ok((st.clone() as Arc<dyn Transport>, st as Arc<dyn UdpTransport>))
+    Ok((
+        st.clone() as Arc<dyn Transport>,
+        st as Arc<dyn UdpTransport>,
+    ))
 }
 
 #[cfg(not(feature = "multi-server"))]
@@ -772,7 +777,10 @@ mod pool_config_tests {
         let cfg = Config {
             transport: TransportConfig {
                 servers: vec![ServerEntry {
-                    spec: ServerSpec::Tunnel(TunnelConfig { server: "1.2.3.4:443".parse().unwrap(), sni: None }),
+                    spec: ServerSpec::Tunnel(TunnelConfig {
+                        server: "1.2.3.4:443".parse().unwrap(),
+                        sni: None,
+                    }),
                     callback_url: None,
                 }],
                 callback_url: Some("http://127.0.0.1:80/ok".into()),
@@ -788,7 +796,10 @@ mod pool_config_tests {
         let cfg = Config {
             transport: TransportConfig {
                 servers: vec![ServerEntry {
-                    spec: ServerSpec::Tunnel(TunnelConfig { server: "1.2.3.4:443".parse().unwrap(), sni: None }),
+                    spec: ServerSpec::Tunnel(TunnelConfig {
+                        server: "1.2.3.4:443".parse().unwrap(),
+                        sni: None,
+                    }),
                     callback_url: None,
                 }],
                 callback_url: None,

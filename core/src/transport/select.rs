@@ -22,8 +22,16 @@ pub(crate) struct Member {
 }
 
 impl Member {
-    pub(crate) fn new(transport: Arc<dyn Transport>, udp: Arc<dyn UdpTransport>, callback: CallbackUrl) -> Self {
-        Member { transport, udp, callback }
+    pub(crate) fn new(
+        transport: Arc<dyn Transport>,
+        udp: Arc<dyn UdpTransport>,
+        callback: CallbackUrl,
+    ) -> Self {
+        Member {
+            transport,
+            udp,
+            callback,
+        }
     }
 }
 
