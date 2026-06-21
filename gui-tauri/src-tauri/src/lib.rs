@@ -268,7 +268,14 @@ pub mod ne_spike {
         activate_extension()?;
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let outer = RcBlock::new(
-            move |arr: *mut NSArray<NETunnelProviderManager>, _e: *mut NSError| {
+            move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
+                // A non-null error means loadAll itself failed (entitlement / provisioning
+                // / profile) — surface it instead of silently falling back to a fresh
+                // manager and hitting a confusing downstream save/start timeout.
+                if !e.is_null() {
+                    let _ = tx.send(Err(format!("loadAllFromPreferences failed: {}", err_str(e))));
+                    return;
+                }
                 let mgr: Retained<NETunnelProviderManager> = unsafe {
                     if !arr.is_null() && (*arr).count() > 0 {
                         (*arr).objectAtIndex(0)
@@ -330,13 +337,19 @@ pub mod ne_spike {
     pub fn disconnect() -> Result<(), String> {
         let (tx, rx): (Sender<Result<(), String>>, _) = std::sync::mpsc::channel();
         let h = RcBlock::new(
-            move |arr: *mut NSArray<NETunnelProviderManager>, _e: *mut NSError| {
-                let r = unsafe {
-                    if !arr.is_null() && (*arr).count() > 0 {
-                        (*arr).objectAtIndex(0).connection().stopVPNTunnel();
-                        Ok(())
-                    } else {
-                        Err("no tunnel configured".to_owned())
+            move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
+                let r = if !e.is_null() {
+                    // loadAll failed — propagate the real cause rather than the
+                    // misleading "no tunnel configured".
+                    Err(format!("loadAllFromPreferences failed: {}", err_str(e)))
+                } else {
+                    unsafe {
+                        if !arr.is_null() && (*arr).count() > 0 {
+                            (*arr).objectAtIndex(0).connection().stopVPNTunnel();
+                            Ok(())
+                        } else {
+                            Err("no tunnel configured".to_owned())
+                        }
                     }
                 };
                 let _ = tx.send(r);
