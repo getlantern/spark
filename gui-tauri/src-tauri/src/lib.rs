@@ -55,20 +55,26 @@ pub mod ne_spike {
 
         let (tx, rx) = channel::<(usize, isize)>();
         let handler = RcBlock::new(
-            move |arr: *mut NSArray<NETunnelProviderManager>, _err: *mut NSError| {
-                // SAFETY: `arr` is the framework-owned managers array (or null).
-                let result = unsafe {
-                    if arr.is_null() {
-                        (0usize, -1isize)
-                    } else {
-                        let arr = &*arr;
-                        let count = arr.count();
-                        let status = if count > 0 {
-                            arr.objectAtIndex(0).connection().status().0
+            move |arr: *mut NSArray<NETunnelProviderManager>, err: *mut NSError| {
+                let result = if !err.is_null() {
+                    // loadAll failed (entitlement/profile) — distinct sentinel so the UI
+                    // surfaces "failed" instead of a silent "disconnected".
+                    (0usize, -3isize)
+                } else {
+                    // SAFETY: `arr` is the framework-owned managers array (or null).
+                    unsafe {
+                        if arr.is_null() {
+                            (0usize, -1isize)
                         } else {
-                            -1
-                        };
-                        (count, status)
+                            let arr = &*arr;
+                            let count = arr.count();
+                            let status = if count > 0 {
+                                arr.objectAtIndex(0).connection().status().0
+                            } else {
+                                -1
+                            };
+                            (count, status)
+                        }
                     }
                 };
                 let _ = tx.send(result);
@@ -102,20 +108,26 @@ pub mod ne_spike {
 
         let (tx, rx) = channel::<(usize, isize)>();
         let handler = RcBlock::new(
-            move |arr: *mut NSArray<NETunnelProviderManager>, _err: *mut NSError| {
-                // SAFETY: `arr` is the framework-owned managers array (or null).
-                let result = unsafe {
-                    if arr.is_null() {
-                        (0usize, -1isize)
-                    } else {
-                        let arr = &*arr;
-                        let count = arr.count();
-                        let status = if count > 0 {
-                            arr.objectAtIndex(0).connection().status().0
+            move |arr: *mut NSArray<NETunnelProviderManager>, err: *mut NSError| {
+                let result = if !err.is_null() {
+                    // loadAll failed (entitlement/profile) — distinct sentinel so the UI
+                    // surfaces "failed" instead of a silent "disconnected".
+                    (0usize, -3isize)
+                } else {
+                    // SAFETY: `arr` is the framework-owned managers array (or null).
+                    unsafe {
+                        if arr.is_null() {
+                            (0usize, -1isize)
                         } else {
-                            -1
-                        };
-                        (count, status)
+                            let arr = &*arr;
+                            let count = arr.count();
+                            let status = if count > 0 {
+                                arr.objectAtIndex(0).connection().status().0
+                            } else {
+                                -1
+                            };
+                            (count, status)
+                        }
                     }
                 };
                 let _ = tx.send(result);
@@ -130,8 +142,9 @@ pub mod ne_spike {
     pub fn ui_state(raw: isize) -> &'static str {
         match raw {
             3 => "connected",
-            2 | 4 => "connecting", // connecting / reasserting
-            _ => "disconnected",   // invalid / disconnected / disconnecting
+            2 | 4 => "connecting",  // connecting / reasserting
+            -2 | -3 => "failed",    // -2 = status load timed out, -3 = loadAll error
+            _ => "disconnected",    // invalid / disconnected / disconnecting; -1 = no managers
         }
     }
 
