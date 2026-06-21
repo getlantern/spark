@@ -250,4 +250,19 @@ mod tests {
         assert!(CallbackUrl::parse("notaurl").is_err());
         assert!(CallbackUrl::parse("https://:443/x").is_err());
     }
+
+    /// Live e2e: probe a real callback through a direct (no-proxy) transport. Set
+    /// `SPARK_LIVE_CALLBACK` to an IP-host URL (the probe dials by `SocketAddr`), e.g.
+    /// `SPARK_LIVE_CALLBACK=https://<ip>:443/generate_204`. https needs the `anytls` feature.
+    /// Run: `SPARK_LIVE_CALLBACK=... cargo test -p spark-core --features anytls -- --ignored live_probe`
+    #[tokio::test]
+    #[ignore = "live: needs network + SPARK_LIVE_CALLBACK"]
+    async fn live_probe() {
+        let Ok(raw) = std::env::var("SPARK_LIVE_CALLBACK") else { return };
+        let url = CallbackUrl::parse(&raw).expect("valid SPARK_LIVE_CALLBACK");
+        let direct: std::sync::Arc<dyn crate::transport::Transport> =
+            std::sync::Arc::new(crate::transport::DirectTransport::new(None));
+        let out = probe(&direct, &url, std::time::Duration::from_secs(8)).await;
+        assert!(out.healthy, "live callback {raw} should be healthy");
+    }
 }
