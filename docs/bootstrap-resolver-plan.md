@@ -1,6 +1,6 @@
 # Bootstrap Resolver Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Implementation plan** — written for task-by-task execution (originally driven by an automation workflow). Steps use checkbox (`- [ ]`) syntax so progress can be tracked; tackle them in order and commit after each. `<spark>` and `<flint>` below are placeholders for your local checkout/worktree roots of the two repos (see **Worktree**).
 
 **Goal:** Give spark an un-poisoned, Chrome-mimicry control-plane name resolver so a proxy `server` can be configured by **hostname** (resolved at startup, before any tunnel exists), instead of only by raw IP.
 
@@ -8,17 +8,17 @@
 
 **Tech Stack:** Rust 2021 (MSRV 1.85), tokio, `async-trait`, `serde`/`toml`, the public `getlantern/flint` crates (`flint-dial`, `flint-dns`) over boring2 Chrome-mimicry TLS. Spec: `docs/bootstrap-resolver-design.md`.
 
-**Worktree:** do the spark work in a dedicated git worktree on a feature branch (e.g. `git worktree add ../spark-bootstrap-resolver -b bootstrap-resolver`), and the flint changes in a separate worktree/branch of `getlantern/flint`. Paths below are written relative to each repo root; substitute your own worktree locations. (This plan was first executed against worktrees under `~/go/src/github.com/getlantern/…`; those absolute paths are illustrative, not required.)
+**Worktree:** do the spark work in a dedicated git worktree on a feature branch (e.g. `git worktree add ../spark-bootstrap-resolver -b bootstrap-resolver`), and the flint changes in a separate worktree/branch of `getlantern/flint`. Throughout this plan, **`<spark>`** is your spark worktree root and **`<flint>`** is your flint checkout root — substitute your own paths.
 
 ---
 
 ## File Structure
 
-**flint repo** (`/Users/afisk/go/src/github.com/getlantern/flint`):
+**flint repo** (`<flint>`):
 - Modify: `crates/flint-dial/src/race.rs` — add `race_windowed`; refactor `race_with` to delegate.
 - Modify: `crates/flint-dns/src/lib.rs` — make `resolve` (and `resolve_cached`'s slow path) use `race_windowed`.
 
-**spark worktree** (`/Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver`):
+**spark worktree** (`<spark>`):
 - Modify: `core/Cargo.toml` — bump 3 flint pins to the new rev; add `flint-dial` + `flint-dns` optional deps; add the `bootstrap-dns` feature.
 - Modify: `core/src/config/mod.rs` — add `Endpoint` enum + `EndpointParseError`; change `AnytlsConfig.server` and `SamizdatConfig.server` from `SocketAddr` to `Endpoint`; add `Config::first_unresolved_host`.
 - Modify: `core/src/transport/mod.rs` — read the resolved `SocketAddr` via `cfg.server.socket_addr()?` in `anytls_transport`/`samizdat_transport`; fix the in-file config-test constructors.
@@ -36,7 +36,7 @@ The inner DoH pool race must run in bounded batches so it scales to large resolv
 ### Task A1: `race_windowed` in flint-dial
 
 **Files:**
-- Modify: `/Users/afisk/go/src/github.com/getlantern/flint/crates/flint-dial/src/race.rs`
+- Modify: `<flint>/crates/flint-dial/src/race.rs`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -105,7 +105,7 @@ Add these tests inside the existing `mod tests` block in `crates/flint-dial/src/
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/flint && cargo test -p flint-dial windowed`
+Run: `cd <flint> && cargo test -p flint-dial windowed`
 Expected: FAIL — `cannot find function race_windowed in this scope`.
 
 - [ ] **Step 3: Implement `race_windowed` and refactor `race_with` to delegate**
@@ -166,13 +166,13 @@ where
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/flint && cargo test -p flint-dial`
+Run: `cd <flint> && cargo test -p flint-dial`
 Expected: PASS — all existing `race_with` tests plus the four new `windowed_*` tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/flint
+cd <flint>
 git add crates/flint-dial/src/race.rs
 git commit -m "feat(flint-dial): bounded-concurrency race_windowed; race_with delegates to it"
 ```
@@ -180,8 +180,8 @@ git commit -m "feat(flint-dial): bounded-concurrency race_windowed; race_with de
 ### Task A2: route `flint_dns::resolve` through `race_windowed` with a per-attempt timeout
 
 **Files:**
-- Modify: `/Users/afisk/go/src/github.com/getlantern/flint/crates/flint-dns/src/lib.rs`
-- Modify: `/Users/afisk/go/src/github.com/getlantern/flint/crates/flint-dns/Cargo.toml`
+- Modify: `<flint>/crates/flint-dns/src/lib.rs`
+- Modify: `<flint>/crates/flint-dns/Cargo.toml`
 
 **Why the timeout (spec §5):** `flint_dial::dial` does `TcpStream::connect(...).await?` with **no timeout**. Under censorship a filtered resolver IP blackholes the connect (no RST), which would hang for the OS default (~minutes). With windowing this is worse than unbounded: a hung connect *occupies its window slot* and starves refills, so a good resolver further down a large pool never gets dialed and the all-fail case never returns. A per-attempt timeout frees the slot so the window refills with potentially-good resolvers. This belongs in flint (it bounds the inner per-resolver attempt and also benefits the future data-plane resolver).
 
@@ -201,7 +201,7 @@ Add this test inside the existing `mod tests` block in `crates/flint-dns/src/lib
 
 - [ ] **Step 2: Run the test (it already passes — it's a guard for the refactor)**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/flint && cargo test -p flint-dns resolve_on_an_empty_pool`
+Run: `cd <flint> && cargo test -p flint-dns resolve_on_an_empty_pool`
 Expected: PASS even now (the current `resolve` already returns `AllFailed{0}` for an empty pool). This behavior must survive the internals swap to `race_windowed` + timeout — note it and proceed.
 
 - [ ] **Step 3: Enable the tokio `time` (and `rt`) features in flint-dns**
@@ -260,13 +260,13 @@ And make the **identical** replacement for the slow-path race call in `resolve_c
 
 - [ ] **Step 5: Run flint-dns tests**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/flint && cargo test -p flint-dns`
+Run: `cd <flint> && cargo test -p flint-dns`
 Expected: PASS — including `resolve_on_an_empty_pool_fails` and `resolve_cached_on_an_empty_pool_fails_without_network`. (The timeout path is exercised live in spark's `doh_resolves_live` e2e and logically by flint-dial's `windowed_first_ok_wins_with_refill` — a timed-out attempt is just an `Err`, which the windowed refill already covers; no no-network unit test can force a real TCP hang.)
 
 - [ ] **Step 6: Lint + commit**
 
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/flint
+cd <flint>
 cargo clippy -p flint-dial -p flint-dns -- -D warnings
 cargo fmt
 git add crates/flint-dns/src/lib.rs crates/flint-dns/Cargo.toml
@@ -281,7 +281,7 @@ git commit -m "feat(flint-dns): bounded-window DoH race with per-attempt timeout
 - [ ] **Step 1: Push flint and capture the new rev**
 
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/flint
+cd <flint>
 git push origin main
 git rev-parse HEAD
 ```
@@ -290,7 +290,7 @@ Record the full 40-char SHA printed by `git rev-parse HEAD` — call it `<NEWREV
 
 - [ ] **Step 2: Bump the three existing pins and add the two new deps**
 
-In `/Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver/core/Cargo.toml`, replace every occurrence of the old rev `56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7` with `<NEWREV>` (the `flint-shaping`, `flint-tls`, and `flint-verify` lines — **all three must stay on one rev** or two copies of `flint_shaping`/`flint_tls` will be linked). Then add these two new optional deps immediately after the `flint-verify` line (line 55):
+In `<spark>/core/Cargo.toml`, replace every occurrence of the old rev `56d4d567ff2e16ab7552fd7e39cdf2ae02ff56b7` with `<NEWREV>` (the `flint-shaping`, `flint-tls`, and `flint-verify` lines — **all three must stay on one rev** or two copies of `flint_shaping`/`flint_tls` will be linked). Then add these two new optional deps immediately after the `flint-verify` line (line 55):
 
 ```toml
 # Bootstrap control-plane name resolution (design: docs/bootstrap-resolver-design.md). flint-dial
@@ -315,7 +315,7 @@ bootstrap-dns = ["dep:flint-dial", "dep:flint-dns", "flint-dial/boring", "flint-
 - [ ] **Step 4: Verify the dep graph resolves to one rev and builds both ways**
 
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver
+cd <spark>
 cargo build -p spark-core                              # base build, no new deps compiled
 cargo build -p spark-core --features bootstrap-dns     # pulls flint-dial/flint-dns + boring (cmake)
 cargo tree -p spark-core --features bootstrap-dns -i flint-shaping
@@ -397,7 +397,7 @@ Add to the `mod tests` block in `core/src/config/mod.rs`:
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core endpoint`
+Run: `cd <spark> && cargo test -p spark-core endpoint`
 Expected: FAIL — `cannot find type Endpoint in this scope`.
 
 - [ ] **Step 3: Define `Endpoint` + `EndpointParseError`**
@@ -488,7 +488,7 @@ impl Serialize for Endpoint {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core endpoint`
+Run: `cd <spark> && cargo test -p spark-core endpoint`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -537,7 +537,7 @@ to:
 
 - [ ] **Step 2: Run to see what breaks (compile failure is the "failing test" here)**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo build -p spark-core --features anytls,samizdat`
+Run: `cd <spark> && cargo build -p spark-core --features anytls,samizdat`
 Expected: FAIL — `anytls_transport`/`samizdat_transport` call `cfg.server.ip()` / pass `cfg.server` where a `SocketAddr` is needed.
 
 - [ ] **Step 3: Read the resolved `SocketAddr` in the transport builders**
@@ -618,7 +618,7 @@ Now that `anytls.server` is an `Endpoint`, add a test confirming a **hostname** 
 
 Run:
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver
+cd <spark>
 cargo build -p spark-core --features anytls,samizdat
 cargo test -p spark-core --features anytls,samizdat
 ```
@@ -756,7 +756,7 @@ mod tests {
 
 - [ ] **Step 3: Run to verify the tests pass**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core --features bootstrap-dns bootstrap::tests`
+Run: `cd <spark> && cargo test -p spark-core --features bootstrap-dns bootstrap::tests`
 Expected: PASS (`first_validated_wins`, `all_fail_is_an_error`). This task introduces both the code and its tests together. Unused-import warnings for `Arc`/`Duration`/`Config`/`Endpoint`/`UdpTransport` are expected here and resolved by C2–C4; `cargo test` doesn't fail on warnings.
 
 - [ ] **Step 4: Commit**
@@ -806,7 +806,7 @@ impl NameResolver for DohResolver {
 
 - [ ] **Step 2: Build (no unit test — exercised by the live e2e in Task C6)**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo build -p spark-core --features bootstrap-dns`
+Run: `cd <spark> && cargo build -p spark-core --features bootstrap-dns`
 Expected: PASS. (`DohResolver` calls real DoH; its happy path is covered by the `#[ignore]` live test in C6, mirroring `flint-dns`'s own live test. No fake is meaningful here because `flint_dns::resolve` owns the network.)
 
 - [ ] **Step 3: Commit**
@@ -911,7 +911,7 @@ Add to the `mod tests` block in `core/src/bootstrap/mod.rs`:
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core --features bootstrap-dns proxy_resolver`
+Run: `cd <spark> && cargo test -p spark-core --features bootstrap-dns proxy_resolver`
 Expected: FAIL — `cannot find type ProxyResolver`.
 
 - [ ] **Step 3: Implement `ProxyResolver`**
@@ -975,7 +975,7 @@ impl NameResolver for ProxyResolver {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core --features bootstrap-dns proxy_resolver`
+Run: `cd <spark> && cargo test -p spark-core --features bootstrap-dns proxy_resolver`
 Expected: PASS — both `proxy_resolver_parses_and_validates` and `proxy_resolver_rejects_a_bogon`.
 
 - [ ] **Step 5: Commit**
@@ -1049,7 +1049,7 @@ Add to the `mod tests` block in `core/src/bootstrap/mod.rs`:
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core --features bootstrap-dns resolve_endpoints`
+Run: `cd <spark> && cargo test -p spark-core --features bootstrap-dns resolve_endpoints`
 Expected: FAIL — `cannot find function resolve_endpoints`.
 
 - [ ] **Step 3: Implement `resolve_endpoints` + `default_resolver`**
@@ -1092,7 +1092,7 @@ pub fn default_resolver(_config: &Config) -> RacingResolver {
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core --features bootstrap-dns resolve_endpoints`
+Run: `cd <spark> && cargo test -p spark-core --features bootstrap-dns resolve_endpoints`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -1131,7 +1131,7 @@ Add to the `mod tests` block in `core/src/config/mod.rs`:
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core first_unresolved_host`
+Run: `cd <spark> && cargo test -p spark-core first_unresolved_host`
 Expected: FAIL — `no method named first_unresolved_host`.
 
 - [ ] **Step 3: Implement `first_unresolved_host`**
@@ -1217,7 +1217,7 @@ mod resolve_bootstrap_tests {
 
 Run:
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver
+cd <spark>
 cargo test -p spark-core first_unresolved_host                    # feature off
 cargo build -p spark-core                                          # resolve_bootstrap (feature-off body)
 cargo build -p spark-core --features bootstrap-dns                 # resolve_bootstrap (feature-on body)
@@ -1256,7 +1256,7 @@ Add to the `mod tests` block in `core/src/bootstrap/mod.rs`:
 
 - [ ] **Step 2: Verify it compiles (ignored, not run)**
 
-Run: `cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver && cargo test -p spark-core --features bootstrap-dns doh_resolves_live -- --list`
+Run: `cd <spark> && cargo test -p spark-core --features bootstrap-dns doh_resolves_live -- --list`
 Expected: the test is listed (compiles) and not executed.
 
 - [ ] **Step 3 (optional, manual): run it live**
@@ -1267,7 +1267,7 @@ Expected (with network): PASS — resolves `one.one.one.one` to a public IP on p
 - [ ] **Step 4: Lint + commit**
 
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver
+cd <spark>
 cargo clippy -p spark-core --features bootstrap-dns -- -D warnings
 cargo fmt
 git add core/src/bootstrap/mod.rs
@@ -1310,7 +1310,7 @@ bootstrap-dns = ["spark-core/bootstrap-dns"]
 
 Run:
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver
+cd <spark>
 cargo build -p spark-cli                                      # feature-off resolve_bootstrap shim
 cargo build -p spark-cli --features anytls,bootstrap-dns      # feature-on path
 ```
@@ -1364,7 +1364,7 @@ to:
 
 Run:
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver
+cd <spark>
 cargo build -p spark-core                                   # fd_tunnel compiled on macOS (feature off)
 cargo build -p spark-core --features bootstrap-dns
 ```
@@ -1413,7 +1413,7 @@ bootstrap-dns = ["spark-core/bootstrap-dns"]
 
 Run:
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver
+cd <spark>
 cargo build -p spark-service
 cargo build -p spark-service --features bootstrap-dns
 ```
@@ -1434,7 +1434,7 @@ git commit -m "feat(service): resolve bootstrap endpoints before building the tr
 
 Run:
 ```bash
-cd /Users/afisk/go/src/github.com/getlantern/spark-bootstrap-resolver
+cd <spark>
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features bootstrap-dns,anytls,samizdat -- -D warnings

@@ -40,6 +40,11 @@ impl RacingResolver {
 #[async_trait]
 impl NameResolver for RacingResolver {
     async fn resolve(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
+        if self.strategies.is_empty() {
+            return Err(io::Error::other(
+                "no resolver strategies configured (RacingResolver has an empty strategy list)",
+            ));
+        }
         match flint_dial::race_with(self.strategies.len(), |i| {
             self.strategies[i].resolve(host, port)
         })
@@ -138,6 +143,11 @@ impl ProxyResolver {
 #[async_trait]
 impl NameResolver for ProxyResolver {
     async fn resolve(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
+        if self.upstreams.is_empty() {
+            return Err(io::Error::other(
+                "ProxyResolver has no upstream resolvers configured",
+            ));
+        }
         match flint_dial::race_with(self.upstreams.len(), |i| {
             self.query_one(self.upstreams[i], host, port)
         })
@@ -273,6 +283,13 @@ mod tests {
         assert!(r.resolve("example.com", 443).await.is_err());
     }
 
+    #[tokio::test]
+    async fn proxy_resolver_with_no_upstreams_errors() {
+        let udp: Arc<dyn UdpTransport> = Arc::new(FakeUdp { response: vec![] });
+        let r = ProxyResolver::new(udp, vec![]);
+        assert!(r.resolve("example.com", 443).await.is_err());
+    }
+
     struct Fixed(io::Result<SocketAddr>);
     #[async_trait]
     impl NameResolver for Fixed {
@@ -303,6 +320,12 @@ mod tests {
     #[tokio::test]
     async fn all_fail_is_an_error() {
         let r = RacingResolver::new(vec![fail(), fail()]);
+        assert!(r.resolve("h", 443).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn racing_resolver_with_no_strategies_errors() {
+        let r = RacingResolver::new(vec![]);
         assert!(r.resolve("h", 443).await.is_err());
     }
 
