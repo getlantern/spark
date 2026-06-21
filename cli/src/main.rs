@@ -106,6 +106,9 @@ impl RunArgs {
                 samizdat: None,
                 wasm: None,
                 shaping: config::ShapingConfig::default(),
+                // The multi-server pool + probe knobs are TOML-only (`run --config`); the bare flags
+                // use their defaults (empty pool → single-transport path).
+                ..Default::default()
             },
             udp: config::UdpConfig::default(),
             routing: config::RoutingConfig::default(),

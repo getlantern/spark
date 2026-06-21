@@ -18,6 +18,7 @@ path = "src/main.rs"
 # Off by default — the base service stays rustls/ring-only with no C/cmake BoringSSL build.
 anytls = ["spark-core/anytls"]
 bootstrap-dns = ["spark-core/bootstrap-dns"]
+multi-server = ["spark-core/multi-server"]
 
 [dependencies]
 spark-ipc = { path = "../ipc", features = ["stream"] }
