@@ -180,10 +180,16 @@ fn build_selecting(
         let (transport, udp) = build_one(&entry.spec, protector.as_ref(), &wire)?;
         members.push(Member::new(transport, udp, callback));
     }
+    // Fail-open fallback (issue #11): when the whole pool is unhealthy the selecting transport dials
+    // directly instead of blackholing. Built with the same protector as the members, so the direct
+    // dial bypasses the tunnel route just like a pool member would.
+    let direct = Arc::new(DirectTransport::new(protector));
     let st = Arc::new(SelectingTransport::new(
         members,
         std::time::Duration::from_secs(config.transport.probe_interval_secs),
         config.transport.probe_window,
+        direct.clone() as Arc<dyn Transport>,
+        direct as Arc<dyn UdpTransport>,
     ));
     Ok((
         st.clone() as Arc<dyn Transport>,
