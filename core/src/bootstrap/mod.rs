@@ -176,17 +176,27 @@ impl NameResolver for ProxyResolver {
 /// Resolve every `Endpoint::Host` proxy `server` in `config` to an `Endpoint::Ip` via `resolver`
 /// (design §3.3). An already-resolved `Ip` is left untouched. Errors with a clear message if any host
 /// fails to resolve — **no silent fallthrough** to a poisoned/system lookup.
+///
+/// When a server is given by hostname and `sni` is unset, the **original hostname** is captured as
+/// the default SNI *before* the rewrite (which discards it). Otherwise the transport would later
+/// default SNI to the resolved IP literal — surprising for a `host:port` dial, which conventionally
+/// presents the hostname. An explicitly-set `sni` (e.g. a cover-site name) is always preserved.
 pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver) -> io::Result<()> {
-    let mut servers: Vec<&mut Endpoint> = Vec::new();
+    // Each boring transport's (server, sni) pair — disjoint fields, so the two mutable borrows are OK.
+    let mut entries: Vec<(&mut Endpoint, &mut Option<String>)> = Vec::new();
     if let Some(anytls) = config.transport.anytls.as_mut() {
-        servers.push(&mut anytls.server);
+        entries.push((&mut anytls.server, &mut anytls.sni));
     }
     if let Some(samizdat) = config.transport.samizdat.as_mut() {
-        servers.push(&mut samizdat.server);
+        entries.push((&mut samizdat.server, &mut samizdat.sni));
     }
-    for ep in servers {
+    for (ep, sni) in entries {
         if let Some((host, port)) = ep.unresolved() {
             let host = host.to_owned();
+            // Preserve the hostname for SNI before the rewrite discards it (unless explicitly set).
+            if sni.is_none() {
+                *sni = Some(host.clone());
+            }
             let addr = resolver
                 .resolve(&host, port)
                 .await
@@ -365,6 +375,30 @@ mod tests {
         assert_eq!(
             cfg.transport.anytls.unwrap().server,
             Endpoint::Ip("5.6.7.8:443".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_endpoints_defaults_sni_to_hostname() {
+        let mut cfg = anytls_cfg("proxy.example.com:443"); // sni: None
+        let resolver = RacingResolver::new(vec![ok("5.6.7.8:443")]);
+        resolve_endpoints(&mut cfg, &resolver).await.unwrap();
+        // The hostname is captured for SNI before the rewrite to Ip discards it.
+        assert_eq!(
+            cfg.transport.anytls.unwrap().sni.as_deref(),
+            Some("proxy.example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_endpoints_preserves_explicit_sni() {
+        let mut cfg = anytls_cfg("proxy.example.com:443");
+        cfg.transport.anytls.as_mut().unwrap().sni = Some("cover.example".into());
+        let resolver = RacingResolver::new(vec![ok("5.6.7.8:443")]);
+        resolve_endpoints(&mut cfg, &resolver).await.unwrap();
+        assert_eq!(
+            cfg.transport.anytls.unwrap().sni.as_deref(),
+            Some("cover.example")
         );
     }
 
