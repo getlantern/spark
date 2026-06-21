@@ -333,6 +333,34 @@ pub struct SamizdatConfig {
     pub sni: Option<String>,
 }
 
+/// The plain `tcp_tunnel` client kind for a pool entry — a tunnel server addressed by `server`,
+/// with no extra mimicry (mirrors the legacy top-level `transport.server`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelConfig {
+    /// The tunnel server address — `IP:port` or `host:port` (resolved at startup).
+    pub server: Endpoint,
+    /// TLS SNI is not applicable to the plain tunnel; present for symmetry, currently unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+}
+
+/// One transport kind in a server pool, internally tagged by `kind` with the kind's fields flat
+/// alongside it (e.g. `kind = "anytls"`, `server = ...`, `password = ...`). Wraps the existing
+/// per-kind config structs so a pool entry is configured exactly like a single transport.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ServerSpec {
+    /// AnyTLS-over-boring (ADR 0001).
+    Anytls(AnytlsConfig),
+    /// Samizdat (ADR 0007).
+    Samizdat(SamizdatConfig),
+    /// Dynamic wasm transport (ADR 0003).
+    Wasm(WasmConfig),
+    /// Plain `tcp_tunnel` client.
+    Tunnel(TunnelConfig),
+}
+
 /// A signed Path-B module that computes a gambit per connection (ADR 0006 P3). Verified by the same
 /// pinned module-signing key + anti-rollback floor as the byte-transform [`WasmConfig`] modules.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -692,6 +720,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c2.first_unresolved_host(), None);
+    }
+
+    #[test]
+    fn server_spec_parses_each_kind() {
+        // internally-tagged by `kind`, flat fields.
+        let anytls: ServerSpec = toml::from_str("kind = \"anytls\"\nserver = \"1.2.3.4:443\"\npassword = \"pw\"\n").unwrap();
+        assert!(matches!(anytls, ServerSpec::Anytls(_)));
+        let tunnel: ServerSpec = toml::from_str("kind = \"tunnel\"\nserver = \"5.6.7.8:443\"\n").unwrap();
+        assert!(matches!(tunnel, ServerSpec::Tunnel(_)));
+        // unknown kind is rejected.
+        assert!(toml::from_str::<ServerSpec>("kind = \"bogus\"\n").is_err());
     }
 
     #[test]
