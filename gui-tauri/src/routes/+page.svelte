@@ -218,6 +218,9 @@
   /* Spinner replaces the knob while (dis)connecting: CircularProgressIndicator
      strokeWidth 8 inside the 60px indicator with padding 8 ⇒ 44px ring. */
   .spinner {
+    /* border-box so the 8px border doesn't inflate the 44px box past the 60px
+       knob slot (content-box would render 60px at offset 13 → off-center). */
+    box-sizing: border-box;
     position: absolute; top: 13px; left: 13px;
     width: 44px; height: 44px; border-radius: 50%;
     border: 8px solid rgba(255, 255, 255, 0.35);
