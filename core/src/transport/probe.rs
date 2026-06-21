@@ -4,7 +4,11 @@
 //! `boring` backend linked by `anytls` (the callback TLS rides inside the tunnel, so no mimicry).
 
 use std::io;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::transport::Transport;
 
 /// A minimally-parsed callback URL: `{scheme}://{host}[:{port}]{path}`. Hand-parsed (no `url` crate).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,10 +92,121 @@ where
     Ok((200..300).contains(&code))
 }
 
+/// Result of probing one server through its transport.
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeOutcome {
+    /// Time to establish the connection and complete the callback GET.
+    /// Only meaningful when `healthy` is `true`; set to `Duration::MAX` on failure.
+    pub latency: Duration,
+    /// `true` iff the callback returned 2xx within the deadline.
+    pub healthy: bool,
+}
+
+impl ProbeOutcome {
+    fn unhealthy() -> Self {
+        ProbeOutcome { latency: Duration::MAX, healthy: false }
+    }
+}
+
+/// Probe one transport: dial the callback host through it (timing establish + callback),
+/// run the HTTP GET, and report health + latency. The whole attempt is bounded by `deadline`.
+/// Never panics; any error results in an unhealthy outcome (disqualified from ranking).
+pub async fn probe(transport: &Arc<dyn Transport>, url: &CallbackUrl, deadline: Duration) -> ProbeOutcome {
+    let started = Instant::now();
+    match tokio::time::timeout(deadline, probe_inner(transport, url)).await {
+        Ok(Ok(true)) => ProbeOutcome { latency: started.elapsed(), healthy: true },
+        _ => ProbeOutcome::unhealthy(),
+    }
+}
+
+async fn probe_inner(transport: &Arc<dyn Transport>, url: &CallbackUrl) -> io::Result<bool> {
+    let target: std::net::SocketAddr = format!("{}:{}", url.host, url.port)
+        .parse()
+        .map_err(|_| io::Error::other("callback host must be an IP literal (not a hostname); e.g. 1.2.3.4:80"))?;
+    let stream = transport.dial(target).await?;
+    if url.tls {
+        let tls = tls_wrap(stream, &url.host).await?;
+        http_get_ok(tls, url).await
+    } else {
+        http_get_ok(stream, url).await
+    }
+}
+
+/// Wrap `stream` in client TLS for the callback host. Reuses the boring backend linked by
+/// `anytls` — the callback TLS rides inside the tunnel, so a plain connector (no Chrome
+/// mimicry) is fine.
+#[cfg(feature = "anytls")]
+async fn tls_wrap<S>(stream: S, host: &str) -> io::Result<impl AsyncRead + AsyncWrite + Unpin>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use boring2::ssl::{SslConnector, SslMethod};
+    let connector = SslConnector::builder(SslMethod::tls_client())
+        .map_err(|e| io::Error::other(format!("probe tls: {e}")))?
+        .build();
+    let config = connector
+        .configure()
+        .map_err(|e| io::Error::other(format!("probe tls: {e}")))?;
+    tokio_boring2::connect(config, host, stream)
+        .await
+        .map_err(|e| io::Error::other(format!("probe tls handshake: {e}")))
+}
+
+#[cfg(not(feature = "anytls"))]
+async fn tls_wrap<S>(_stream: S, _host: &str) -> io::Result<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    Err(io::Error::other(
+        "https callback URL requires a TLS backend; build with the `anytls` feature (or use an http:// callback)",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::Transport;
+    use crate::BoxedStream;
+    use async_trait::async_trait;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct FakeTransport {
+        status: &'static [u8],
+    }
+
+    #[async_trait]
+    impl Transport for FakeTransport {
+        async fn dial(&self, _t: SocketAddr) -> io::Result<BoxedStream> {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let status = self.status;
+            tokio::spawn(async move {
+                let mut b = vec![0u8; 1024];
+                let _ = server.read(&mut b).await;
+                let _ = server.write_all(status).await;
+            });
+            Ok(Box::new(client))
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_healthy_on_2xx_with_latency() {
+        let t: Arc<dyn Transport> =
+            Arc::new(FakeTransport { status: b"HTTP/1.1 204 No Content\r\n\r\n" });
+        let url = CallbackUrl { tls: false, host: "127.0.0.1".into(), port: 80, path: "/".into() };
+        let out = probe(&t, &url, Duration::from_secs(5)).await;
+        assert!(out.healthy);
+    }
+
+    #[tokio::test]
+    async fn probe_unhealthy_on_non_2xx() {
+        let t: Arc<dyn Transport> =
+            Arc::new(FakeTransport { status: b"HTTP/1.1 500 Err\r\n\r\n" });
+        let url = CallbackUrl { tls: false, host: "127.0.0.1".into(), port: 80, path: "/".into() };
+        assert!(!probe(&t, &url, Duration::from_secs(5)).await.healthy);
+    }
 
     #[tokio::test]
     async fn http_get_reads_2xx_and_sends_request() {
