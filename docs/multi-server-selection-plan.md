@@ -662,9 +662,7 @@ pub async fn probe(transport: &Arc<dyn Transport>, url: &CallbackUrl, deadline: 
 }
 
 async fn probe_inner(transport: &Arc<dyn Transport>, url: &CallbackUrl) -> io::Result<bool> {
-    let target: std::net::SocketAddr = format!("{}:{}", url.host, url.port)
-        .parse()
-        .map_err(|_| io::Error::other("callback host is not an IP; callback hosts must be IP:port or resolvable upstream"))?;
+    let target = resolve_callback_addr(&url.host, url.port).await?;
     let stream = transport.dial(target).await?;
     if url.tls {
         let tls = tls_wrap(stream, &url.host).await?;
@@ -673,12 +671,21 @@ async fn probe_inner(transport: &Arc<dyn Transport>, url: &CallbackUrl) -> io::R
         http_get_ok(stream, url).await
     }
 }
+
+/// Resolve a callback host to a dial address: an IP literal is used directly; a hostname is resolved
+/// via the local resolver. The original `url.host` is kept for the TLS SNI + `Host:` header.
+async fn resolve_callback_addr(host: &str, port: u16) -> io::Result<std::net::SocketAddr> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(std::net::SocketAddr::new(ip, port));
+    }
+    tokio::net::lookup_host((host, port))
+        .await?
+        .next()
+        .ok_or_else(|| io::Error::other(format!("callback host `{host}` resolved to no addresses")))
+}
 ```
 
-> **Callback host resolution note:** `Transport::dial` takes a `SocketAddr`, so the callback host must be reachable as an IP here. For an `https://canary.example` hostname the exit normally resolves it — but `dial` needs a `SocketAddr`. Two clean options; the implementer picks one and the test above (IP host) passes either way:
-> - **(a, simplest)** require the callback URL to use an **IP literal** host (document it); `probe_inner` parses it directly (the code above).
-> - **(b)** resolve the callback hostname once at startup via the existing bootstrap resolver and store the `SocketAddr` (host kept for the TLS SNI + `Host:` header). If you choose (b), thread a resolved `SocketAddr` into `probe`/`CallbackUrl` instead of parsing here.
-> Pick (a) for this plan unless told otherwise; note the choice in the commit.
+> **Callback host resolution:** `Transport::dial` takes a `SocketAddr`, so a hostname callback (the common case, e.g. `https://canary.example/...`) is resolved via the local resolver before dialing, keeping `url.host` for the TLS SNI + `Host:` header. (An earlier draft required an IP-literal host; that was wrong — the config/docs/tests all use hostnames, so it would have made every probe fail. Local resolution of a public canary is fine for a health check; a poisoned/missing record just marks the server unhealthy that round.)
 
 - [ ] **Step 4: Implement `tls_wrap` (boring, behind `anytls`; clear error otherwise).** Add to `probe.rs`:
 
@@ -728,14 +735,14 @@ git commit -m "feat(transport): probe() — handshake timing + callback health c
 
 **Files:** `<spark>/core/src/transport/probe.rs`
 
-Mirrors the bootstrap resolver's `#[ignore]` live test. It probes a real callback **through `DirectTransport`** (no proxy needed to validate the probe + HTTP/TLS client end-to-end against a live server). Operator-parameterized via `SPARK_LIVE_CALLBACK` (an `IP:port`-host `http(s)://` URL, since the probe dials by `SocketAddr` — option (a)); the test no-ops when it's unset so CI without the env stays green.
+Mirrors the bootstrap resolver's `#[ignore]` live test. It probes a real callback **through `DirectTransport`** (no proxy needed to validate the probe + HTTP/TLS client end-to-end against a live server). Operator-parameterized via `SPARK_LIVE_CALLBACK` (any `http(s)://` URL — `probe` now resolves hostnames); the test no-ops when it's unset so CI without the env stays green.
 
 - [ ] **Step 1: Add the live test.** Add to `probe.rs`'s `mod tests`:
 
 ```rust
     /// Live e2e: probe a real callback through a direct (no-proxy) transport. Set
-    /// `SPARK_LIVE_CALLBACK` to an IP-host URL, e.g. `http://1.1.1.1:80/` won't be 2xx — use a real
-    /// canary's IP, e.g. `SPARK_LIVE_CALLBACK=https://<ip>:443/generate_204`. https needs `anytls`.
+    /// `SPARK_LIVE_CALLBACK` to any reachable `http(s)://` URL (hostname or IP), e.g.
+    /// `SPARK_LIVE_CALLBACK=https://www.gstatic.com/generate_204`. https needs `anytls`.
     /// Run: `SPARK_LIVE_CALLBACK=... cargo test -p spark-core --features multi-server,anytls -- --ignored live_probe`
     #[tokio::test]
     #[ignore = "live: needs network + SPARK_LIVE_CALLBACK"]
@@ -1073,8 +1080,8 @@ Add this test helper to `mod tests` (a member whose transport serves `204` to th
         Member {
             transport: Arc::new(Serve204),
             udp: Arc::new(NoUdp),
-            // host must be an IP literal (probe option (a)); 127.0.0.1 is never dialed for real (the
-            // fake transport ignores the target), it just has to parse as SocketAddr.
+            // 127.0.0.1 is never dialed for real (the fake transport ignores the target); using an IP
+            // literal just keeps the test offline (no DNS lookup in `resolve_callback_addr`).
             callback: CallbackUrl { tls: false, host: "127.0.0.1".into(), port: 80, path: "/".into() },
         }
     }
