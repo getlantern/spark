@@ -23,3 +23,4 @@ bytes.workspace = true
 anytls = ["spark-core/anytls"]
 system-stack = ["spark-core/system-stack"]
 bootstrap-dns = ["spark-core/bootstrap-dns"]
+multi-server = ["spark-core/multi-server"]

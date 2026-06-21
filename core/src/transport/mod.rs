@@ -64,11 +64,16 @@ pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
+pub mod probe;
 /// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
 /// mux, wire-interoperable with deployed lantern-box `"samizdat"` servers. Behind the `samizdat`
 /// feature so the base build pulls neither the boring TLS backend nor the `h2` dependency.
 #[cfg(feature = "samizdat")]
 pub mod samizdat;
+/// Latency-selecting transport over a multi-server pool (design: docs/multi-server-selection-design.md).
+/// Gated behind `multi-server` so the base build pulls no `flint-dial` dependency.
+#[cfg(feature = "multi-server")]
+pub mod select;
 pub mod tcp_tunnel;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.
@@ -117,6 +122,85 @@ fn protected_udp_socket(
     Ok(socket)
 }
 
+/// Build one server entry's transport pair from its [`ServerSpec`]. The single seam for transport
+/// kinds — adding a kind is a new `ServerSpec` variant + a match arm here. `protector` is cloned per
+/// entry (it is `Clone`); `wire` is the shared opening-shaping plan. Only the multi-server pool path
+/// (`build_selecting`) uses this, so it's gated to keep the base build free of dead code.
+#[cfg(feature = "multi-server")]
+pub(crate) fn build_one(
+    spec: &crate::config::ServerSpec,
+    protector: Option<&SocketProtector>,
+    wire: &WirePlan,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    use crate::config::ServerSpec;
+    match spec {
+        ServerSpec::Anytls(cfg) => anytls_transport(cfg, protector.cloned(), wire.clone()),
+        ServerSpec::Samizdat(cfg) => samizdat_transport(cfg, protector.cloned(), wire.clone()),
+        ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
+        ServerSpec::Tunnel(cfg) => {
+            let server = cfg.server.socket_addr()?;
+            let mut client = tcp_tunnel::client::TunnelClient::new(server);
+            if let Some(p) = protector.cloned() {
+                client = client.with_socket_protection(p);
+            }
+            let client = Arc::new(client);
+            Ok((
+                client.clone() as Arc<dyn Transport>,
+                client as Arc<dyn UdpTransport>,
+            ))
+        }
+    }
+}
+
+/// Build a `SelectingTransport` over `config.transport.servers`. Each entry's callback URL is its
+/// per-entry override or the global `transport.callback_url`; the pool needs at least one callback.
+#[cfg(feature = "multi-server")]
+fn build_selecting(
+    config: &Config,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    use crate::transport::probe::CallbackUrl;
+    use crate::transport::select::{Member, SelectingTransport};
+    let wire = wire_plan_from_config(&config.transport.shaping);
+    let mut members = Vec::with_capacity(config.transport.servers.len());
+    for entry in &config.transport.servers {
+        let raw = entry
+            .callback_url
+            .as_deref()
+            .or(config.transport.callback_url.as_deref())
+            .ok_or_else(|| {
+                io::Error::other("transport.servers requires a callback_url (global or per-entry)")
+            })?;
+        let callback = CallbackUrl::parse(raw)?;
+        if callback.tls && !cfg!(feature = "anytls") {
+            return Err(io::Error::other(format!(
+                "https callback `{raw}` requires the `anytls` feature (TLS backend); use an http:// callback or build with anytls"
+            )));
+        }
+        let (transport, udp) = build_one(&entry.spec, protector.as_ref(), &wire)?;
+        members.push(Member::new(transport, udp, callback));
+    }
+    let st = Arc::new(SelectingTransport::new(
+        members,
+        std::time::Duration::from_secs(config.transport.probe_interval_secs),
+        config.transport.probe_window,
+    ));
+    Ok((
+        st.clone() as Arc<dyn Transport>,
+        st as Arc<dyn UdpTransport>,
+    ))
+}
+
+#[cfg(not(feature = "multi-server"))]
+fn build_selecting(
+    _config: &Config,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.servers is configured but spark was built without the `multi-server` feature",
+    ))
+}
+
 /// Build the TCP + UDP transports from `config`: a tunnel client when `transport.server` is
 /// set, otherwise direct; both pinned to `transport.protect_interface` when configured.
 pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
@@ -124,6 +208,11 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
         Some(name) => Some(SocketProtector::for_interface(name)?),
         None => None,
     };
+    // A configured server pool supersedes the single-transport fields: build a latency-selecting
+    // transport over it.
+    if !config.transport.servers.is_empty() {
+        return build_selecting(config, protector);
+    }
     // AnyTLS takes precedence over the plain `server` tunnel when configured.
     if let Some(anytls) = &config.transport.anytls {
         let wire = wire_plan_from_config(&config.transport.shaping);
@@ -680,6 +769,73 @@ mod samizdat_config_tests {
     #[test]
     fn rejects_non_hex() {
         assert!(from_config(&config_with(&"zz".repeat(32), &"10".repeat(8))).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "multi-server"))]
+mod pool_config_tests {
+    use super::*;
+    use crate::config::{Config, ServerEntry, ServerSpec, TransportConfig, TunnelConfig};
+
+    #[tokio::test]
+    async fn from_config_builds_a_selecting_transport_for_a_pool() {
+        let cfg = Config {
+            transport: TransportConfig {
+                servers: vec![ServerEntry {
+                    spec: ServerSpec::Tunnel(TunnelConfig {
+                        server: "1.2.3.4:443".parse().unwrap(),
+                        sni: None,
+                    }),
+                    callback_url: None,
+                }],
+                callback_url: Some("http://127.0.0.1:80/ok".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        from_config(&cfg).expect("from_config should build the selecting transport");
+    }
+
+    #[cfg(not(feature = "anytls"))]
+    #[tokio::test]
+    async fn https_callback_without_anytls_is_a_clear_error() {
+        let cfg = Config {
+            transport: TransportConfig {
+                servers: vec![ServerEntry {
+                    spec: ServerSpec::Tunnel(TunnelConfig {
+                        server: "1.2.3.4:443".parse().unwrap(),
+                        sni: None,
+                    }),
+                    callback_url: None,
+                }],
+                callback_url: Some("https://canary.example/x".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = from_config(&cfg)
+            .err()
+            .expect("https callback without anytls must error");
+        assert!(err.to_string().contains("anytls"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn pool_without_callback_url_is_an_error() {
+        let cfg = Config {
+            transport: TransportConfig {
+                servers: vec![ServerEntry {
+                    spec: ServerSpec::Tunnel(TunnelConfig {
+                        server: "1.2.3.4:443".parse().unwrap(),
+                        sni: None,
+                    }),
+                    callback_url: None,
+                }],
+                callback_url: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(from_config(&cfg).is_err());
     }
 }
 

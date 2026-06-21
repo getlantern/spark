@@ -202,7 +202,7 @@ impl Default for TunConfig {
 }
 
 /// How upstream traffic is reached.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TransportConfig {
     /// Tunnel server address. When set, flows are tunneled through it; when `None`, flows
@@ -233,8 +233,39 @@ pub struct TransportConfig {
     pub samizdat: Option<SamizdatConfig>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
-    /// handshake. Default: no shaping.
+    /// and Samizdat handshakes (both build their `WirePlan` from this). Default: no shaping.
     pub shaping: ShapingConfig,
+    /// A pool of servers to probe and select among by latency (see
+    /// `docs/multi-server-selection-design.md`). When non-empty, supersedes the single-transport
+    /// fields above; spark builds a latency-selecting transport over the pool. Empty = the legacy
+    /// single-transport path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<ServerEntry>,
+    /// Default health-check URL fetched *through* each server to confirm it works end-to-end
+    /// (per-entry `callback_url` overrides). Required when `servers` is non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+    /// Seconds between full pool re-probes.
+    pub probe_interval_secs: u64,
+    /// Max probes in flight at once (bounded concurrency for large pools).
+    pub probe_window: usize,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            server: None,
+            protect_interface: None,
+            anytls: None,
+            wasm: None,
+            samizdat: None,
+            shaping: ShapingConfig::default(),
+            servers: Vec::new(),
+            callback_url: None,
+            probe_interval_secs: 300,
+            probe_window: 8,
+        }
+    }
 }
 
 /// Opening-handshake framing/timing (ADR 0006 Phase 1, genome Layer C). Shapes only the opening
@@ -333,6 +364,47 @@ pub struct SamizdatConfig {
     pub sni: Option<String>,
 }
 
+/// The plain `tcp_tunnel` client kind for a pool entry — a tunnel server addressed by `server`,
+/// with no extra mimicry (mirrors the legacy top-level `transport.server`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelConfig {
+    /// The tunnel server address — `IP:port` or `host:port` (resolved at startup).
+    pub server: Endpoint,
+    /// TLS SNI is not applicable to the plain tunnel; present for symmetry, currently unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+}
+
+/// One transport kind in a server pool, internally tagged by `kind` with the kind's fields flat
+/// alongside it (e.g. `kind = "anytls"`, `server = ...`, `password = ...`). Wraps the existing
+/// per-kind config structs so a pool entry is configured exactly like a single transport.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ServerSpec {
+    /// AnyTLS-over-boring (ADR 0001).
+    Anytls(AnytlsConfig),
+    /// Samizdat (ADR 0007).
+    Samizdat(SamizdatConfig),
+    /// Dynamic wasm transport (ADR 0003).
+    Wasm(WasmConfig),
+    /// Plain `tcp_tunnel` client.
+    Tunnel(TunnelConfig),
+}
+
+/// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
+/// to `transport.callback_url`). `#[serde(flatten)]` puts the spec's `kind` + fields and the
+/// `callback_url` at the same TOML level. (`deny_unknown_fields` is incompatible with `flatten`.)
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ServerEntry {
+    /// The transport kind + its config.
+    #[serde(flatten)]
+    pub spec: ServerSpec,
+    /// Per-entry health-check URL; overrides `transport.callback_url` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+}
+
 /// A signed Path-B module that computes a gambit per connection (ADR 0006 P3). Verified by the same
 /// pinned module-signing key + anti-rollback floor as the byte-transform [`WasmConfig`] modules.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -412,15 +484,23 @@ impl Config {
 
     /// The first proxy `server` configured as a hostname needing resolution (`"host:port"`), or
     /// `None` if every configured server is an IP literal. Used to fail fast when a hostname is
-    /// configured but the resolver wasn't built in (no `bootstrap-dns` feature).
+    /// configured but the resolver wasn't built in (no `bootstrap-dns` feature). Scans both the
+    /// single-transport fields and the multi-server pool.
     pub fn first_unresolved_host(&self) -> Option<String> {
-        let servers = [
+        let singles = [
             self.transport.anytls.as_ref().map(|c| &c.server),
             self.transport.samizdat.as_ref().map(|c| &c.server),
         ];
-        servers
+        let pool = self.transport.servers.iter().filter_map(|e| match &e.spec {
+            ServerSpec::Anytls(c) => Some(&c.server),
+            ServerSpec::Samizdat(c) => Some(&c.server),
+            ServerSpec::Tunnel(c) => Some(&c.server),
+            ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
+        });
+        singles
             .into_iter()
             .flatten()
+            .chain(pool)
             .find_map(|ep| ep.unresolved().map(|(h, p)| format!("{h}:{p}")))
     }
 }
@@ -505,6 +585,10 @@ mod tests {
                         delay_ms: Some(12),
                         tcp_nodelay: true,
                     },
+                    servers: Vec::new(),
+                    callback_url: None,
+                    probe_interval_secs: 300,
+                    probe_window: 8,
                 },
                 udp: UdpConfig {
                     idle_timeout_secs: 30,
@@ -692,6 +776,86 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c2.first_unresolved_host(), None);
+    }
+
+    #[test]
+    fn first_unresolved_host_scans_the_pool() {
+        let c = Config::from_toml_str(
+            "[transport]\ncallback_url = \"http://127.0.0.1/ok\"\n\n[[transport.servers]]\nkind = \"tunnel\"\nserver = \"pool-host.example:443\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.first_unresolved_host().as_deref(),
+            Some("pool-host.example:443")
+        );
+        // an all-IP pool has nothing unresolved.
+        let c2 = Config::from_toml_str(
+            "[transport]\ncallback_url = \"http://127.0.0.1/ok\"\n\n[[transport.servers]]\nkind = \"tunnel\"\nserver = \"1.2.3.4:443\"\n",
+        )
+        .unwrap();
+        assert_eq!(c2.first_unresolved_host(), None);
+    }
+
+    #[test]
+    fn parses_a_server_pool_with_callbacks_and_knobs() {
+        let c = Config::from_toml_str(
+            r#"
+            [transport]
+            callback_url = "https://canary.example/generate_204"
+            probe_interval_secs = 120
+            probe_window = 4
+
+            [[transport.servers]]
+            kind = "anytls"
+            server = "proxy-a.example.com:443"
+            password = "pw"
+
+            [[transport.servers]]
+            kind = "samizdat"
+            server = "203.0.113.7:443"
+            server_pubkey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+            short_id = "1011121314151617"
+            callback_url = "https://other.example/ok"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            c.transport.callback_url.as_deref(),
+            Some("https://canary.example/generate_204")
+        );
+        assert_eq!(c.transport.probe_interval_secs, 120);
+        assert_eq!(c.transport.probe_window, 4);
+        let servers = &c.transport.servers;
+        assert_eq!(servers.len(), 2);
+        assert!(matches!(servers[0].spec, ServerSpec::Anytls(_)));
+        assert_eq!(servers[0].callback_url, None); // falls back to the global default
+        assert_eq!(
+            servers[1].callback_url.as_deref(),
+            Some("https://other.example/ok")
+        );
+    }
+
+    #[test]
+    fn pool_defaults_when_absent() {
+        let c = Config::default();
+        assert!(c.transport.servers.is_empty());
+        assert_eq!(c.transport.probe_interval_secs, 300);
+        assert_eq!(c.transport.probe_window, 8);
+        assert_eq!(c.transport.callback_url, None);
+    }
+
+    #[test]
+    fn server_spec_parses_each_kind() {
+        // internally-tagged by `kind`, flat fields.
+        let anytls: ServerSpec =
+            toml::from_str("kind = \"anytls\"\nserver = \"1.2.3.4:443\"\npassword = \"pw\"\n")
+                .unwrap();
+        assert!(matches!(anytls, ServerSpec::Anytls(_)));
+        let tunnel: ServerSpec =
+            toml::from_str("kind = \"tunnel\"\nserver = \"5.6.7.8:443\"\n").unwrap();
+        assert!(matches!(tunnel, ServerSpec::Tunnel(_)));
+        // unknown kind is rejected.
+        assert!(toml::from_str::<ServerSpec>("kind = \"bogus\"\n").is_err());
     }
 
     #[test]
