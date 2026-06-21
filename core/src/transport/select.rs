@@ -38,7 +38,7 @@ impl Member {
 /// Ranked selection: indices into the pool, best-first; empty = nothing healthy.
 #[derive(Default)]
 struct Selection {
-    ranked: Vec<usize>,
+    ranked: Arc<[usize]>,
 }
 
 /// A latency-selecting transport over a pool of [`Member`]s.
@@ -57,7 +57,7 @@ impl SelectingTransport {
         let members = Arc::new(members);
         // Seed with config order so flows can dial (with failover) before the first probe round; an
         // empty ranking would make startup dials fail with "no healthy server".
-        let seeded = (0..members.len()).collect();
+        let seeded: Arc<[usize]> = (0..members.len()).collect();
         let selection = Arc::new(Mutex::new(Selection { ranked: seeded }));
         let reprobe = Arc::new(tokio::sync::Notify::new());
         // Clamp to ≥1s so a misconfigured `probe_interval_secs = 0` can't spin the prober.
@@ -77,8 +77,9 @@ impl SelectingTransport {
         }
     }
 
-    /// Current best-first order (snapshot; lock not held across `.await`).
-    fn order(&self) -> Vec<usize> {
+    /// Current best-first order (snapshot; lock not held across `.await`). Returns a cheap
+    /// `Arc` clone — a refcount bump, no heap allocation on the hot path.
+    fn order(&self) -> Arc<[usize]> {
         self.selection
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -88,13 +89,16 @@ impl SelectingTransport {
 
     /// Move a failed member to the back of the ranking (so new flows stop trying it first) and wake
     /// the prober for an immediate off-cycle re-probe. A transient reorder; the next probe round
-    /// re-ranks properly (a truly-dead server fails its health check and drops out).
+    /// re-ranks properly (a truly-dead server fails its health check and drops out). Allocates a
+    /// new `Arc<[usize]>` — demote is the cold error path, so this is acceptable.
     fn demote(&self, member: usize) {
         {
             let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(pos) = sel.ranked.iter().position(|&i| i == member) {
-                sel.ranked.remove(pos);
-                sel.ranked.push(member);
+            let mut v = sel.ranked.to_vec();
+            if let Some(pos) = v.iter().position(|&i| i == member) {
+                v.remove(pos);
+                v.push(member);
+                sel.ranked = v.into();
             }
         }
         self.reprobe.notify_one();
@@ -109,7 +113,7 @@ impl Transport for SelectingTransport {
             return Err(io::Error::other("no healthy server in the pool"));
         }
         let mut last_err = None;
-        for i in order {
+        for &i in order.iter() {
             match self.members[i].transport.dial(target).await {
                 Ok(s) => return Ok(s),
                 Err(e) => {
@@ -133,7 +137,7 @@ impl UdpTransport for SelectingTransport {
             return Err(io::Error::other("no healthy server in the pool"));
         }
         let mut last_err = None;
-        for i in order {
+        for &i in order.iter() {
             match self.members[i].udp.dial_udp(target).await {
                 Ok(p) => return Ok(p),
                 Err(e) => {
@@ -178,9 +182,9 @@ async fn prober_loop(
         {
             let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
             sel.ranked = if measured {
-                next_order(&sel.ranked, &outcomes)
+                next_order(&sel.ranked, &outcomes).into()
             } else {
-                rank(&outcomes)
+                rank(&outcomes).into()
             };
         }
         measured = true;
@@ -283,7 +287,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             8,
         );
-        assert_eq!(st.order(), vec![0, 1]); // seeded synchronously; prober hasn't run yet
+        assert_eq!(&*st.order(), &[0usize, 1][..]); // seeded synchronously; prober hasn't run yet
     }
 
     #[tokio::test]
@@ -293,14 +297,14 @@ mod tests {
         let members = vec![member_serving_204(), member(false)];
         let st = SelectingTransport::new(members, std::time::Duration::from_secs(300), 8);
         for _ in 0..100 {
-            if st.order() == vec![0] {
+            if st.order().as_ref() == [0usize].as_slice() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(
-            st.order(),
-            vec![0],
+            &*st.order(),
+            &[0usize][..],
             "prober should drop the unhealthy server"
         );
     }
@@ -344,7 +348,9 @@ mod tests {
     fn selecting(members: Vec<Member>, ranked: Vec<usize>) -> SelectingTransport {
         SelectingTransport {
             members: Arc::new(members),
-            selection: Arc::new(Mutex::new(Selection { ranked })),
+            selection: Arc::new(Mutex::new(Selection {
+                ranked: ranked.into(),
+            })),
             reprobe: Arc::new(tokio::sync::Notify::new()),
             prober: Mutex::new(None),
         }
@@ -374,7 +380,7 @@ mod tests {
         let t = selecting(vec![member(false), member(true)], vec![0, 1]);
         assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_ok()); // fails over 0→1
                                                                       // 0 was demoted to the back; the live order now leads with 1.
-        assert_eq!(t.order(), vec![1, 0]);
+        assert_eq!(&*t.order(), &[1usize, 0][..]);
     }
 
     #[test]

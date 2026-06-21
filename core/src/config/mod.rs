@@ -484,15 +484,23 @@ impl Config {
 
     /// The first proxy `server` configured as a hostname needing resolution (`"host:port"`), or
     /// `None` if every configured server is an IP literal. Used to fail fast when a hostname is
-    /// configured but the resolver wasn't built in (no `bootstrap-dns` feature).
+    /// configured but the resolver wasn't built in (no `bootstrap-dns` feature). Scans both the
+    /// single-transport fields and the multi-server pool.
     pub fn first_unresolved_host(&self) -> Option<String> {
-        let servers = [
+        let singles = [
             self.transport.anytls.as_ref().map(|c| &c.server),
             self.transport.samizdat.as_ref().map(|c| &c.server),
         ];
-        servers
+        let pool = self.transport.servers.iter().filter_map(|e| match &e.spec {
+            ServerSpec::Anytls(c) => Some(&c.server),
+            ServerSpec::Samizdat(c) => Some(&c.server),
+            ServerSpec::Tunnel(c) => Some(&c.server),
+            ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
+        });
+        singles
             .into_iter()
             .flatten()
+            .chain(pool)
             .find_map(|ep| ep.unresolved().map(|(h, p)| format!("{h}:{p}")))
     }
 }
@@ -765,6 +773,24 @@ mod tests {
 
         let c2 = Config::from_toml_str(
             "[transport.anytls]\nserver = \"1.2.3.4:443\"\npassword = \"pw\"\n",
+        )
+        .unwrap();
+        assert_eq!(c2.first_unresolved_host(), None);
+    }
+
+    #[test]
+    fn first_unresolved_host_scans_the_pool() {
+        let c = Config::from_toml_str(
+            "[transport]\ncallback_url = \"http://127.0.0.1/ok\"\n\n[[transport.servers]]\nkind = \"tunnel\"\nserver = \"pool-host.example:443\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.first_unresolved_host().as_deref(),
+            Some("pool-host.example:443")
+        );
+        // an all-IP pool has nothing unresolved.
+        let c2 = Config::from_toml_str(
+            "[transport]\ncallback_url = \"http://127.0.0.1/ok\"\n\n[[transport.servers]]\nkind = \"tunnel\"\nserver = \"1.2.3.4:443\"\n",
         )
         .unwrap();
         assert_eq!(c2.first_unresolved_host(), None);
