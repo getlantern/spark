@@ -139,7 +139,8 @@ A probe:
   tunnel where the censor can't see it). Gated `#[cfg(feature = "anytls")]` (which `samizdat` implies,
   and which any real anytls/samizdat pool already enables).
 - An `https://` callback configured in a build **without** a boring-bearing feature → a clear error at
-  probe time (mirroring the existing "feature not built" errors), never a silent skip.
+  **pool-construction time** (`from_config`/`build_selecting` validates this up front), not a silent
+  "no healthy server" later, and never a silent skip.
 
 The HTTP client is a tiny hand-rolled GET-status reader over the transport stream — consistent with
 spark's "raw TLS + `tokio`, no `hyper`/`reqwest`" rule (cf. `flint-dns`'s hand-rolled DoH/h2).
@@ -165,21 +166,24 @@ resolver's per-attempt timeout).
 next-best in rank order for that flow and **demotes** the failed server (triggering an off-cycle
 re-probe). Existing connections are never migrated — only *new* flows see a swap.
 
-**L4 capability & selection (forward-looking).** v1 keeps one current-best shared by TCP and UDP, and
-ranks on the proxied-flow probe above; UDP rides the same selected server and inherits its UDP
-capability (e.g. a TCP-only `samizdat` entry's `dial_udp` reports unsupported, exactly as today). This
-is fine for today's kinds (anytls/wasm/tunnel carry both; samizdat is TCP-only). As **UDP-native**
-transports arrive (hysteria2/QUIC) and kinds diverge in L4 support, selection becomes
-**capability-aware**: rank only UDP-capable servers for the UDP best, independently from the TCP best
-(two current-bests rather than one). The `ServerEntry`/`build_one`/prober seams already isolate this —
-it's an internal change to ranking, not to the config or the forwarder. Tracked in the roadmap; not
-built here.
+**L4 capability & selection (forward-looking).** Ranking is on the proxied-flow (TCP) probe, shared by
+both `dial` and `dial_udp`. `dial_udp` walks the **same ranked order with failover**: if the current
+best is TCP-only (e.g. `samizdat`, whose `dial_udp` returns unsupported) the UDP flow simply fails over
+to the next-best member, so UDP succeeds as long as *some* pool member carries it — it isn't stuck on
+the #1. What's *not* done in v1 is **capability-aware ranking**: UDP flows still try servers in TCP-
+latency order, not a separate UDP-best. As **UDP-native** transports arrive (hysteria2/QUIC) and kinds
+diverge in L4 support, a separate UDP ranking (rank only UDP-capable servers, independently from the
+TCP best) is the natural next step. The `ServerSpec`/`build_one`/prober seams already isolate this —
+it's an internal change to ranking, not to the config or the forwarder. Tracked in the roadmap.
 
 **Prober** (uses `flint_dial::probe_windowed`):
-- **Initial selection (v1):** probe the whole pool once in bounded (windowed) batches, then set the
-  current best from that round. The window already caps in-flight probes, so even a large pool's first
-  round is bounded; **incremental "select from the first healthy batch, keep ranking the rest"** is a
-  follow-up optimization (roadmap), not v1 — v1 awaits the full first round before the first selection.
+- **Startup (v1):** `SelectingTransport::new` **seeds the ranking with config order** so new flows can
+  dial immediately (with failover) before any probe completes — a cold start never returns "no healthy
+  server" for a fine pool. The prober's **first round** then probes the whole pool once in bounded
+  (windowed) batches and **replaces** the seed with the measured ranking (the first round uses a pure
+  latency rank — no hysteresis on the arbitrary seed; later rounds apply hysteresis). The window caps
+  in-flight probes, so even a large pool's first round is bounded; **incremental "select from the first
+  healthy batch as it lands"** is a follow-up optimization (roadmap).
 - **Periodic:** every `probe_interval_secs`, re-probe the pool (windowed) and re-rank.
 - **Switch policy — failover + hysteresis:** immediate failover when the active server errors/dies; on
   a periodic re-rank, switch only if a challenger is **≥ 20% lower latency** *or* the current server is
@@ -214,12 +218,12 @@ single-push-site, `Send`-preserving structure as `race_windowed`.
 load Config (transport.servers: pool of full transport configs)
   → bootstrap: resolve every Endpoint::Host across all entries → Ip  (default SNI = hostname)
   → build pool (build_one per entry)
-  → SelectingTransport::new → spawn prober
-        initial (v1): probe_windowed full round → lowest-latency healthy = current best
-        background: finish ranking → swap to global best (hysteresis)
+  → SelectingTransport::new → seed ranking = config order; spawn prober
+        prober round 1: probe_windowed full round → pure latency rank → replaces the seed
+        subsequent rounds: re-rank with hysteresis
   → hand SelectingTransport to the forwarder (as Arc<dyn Transport>/<dyn UdpTransport>)
 
-per new flow:  SelectingTransport.dial(target) → current_best.dial(target)
+per new flow:  SelectingTransport.dial(target) → current_best.dial(target)   [seed order until round 1]
                  └─ on error → next-best + demote failed → off-cycle re-probe
 
 every probe_interval_secs:  probe_windowed(pool) → re-rank → swap if ≥20% better or current unhealthy
