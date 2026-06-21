@@ -116,27 +116,38 @@ impl ProxyResolver {
         host: &str,
         port: u16,
     ) -> io::Result<SocketAddr> {
-        let (mut sink, mut source) = self.udp.dial_udp(upstream).await?;
-        let query =
-            flint_dns::codec::build_query(host, flint_dns::TYPE_A).map_err(io::Error::other)?;
-        sink.send(&query).await?;
-        // 512 = the classic non-EDNS DNS/UDP limit; our query sets no EDNS so the answer fits. A
-        // truncated (TC=1) response isn't retried over TCP — `parse_response` is bounds-checked, so
-        // the worst case is a clean parse error and this upstream losing the race. (v1; ProxyResolver
-        // is the future-facing path and isn't wired into `default_resolver` yet.)
-        let mut buf = [0u8; 512];
-        let n = tokio::time::timeout(self.deadline, source.recv(&mut buf))
+        // Bound the *entire* attempt — dial + send + recv — under one deadline, not just `recv`.
+        // For a stream-backed UDP-over-tunnel transport, `dial_udp` does a TLS connect/handshake that
+        // can itself block on a filtered IP, so timing out only the recv would leave the dial able to
+        // hang indefinitely and stall the all-fail race.
+        let attempt = async {
+            let (mut sink, mut source) = self.udp.dial_udp(upstream).await?;
+            let query =
+                flint_dns::codec::build_query(host, flint_dns::TYPE_A).map_err(io::Error::other)?;
+            sink.send(&query).await?;
+            // 512 = the classic non-EDNS DNS/UDP limit; our query sets no EDNS so the answer fits. A
+            // truncated (TC=1) response isn't retried over TCP — `parse_response` is bounds-checked,
+            // so the worst case is a clean parse error and this upstream losing the race. (v1;
+            // ProxyResolver is the future-facing path and isn't wired into `default_resolver` yet.)
+            let mut buf = [0u8; 512];
+            let n = source.recv(&mut buf).await?;
+            let answers = flint_dns::codec::parse_response(&buf[..n]).map_err(io::Error::other)?;
+            let validated =
+                flint_dns::validate::validate_answers(answers).map_err(io::Error::other)?;
+            let ip = validated
+                .into_iter()
+                .next()
+                .ok_or_else(|| io::Error::other("no validated A records"))?;
+            Ok::<_, io::Error>(SocketAddr::new(ip, port))
+        };
+        tokio::time::timeout(self.deadline, attempt)
             .await
             .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "DNS-through-proxy timed out")
-            })??;
-        let answers = flint_dns::codec::parse_response(&buf[..n]).map_err(io::Error::other)?;
-        let validated = flint_dns::validate::validate_answers(answers).map_err(io::Error::other)?;
-        let ip = validated
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::other("no validated A records"))?;
-        Ok(SocketAddr::new(ip, port))
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "DNS-through-proxy attempt timed out",
+                )
+            })?
     }
 }
 
