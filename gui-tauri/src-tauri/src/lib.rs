@@ -374,7 +374,10 @@ fn spark_status() -> SparkStatus {
         state: state.to_owned(),
         protocol: "AnyTLS".to_owned(),
         routing: "Full tunnel".to_owned(),
-        fail_open: state != "connected",
+        // `fail_open` means "fell open to direct" — a signal the NE layer doesn't
+        // surface yet. Don't derive it from connection state (that would falsely
+        // report fail-open whenever disconnected/connecting).
+        fail_open: false,
     }
 }
 
@@ -385,7 +388,7 @@ fn spark_status() -> SparkStatus {
         state: "disconnected".to_owned(),
         protocol: "AnyTLS".to_owned(),
         routing: "Full tunnel".to_owned(),
-        fail_open: true,
+        fail_open: false,
     }
 }
 

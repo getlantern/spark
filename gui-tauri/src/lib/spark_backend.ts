@@ -34,7 +34,8 @@ export class MockBackend implements SparkBackend {
       state: this.state,
       protocol: "AnyTLS",
       routing: "Full tunnel",
-      failOpen: this.state !== "connected",
+      // No real direct-fallback signal yet, so don't derive it from connection state.
+      failOpen: false,
     };
   }
 

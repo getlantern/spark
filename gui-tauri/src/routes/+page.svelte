@@ -15,7 +15,7 @@
     state: "disconnected",
     protocol: "AnyTLS",
     routing: "Full tunnel",
-    failOpen: true,
+    failOpen: false,
   });
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
