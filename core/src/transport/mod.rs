@@ -104,7 +104,7 @@ pub(crate) async fn protected_tcp_connect(
 }
 
 /// Build a connected UDP socket to `target`, optionally pinned to a physical interface.
-fn protected_udp_socket(
+pub(crate) fn protected_udp_socket(
     target: SocketAddr,
     protector: Option<&SocketProtector>,
 ) -> io::Result<socket2::Socket> {

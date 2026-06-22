@@ -6,11 +6,95 @@ mod crypto;
 mod tcp;
 mod udp;
 
+use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use ring::rand::{SecureRandom, SystemRandom};
+use tokio::net::UdpSocket;
+
+use crate::config::SsMethod;
+use crate::net::SocketProtector;
+use crate::transport::{
+    protected_tcp_connect, protected_udp_socket, BoxedPacketSink, BoxedPacketSource, BoxedStream,
+    Transport, UdpTransport,
+};
+use tcp::{encode_request, ShadowsocksStream};
+use udp::{ShadowsocksUdpSink, ShadowsocksUdpSource};
+
+/// An SS-2022 transport: dials the SS server per flow (TCP 1:1) and per UDP association.
+pub struct ShadowsocksTransport {
+    server: SocketAddr,
+    method: SsMethod,
+    psk: Vec<u8>,
+    protector: Option<SocketProtector>,
+}
+
+impl ShadowsocksTransport {
+    /// Build from a validated `(server, method, psk)`. `psk` is the already-decoded key
+    /// (`method.key_len()` bytes); the builder in `transport/mod.rs` decodes + length-checks it.
+    pub fn new(
+        server: SocketAddr,
+        method: SsMethod,
+        psk: Vec<u8>,
+        protector: Option<SocketProtector>,
+    ) -> Self {
+        ShadowsocksTransport {
+            server,
+            method,
+            psk,
+            protector,
+        }
+    }
+}
+
+#[async_trait]
+impl Transport for ShadowsocksTransport {
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        let conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        let req = encode_request(self.method, &self.psk, &target).map_err(io::Error::other)?;
+        let stream = ShadowsocksStream::new(conn, self.method, self.psk.clone(), req);
+        Ok(Box::new(stream))
+    }
+}
+
+#[async_trait]
+impl UdpTransport for ShadowsocksTransport {
+    async fn dial_udp(
+        &self,
+        target: SocketAddr,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        if !self.method.is_aes() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Shadowsocks UDP is supported only for the AES methods in this build (chacha UDP needs XChaCha20)",
+            ));
+        }
+        let socket = protected_udp_socket(self.server, self.protector.as_ref())?;
+        let socket = UdpSocket::from_std(socket.into())?;
+        socket.connect(self.server).await?;
+        let socket = Arc::new(socket);
+
+        let mut session_id = [0u8; 8];
+        SystemRandom::new()
+            .fill(&mut session_id)
+            .map_err(|_| io::Error::other("rng"))?;
+
+        let sink = ShadowsocksUdpSink::new(
+            Arc::clone(&socket),
+            self.method,
+            self.psk.clone(),
+            target,
+            session_id,
+        );
+        let source = ShadowsocksUdpSource::new(socket, self.method, self.psk.clone(), session_id);
+        Ok((Box::new(sink), Box::new(source)))
+    }
+}
 
 /// Append `addr` in SOCKS5 address format: ATYP(1) ‖ address ‖ port(u16be). spark only ever sends an
 /// IP target, so only ATYP 1 (IPv4) and 4 (IPv6) are produced (SIP022 §3.1.3 / RFC 1928 §5).
-#[allow(dead_code)] // consumed by tcp.rs (Task 6) / udp.rs (Task 10)
 pub(super) fn write_socks_addr(addr: &SocketAddr, out: &mut Vec<u8>) {
     match addr {
         SocketAddr::V4(a) => {
@@ -28,7 +112,6 @@ pub(super) fn write_socks_addr(addr: &SocketAddr, out: &mut Vec<u8>) {
 /// Parse a SOCKS5 address from the front of `buf`, returning the address and bytes consumed.
 /// Returns `None` if truncated or the ATYP is a domain (`0x03`) — the server echoes the IP we sent,
 /// so we never expect a domain on the response path.
-#[allow(dead_code)] // consumed by tcp.rs (Task 6) / udp.rs (Task 10)
 pub(super) fn read_socks_addr(buf: &[u8]) -> Option<(SocketAddr, usize)> {
     let atyp = *buf.first()?;
     match atyp {
@@ -43,6 +126,30 @@ pub(super) fn read_socks_addr(buf: &[u8]) -> Option<(SocketAddr, usize)> {
             Some((SocketAddr::new(Ipv6Addr::from(bytes).into(), port), 19))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use crate::config::SsMethod;
+    use crate::transport::UdpTransport;
+
+    #[tokio::test]
+    async fn dial_udp_rejects_chacha_method() {
+        let t = ShadowsocksTransport::new(
+            "127.0.0.1:1".parse().unwrap(),
+            SsMethod::Chacha20Poly1305,
+            vec![0u8; 32],
+            None,
+        );
+        let target = "1.2.3.4:53".parse().unwrap();
+        let err = t
+            .dial_udp(target)
+            .await
+            .err()
+            .expect("chacha udp must error");
+        assert!(err.to_string().contains("UDP"));
     }
 }
 

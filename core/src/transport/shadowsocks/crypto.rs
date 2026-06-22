@@ -1,6 +1,7 @@
 //! SS-2022 crypto: base64 PSK decode, BLAKE3 subkey derivation, ring AEAD, raw-AES block.
 
-// Items here are consumed by tcp.rs / udp.rs in subsequent tasks; suppress dead-code until then.
+// `decode_psk` (+ BadBase64/base64_decode it pulls in) is consumed by shadowsocks_transport()
+// in transport/mod.rs (Task 13); keep the allow until that builder is wired up.
 #![allow(dead_code)]
 
 use ring::aead;

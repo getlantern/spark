@@ -1,8 +1,5 @@
 //! SS-2022 UDP: native packet build/parse + sliding-window replay filter.
 
-// consumed by packet codec (Task 10) + sink/source (Task 11); remove at the final sweep.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;

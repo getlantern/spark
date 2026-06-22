@@ -1,5 +1,4 @@
 //! SS-2022 TCP: request/response codec + the AsyncRead+AsyncWrite chunk-framing stream.
-#![allow(dead_code)] // consumed by ShadowsocksStream (Task 8) + ShadowsocksTransport (Task 12); remove at the final sweep.
 
 use std::io;
 use std::net::SocketAddr;
