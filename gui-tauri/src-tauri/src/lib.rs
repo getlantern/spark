@@ -509,13 +509,18 @@ pub mod ne_spike {
             let data = NSData::with_bytes(message.as_bytes());
             let tx_resp = tx.clone();
             let handler = RcBlock::new(move |resp: *mut NSData| {
+                // A null reply means the provider sent no response — an unrecognized command, or a
+                // control channel that isn't actually delivering (the exact failure mode this PR
+                // fixed: entitlement rejection surfaced as responseHandler(nil) while ok=true).
+                // Surface it as an error rather than a silent empty-string success, so callers don't
+                // parse "" as JSON or mask a dead channel.
                 // SAFETY: `resp` is the framework-provided reply NSData (or null = no reply).
-                let s = if resp.is_null() {
-                    String::new()
-                } else {
-                    let bytes = unsafe { &*resp }.to_vec();
-                    String::from_utf8_lossy(&bytes).into_owned()
-                };
+                if resp.is_null() {
+                    let _ = tx_resp.send(Err("provider sent no response".to_owned()));
+                    return;
+                }
+                let bytes = unsafe { &*resp }.to_vec();
+                let s = String::from_utf8_lossy(&bytes).into_owned();
                 let _ = tx_resp.send(Ok(s));
             });
             let mut err: Option<Retained<NSError>> = None;

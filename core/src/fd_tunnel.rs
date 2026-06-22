@@ -75,14 +75,12 @@ pub fn servers_json() -> String {
 }
 
 /// Pin which pool member new flows dial first: `Some(index)` pins (overrides latency ranking),
-/// `None` returns to auto. Returns `false` when no server pool is active (nothing to pin). Takes
-/// effect for new flows only. Called across the platform FFI.
+/// `None` returns to auto. Returns `true` only when the pin was actually applied; `false` when no
+/// server pool is active (nothing to pin) *or* the index was out of range — so the FFI/UI can tell
+/// a real selection from a no-op. Takes effect for new flows only. Called across the platform FFI.
 pub fn select_server(index: Option<usize>) -> bool {
     match current_pool() {
-        Some(c) => {
-            c.set_pin(index);
-            true
-        }
+        Some(c) => c.set_pin(index),
         None => false,
     }
 }

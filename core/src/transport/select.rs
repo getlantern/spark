@@ -180,7 +180,11 @@ impl SelectingTransport {
     /// (the user's explicit choice), `None` returns to auto (latency-ranked). Out-of-range indices
     /// are ignored (logged) so a stale UI handle can't silently flip the pool to auto. Takes effect
     /// for **new** flows; in-flight connections are unaffected.
-    pub fn set_pin(&self, index: Option<usize>) {
+    ///
+    /// Returns `true` when the pin was applied (auto, or a valid index) and `false` when an
+    /// out-of-range index was ignored — so the FFI/UI layer can distinguish a real pin from a no-op
+    /// instead of always reporting success.
+    pub fn set_pin(&self, index: Option<usize>) -> bool {
         if let Some(i) = index {
             if i >= self.members.len() {
                 tracing::warn!(
@@ -188,12 +192,13 @@ impl SelectingTransport {
                     pool = self.members.len(),
                     "set_pin ignored: index out of range"
                 );
-                return;
+                return false;
             }
         }
         let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         sel.pinned = index;
         tracing::debug!(?index, "server selection pin updated");
+        true
     }
 }
 
@@ -204,7 +209,7 @@ impl PoolControl for SelectingTransport {
     fn snapshot(&self) -> Vec<MemberStatus> {
         SelectingTransport::snapshot(self)
     }
-    fn set_pin(&self, index: Option<usize>) {
+    fn set_pin(&self, index: Option<usize>) -> bool {
         SelectingTransport::set_pin(self, index)
     }
 }
@@ -600,20 +605,23 @@ mod tests {
         // Auto order leads with the ranked best (1). Pinning 0 puts it first; unpinning restores auto.
         let t = selecting(vec![member(true), member(true)], vec![1, 0]);
         assert_eq!(&*t.order(), &[1usize, 0][..], "auto follows the ranking");
-        t.set_pin(Some(0));
+        assert!(t.set_pin(Some(0)), "valid pin reports applied");
         assert_eq!(
             &*t.order(),
             &[0usize, 1][..],
             "pin leads, ranked rest follows"
         );
-        t.set_pin(None);
+        assert!(t.set_pin(None), "unpin (auto) reports applied");
         assert_eq!(&*t.order(), &[1usize, 0][..], "unpin returns to auto");
     }
 
     #[tokio::test]
     async fn set_pin_ignores_out_of_range() {
         let t = selecting(vec![member(true), member(true)], vec![0, 1]);
-        t.set_pin(Some(99)); // no such member → ignored, not a silent flip to auto
+        assert!(
+            !t.set_pin(Some(99)), // no such member → ignored, reports not-applied
+            "out-of-range pin reports failure, not a silent success"
+        );
         assert_eq!(&*t.order(), &[0usize, 1][..]);
         assert!(t.snapshot()[0].is_current, "still on the ranked best");
     }

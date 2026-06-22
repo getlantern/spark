@@ -587,8 +587,9 @@ pub trait PoolControl: Send + Sync {
     /// Per-member status snapshot, ordered by pool index.
     fn snapshot(&self) -> Vec<MemberStatus>;
     /// Pin which member new flows dial first: `Some(index)` overrides the latency ranking, `None`
-    /// returns to auto. Out-of-range indices are ignored. New flows only; in-flight unaffected.
-    fn set_pin(&self, index: Option<usize>);
+    /// returns to auto. New flows only; in-flight unaffected. Returns `true` if applied, `false` if
+    /// an out-of-range index was ignored (so callers can report a real failure instead of a no-op).
+    fn set_pin(&self, index: Option<usize>) -> bool;
 }
 
 /// JSON-escape a string for [`snapshot_to_json`] (only the characters JSON requires: quote,
