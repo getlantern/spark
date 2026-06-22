@@ -3,13 +3,22 @@
 Companion to **ADR 0006** (early-bytes handshake shaping). The ADR decides *what* and *why*; this doc
 specifies the two things it deferred: **(1) the gambit genome** (the portable opening-gambit
 specification shared across executors) and **(2) the discovery harness** (the closed loop that finds,
-scores, and ships gambits). Status: **draft** — schema sketch + harness architecture for review, not
-yet implemented.
+scores, and ships gambits).
+
+**Status (2026-06-22):** **partially built.** P1 (socket-layer segment/timing) and P2 (the genome +
+the boring executor mapping + the `SignedGambit` envelope) are implemented in `flint-tls`
+(`gambit.rs`, `profile.rs`) and `flint-shaping`; P3 (per-connection compute) has its ABI and the
+offline inner-GA (`core/src/transport/{wasm,discovery}.rs`). **Not yet built:** consuming a
+*server-assigned* gambit over the control plane, P4 (the unconstrained byte-builder), and P5 (the
+live discovery loop, which is server-side in lantern-cloud). The genome §2 sketch below was written
+ahead of the code; **§3.5 (Client realization) is the authoritative account of what the spark client
+actually decodes, can realize today, and does with a gambit** — read it for the precise client-side
+contract.
 
 Terminology: a **gambit** is the specification of a flow's *opening* — the ClientHello content, the
-TLS record framing, and the TCP-segment/timing of the first ~5 packets. An **executor** runs a gambit
-on the wire (`boring`/`btls` in spark/Rust; `uTLS` in lantern/Go). The genome is the *interchange
-format* between the discovery loop and both executors.
+TLS record framing, and the TCP-segment/timing of the first ~5 packets — **and nothing after**
+(§3.6). An **executor** runs a gambit on the wire (`boring`/`btls` in spark/Rust; `uTLS` in
+lantern/Go). The genome is the *interchange format* between the discovery loop and both executors.
 
 ---
 
@@ -35,11 +44,20 @@ format* between the discovery loop and both executors.
 
 ---
 
-## 2. The genome schema (v1 — locked)
+## 2. The genome schema (v1)
 
-The interchange contract between the discovery loop and both executors. Serde/JSON-portable (the Go
-side decodes the *same* document). **Locked for v1**: executors and the search loop target exactly
-these fields. A conformant gambit:
+The interchange contract between the discovery loop and both executors. Serde/postcard-portable (the
+canonical signing encoding; the Go side decodes the *same* document). A conformant gambit:
+
+> **Implemented vs. specified.** This JSONC sketch is the *target* vocabulary; the **implemented**
+> `flint_tls::gambit` v1 types are a deliberate subset of it. Implemented today: `genome_version`,
+> `version`, `id`, `anchor`; **A** `extension_order`, `cipher_order`, `grease_seed`, `padding_target`,
+> `ech`, `alps`, `pq_kem`, `session_id`; **B** `size_limit`, `split_offsets`; **C** `segment_split`,
+> `delay_ms`, `delay_jitter_ms`, `tcp_nodelay`; plus `requires`. **Specified-but-not-yet-coded** (so a
+> producer must not emit them yet): `origin`, `clienthello.{supported_groups.order, alpn,
+> cert_compression, ext_toggles, sni, raw}`, and `wire.first_data_delay_ms`. New optional fields are
+> added within v1 (defaulted, forward-compatible per §2.5); the *realizable* subset on a given
+> executor is narrower still — see §3.5.
 
 ```jsonc
 {
@@ -173,6 +191,84 @@ is fully portable today; tagged gambits degrade gracefully** (an executor that c
 inter_segment_delay_ms: jitter(5,25)}` → **both** executors: emit a byte-exact Chrome-137 CH, padded
 to 700 B, with ECH-GREASE, then write it as ≥2 TCP segments split at the SNI with 5–25 ms between
 them. No `requires` beyond `ech`/`alps` → portable, well-formed, keeps a working handshake on boring.
+
+### 3.5 Client realization (spark/boring) — the authoritative client-side contract
+
+What the spark client actually *does* with a gambit, against the real `flint_tls` APIs. The decode →
+verify → gate → realize → fall-back chain:
+
+1. **Decode + verify** — `SignedGambit { gambit, key_id, sig }.verify(pinned_keys, floor)`: looks up
+   `key_id` among the **binary-pinned** Ed25519 keys, verifies the detached signature over the
+   **postcard-canonical** `Gambit`, and rejects `version ≤ floor` (anti-rollback). Returns the `Gambit`.
+2. **Capability gate** — `Profile::for_boring(&gambit)` calls `gambit.check_supported(BORING_CAPABILITIES)`,
+   where `BORING_CAPABILITIES = [ech, alps, pq_kem]`. A gambit whose `requires` includes
+   `session_id_inject` or `raw_clienthello` is **declined** (`GambitError::Unsupported`); the caller
+   falls back to its best portable gambit (the static config profile, or the Chrome-137 default). **A
+   dynamic gambit never breaks connectivity** — boring always completes a handshake.
+3. **Realize Layers A + B** — `Profile::resolve(&clienthello, &records)` maps the genome onto the
+   boring connector's on/off decisions (`Profile { grease, permute_extensions, pq_kem, ech_grease,
+   alps, record_size_limit }`), collecting every knob boring2 4.15 can't fully honor into
+   `Resolved.unrealizable` — **logged, never silently dropped.**
+4. **Realize Layer C** — `gambit.wire_plan()` → `WirePlan` drives the native `SegmentShapingStream`
+   (split the opening write into TCP segments ± inter-segment delay/jitter; `tcp_nodelay`).
+5. **Dial** — boring emits the resolved ClientHello; the shaper splits/times the opening write; the
+   handshake completes; the connection proceeds (Layer C then passes through — §3.6).
+
+**Encodable ≠ realizable.** The genome can *encode* far more than boring can *realize today*. The
+precise status of each knob on the spark/boring executor:
+
+| Genome knob | boring (spark), today | Status |
+|---|---|---|
+| `ech` (off / grease) | honored | ✅ realized |
+| `alps` | honored | ✅ realized |
+| `pq_kem` (X25519MLKEM768) | honored (supported-groups) | ✅ realized |
+| `records.size_limit` | honored (`record_size_limit` ext) | ✅ realized |
+| `wire.*` (segment_split / delay / jitter / tcp_nodelay) | honored via the native shaper | ✅ realized |
+| `grease_seed` | GREASE on/off only; exact seed not honored | ⚠️ approximated |
+| `extension_order: permute_seed` | permute on/off only; seed not honored | ⚠️ approximated |
+| `ech: real` | no ECHConfig wiring → uses grease | ⚠️ approximated |
+| `extension_order: explicit` | needs `raw_clienthello` / P4 byte-builder | ❌ ignored (logged) |
+| `cipher_order` (any) | boring has no cipher permutation | ❌ ignored (logged) |
+| `padding_target` | no boring2 4.15 API; needs P4 byte-builder | ❌ ignored (logged) |
+| `records.split_offsets` | no boring record-split API | ❌ ignored (logged) |
+| `session_id: inject` | requires `session_id_inject` | ⛔ declined (cap-gated) |
+| `clienthello.raw` | requires `raw_clienthello` | ⛔ declined (cap-gated) |
+
+So **the discoverable space on the spark client today** = `{ech-grease, alps, pq_kem,
+record_size_limit, GREASE on/off, extension-permute on/off}` × the **full** Layer-C wire knobs. The
+richer Layer-A moves (explicit orders, exact seeds, padding-to-length, `session_id` inject, raw CH)
+light up only with the **P4 byte-builder** (spark) or on the **uTLS fleet** (Go) — and the capability
+tags keep that honest: a gambit needing more than boring offers is declined, never mis-run.
+
+### 3.6 Scope: a gambit is the *opening* only (+ a reserved Layer D)
+
+Layers A/B/C all govern the **opening**. The native shaper shapes **only the opening write (the
+ClientHello)** and then **passes through untouched for the rest of the connection**; once the
+handshake completes, the gambit's job is done. What happens to traffic *after* the early bytes is the
+**transport's data plane, not the gambit's** — for AnyTLS the server-pushed padding scheme
+(`cmdUpdatePaddingScheme`, record-size shaping) + stream mux; for hysteria2 the QUIC framing +
+Salamander/Gecko obfs. This split is deliberate (the opening-book thesis: the censor's verdict comes
+early, the leverage is in the opening, and the opening is cheap — a few hundred bytes, once per
+connection). The data plane is high-volume, expensive to shape, and already owned per-transport.
+
+**Reserved Layer D (post-opening).** So the discovery loop *can* grow into data-plane shaping later
+without a v1 break, the genome reserves a `genome_version`-gated **Layer D: `post_opening`** slot —
+the future home for e.g. a record-size distribution, inter-record timing, or padding/chaff policy. It
+is **unspecified and unimplemented in v1**: a v1 executor ignores an absent Layer D
+(forward-compatible, §2.5). Introducing Layer-D fields that *change behavior* bumps the genome to v2,
+and at that point the transport and the gambit must agree on **who owns data-plane shaping** (the
+gambit or the transport's own scheme) to avoid double-shaping. This is a documented reservation, not
+code.
+
+### 3.7 Cross-transport applicability
+
+A gambit is **TLS-handshake-shaped**: it assumes a ClientHello, TLS records, and the TCP segments
+carrying them. It maps onto the **TLS-handshake transports** (AnyTLS, Samizdat — boring/btls). It does
+**not** apply as-is to **QUIC** transports (hysteria2), whose opening is a QUIC Initial packet with an
+encrypted ClientHello inside QUIC crypto frames — a different shaping surface, already addressed by
+Salamander/Gecko. "The client realizes the gambit" therefore means specifically the TLS-handshake
+transports; a QUIC opening-gambit would be a separate, future genome dialect (a natural Layer-A
+sibling, not a v1 concern).
 
 ---
 
