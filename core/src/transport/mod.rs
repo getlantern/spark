@@ -160,7 +160,7 @@ fn build_selecting(
     protector: Option<SocketProtector>,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     use crate::transport::probe::CallbackUrl;
-    use crate::transport::select::{Member, SelectingTransport};
+    use crate::transport::select::{Member, SelectingTransport, ServerMeta};
     let wire = wire_plan_from_config(&config.transport.shaping);
     let mut members = Vec::with_capacity(config.transport.servers.len());
     for entry in &config.transport.servers {
@@ -178,7 +178,13 @@ fn build_selecting(
             )));
         }
         let (transport, udp) = build_one(&entry.spec, protector.as_ref(), &wire)?;
-        members.push(Member::new(transport, udp, callback));
+        let meta = ServerMeta {
+            name: entry.name.clone(),
+            country: entry.country.clone(),
+            country_code: entry.country_code.clone(),
+            city: entry.city.clone(),
+        };
+        members.push(Member::new(transport, udp, callback, meta));
     }
     // Fail-open fallback (issue #11): when the whole pool is unhealthy the selecting transport dials
     // directly instead of blackholing. Built with the same protector as the members, so the direct
@@ -793,6 +799,10 @@ mod pool_config_tests {
                         sni: None,
                     }),
                     callback_url: None,
+                    name: None,
+                    country: None,
+                    country_code: None,
+                    city: None,
                 }],
                 callback_url: Some("http://127.0.0.1:80/ok".into()),
                 ..Default::default()
@@ -813,6 +823,10 @@ mod pool_config_tests {
                         sni: None,
                     }),
                     callback_url: None,
+                    name: None,
+                    country: None,
+                    country_code: None,
+                    city: None,
                 }],
                 callback_url: Some("https://canary.example/x".into()),
                 ..Default::default()
@@ -835,6 +849,10 @@ mod pool_config_tests {
                         sni: None,
                     }),
                     callback_url: None,
+                    name: None,
+                    country: None,
+                    country_code: None,
+                    city: None,
                 }],
                 callback_url: None,
                 ..Default::default()

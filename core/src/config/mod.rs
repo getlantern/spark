@@ -403,6 +403,18 @@ pub struct ServerEntry {
     /// Per-entry health-check URL; overrides `transport.callback_url` when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_url: Option<String>,
+    /// Display metadata for the server-selection UI, surfaced via the selecting transport's
+    /// `snapshot()`. All optional — absent fields fall back to the server address / "Tunnel" in the
+    /// UI. This is the minimal Phase 2 subset; the full `config_raw.json` location shape (lat/long,
+    /// outbound grouping) lands in Phase 3. Does not affect transport behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
 }
 
 /// A signed Path-B module that computes a gambit per connection (ADR 0006 P3). Verified by the same
