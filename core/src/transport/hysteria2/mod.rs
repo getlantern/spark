@@ -689,10 +689,13 @@ impl PacketSource for Hysteria2UdpSource {
 
 impl Drop for Hysteria2UdpSource {
     fn drop(&mut self) {
-        // De-register this session; a poisoned lock means the pump is gone anyway, so skip it.
-        if let Ok(mut m) = self.sessions.lock() {
-            m.remove(&self.session_id);
-        }
+        // De-register this session, recovering a poisoned lock (consistent with the rest of the
+        // module) so a stale entry can't linger and keep the pump routing to a dead channel.
+        let mut m = match self.sessions.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        m.remove(&self.session_id);
     }
 }
 

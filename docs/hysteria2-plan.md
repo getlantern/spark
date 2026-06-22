@@ -257,7 +257,7 @@ fn salamander_xor_with_salt(key: &[u8], salt: &[u8; SALT_LEN], payload: &mut [u8
     payload.to_vec()
 }
 ```
-> The `.expect("system rng")` on `SystemRandom::fill` is the one sanctioned infallible-OS-RNG use (ring's fill only fails if the OS entropy source is unavailable). If you prefer, thread a `Result` — but obfuscation runs per packet on the hot path and a failed OS RNG is unrecoverable; keep the expect with the comment. VERIFY `blake2` 0.10 API: `Blake2b<U32>` + `Digest`.
+> RNG handling: the **shipped** code propagates an OS-RNG failure as an `io::Error` up through `AsyncUdpSocket::try_send` (a shared `fill_random` helper; `salamander_obfuscate`/`gecko_split`/`encode_out` return `io::Result`) — **not** a `.expect()` — per the project anti-patterns (no `expect` outside tests, never ignore a `Result`). Do not reintroduce a per-packet `.expect("system rng")`. VERIFY `blake2` 0.10 API: `Blake2b<U32>` + `Digest`.
 
 - [ ] **Step 4: Run → pass.** Same filter.
 - [ ] **Step 5: Commit.** `git commit -m "feat(hysteria2): Salamander obfuscation transform"`
@@ -756,7 +756,7 @@ mod tests {
 
 - [ ] **Step 3: Implement** `encode_auth_request(auth: &str, cc_rx: u64) -> Vec<u8>` and `decode_auth_status(headers_frame: &[u8]) -> Result<u16, Hysteria2Error>`. Encode the field section as QPACK literals (prefix `00 00`, then for each header a `Literal Field Line With Literal Name` (`0x20|...` pattern) or `With Name Reference` against the static table) for: `:method POST`, `:scheme https`, `:authority hysteria`, `:path /auth`, `Hysteria-Auth: <auth>`, `Hysteria-CC-RX: <cc_rx>`, `Hysteria-Padding: <random>`; wrap in a HEADERS frame (`write_varint(0x01)`, `write_varint(section_len)`, section). For decode: read the HEADERS frame, parse the QPACK field section, find `:status`, return it. **Use literal-with-literal-name encoding throughout** (simplest correct QPACK; no static-table-index bugs) — it's larger on the wire but valid, and the request is tiny. Provide the complete QPACK literal encoder/decoder helpers (string = `[H=0][len varint(7-bit prefix)][bytes]`, no Huffman).
 
-> This is the fiddliest deterministic task. Keep Huffman OFF (the `H` bit = 0) on both encode and decode — valid per RFC 9204 and far simpler. The interop gate confirms the server accepts it. If hand-rolling QPACK proves error-prone against the live server, the fallback is the `h3`/`h3-quinn` crates for the auth stream only (documented in design §5 as the alternative) — but try hand-rolled first.
+> This is the fiddliest deterministic task. Encode Huffman-OFF (the `H` bit = 0) — valid per RFC 9204 and far simpler. **Decode must handle Huffman**, though: the interop gate showed quic-go servers Huffman-encode their QPACK response values, so the shipped decoder includes an RFC 7541 Appendix B Huffman table (see ADR 0010 / the design doc). If hand-rolling QPACK proves error-prone against the live server, the fallback is the `h3`/`h3-quinn` crates for the auth stream only (documented in design §5 as the alternative) — but the hand-rolled codec interops.
 
 - [ ] **Step 4: Run → pass. Step 5: commit.** `git commit -m "feat(hysteria2): minimal H3/QPACK /auth handshake codec"`
 
