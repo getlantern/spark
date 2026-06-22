@@ -117,10 +117,12 @@ pub fn gecko_split(packet: &[u8], seed: u8) -> Vec<Vec<u8>> {
 /// Bounded to [`GECKO_MAX_MSGS`] concurrent message IDs; on overflow the
 /// partial-reassembly map is cleared (best-effort — QUIC retransmits any lost
 /// handshake packets).
+#[derive(Debug)]
 pub struct GeckoReassembler {
     partial: std::collections::HashMap<u8, GeckoEntry>,
 }
 
+#[derive(Debug)]
 struct GeckoEntry {
     total: u8,
     chunks: Vec<Option<Vec<u8>>>,
@@ -190,6 +192,201 @@ impl GeckoReassembler {
 impl Default for GeckoReassembler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── SalamanderGeckoSocket ──────────────────────────────────────────────────────
+
+use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+/// Largest UDP payload we will receive in one datagram (QUIC datagrams stay well under this).
+const RECV_SCRATCH: usize = 65535;
+
+/// A [`quinn::AsyncUdpSocket`] that applies Gecko (optional) + Salamander on send and the
+/// reverse on receive, wrapping a real Tokio UDP socket.
+///
+/// GSO is disabled ([`max_transmit_segments`](Self::max_transmit_segments) returns `1`) and GRO is
+/// disabled ([`max_receive_segments`](Self::max_receive_segments) returns `1`) so every `try_send`
+/// is exactly one QUIC packet and every receive yields whole datagrams — giving clean per-packet
+/// obfuscation. Each Gecko frame / QUIC packet is independently Salamander-obfuscated (its own
+/// salt), so coalescing would break the transform.
+#[derive(Debug)]
+pub struct SalamanderGeckoSocket {
+    inner: tokio::net::UdpSocket,
+    state: quinn_udp::UdpSocketState,
+    key: Vec<u8>,
+    gecko: bool,
+    reassembler: std::sync::Mutex<GeckoReassembler>,
+}
+
+impl SalamanderGeckoSocket {
+    /// Wrap an existing Tokio UDP socket. `key` is the Salamander pre-shared key; `gecko` enables
+    /// the handshake-fragmentation layer.
+    pub fn new(inner: tokio::net::UdpSocket, key: Vec<u8>, gecko: bool) -> io::Result<Self> {
+        let state = quinn_udp::UdpSocketState::new((&inner).into())?;
+        Ok(Self {
+            inner,
+            state,
+            key,
+            gecko,
+            reassembler: std::sync::Mutex::new(GeckoReassembler::new()),
+        })
+    }
+
+    /// Encode one outgoing QUIC packet into one or more on-wire datagrams: Gecko-split (if enabled)
+    /// then Salamander-obfuscate each resulting piece.
+    fn encode_out(&self, packet: &[u8], seed: u8) -> Vec<Vec<u8>> {
+        let pieces = if self.gecko {
+            gecko_split(packet, seed)
+        } else {
+            vec![packet.to_vec()]
+        };
+        pieces
+            .iter()
+            .map(|p| salamander_obfuscate(&self.key, p))
+            .collect()
+    }
+}
+
+impl quinn::AsyncUdpSocket for SalamanderGeckoSocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn quinn::UdpPoller>> {
+        Box::pin(SalamanderGeckoPoller { socket: self })
+    }
+
+    fn try_send(&self, transmit: &quinn_udp::Transmit<'_>) -> io::Result<()> {
+        // Seed the Gecko msgID per destination so concurrent flows do not collide on msgID.
+        let seed = transmit.destination.port() as u8;
+        for dg in self.encode_out(transmit.contents, seed) {
+            let t = quinn_udp::Transmit {
+                destination: transmit.destination,
+                ecn: transmit.ecn,
+                contents: &dg,
+                // GSO disabled: one datagram per Transmit.
+                segment_size: None,
+                src_ip: transmit.src_ip,
+            };
+            // Mirror quinn's own tokio AsyncUdpSocket::try_send: drive the obfuscated send through
+            // quinn-udp's UdpSocketState (for ECN cmsgs) on the borrowed Tokio socket. Propagate
+            // WouldBlock so quinn re-arms the poller and retries; a partially sent Gecko burst is
+            // fine — QUIC retransmits.
+            self.inner.try_io(tokio::io::Interest::WRITABLE, || {
+                self.state.try_send((&self.inner).into(), &t)
+            })?;
+        }
+        Ok(())
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context<'_>,
+        bufs: &mut [io::IoSliceMut<'_>],
+        meta: &mut [quinn_udp::RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        if bufs.is_empty() || meta.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        loop {
+            // Register the waker if the inner socket is not yet readable.
+            std::task::ready!(self.inner.poll_recv_ready(cx))?;
+
+            // Receive one raw on-wire datagram into scratch, capturing ECN/src via quinn-udp.
+            let mut scratch = [0u8; RECV_SCRATCH];
+            let mut raw_meta = [quinn_udp::RecvMeta::default()];
+            let res = self.inner.try_io(tokio::io::Interest::READABLE, || {
+                let mut slices = [io::IoSliceMut::new(&mut scratch)];
+                self.state
+                    .recv((&self.inner).into(), &mut slices, &mut raw_meta)
+            });
+            let n = match res {
+                Ok(n) => n,
+                // The readiness was spurious; loop and re-poll readiness.
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            if n == 0 {
+                continue;
+            }
+
+            let rm = raw_meta[0];
+            // GRO disabled, but split defensively by stride in case the kernel coalesced anyway:
+            // each on-wire datagram is an independent Salamander unit.
+            let stride = if rm.stride == 0 { rm.len } else { rm.stride };
+            let total = rm.len.min(RECV_SCRATCH);
+
+            let mut emitted = 0usize;
+            let mut off = 0usize;
+            while off < total && emitted < bufs.len() {
+                let end = (off + stride).min(total);
+                let raw = &scratch[off..end];
+                off = end;
+
+                let Some(plain) = salamander_deobfuscate(&self.key, raw) else {
+                    continue; // not for us / malformed — drop
+                };
+
+                // Resolve to zero or more complete QUIC packets.
+                let packet = if self.gecko {
+                    // Lock is sync-only and dropped before any further poll; never held across await.
+                    let mut reasm = match self.reassembler.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    reasm.accept(&plain)
+                } else {
+                    Some(plain)
+                };
+                let Some(packet) = packet else {
+                    continue; // buffered Gecko fragment; nothing complete yet
+                };
+
+                let dst = bufs[emitted].as_mut();
+                let len = packet.len().min(dst.len());
+                dst[..len].copy_from_slice(&packet[..len]);
+                meta[emitted] = quinn_udp::RecvMeta {
+                    addr: rm.addr,
+                    len,
+                    stride: len,
+                    ecn: rm.ecn,
+                    dst_ip: None,
+                };
+                emitted += 1;
+            }
+
+            if emitted > 0 {
+                return Poll::Ready(Ok(emitted));
+            }
+            // Only incomplete Gecko fragments / dropped datagrams this round: loop and poll again.
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    /// GSO disabled: one QUIC packet per send so each is cleanly obfuscated.
+    fn max_transmit_segments(&self) -> usize {
+        1
+    }
+
+    /// GRO disabled: each received datagram is an independent Salamander unit.
+    fn max_receive_segments(&self) -> usize {
+        1
+    }
+}
+
+/// [`quinn::UdpPoller`] for [`SalamanderGeckoSocket`]. quinn's own `UdpPollHelper` is private, so we
+/// implement the trait directly over the inner Tokio socket's write-readiness.
+#[derive(Debug)]
+struct SalamanderGeckoPoller {
+    socket: Arc<SalamanderGeckoSocket>,
+}
+
+impl quinn::UdpPoller for SalamanderGeckoPoller {
+    fn poll_writable(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.socket.inner.poll_send_ready(cx)
     }
 }
 
