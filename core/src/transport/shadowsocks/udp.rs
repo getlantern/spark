@@ -25,10 +25,10 @@ const WINDOW: u64 = 64;
 /// Cap on tracked server sessions per UDP association (bounds memory against session-ID rotation).
 const MAX_SERVER_SESSIONS: usize = 8;
 
-/// Build a client→server UDP packet (AES methods only).
-pub fn build_client_packet(
-    method: SsMethod,
-    psk: &[u8],
+/// Build a client→server UDP packet from pre-built primitives (no per-call key derivation).
+fn build_client_packet_with(
+    block: &AesBlock,
+    cipher: &Cipher,
     session_id: [u8; 8],
     packet_id: u64,
     target: &SocketAddr,
@@ -45,13 +45,10 @@ pub fn build_client_packet(
     write_socks_addr(target, &mut body);
     body.extend_from_slice(payload);
 
-    let subkey = session_subkey(method, psk, &session_id);
-    let cipher = Cipher::new(method, &subkey)?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&sep[4..16]);
     cipher.seal(nonce, &mut body)?;
 
-    let block = AesBlock::new(psk)?;
     block.encrypt(&mut sep);
     let mut out = Vec::with_capacity(16 + body.len());
     out.extend_from_slice(&sep);
@@ -59,36 +56,61 @@ pub fn build_client_packet(
     Ok(out)
 }
 
-/// A parsed server→client UDP packet.
+/// Build a client→server UDP packet (AES methods only). Convenience wrapper that builds the
+/// primitives then delegates — used by tests / one-off callers. The hot send path goes through
+/// `build_client_packet_with` with cached primitives, so this has no non-test caller in the lib.
+#[cfg(test)]
+pub fn build_client_packet(
+    method: SsMethod,
+    psk: &[u8],
+    session_id: [u8; 8],
+    packet_id: u64,
+    target: &SocketAddr,
+    payload: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let block = AesBlock::new(psk)?;
+    let cipher = Cipher::new(method, &session_subkey(method, psk, &session_id))?;
+    build_client_packet_with(&block, &cipher, session_id, packet_id, target, payload)
+}
+
+/// A parsed server→client UDP packet. Produced by the `parse_server_packet` convenience wrapper
+/// (tests / one-off); the hot recv path uses the `decrypt_separate_header` + `open_server_body`
+/// helpers directly and never materializes this struct.
+#[cfg(test)]
 pub struct ServerPacket {
     pub server_session_id: [u8; 8],
     pub packet_id: u64,
     pub payload: Vec<u8>,
 }
 
-/// Parse and validate a server→client UDP packet (AES methods only). Does NOT advance any replay
-/// window — the caller does that after this returns Ok (so invalid packets don't poison the window).
-pub fn parse_server_packet(
-    method: SsMethod,
-    psk: &[u8],
-    expected_client_sid: [u8; 8],
+/// Decrypt the 16-byte separate header with the PSK-keyed block cipher. Returns
+/// (server_session_id, packet_id, the decrypted 16-byte header — its [4..16] is the AEAD nonce).
+fn decrypt_separate_header(
+    block: &AesBlock,
     pkt: &[u8],
-) -> Result<ServerPacket, CryptoError> {
+) -> Result<([u8; 8], u64, [u8; 16]), CryptoError> {
     if pkt.len() < 16 + TAG {
         return Err(CryptoError::Auth);
     }
-    let block = AesBlock::new(psk)?;
     let mut sep = [0u8; 16];
     sep.copy_from_slice(&pkt[..16]);
     block.decrypt(&mut sep);
-    let server_session_id: [u8; 8] = sep[..8].try_into().map_err(|_| CryptoError::Auth)?;
-    let packet_id = u64::from_be_bytes(sep[8..].try_into().map_err(|_| CryptoError::Auth)?);
+    let sid: [u8; 8] = sep[..8].try_into().map_err(|_| CryptoError::Auth)?;
+    let pid = u64::from_be_bytes(sep[8..].try_into().map_err(|_| CryptoError::Auth)?);
+    Ok((sid, pid, sep))
+}
 
-    let subkey = session_subkey(method, psk, &server_session_id);
-    let cipher = Cipher::new(method, &subkey)?;
+/// Open the AEAD body with the session cipher and validate the server main header; return the payload.
+/// `enc_body` is the bytes AFTER the 16-byte separate header; `sep` is the decrypted separate header.
+fn open_server_body(
+    cipher: &Cipher,
+    sep: &[u8; 16],
+    enc_body: &[u8],
+    expected_client_sid: [u8; 8],
+) -> Result<Vec<u8>, CryptoError> {
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&sep[4..16]);
-    let mut body = pkt[16..].to_vec();
+    let mut body = enc_body.to_vec();
     let plain_len = cipher.open(nonce, &mut body)?.len(); // decrypts in place; trailing 16 bytes = tag
     body.truncate(plain_len);
 
@@ -122,7 +144,24 @@ pub fn parse_server_packet(
         .get(addr_off + consumed..)
         .ok_or(CryptoError::Auth)?
         .to_vec();
+    Ok(payload)
+}
 
+/// Parse and validate a server→client UDP packet (AES methods only). Does NOT advance any replay
+/// window — the caller does that after this returns Ok (so invalid packets don't poison the window).
+/// Convenience wrapper (tests / one-off) that builds the primitives then delegates. The hot recv
+/// path uses the cached-primitive helpers directly, so this has no non-test caller in the lib.
+#[cfg(test)]
+pub fn parse_server_packet(
+    method: SsMethod,
+    psk: &[u8],
+    expected_client_sid: [u8; 8],
+    pkt: &[u8],
+) -> Result<ServerPacket, CryptoError> {
+    let block = AesBlock::new(psk)?;
+    let (server_session_id, packet_id, sep) = decrypt_separate_header(&block, pkt)?;
+    let cipher = Cipher::new(method, &session_subkey(method, psk, &server_session_id))?;
+    let payload = open_server_body(&cipher, &sep, &pkt[16..], expected_client_sid)?;
     Ok(ServerPacket {
         server_session_id,
         packet_id,
@@ -166,38 +205,40 @@ pub fn build_server_packet_for_test(
 /// Send half of an SS-2022 UDP association (AES methods).
 pub struct ShadowsocksUdpSink {
     socket: Arc<UdpSocket>,
-    method: SsMethod,
-    psk: Vec<u8>,
     target: SocketAddr,
     session_id: [u8; 8],
     packet_id: u64,
+    block: AesBlock,
+    cipher: Cipher,
 }
 
 impl ShadowsocksUdpSink {
     pub fn new(
         socket: Arc<UdpSocket>,
         method: SsMethod,
-        psk: Vec<u8>,
+        psk: &[u8],
         target: SocketAddr,
         session_id: [u8; 8],
-    ) -> Self {
-        ShadowsocksUdpSink {
+    ) -> Result<Self, CryptoError> {
+        let block = AesBlock::new(psk)?;
+        let cipher = Cipher::new(method, &session_subkey(method, psk, &session_id))?;
+        Ok(ShadowsocksUdpSink {
             socket,
-            method,
-            psk,
             target,
             session_id,
             packet_id: 0,
-        }
+            block,
+            cipher,
+        })
     }
 }
 
 #[async_trait]
 impl PacketSink for ShadowsocksUdpSink {
     async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
-        let pkt = build_client_packet(
-            self.method,
-            &self.psk,
+        let pkt = build_client_packet_with(
+            &self.block,
+            &self.cipher,
             self.session_id,
             self.packet_id,
             &self.target,
@@ -209,6 +250,13 @@ impl PacketSink for ShadowsocksUdpSink {
     }
 }
 
+/// Per-server-session state: the replay window plus the session-keyed AEAD (derived once on
+/// first sight of the server session ID, then reused for every datagram in that session).
+struct SessionState {
+    window: ReplayWindow,
+    cipher: Cipher,
+}
+
 /// Receive half of an SS-2022 UDP association (AES methods).
 ///
 /// Drops malformed or replayed datagrams and keeps reading so that one bad packet never
@@ -218,7 +266,8 @@ pub struct ShadowsocksUdpSource {
     method: SsMethod,
     psk: Vec<u8>,
     client_session_id: [u8; 8],
-    windows: HashMap<[u8; 8], ReplayWindow>,
+    block: AesBlock,
+    sessions: HashMap<[u8; 8], SessionState>,
     scratch: Vec<u8>,
 }
 
@@ -228,15 +277,17 @@ impl ShadowsocksUdpSource {
         method: SsMethod,
         psk: Vec<u8>,
         client_session_id: [u8; 8],
-    ) -> Self {
-        ShadowsocksUdpSource {
+    ) -> Result<Self, CryptoError> {
+        let block = AesBlock::new(&psk)?;
+        Ok(ShadowsocksUdpSource {
             socket,
             method,
             psk,
             client_session_id,
-            windows: HashMap::new(),
+            block,
+            sessions: HashMap::new(),
             scratch: vec![0u8; 64 * 1024], // reused across recvs (one datagram at a time)
-        }
+        })
     }
 }
 
@@ -247,31 +298,51 @@ impl PacketSource for ShadowsocksUdpSource {
         // bad datagram never surfaces as an error to the netstack.
         loop {
             let n = self.socket.recv(&mut self.scratch).await?;
-            let parsed = match parse_server_packet(
-                self.method,
-                &self.psk,
+            let (sid, pid, sep) = match decrypt_separate_header(&self.block, &self.scratch[..n]) {
+                Ok(v) => v,
+                Err(_) => continue, // malformed -> drop
+            };
+            // Ensure a cached session (derive its Cipher once). Bound the map: a server rotates
+            // session IDs rarely (SIP022 clients only need the current + one prior), so a much higher
+            // cap than that can only be hit by a misbehaving server, and we evict an arbitrary entry
+            // rather than grow unbounded.
+            if !self.sessions.contains_key(&sid) {
+                let cipher =
+                    match Cipher::new(self.method, &session_subkey(self.method, &self.psk, &sid)) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                if self.sessions.len() >= MAX_SERVER_SESSIONS {
+                    if let Some(victim) = self.sessions.keys().next().copied() {
+                        self.sessions.remove(&victim);
+                    }
+                }
+                self.sessions.insert(
+                    sid,
+                    SessionState {
+                        window: ReplayWindow::new(),
+                        cipher,
+                    },
+                );
+            }
+            let st = match self.sessions.get_mut(&sid) {
+                Some(s) => s,
+                None => continue,
+            };
+            let payload = match open_server_body(
+                &st.cipher,
+                &sep,
+                &self.scratch[16..n],
                 self.client_session_id,
-                &self.scratch[..n],
             ) {
                 Ok(p) => p,
-                Err(_) => continue, // malformed / failed auth -> drop
+                Err(_) => continue, // failed auth / bad header -> drop
             };
-            // Bound the per-server-session window map: a server rotates session IDs rarely (SIP022
-            // clients only need the current + one prior), so a much higher cap than that can only be
-            // hit by a misbehaving server, and we evict an arbitrary entry rather than grow unbounded.
-            if !self.windows.contains_key(&parsed.server_session_id)
-                && self.windows.len() >= MAX_SERVER_SESSIONS
-            {
-                if let Some(victim) = self.windows.keys().next().copied() {
-                    self.windows.remove(&victim);
-                }
-            }
-            let window = self.windows.entry(parsed.server_session_id).or_default();
-            if !window.accept(parsed.packet_id) {
+            if !st.window.accept(pid) {
                 continue; // replay / out-of-window -> drop
             }
-            let len = parsed.payload.len().min(buf.len());
-            buf[..len].copy_from_slice(&parsed.payload[..len]);
+            let len = payload.len().min(buf.len());
+            buf[..len].copy_from_slice(&payload[..len]);
             return Ok(len);
         }
     }
@@ -380,9 +451,10 @@ mod tests {
 
         let session_id = [7u8; 8];
         let mut sink =
-            ShadowsocksUdpSink::new(Arc::clone(&client), method, psk.clone(), target, session_id);
+            ShadowsocksUdpSink::new(Arc::clone(&client), method, &psk, target, session_id).unwrap();
         let mut source =
-            ShadowsocksUdpSource::new(Arc::clone(&client), method, psk.clone(), session_id);
+            ShadowsocksUdpSource::new(Arc::clone(&client), method, psk.clone(), session_id)
+                .unwrap();
 
         sink.send(b"ping").await.unwrap();
 

@@ -179,8 +179,10 @@ impl Cipher {
 
 /// A raw AES block cipher keyed by the PSK directly — used only for the SS-2022 UDP separate-header
 /// (a single ECB block; SIP022 §3.2.1). AES methods only.
+#[derive(Clone)]
 pub struct AesBlock(AesKind);
 
+#[derive(Clone)]
 enum AesKind {
     A128(Box<aes::Aes128>),
     A256(Box<aes::Aes256>),

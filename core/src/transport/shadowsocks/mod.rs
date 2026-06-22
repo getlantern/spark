@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ring::rand::{SecureRandom, SystemRandom};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UdpSocket;
 
 use crate::config::SsMethod;
@@ -65,7 +66,11 @@ impl Transport for ShadowsocksTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
         let conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         let req = encode_request(self.method, &self.psk, &target).map_err(io::Error::other)?;
-        let stream = ShadowsocksStream::new(conn, self.method, self.psk.clone(), req);
+        let mut stream = ShadowsocksStream::new(conn, self.method, self.psk.clone(), req);
+        // SS-2022 is request-first: the server can't send its response head until it has the request
+        // prefix (which carries the target address). Flush it now so a read-first / server-first upper
+        // layer doesn't deadlock waiting on a response the server is itself waiting to be unblocked for.
+        stream.flush().await?;
         Ok(Box::new(stream))
     }
 }
@@ -95,11 +100,13 @@ impl UdpTransport for ShadowsocksTransport {
         let sink = ShadowsocksUdpSink::new(
             Arc::clone(&socket),
             self.method,
-            self.psk.clone(),
+            &self.psk,
             target,
             session_id,
-        );
-        let source = ShadowsocksUdpSource::new(socket, self.method, self.psk.clone(), session_id);
+        )
+        .map_err(io::Error::other)?;
+        let source = ShadowsocksUdpSource::new(socket, self.method, self.psk.clone(), session_id)
+            .map_err(io::Error::other)?;
         Ok((Box::new(sink), Box::new(source)))
     }
 }
@@ -144,7 +151,32 @@ pub(super) fn read_socks_addr(buf: &[u8]) -> Option<(SocketAddr, usize)> {
 mod transport_tests {
     use super::*;
     use crate::config::SsMethod;
-    use crate::transport::UdpTransport;
+    use crate::transport::{Transport, UdpTransport};
+
+    #[tokio::test]
+    async fn dial_sends_request_prefix_without_a_prior_read_or_write() {
+        // Guards the server-first deadlock: dial() must flush the SS request prefix on its own, before
+        // the caller reads or writes anything. A fake server accepts and reads salt + the fixed header
+        // chunk; if dial() didn't flush, this read would hang and the test would time out.
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 32 + 11 + 16]; // salt(32) + encrypted fixed header chunk
+            sock.read_exact(&mut buf).await.unwrap();
+            buf.len()
+        });
+        let t = ShadowsocksTransport::new(addr, SsMethod::Aes256Gcm, vec![5u8; 32], None);
+        let _stream = t.dial("1.2.3.4:443".parse().unwrap()).await.unwrap();
+        // The server received the prefix purely from dial()'s eager flush — no caller read/write.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("server must receive the prefix from dial() alone")
+            .unwrap();
+        assert_eq!(got, 32 + 11 + 16);
+    }
 
     #[tokio::test]
     async fn dial_udp_rejects_chacha_method() {

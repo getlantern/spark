@@ -136,12 +136,15 @@ New surface under `core/src/transport/shadowsocks/`:
 
 ```
 shadowsocks/
-  mod.rs      ShadowsocksTransport: impl Transport + UdpTransport; method/key plumbing; version/label consts
-  method.rs   SsMethod enum (3 methods) + key/salt sizes + AEAD construction selection
+  mod.rs      ShadowsocksTransport: impl Transport + UdpTransport; SOCKS-addr codec; method/key plumbing
   crypto.rs   PSK parse (base64), blake3 subkey derivation, ring AEAD wrappers, raw-AES block (udp header)
   tcp.rs      TCP request/response codec + the AsyncRead+AsyncWrite chunk-framing stream adapter
   udp.rs      native SS-2022 UDP: packet build/parse, per-session state, sliding-window replay filter
 ```
+
+(As built, `SsMethod` — the 3-method enum + key/salt-size helpers — lives in `core/src/config/mod.rs`
+alongside `ShadowsocksConfig`, since config is always-compiled and the AEAD-construction selection is a
+trivial `match` in `crypto.rs`; there is no separate `method.rs`.)
 
 Feature gate: a new `shadowsocks` cargo feature pulling `dep:blake3` + `dep:aes`. `ring`, `bytes`,
 `tokio`, `async-trait` are already in base. The base build remains rustls/ring-only and cmake-free.
@@ -159,11 +162,13 @@ exactly the SS-2022 "caller supplies the nonce" model). Two primitives `ring` do
 2. **A raw AES block** (single-block ECB) for the UDP separate header → the **`aes`** crate
    (RustCrypto: `Aes128`/`Aes256` implementing `BlockEncrypt`/`BlockDecrypt`).
 
-**Decision (approved):** use the pure-Rust RustCrypto crates `blake3` + `aes` rather than CLAUDE.md's
-named `aws-lc-rs` fallback. `aws-lc-rs` would pull the AWS-LC C/cmake library (heavy, and an
-awkward/unstable API for raw AES); both new crates are small, audited, pure-Rust, **cmake-free**, and
-pulled **only under the `shadowsocks` feature** — so the <3 MB base build is untouched. This is a
-deliberate, scoped deviation from the letter of the locked-stack crypto fallback, recorded in ADR 0009.
+**Decision (approved):** use the RustCrypto crates `blake3` + `aes` rather than CLAUDE.md's named
+`aws-lc-rs` fallback. `aws-lc-rs` would pull the AWS-LC **cmake + C library** to link (heavy, and an
+awkward/unstable API for raw AES); both new crates are small and audited, need **no cmake and no
+linked C library** (`aes` is portable Rust; `blake3` runs a `cc` build script for its SIMD assembly —
+the same C-compiler step `ring` already requires, so no new toolchain demand), and are pulled **only
+under the `shadowsocks` feature** — so the <3 MB base build is untouched. This is a deliberate, scoped
+deviation from the letter of the locked-stack crypto fallback, recorded in ADR 0009.
 The `chacha20poly1305` crate (XChaCha20, for chacha-over-UDP) is **not** added in v1 (§1, §11).
 
 Dependency hygiene: pin `blake3` and `aes` to current versions; prefer `default-features = false`
@@ -345,8 +350,8 @@ This framing is the reason chacha-over-UDP and EIH are deferrable without hurtin
 
 ## 11. Build order (chunks, one per session, green at each boundary)
 
-1. **`method.rs` + `crypto.rs`** — `SsMethod`, key/salt sizes, base64 PSK parse, `blake3` subkey,
-   `ring` AEAD wrappers, raw-`aes` block. Pure crypto; KATs vs shadowsocks-rust + FIPS-197. (No I/O.)
+1. **`SsMethod` (in `config/mod.rs`) + `crypto.rs`** — `SsMethod`, key/salt sizes, base64 PSK parse,
+   `blake3` subkey, `ring` AEAD wrappers, raw-`aes` block. Pure crypto; KATs vs shadowsocks-rust + FIPS-197. (No I/O.)
 2. **`tcp.rs`** — request/response codec + the `AsyncRead+AsyncWrite` chunk-framing adapter, unit-tested
    in isolation (in-memory duplex; no socket).
 3. **`udp.rs`** — packet build/parse, per-session state, sliding-window filter; unit-tested.

@@ -103,7 +103,9 @@ pub(crate) async fn protected_tcp_connect(
     socket.connect(addr).await
 }
 
-/// Build a connected UDP socket to `target`, optionally pinned to a physical interface.
+/// Build a bound, nonblocking UDP socket, optionally pinned to a physical interface (so its traffic
+/// bypasses the tunnel route). `target` only selects the address family for the bind; the caller
+/// `connect`s it to the destination afterward.
 pub(crate) fn protected_udp_socket(
     target: SocketAddr,
     protector: Option<&SocketProtector>,

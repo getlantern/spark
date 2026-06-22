@@ -31,9 +31,12 @@ to take the spec in v1.
    12-byte nonces) does AES-128/256-GCM and ChaCha20-Poly1305; RustCrypto `blake3` derives the
    per-session subkey (the SIP022 KDF), and `aes` provides the raw block cipher for the UDP
    separate-header. This is a deliberate, **scoped** deviation from CLAUDE.md's named `aws-lc-rs`
-   fallback: `aws-lc-rs` would pull a C/cmake library, whereas `blake3` + `aes` are pure-Rust,
-   cmake-free, and **feature-gated** so the <3 MB base build is untouched. base64 PSK decode is
-   hand-rolled (no `base64` dependency).
+   fallback: `aws-lc-rs` would pull a **cmake + AWS-LC C library** to link, whereas `blake3` + `aes`
+   are Rust crates needing **no cmake and no linked C library** (`aes` is fully portable Rust;
+   `blake3` runs a small `cc` build script to compile its SIMD assembly — the same kind of C-compiler
+   step `ring` already requires in the base build, so it adds **no new toolchain requirement**). Both
+   are **feature-gated**, so the <3 MB base build is untouched. base64 PSK decode is hand-rolled (no
+   `base64` dependency).
 
 3. **v1 UDP supports the two AES methods only.** `2022-blake3-chacha20-poly1305` is **TCP-only** in
    v1: SS-2022 UDP for the chacha method needs **XChaCha20-Poly1305**, a primitive `ring` lacks.
@@ -50,8 +53,10 @@ self-contained; the base build stays rustls/ring-only and cmake-free (the extra 
 feature flag). Live-gated against a real `shadowsocks-rust` 1.24.0 server with zero codec fixes on
 first interop.
 
-**Costs / risks.** A scoped deviation from the named crypto fallback (justified above). Two
-pure-Rust crypto crates (`blake3`, `aes`) added behind the `shadowsocks` feature. chacha-over-UDP is
+**Costs / risks.** A scoped deviation from the named crypto fallback (justified above). Two RustCrypto
+crates (`blake3`, `aes`) added behind the `shadowsocks` feature — no cmake/linked-C-library, though
+`blake3` does compile SIMD assembly via a `cc` build script (no new toolchain demand over `ring`).
+chacha-over-UDP is
 unsupported in v1 (errors loudly, doesn't fall back). PSK / method come from config distribution (as
 AnyTLS's `password` does).
 
