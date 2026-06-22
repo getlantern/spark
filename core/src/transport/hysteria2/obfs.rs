@@ -5,9 +5,6 @@
 //! BLAKE2b-256(key ‖ salt) keystream (32-byte block, repeated), per the Hysteria 2 spec
 //! §Salamander.
 
-// Consumed by SalamanderGeckoSocket (Task 4); remove at the final sweep.
-#![allow(dead_code)]
-
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 

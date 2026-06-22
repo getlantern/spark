@@ -1,8 +1,5 @@
 //! Hysteria 2 UDP proxy: QUIC datagram framing, fragmentation/reassembly.
 
-// consumed by dial_udp in Task 10; remove at final sweep
-#![allow(dead_code)]
-
 use super::tcp::{read_varint, varint_len, write_varint};
 
 /// A decoded Hysteria 2 UDPMessage datagram.
@@ -11,6 +8,9 @@ pub struct UdpMessage {
     pub packet_id: u16,
     pub frag_id: u8,
     pub frag_count: u8,
+    /// Source address from the wire. Faithfully decoded, but the receive pump routes datagrams by
+    /// `session_id`/`packet_id`, so this field is never read on the recv path.
+    #[allow(dead_code)]
     pub addr: String,
     pub payload: Vec<u8>,
 }

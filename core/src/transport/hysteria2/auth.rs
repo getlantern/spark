@@ -19,9 +19,6 @@
 //! table** and only the static-table *names* it needs. It is NOT a general QPACK
 //! implementation; it does exactly what the Hysteria 2 /auth exchange requires.
 
-// Consumed by the auth handshake (Task 8); remove at the final sweep.
-#![allow(dead_code)]
-
 use std::io;
 
 use super::tcp::{read_varint, write_varint};
@@ -494,6 +491,9 @@ pub fn decode_auth_response(headers_frame: &[u8]) -> io::Result<AuthResponse> {
 /// Parse an HTTP/3 HEADERS frame containing the /auth response and return the HTTP status.
 ///
 /// A thin wrapper over [`decode_auth_response`] for callers that only need the status code.
+/// Retained as the natural "just the status" accessor (production uses [`decode_auth_response`]
+/// to also read the UDP flag); currently exercised only by tests.
+#[allow(dead_code)]
 pub fn decode_auth_status(headers_frame: &[u8]) -> io::Result<u16> {
     decode_auth_response(headers_frame).map(|r| r.status)
 }
@@ -609,9 +609,13 @@ mod tests {
                 0u64,
                 1,
                 5,
+                7, // 3-bit prefix max
+                8, // just over the 3-bit prefix max
                 14,
                 15,
                 16,
+                31, // 5-bit prefix max
+                32, // just over the 5-bit prefix max
                 127,
                 128,
                 233,

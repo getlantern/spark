@@ -1,10 +1,5 @@
 //! Hysteria 2 TCP proxy: QUIC bidirectional stream framing for proxied TCP flows.
 
-// consumed by Hysteria2Transport (Task 9); remove at the final sweep
-#![allow(dead_code)]
-
-use std::io;
-
 /// Append a QUIC varint (RFC 9000 §16: the 2 most-significant bits of the first byte encode the
 /// length 2^n, the remaining 62 bits are the value, big-endian).
 pub fn write_varint(out: &mut Vec<u8>, v: u64) {
@@ -58,15 +53,6 @@ pub fn encode_tcp_request(addr: &str) -> Vec<u8> {
     out
 }
 
-/// Decode the TCPResponse status byte (0x00 = OK, anything else = Error). The msg/padding that
-/// follow are not parsed here — the caller drains them off the stream after this.
-pub fn decode_tcp_response_status(buf: &[u8]) -> io::Result<bool> {
-    let status = *buf
-        .first()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "empty TCPResponse"))?;
-    Ok(status == 0x00)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,13 +77,6 @@ mod tests {
         let (alen, rest) = read_varint(rest).unwrap();
         assert_eq!(alen, 14);
         assert_eq!(&rest[..14], b"example.com:80");
-    }
-
-    #[test]
-    fn tcp_response_decodes_ok_and_error() {
-        assert!(decode_tcp_response_status(&[0x00, 0x00, 0x00]).unwrap()); // OK
-        assert!(!decode_tcp_response_status(&[0x01, 0x00, 0x00]).unwrap()); // Error
-        assert!(decode_tcp_response_status(&[]).is_err()); // empty
     }
 
     #[test]
