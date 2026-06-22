@@ -62,14 +62,16 @@
   async function choose(index: number | null) {
     if (busy) return;
     busy = true;
+    // Reflect the choice immediately and pop home (Lantern's popUntilRoot). The pin takes effect
+    // live when connected; when not, it's stored as the UI preference and applied on connect — so a
+    // failed live pin (disconnected / no pool yet) must not block the pick.
+    selectedIndex.set(index);
     try {
       await backend.selectServer(index);
-      selectedIndex.set(index);
-      goto("/"); // pop back to home, like Lantern's popUntilRoot after a pick
-    } catch (e) {
-      errorMsg = String(e);
-      busy = false;
+    } catch {
+      // best-effort: applied on the next connect
     }
+    goto("/");
   }
 
   function toggle(country: string) {
@@ -128,8 +130,6 @@
               <div class="meta"><div class="name">{serverLabel(s)}</div></div>
               {#if s.latencyMs != null}
                 <span class="pill {latencyClass(s.latencyMs)}">{s.latencyMs} ms</span>
-              {:else}
-                <span class="pill muted">offline</span>
               {/if}
               {#if $selectedIndex === s.index}<span class="check" aria-label="Selected">✓</span>{/if}
             </button>

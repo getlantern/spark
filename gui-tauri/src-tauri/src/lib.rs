@@ -553,9 +553,31 @@ fn spark_disconnect() -> Result<(), String> {
 /// no pool is active (direct / single relay / AnyTLS).
 #[cfg(target_os = "macos")]
 #[tauri::command(async)]
-fn spark_servers() -> Result<serde_json::Value, String> {
-    let json = ne_spike::send_provider_message("{\"cmd\":\"servers\"}".to_owned())?;
-    serde_json::from_str(&json).map_err(|e| format!("invalid servers response: {e}"))
+fn spark_servers() -> Result<Vec<config::ServerInfo>, String> {
+    // Static list from config first, so the screen shows the pool even before connecting (the list
+    // is config data, not tunnel state).
+    let mut list = config::servers_from_config();
+    // Overlay live latency / health / current — but only when actually connected, else
+    // sendProviderMessage to a down session just burns the 5s timeout on every poll.
+    let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
+    if ne_spike::ui_state(raw) == "connected" {
+        if let Ok(json) = ne_spike::send_provider_message("{\"cmd\":\"servers\"}".to_owned()) {
+            if let Ok(live) = serde_json::from_str::<Vec<config::ServerInfo>>(&json) {
+                if list.is_empty() {
+                    list = live; // no static config (e.g. base64) → use the live pool outright
+                } else {
+                    for l in &live {
+                        if let Some(s) = list.get_mut(l.index) {
+                            s.latency_ms = l.latency_ms;
+                            s.healthy = l.healthy;
+                            s.is_current = l.is_current;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(list)
 }
 
 /// Pin which pool member new flows use: `index >= 0` pins that member; `index < 0` selects auto
@@ -576,8 +598,9 @@ fn spark_select_server(index: i32) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn spark_servers() -> Result<serde_json::Value, String> {
-    Err("server list unsupported on this platform".to_owned())
+fn spark_servers() -> Result<Vec<config::ServerInfo>, String> {
+    // No NE channel off-macOS, but the static config list is still useful.
+    Ok(config::servers_from_config())
 }
 
 #[cfg(not(target_os = "macos"))]

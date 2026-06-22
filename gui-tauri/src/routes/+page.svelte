@@ -23,8 +23,13 @@
 
   const connected = $derived(status.state === "connected");
   const connecting = $derived(status.state === "connecting");
-  // The server new flows currently dial — shown in the Smart-location tile.
-  const current = $derived(servers.find((s) => s.isCurrent));
+  // The server shown in the Smart-location tile: the user's pick if any, else the live current
+  // (the auto-ranked best, marked by the snapshot).
+  const current = $derived(
+    $selectedIndex != null
+      ? servers.find((s) => s.index === $selectedIndex)
+      : servers.find((s) => s.isCurrent),
+  );
 
   // Capitalized status value, matching Lantern's VpnStatus row (vpnStatus.name.capitalize).
   const statusValue = $derived(
@@ -43,15 +48,11 @@
     refreshing = true;
     try {
       status = await backend.status();
-      // The pool can only be queried over a live tunnel; skip (and clear) when not connected so a
-      // disconnected poll doesn't error every tick.
-      if (status.state === "connected") {
-        try {
-          servers = await backend.servers();
-        } catch {
-          servers = [];
-        }
-      } else {
+      // The list is config-sourced (available offline); latency overlays when connected. Cheap to
+      // fetch every tick — the Rust side only hits the NE channel when actually connected.
+      try {
+        servers = await backend.servers();
+      } catch {
         servers = [];
       }
       errorMsg = null; // clear a prior (transient) error once the backend recovers
@@ -66,8 +67,20 @@
     busy = true;
     errorMsg = null;
     try {
-      if (connected) await backend.disconnect();
-      else await backend.connect();
+      if (connected) {
+        await backend.disconnect();
+      } else {
+        await backend.connect();
+        // Apply the user's server pick (if any) now that the tunnel is up — so "pick offline →
+        // connect" actually routes through the chosen relay. Best-effort.
+        if ($selectedIndex != null) {
+          try {
+            await backend.selectServer($selectedIndex);
+          } catch {
+            /* pool may not be ready yet; the pick still shows in the UI */
+          }
+        }
+      }
       await refresh();
     } catch (e) {
       errorMsg = String(e);
