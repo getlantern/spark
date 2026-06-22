@@ -1,6 +1,6 @@
 # Shadowsocks 2022 transport — design
 
-- **Status:** Proposed — awaiting implementation plan. On approval, record the decision as **ADR 0009**.
+- **Status:** Accepted — implemented and live-gated end-to-end against shadowsocks-rust 1.24.0 (2026-06-21). ADR 0009.
 - **Scope:** Add **Shadowsocks 2022 (SIP022)** as a spark client `Transport` + `UdpTransport`,
   **wire-interoperable with deployed `shadowsocks-rust` (and sing-box) SS-2022 servers** (client side
   only; the server stays as-is). Implemented **from scratch** in Rust — no `shadowsocks-rust`

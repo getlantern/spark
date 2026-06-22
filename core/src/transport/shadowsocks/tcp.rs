@@ -4,7 +4,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BytesMut};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -13,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::config::SsMethod;
 
 use super::crypto::{session_subkey, Cipher, CryptoError, NonceCounter};
-use super::write_socks_addr;
+use super::{now_secs, write_socks_addr};
 
 const HEADER_TYPE_CLIENT: u8 = 0;
 
@@ -23,14 +22,6 @@ pub struct Request {
     pub salt: Vec<u8>,
     pub cipher: Cipher,
     pub counter: NonceCounter,
-}
-
-/// Current Unix time in seconds (SIP022 timestamps). Mirrors samizdat/session_id.rs.
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Build the SS-2022 request prefix: `salt ‖ enc[fixed header] ‖ enc[variable header]`.

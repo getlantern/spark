@@ -2294,6 +2294,29 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   complete and validated against a real server.** Cleanup pending: tear down the droplet+firewall
   (`doctl compute droplet delete spark-relay-test`) when done testing.
 
+- 2026-06-21 (Shadowsocks 2022 transport SHIPPED — live-gated vs shadowsocks-rust 1.24.0; ADR 0009):
+  Added **Shadowsocks 2022 (SIP022)** as a spark client `Transport` (TCP) + `UdpTransport` (UDP),
+  **implemented from scratch in Rust** (no `shadowsocks-rust` dependency), wire-interoperable with
+  deployed shadowsocks-rust / sing-box SS-2022 servers. Gated behind a new `shadowsocks` cargo
+  feature (`= ["dep:blake3", "dep:aes"]`, OFF by default → base build untouched, stays
+  rustls/ring-only + cmake-free). Code: `core/src/transport/shadowsocks/{mod,crypto,tcp,udp}.rs`;
+  config `ServerSpec::Shadowsocks` + `[transport.shadowsocks]`; the bootstrap `resolve_endpoints` SNI
+  slot was made optional (SS has no SNI). **TCP** carries the three `2022-blake3-*` ciphers
+  (`aes-128-gcm`, `aes-256-gcm`, `chacha20-poly1305`); **UDP** carries the two AES methods only —
+  `2022-blake3-chacha20-poly1305` is TCP-only in v1 (UDP needs XChaCha20-Poly1305, which `ring`
+  lacks; chacha-over-UDP returns a clear `Unsupported` error, never a silent fallback; XChaCha UDP
+  deferred). Crypto backend = `ring` for the AEADs (`LessSafeKey`, 12-byte nonces) + RustCrypto
+  `blake3` (session-subkey KDF) + `aes` (raw block for the UDP separate-header); base64 PSK decode
+  hand-rolled (no `base64` dep) — a deliberate, scoped deviation from CLAUDE.md's named `aws-lc-rs`
+  fallback (`blake3`+`aes` are pure-Rust + cmake-free + feature-gated). Out of scope v1: EIH /
+  multi-user, legacy SS AEAD (SIP004/007), UDP-over-TCP, obfuscation/cover, the server side.
+  **Live-interop gate PASSED** against a real `shadowsocks-rust` 1.24.0 server: TCP HTTP 200 + UDP
+  DNS through the tunnel, zero codec fixes on first interop. All feature combos build/clippy/test
+  clean. Threat-model note: plain SS-2022 is high-entropy "look-like-nothing" traffic (FET-detectable
+  by the GFW) — positioned as an interop / arm / inner-layer transport, NOT a frontline evader
+  (design §10); AnyTLS/Samizdat remain the spearhead. Design: `docs/shadowsocks-design.md`
+  (status flipped to Accepted); decision: **ADR 0009**.
+
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
 - [x] U1 (NE Model A — **DONE + PROVEN e2e 2026-06-21**: U1a/U1b/U1b-1/U1b-2a/U1b-4 + U1b-2b connect/disconnect + U1b-2b-ii OSSystemExtensionRequest activation; live test through a remote DO relay showed real TCP+UDP traffic egressing via the tunnel. Notarized DMG carries the Lantern-matched UI.)

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
@@ -13,7 +12,7 @@ use crate::config::SsMethod;
 use crate::transport::{PacketSink, PacketSource};
 
 use super::crypto::{session_subkey, AesBlock, Cipher, CryptoError};
-use super::{read_socks_addr, write_socks_addr};
+use super::{now_secs, read_socks_addr, write_socks_addr};
 
 const PKT_TYPE_CLIENT: u8 = 0;
 const PKT_TYPE_SERVER: u8 = 1;
@@ -25,15 +24,6 @@ const WINDOW: u64 = 64;
 
 /// Cap on tracked server sessions per UDP association (bounds memory against session-ID rotation).
 const MAX_SERVER_SESSIONS: usize = 8;
-
-/// Current Unix time in seconds (SIP022 timestamps).
-// TODO(sweep): consolidate with tcp::now_secs into a shared pub(super) helper in mod.rs.
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 /// Build a client→server UDP packet (AES methods only).
 pub fn build_client_packet(

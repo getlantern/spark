@@ -11,6 +11,7 @@ pub(crate) use crypto::decode_psk;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -24,6 +25,14 @@ use crate::transport::{
 };
 use tcp::{encode_request, ShadowsocksStream};
 use udp::{ShadowsocksUdpSink, ShadowsocksUdpSource};
+
+/// Current Unix time in seconds (SIP022 timestamps). Shared by the TCP and UDP codecs.
+pub(super) fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// An SS-2022 transport: dials the SS server per flow (TCP 1:1) and per UDP association.
 pub struct ShadowsocksTransport {
