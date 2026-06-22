@@ -6,7 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { SparkBackend, SparkStatus } from "./spark_backend";
+import type { ServerInfo, SparkBackend, SparkStatus } from "./spark_backend";
 
 export class TauriBackend implements SparkBackend {
   async status(): Promise<SparkStatus> {
@@ -17,6 +17,13 @@ export class TauriBackend implements SparkBackend {
   }
   async disconnect(): Promise<void> {
     await invoke("spark_disconnect");
+  }
+  async servers(): Promise<ServerInfo[]> {
+    return await invoke<ServerInfo[]>("spark_servers");
+  }
+  async selectServer(index: number | null): Promise<void> {
+    // The Rust command takes a plain i32; -1 means auto (the pool has no negative indices).
+    await invoke("spark_select_server", { index: index ?? -1 });
   }
 }
 

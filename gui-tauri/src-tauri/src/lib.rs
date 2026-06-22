@@ -142,9 +142,9 @@ pub mod ne_spike {
     pub fn ui_state(raw: isize) -> &'static str {
         match raw {
             3 => "connected",
-            2 | 4 => "connecting",  // connecting / reasserting
-            -2 | -3 => "failed",    // -2 = status load timed out, -3 = loadAll error
-            _ => "disconnected",    // invalid / disconnected / disconnecting; -1 = no managers
+            2 | 4 => "connecting", // connecting / reasserting
+            -2 | -3 => "failed",   // -2 = status load timed out, -3 = loadAll error
+            _ => "disconnected",   // invalid / disconnected / disconnecting; -1 = no managers
         }
     }
 
@@ -156,7 +156,9 @@ pub mod ne_spike {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject};
     use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
-    use objc2_foundation::{ns_string, NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_foundation::{
+        ns_string, NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString,
+    };
     use objc2_network_extension::NETunnelProviderProtocol;
     use objc2_system_extensions::{
         OSSystemExtensionManager, OSSystemExtensionProperties, OSSystemExtensionReplacementAction,
@@ -221,10 +223,10 @@ pub mod ne_spike {
 
             #[unsafe(method(request:didFailWithError:))]
             fn did_fail(&self, _request: &OSSystemExtensionRequest, error: &NSError) {
-                let _ = self
-                    .ivars()
-                    .tx
-                    .send(Err(format!("activation failed: {}", error.localizedDescription())));
+                let _ = self.ivars().tx.send(Err(format!(
+                    "activation failed: {}",
+                    error.localizedDescription()
+                )));
             }
         }
     );
@@ -258,11 +260,15 @@ pub mod ne_spike {
         // Wait for a terminal callback. `request`/`delegate` stay alive on this frame
         // for the whole window so a pending approval can still complete (dropping the
         // request cancels it). Generous timeout to let the user approve in Settings.
-        let outcome = rx.recv_timeout(Duration::from_secs(150)).unwrap_or_else(|_| {
-            Err("system extension approval timed out — approve Spark in System \
+        let outcome = rx
+            .recv_timeout(Duration::from_secs(150))
+            .unwrap_or_else(|_| {
+                Err(
+                    "system extension approval timed out — approve Spark in System \
                  Settings → General → Login Items & Extensions, then tap Connect again"
-                .to_owned())
-        });
+                        .to_owned(),
+                )
+            });
         drop(request);
         drop(delegate);
         outcome
@@ -288,7 +294,10 @@ pub mod ne_spike {
                 // / profile) — surface it instead of silently falling back to a fresh
                 // manager and hitting a confusing downstream save/start timeout.
                 if !e.is_null() {
-                    let _ = tx.send(Err(format!("loadAllFromPreferences failed: {}", err_str(e))));
+                    let _ = tx.send(Err(format!(
+                        "loadAllFromPreferences failed: {}",
+                        err_str(e)
+                    )));
                     return;
                 }
                 let mgr: Retained<NETunnelProviderManager> = unsafe {
@@ -381,6 +390,86 @@ pub mod ne_spike {
         rx.recv_timeout(Duration::from_secs(10))
             .map_err(|_| "disconnect timed out".to_owned())?
     }
+
+    /// Send a control message to the running tunnel provider via `sendProviderMessage` and return its
+    /// reply (a UTF-8 JSON string). The provider's `handleAppMessage` (spark-apple) understands
+    /// `{"cmd":"servers"}` and `{"cmd":"select","index":N}`. Like `connect`/`disconnect`, the NE
+    /// completion handlers fire on the main queue and `NETunnelProviderManager` isn't `Send`, so the
+    /// load→send chain runs inside the loadAll completion (on the main thread) while this (worker)
+    /// thread waits on a channel. MUST be called off the main thread (the Tauri commands are
+    /// `command(async)`). Needs the NE entitlement — the tunnel must already be running.
+    pub fn send_provider_message(message: String) -> Result<String, String> {
+        // `Retained`, `RcBlock`, `NSArray`, `NSError`, `Duration`, `err_str` are in scope from the
+        // module-level imports; `NSData`/`NETunnelProviderSession` are specific to this call.
+        use objc2_foundation::NSData;
+        use objc2_network_extension::NETunnelProviderSession;
+
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        let outer = RcBlock::new(
+            move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
+                if !e.is_null() {
+                    let _ = tx.send(Err(format!(
+                        "loadAllFromPreferences failed: {}",
+                        err_str(e)
+                    )));
+                    return;
+                }
+                // SAFETY: `arr` is the framework-owned managers array (or null).
+                let mgr: Retained<NETunnelProviderManager> = unsafe {
+                    if !arr.is_null() && (*arr).count() > 0 {
+                        (*arr).objectAtIndex(0)
+                    } else {
+                        let _ = tx.send(Err("no tunnel configured".to_owned()));
+                        return;
+                    }
+                };
+                // A running tunnel's connection is an NETunnelProviderSession (subclass of
+                // NEVPNConnection); downcast to reach `sendProviderMessage`.
+                let connection = unsafe { mgr.connection() };
+                let session = match connection.downcast::<NETunnelProviderSession>() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let _ =
+                            tx.send(Err("tunnel connection is not a provider session".to_owned()));
+                        return;
+                    }
+                };
+                let data = NSData::with_bytes(message.as_bytes());
+                let tx_resp = tx.clone();
+                let handler = RcBlock::new(move |resp: *mut NSData| {
+                    // SAFETY: `resp` is the framework-provided reply NSData (or null = no reply).
+                    let s = if resp.is_null() {
+                        String::new()
+                    } else {
+                        let bytes = unsafe { &*resp }.to_vec();
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    };
+                    let _ = tx_resp.send(Ok(s));
+                });
+                let mut err: Option<Retained<NSError>> = None;
+                // SAFETY: standard NE control API; NE copies the escaping response block, so
+                // `handler` may be dropped after this call returns.
+                let ok = unsafe {
+                    session.sendProviderMessage_returnError_responseHandler(
+                        &data,
+                        Some(&mut err),
+                        Some(&handler),
+                    )
+                };
+                if !ok {
+                    let msg = err
+                        .map(|e| e.localizedDescription().to_string())
+                        .unwrap_or_else(|| "sendProviderMessage failed".to_owned());
+                    let _ = tx.send(Err(msg));
+                }
+                // On success, the response handler sends the reply.
+            },
+        );
+        // SAFETY: NE copies the escaping completion block, so it outlives this call.
+        unsafe { NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler(&outer) };
+        rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "provider message timed out".to_owned())?
+    }
 }
 
 /// The SparkBackend status shape the frontend renders (mirrors the TS interface).
@@ -455,6 +544,48 @@ fn spark_disconnect() -> Result<(), String> {
     Err("disconnect unsupported on this platform".to_owned())
 }
 
+// Server selection (P2.3): query/choose pool members over the NE control channel
+// (`sendProviderMessage` → the provider's `handleAppMessage` → the Rust core's pool control).
+// Both run off-main (`command(async)`) for the same main-queue-completion reason as status/connect.
+
+/// The live server pool as a JSON array (see `spark_servers_json`/`snapshot_to_json`): one object
+/// per member with index, location metadata, `latencyMs`, `healthy`, `isCurrent`. Empty array when
+/// no pool is active (direct / single relay / AnyTLS).
+#[cfg(target_os = "macos")]
+#[tauri::command(async)]
+fn spark_servers() -> Result<serde_json::Value, String> {
+    let json = ne_spike::send_provider_message("{\"cmd\":\"servers\"}".to_owned())?;
+    serde_json::from_str(&json).map_err(|e| format!("invalid servers response: {e}"))
+}
+
+/// Pin which pool member new flows use: `index >= 0` pins that member; `index < 0` selects auto
+/// (latency-ranked). Errors if the selection wasn't applied (e.g. no active pool).
+#[cfg(target_os = "macos")]
+#[tauri::command(async)]
+fn spark_select_server(index: i32) -> Result<(), String> {
+    let resp =
+        ne_spike::send_provider_message(format!("{{\"cmd\":\"select\",\"index\":{index}}}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("invalid select response: {e}"))?;
+    if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err("server selection was not applied (no active pool?)".to_owned())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn spark_servers() -> Result<serde_json::Value, String> {
+    Err("server list unsupported on this platform".to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn spark_select_server(_index: i32) -> Result<(), String> {
+    Err("server selection unsupported on this platform".to_owned())
+}
+
 // U1b-2a: the UI now drives a real SparkBackend command surface — `spark_status`
 // reads the live NE connection state; `spark_connect`/`spark_disconnect` resolve
 // config and report honest "pending" until the U1b-2b write path lands. (The U1a
@@ -466,7 +597,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             spark_status,
             spark_connect,
-            spark_disconnect
+            spark_disconnect,
+            spark_servers,
+            spark_select_server
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
