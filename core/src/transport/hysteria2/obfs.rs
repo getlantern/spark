@@ -58,6 +58,141 @@ fn salamander_xor_with_salt(key: &[u8], salt: &[u8; SALT_LEN], payload: &mut [u8
     }
 }
 
+// ── Gecko ────────────────────────────────────────────────────────────────────
+
+const GECKO_FLAG: u8 = 0x80;
+
+/// Split a QUIC packet into Gecko frames.
+///
+/// Short-header packets (`packet[0] & 0x80 == 0`) pass through unchanged (a
+/// single element). Long-header packets are split into 2..=8 chunks, each
+/// wrapped in a Gecko frame with random padding.
+///
+/// Frame layout: `[1] flags=0x80 | [1] msgID | [1] chunkIdx:4|totalChunks:4 |
+/// [2] padLen(be) | [padLen] padding | [..] chunk`
+///
+/// `seed` perturbs the msgID per call (callers pass a per-packet value; tests
+/// pass a fixed one). Split sizing, padding, and msgID are sender-side choices
+/// (not negotiated with the server).
+pub fn gecko_split(packet: &[u8], seed: u8) -> Vec<Vec<u8>> {
+    if packet.is_empty() || packet[0] & GECKO_FLAG == 0 {
+        return vec![packet.to_vec()];
+    }
+    let rng = ring::rand::SystemRandom::new();
+    let mut rb = [0u8; 2];
+    // OS CSRNG; unrecoverable on failure — treat as infallible.
+    let _ = ring::rand::SecureRandom::fill(&rng, &mut rb);
+    let total = 2 + (rb[0] % 7) as usize; // 2..=8
+    let msg_id = rb[1] ^ seed;
+    let base = packet.len() / total;
+    let mut frames = Vec::with_capacity(total);
+    let mut off = 0;
+    for idx in 0..total {
+        let end = if idx == total - 1 {
+            packet.len()
+        } else {
+            off + base
+        };
+        let chunk = &packet[off..end];
+        off = end;
+        let mut padb = [0u8; 1];
+        let _ = ring::rand::SecureRandom::fill(&rng, &mut padb);
+        let pad_len = (padb[0] % 16) as usize;
+        let mut padding = vec![0u8; pad_len];
+        let _ = ring::rand::SecureRandom::fill(&rng, &mut padding);
+        let mut frame = Vec::with_capacity(5 + pad_len + chunk.len());
+        frame.push(GECKO_FLAG);
+        frame.push(msg_id);
+        frame.push(((idx as u8) << 4) | (total as u8));
+        frame.extend_from_slice(&(pad_len as u16).to_be_bytes());
+        frame.extend_from_slice(&padding);
+        frame.extend_from_slice(chunk);
+        frames.push(frame);
+    }
+    frames
+}
+
+/// Reassembles Gecko frames keyed by msgID.
+///
+/// Bounded to [`GECKO_MAX_MSGS`] concurrent message IDs; on overflow the
+/// partial-reassembly map is cleared (best-effort — QUIC retransmits any lost
+/// handshake packets).
+pub struct GeckoReassembler {
+    partial: std::collections::HashMap<u8, GeckoEntry>,
+}
+
+struct GeckoEntry {
+    total: u8,
+    chunks: Vec<Option<Vec<u8>>>,
+    have: u8,
+}
+
+const GECKO_MAX_MSGS: usize = 16;
+
+impl GeckoReassembler {
+    pub fn new() -> Self {
+        GeckoReassembler {
+            partial: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Feed one (already Salamander-deobfuscated) datagram.
+    ///
+    /// A short-header datagram (flags high bit clear) is itself a complete QUIC
+    /// packet and is returned as-is. A Gecko frame is buffered; the reassembled
+    /// QUIC packet is returned when its msgID completes. Malformed frames
+    /// return `None`.
+    pub fn accept(&mut self, datagram: &[u8]) -> Option<Vec<u8>> {
+        let &flags = datagram.first()?;
+        if flags & GECKO_FLAG == 0 {
+            return Some(datagram.to_vec());
+        }
+        if datagram.len() < 5 {
+            return None;
+        }
+        let msg_id = datagram[1];
+        let idx = (datagram[2] >> 4) as usize;
+        let total = (datagram[2] & 0x0f) as usize;
+        if !(2..=8).contains(&total) || idx >= total {
+            return None;
+        }
+        let pad_len = u16::from_be_bytes([datagram[3], datagram[4]]) as usize;
+        let chunk = datagram.get(5 + pad_len..)?.to_vec();
+
+        if self.partial.len() >= GECKO_MAX_MSGS && !self.partial.contains_key(&msg_id) {
+            self.partial.clear();
+        }
+        let entry = self.partial.entry(msg_id).or_insert_with(|| GeckoEntry {
+            total: total as u8,
+            chunks: vec![None; total],
+            have: 0,
+        });
+        if entry.total as usize != total {
+            self.partial.remove(&msg_id);
+            return None;
+        }
+        if entry.chunks[idx].is_none() {
+            entry.chunks[idx] = Some(chunk);
+            entry.have += 1;
+        }
+        if entry.have as usize == total {
+            let entry = self.partial.remove(&msg_id)?;
+            let mut out = Vec::new();
+            for c in entry.chunks {
+                out.extend_from_slice(&c?);
+            }
+            return Some(out);
+        }
+        None
+    }
+}
+
+impl Default for GeckoReassembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +223,53 @@ mod tests {
         for i in 0..p.len() {
             assert_eq!(p[i], expected[i % 32]);
         }
+    }
+
+    #[test]
+    fn gecko_short_header_passes_through() {
+        // high bit clear => short header => one piece, unchanged
+        let packet = vec![0x40, 1, 2, 3];
+        let frames = gecko_split(&packet, 7);
+        assert_eq!(frames, vec![packet]);
+    }
+
+    #[test]
+    fn gecko_long_header_splits_and_reassembles() {
+        // high bit set => long header
+        let packet: Vec<u8> = (0..300u32)
+            .map(|i| (i % 256) as u8)
+            .map(|b| b | (0x80_u8 * (b == 0) as u8))
+            .collect();
+        let mut packet = packet;
+        packet[0] = 0xC0; // ensure long header
+        let frames = gecko_split(&packet, 0x55);
+        assert!(
+            frames.len() >= 2 && frames.len() <= 8,
+            "got {} frames",
+            frames.len()
+        );
+        let mut r = GeckoReassembler::new();
+        let mut done = None;
+        for f in &frames {
+            if let Some(pkt) = r.accept(f) {
+                done = Some(pkt);
+            }
+        }
+        assert_eq!(done.unwrap(), packet);
+    }
+
+    #[test]
+    fn gecko_reassembler_rejects_malformed() {
+        let mut r = GeckoReassembler::new();
+        assert!(r.accept(&[0x80, 1]).is_none()); // truncated frame (< 5 bytes header)
+                                                 // a short-header datagram (flags high bit clear) is returned as-is (passthrough), not None:
+        assert_eq!(r.accept(&[0x40, 9, 9]).unwrap(), vec![0x40, 9, 9]);
+        // totalChunks out of range (frame = flags, msgID, packed, padLen_hi, padLen_lo):
+        assert!(r.accept(&[0x80, 0, 0x09, 0, 0]).is_none()); // total=9 (>8)
+        assert!(r.accept(&[0x80, 0, 0x01, 0, 0]).is_none()); // total=1 (<2)
+                                                             // chunkIdx >= totalChunks (idx=3, total=2):
+        assert!(r.accept(&[0x80, 0, 0x32, 0, 0]).is_none());
+        // padLen pointing past the datagram end:
+        assert!(r.accept(&[0x80, 0, 0x02, 0xff, 0xff]).is_none());
     }
 }
