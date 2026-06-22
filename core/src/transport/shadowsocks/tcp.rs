@@ -1,10 +1,15 @@
 //! SS-2022 TCP: request/response codec + the AsyncRead+AsyncWrite chunk-framing stream.
 #![allow(dead_code)] // consumed by ShadowsocksStream (Task 8) + ShadowsocksTransport (Task 12); remove at the final sweep.
 
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::{Buf, BytesMut};
 use ring::rand::{SecureRandom, SystemRandom};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::config::SsMethod;
 
@@ -142,6 +147,231 @@ pub fn decode_response_head(
     })
 }
 
+/// The largest plaintext payload per chunk (SIP022 §3.1.2 raised the cap to 0xFFFF).
+const MAX_PAYLOAD: usize = 0xFFFF;
+const TAG: usize = 16;
+
+/// Read-side state machine over the encrypted chunk stream.
+#[allow(clippy::enum_variant_names)] // the shared `Need` prefix reads as intent: each is a wait state
+enum RxState {
+    NeedHead,
+    NeedLen,
+    NeedPayload { plain: usize },
+}
+
+/// An SS-2022 TCP stream: a transparent `AsyncRead+AsyncWrite` over the encrypted chunk framing.
+pub struct ShadowsocksStream<S> {
+    inner: S,
+    method: SsMethod,
+    psk: Vec<u8>,
+    tx: Cipher,
+    tx_ctr: NonceCounter,
+    tx_pending: BytesMut,
+    rx: Option<ResponseHead>,
+    rx_state: RxState,
+    rx_raw: BytesMut,
+    rx_plain: BytesMut,
+    request_salt: Vec<u8>,
+}
+
+impl<S> ShadowsocksStream<S> {
+    /// Wrap `inner` after the request prefix in `req` has been (or will be) written. Takes ownership
+    /// of the send-side cipher/counter from `req`.
+    pub fn new(inner: S, method: SsMethod, psk: Vec<u8>, req: Request) -> Self {
+        let mut tx_pending = BytesMut::with_capacity(req.bytes.len());
+        tx_pending.extend_from_slice(&req.bytes);
+        ShadowsocksStream {
+            inner,
+            method,
+            psk,
+            tx: req.cipher,
+            tx_ctr: req.counter,
+            tx_pending,
+            rx: None,
+            rx_state: RxState::NeedHead,
+            rx_raw: BytesMut::with_capacity(16 * 1024),
+            rx_plain: BytesMut::with_capacity(16 * 1024),
+            request_salt: req.salt,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> ShadowsocksStream<S> {
+    /// Pull at least `want` raw bytes into `rx_raw`. `Ok(true)` = have them; `Ok(false)` = EOF.
+    fn fill_raw(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<io::Result<bool>> {
+        while self.rx_raw.len() < want {
+            let mut tmp = [0u8; 16 * 1024];
+            let mut rb = ReadBuf::new(&mut tmp);
+            match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
+                Poll::Ready(Ok(())) => {
+                    let n = rb.filled().len();
+                    if n == 0 {
+                        return Poll::Ready(Ok(false));
+                    }
+                    self.rx_raw.extend_from_slice(rb.filled());
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(true))
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for ShadowsocksStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        loop {
+            if !me.rx_plain.is_empty() {
+                let n = me.rx_plain.len().min(buf.remaining());
+                buf.put_slice(&me.rx_plain[..n]);
+                me.rx_plain.advance(n);
+                return Poll::Ready(Ok(()));
+            }
+            match me.rx_state {
+                RxState::NeedHead => {
+                    let head_len = response_head_len(me.method);
+                    match me.fill_raw(cx, head_len) {
+                        Poll::Ready(Ok(true)) => {}
+                        Poll::Ready(Ok(false)) => return Poll::Ready(Ok(())),
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                    let head_bytes = me.rx_raw.split_to(head_len);
+                    let head =
+                        decode_response_head(me.method, &me.psk, &me.request_salt, &head_bytes)
+                            .map_err(|_| {
+                                io::Error::new(io::ErrorKind::InvalidData, "ss response head")
+                            })?;
+                    let first = head.first_chunk_len;
+                    me.rx = Some(head);
+                    me.rx_state = RxState::NeedPayload { plain: first };
+                }
+                RxState::NeedLen => {
+                    match me.fill_raw(cx, 2 + TAG) {
+                        Poll::Ready(Ok(true)) => {}
+                        Poll::Ready(Ok(false)) => return Poll::Ready(Ok(())),
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                    let mut chunk = me.rx_raw.split_to(2 + TAG); // BytesMut derefs to &mut [u8] for open()
+                                                                 // Fetch the head set during NeedHead; error rather than panic if absent.
+                    let head = match me.rx.as_mut() {
+                        Some(h) => h,
+                        None => {
+                            return Poll::Ready(Err(io::Error::other("ss: response head missing")))
+                        }
+                    };
+                    let nonce = head.counter.next();
+                    let plain = head
+                        .cipher
+                        .open(nonce, &mut chunk)
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "ss len chunk"))?;
+                    let plain_len = u16::from_be_bytes([plain[0], plain[1]]) as usize;
+                    me.rx_state = RxState::NeedPayload { plain: plain_len };
+                }
+                RxState::NeedPayload { plain } => {
+                    match me.fill_raw(cx, plain + TAG) {
+                        Poll::Ready(Ok(true)) => {}
+                        Poll::Ready(Ok(false)) => {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "ss payload chunk truncated",
+                            )))
+                        }
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                    let mut chunk = me.rx_raw.split_to(plain + TAG); // BytesMut derefs to &mut [u8] for open()
+                                                                     // Fetch the head set during NeedHead; error rather than panic if absent.
+                    let head = match me.rx.as_mut() {
+                        Some(h) => h,
+                        None => {
+                            return Poll::Ready(Err(io::Error::other("ss: response head missing")))
+                        }
+                    };
+                    let nonce = head.counter.next();
+                    let payload = head
+                        .cipher
+                        .open(nonce, &mut chunk)
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "ss payload"))?;
+                    me.rx_plain.extend_from_slice(payload);
+                    me.rx_state = RxState::NeedLen;
+                }
+            }
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> ShadowsocksStream<S> {
+    /// Flush `tx_pending` to `inner`. `Ready(Ok(()))` only when fully drained.
+    fn flush_pending(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while !self.tx_pending.is_empty() {
+            match Pin::new(&mut self.inner).poll_write(cx, &self.tx_pending) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "ss write zero",
+                    )))
+                }
+                Poll::Ready(Ok(n)) => {
+                    self.tx_pending.advance(n);
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ShadowsocksStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let me = self.get_mut();
+        match me.flush_pending(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let take = buf.len().min(MAX_PAYLOAD);
+        let mut len_chunk = (take as u16).to_be_bytes().to_vec();
+        me.tx.seal(me.tx_ctr.next(), &mut len_chunk);
+        let mut payload = buf[..take].to_vec();
+        me.tx.seal(me.tx_ctr.next(), &mut payload);
+        me.tx_pending.extend_from_slice(&len_chunk);
+        me.tx_pending.extend_from_slice(&payload);
+        let _ = me.flush_pending(cx);
+        Poll::Ready(Ok(take))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        match me.flush_pending(cx) {
+            Poll::Ready(Ok(())) => Pin::new(&mut me.inner).poll_flush(cx),
+            other => other,
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        match me.flush_pending(cx) {
+            Poll::Ready(Ok(())) => Pin::new(&mut me.inner).poll_shutdown(cx),
+            other => other,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +440,143 @@ mod tests {
         assert_eq!(var.len(), 7 + 2 + pad_len as usize); // addr + pad_len field + padding, no initial payload
         assert_eq!(off + var_len + 16, req.bytes.len());
         assert_eq!(req.salt, salt.to_vec());
+    }
+
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+
+    /// A minimal in-test SS-2022 server half: reads a request, then sends one response payload chunk.
+    async fn ss_echo_peer(mut sock: tokio::io::DuplexStream, method: SsMethod, psk: Vec<u8>) {
+        let sl = method.salt_len();
+        let mut head = vec![0u8; sl + 11 + 16];
+        sock.read_exact(&mut head).await.unwrap();
+        let req_salt = head[..sl].to_vec();
+        let subkey = session_subkey(method, &psk, &req_salt);
+        let rx = Cipher::new(method, &subkey).unwrap();
+        let mut rxc = NonceCounter::new();
+        let mut fixed = head[sl..].to_vec();
+        let fixed = rx.open(rxc.next(), &mut fixed).unwrap().to_vec();
+        let var_len = u16::from_be_bytes([fixed[9], fixed[10]]) as usize;
+        let mut var = vec![0u8; var_len + 16];
+        sock.read_exact(&mut var).await.unwrap();
+        rx.open(rxc.next(), &mut var).unwrap();
+
+        let rng = ring::rand::SystemRandom::new();
+        let mut resp_salt = vec![0u8; sl];
+        ring::rand::SecureRandom::fill(&rng, &mut resp_salt).unwrap();
+        let tx = Cipher::new(method, &session_subkey(method, &psk, &resp_salt)).unwrap();
+        let mut txc = NonceCounter::new();
+        let payload = b"pong";
+        let mut hdr = vec![1u8];
+        hdr.extend_from_slice(&now_secs().to_be_bytes());
+        hdr.extend_from_slice(&req_salt);
+        hdr.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        tx.seal(txc.next(), &mut hdr);
+        let mut body = payload.to_vec();
+        tx.seal(txc.next(), &mut body);
+        let mut out = resp_salt;
+        out.extend_from_slice(&hdr);
+        out.extend_from_slice(&body);
+        sock.write_all(&out).await.unwrap();
+        sock.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_round_trips_against_a_spec_peer() {
+        let method = SsMethod::Aes256Gcm;
+        let psk = vec![5u8; 32];
+        let target: std::net::SocketAddr = "1.2.3.4:443".parse().unwrap();
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer = tokio::spawn(ss_echo_peer(server_io, method, psk.clone()));
+
+        let req = encode_request(method, &psk, &target).unwrap();
+        let mut stream = ShadowsocksStream::new(client_io, method, psk.clone(), req);
+        stream.write_all(b"ping").await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+        peer.await.unwrap();
+    }
+
+    /// A peer that sends a known `blob` after the request head, split into MAX_PAYLOAD-capped chunks.
+    async fn ss_blob_peer(
+        mut sock: tokio::io::DuplexStream,
+        method: SsMethod,
+        psk: Vec<u8>,
+        blob: Vec<u8>,
+    ) {
+        let sl = method.salt_len();
+        let mut head = vec![0u8; sl + 11 + 16];
+        sock.read_exact(&mut head).await.unwrap();
+        let req_salt = head[..sl].to_vec();
+        let rx = Cipher::new(method, &session_subkey(method, &psk, &req_salt)).unwrap();
+        let mut rxc = NonceCounter::new();
+        let mut fixed = head[sl..].to_vec();
+        let fixed = rx.open(rxc.next(), &mut fixed).unwrap().to_vec();
+        let var_len = u16::from_be_bytes([fixed[9], fixed[10]]) as usize;
+        let mut var = vec![0u8; var_len + 16];
+        sock.read_exact(&mut var).await.unwrap();
+        rx.open(rxc.next(), &mut var).unwrap();
+
+        let rng = ring::rand::SystemRandom::new();
+        let mut resp_salt = vec![0u8; sl];
+        ring::rand::SecureRandom::fill(&rng, &mut resp_salt).unwrap();
+        let tx = Cipher::new(method, &session_subkey(method, &psk, &resp_salt)).unwrap();
+        let mut txc = NonceCounter::new();
+        let mut out = resp_salt;
+
+        let mut chunks = blob.chunks(0xFFFF);
+        let first = chunks.next().unwrap_or(&[]);
+        let mut hdr = vec![1u8];
+        hdr.extend_from_slice(&now_secs().to_be_bytes());
+        hdr.extend_from_slice(&req_salt);
+        hdr.extend_from_slice(&(first.len() as u16).to_be_bytes());
+        tx.seal(txc.next(), &mut hdr);
+        out.extend_from_slice(&hdr);
+        let mut body = first.to_vec();
+        tx.seal(txc.next(), &mut body);
+        out.extend_from_slice(&body);
+
+        for chunk in chunks {
+            let mut len = (chunk.len() as u16).to_be_bytes().to_vec();
+            tx.seal(txc.next(), &mut len);
+            out.extend_from_slice(&len);
+            let mut payload = chunk.to_vec();
+            tx.seal(txc.next(), &mut payload);
+            out.extend_from_slice(&payload);
+        }
+        sock.write_all(&out).await.unwrap();
+        sock.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_handles_a_large_chunked_download() {
+        let method = SsMethod::Aes256Gcm;
+        let psk = vec![5u8; 32];
+        let target: std::net::SocketAddr = "1.2.3.4:443".parse().unwrap();
+        let blob: Vec<u8> = (0..200 * 1024).map(|i| (i % 251) as u8).collect();
+
+        let (client_io, server_io) = duplex(8 * 1024); // small duplex => many partial reads
+        let peer = tokio::spawn(ss_blob_peer(server_io, method, psk.clone(), blob.clone()));
+
+        let req = encode_request(method, &psk, &target).unwrap();
+        let mut stream = ShadowsocksStream::new(client_io, method, psk.clone(), req);
+        stream.flush().await.unwrap();
+
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&chunk[..n]);
+            if got.len() == blob.len() {
+                break;
+            }
+        }
+        assert_eq!(got, blob);
+        peer.await.unwrap();
     }
 }
