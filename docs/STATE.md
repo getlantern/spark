@@ -2342,10 +2342,11 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   so the `/auth` decoder needed an **RFC 7541 Appendix B Huffman decoder** (T7 had flagged this risk);
   with it, auth=233 + TCP+UDP worked on first interop. **Live-interop gate PASSED** against
   apernet/hysteria v2.9.2: TCP HTTP 200 + UDP DNS through the tunnel with **obfs off, Salamander, and
-  Gecko** (all 2×3 = 6 green). Out of scope v1: Brutal CC, port hopping, masquerade site, server side,
-  multipath (the noq swap). **Deferred limitation:** `SocketProtector` not yet applied to the QUIC/
-  obfs UDP socket (binds 0.0.0.0:0). All feature combos build/clippy/test clean; base build stays
-  rustls/ring-only. Design: `docs/hysteria2-design.md` (status flipped to Accepted); decision:
+  Gecko** (all 2×3 = 6 green). **`SocketProtector` IS applied** to the QUIC data-plane socket (via
+  the shared `protected_udp_socket`, threaded `hysteria2_transport → new → connect`) so the
+  transport's own packets bypass the tunnel route on a routed full-tunnel setup — re-validated live
+  after wiring it. Out of scope v1: Brutal CC, port hopping, masquerade site, server side, multipath
+  (the noq swap). All feature combos build/clippy/test clean; base build stays rustls/ring-only. Design: `docs/hysteria2-design.md` (status flipped to Accepted); decision:
   **ADR 0010**.
 
 ## Milestone checklist

@@ -81,10 +81,13 @@ bundle with no OS-trust-store integration; see the CA-roots decision below). The
 **minimal** HTTP/3 (single bidi stream, no SETTINGS/control streams) — sufficient for `/auth` against
 the real server, validated live, but not a general H3 client.
 
-**Deferred limitation (tracked):** `SocketProtector` is **not yet applied** to the QUIC/obfs UDP
-socket — `connect()` binds `0.0.0.0:0` and the `hysteria2_transport` builder accepts the protector
-only for signature symmetry. On a routed-tunnel setup the data-plane UDP socket would not be pinned
-to the protected interface; threading it through is follow-up work.
+**Socket protection.** The QUIC data-plane UDP socket is created via the shared
+`protected_udp_socket(server, protector)` helper, so when a `SocketProtector` is configured
+(`transport.protect_interface`) the socket is pinned to the physical interface and the transport's
+own QUIC packets bypass the tunnel route — required on a routed full-tunnel setup, where an
+unprotected socket would loop its traffic back through the tunnel. The protector is threaded
+`hysteria2_transport → Hysteria2Transport::new → connect`. (As a side benefit, the socket's address
+family now follows the server's, so an IPv6 server is handled correctly.)
 
 **TLS.** `rustls`/`ring`, **TLS 1.3 only**, ALPN `h3`. Three verifier modes (config `tls.mode`):
 `system-roots` (webpki-roots), `pin-sha256` (leaf-cert SHA-256 pin, normalized to tolerate the

@@ -509,15 +509,19 @@ fn shadowsocks_transport(
 
 /// Build the Hysteria 2 transport (feature `hysteria2`): a QUIC client serving both TCP and UDP.
 ///
-/// NOTE: `SocketProtector` is not yet applied to the QUIC/obfs UDP socket (bound 0.0.0.0:0 in
-/// `connect`); threading it is future work (see ADR 0010).
+/// `protector`, when set, pins the QUIC data-plane UDP socket to the physical interface so the
+/// transport's own packets bypass the tunnel route.
 #[cfg(feature = "hysteria2")]
 fn hysteria2_transport(
     cfg: &Hysteria2Config,
-    _protector: Option<SocketProtector>,
+    protector: Option<SocketProtector>,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     let server = cfg.server.socket_addr()?;
-    let t = Arc::new(hysteria2::Hysteria2Transport::new(cfg.clone(), server));
+    let t = Arc::new(hysteria2::Hysteria2Transport::new(
+        cfg.clone(),
+        server,
+        protector,
+    ));
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
 }
 

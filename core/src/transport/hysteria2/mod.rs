@@ -12,9 +12,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
+use crate::net::SocketProtector;
 use crate::transport::{
-    BoxedPacketSink, BoxedPacketSource, BoxedStream, PacketSink, PacketSource, Transport,
-    UdpTransport,
+    protected_udp_socket, BoxedPacketSink, BoxedPacketSource, BoxedStream, PacketSink,
+    PacketSource, Transport, UdpTransport,
 };
 
 // rustls is not a direct dependency of this crate; it is the exact same locked version re-exported
@@ -250,6 +251,10 @@ fn rustls_client_config(cfg: &Hysteria2Config) -> Result<rustls::ClientConfig, H
 
 /// Open a QUIC connection to `server`, applying the obfuscation layer when `cfg.obfs` is set.
 ///
+/// The data-plane UDP socket is created via [`protected_udp_socket`], so when a [`SocketProtector`]
+/// is supplied the socket is pinned to the physical interface and its QUIC packets bypass the tunnel
+/// route (otherwise the tunnel would capture the transport's own traffic and loop).
+///
 /// The returned [`quinn::Connection`] is not yet authenticated — the caller must invoke
 /// [`authenticate`] before proxying. The connection's UDP endpoint is kept alive internally by
 /// quinn (the spawned endpoint driver holds a strong reference to the `EndpointRef`, and the
@@ -258,18 +263,22 @@ fn rustls_client_config(cfg: &Hysteria2Config) -> Result<rustls::ClientConfig, H
 async fn connect(
     cfg: &Hysteria2Config,
     server: SocketAddr,
+    protector: Option<&SocketProtector>,
 ) -> Result<quinn::Connection, Hysteria2Error> {
     let tls = rustls_client_config(cfg)?;
     let quic =
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| Hysteria2Error::Tls)?;
     let client_config = quinn::ClientConfig::new(Arc::new(quic));
 
-    let udp = std::net::UdpSocket::bind(("0.0.0.0", 0)).map_err(Hysteria2Error::Io)?;
+    // A UDP socket bound to 0.0.0.0:0 (family from `server`), pinned to the physical interface when a
+    // protector is set so the QUIC data plane bypasses the tunnel route. Already non-blocking, as both
+    // `quinn::Endpoint::new` and `tokio::net::UdpSocket::from_std` require.
+    let udp: std::net::UdpSocket = protected_udp_socket(server, protector)
+        .map_err(Hysteria2Error::Io)?
+        .into();
 
     let mut endpoint = match &cfg.obfs {
         Some(o) => {
-            // quinn-udp needs a non-blocking socket; tokio's `from_std` requires the same.
-            udp.set_nonblocking(true).map_err(Hysteria2Error::Io)?;
             let tokio_udp = tokio::net::UdpSocket::from_std(udp).map_err(Hysteria2Error::Io)?;
             let sock = obfs::SalamanderGeckoSocket::new(
                 tokio_udp,
@@ -453,6 +462,9 @@ async fn udp_receive_pump(conn: quinn::Connection, sessions: Arc<SessionMap>) {
 pub struct Hysteria2Transport {
     cfg: Hysteria2Config,
     server: SocketAddr,
+    /// Pins the QUIC data-plane socket to a physical interface so its packets bypass the tunnel
+    /// route. `None` leaves the socket on the default route.
+    protector: Option<SocketProtector>,
     /// The cached, authenticated connection state, or `None` before the first dial / after teardown.
     /// Guarded by a tokio mutex held only for the brief check/store windows — never across the
     /// `connect`/`authenticate` awaits (see [`Self::connection`]).
@@ -460,11 +472,17 @@ pub struct Hysteria2Transport {
 }
 
 impl Hysteria2Transport {
-    /// Build a transport for `cfg` against `server`. No connection is opened until the first dial.
-    pub fn new(cfg: Hysteria2Config, server: SocketAddr) -> Self {
+    /// Build a transport for `cfg` against `server`, optionally pinning the QUIC socket to a physical
+    /// interface via `protector`. No connection is opened until the first dial.
+    pub fn new(
+        cfg: Hysteria2Config,
+        server: SocketAddr,
+        protector: Option<SocketProtector>,
+    ) -> Self {
         Self {
             cfg,
             server,
+            protector,
             conn: tokio::sync::Mutex::new(None),
         }
     }
@@ -487,7 +505,7 @@ impl Hysteria2Transport {
         }
 
         // Slow path: build a new connection with NO guard held across these awaits.
-        let c = connect(&self.cfg, self.server).await?;
+        let c = connect(&self.cfg, self.server, self.protector.as_ref()).await?;
         let udp_ok = authenticate(&c, &self.cfg).await?;
         let sessions: Arc<SessionMap> = Arc::new(std::sync::Mutex::new(Default::default()));
         let pump = tokio::spawn(udp_receive_pump(c.clone(), sessions.clone()));
