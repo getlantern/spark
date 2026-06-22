@@ -56,8 +56,9 @@ mod ffi {
     }
 
     /// Resolve the C `config` arg into a [`Config`]: null/empty → direct; a bare `host:port` → the
-    /// plain relay (today's behavior); otherwise a full TOML config. `None` signals a parse error
-    /// (`-1` to the caller). The NE always uses the userspace stack (`system` is Android-only).
+    /// plain relay (today's behavior); otherwise a full config — spark's native TOML or a Lantern
+    /// `config_raw.json` payload (auto-detected). `None` signals a parse error (`-1` to the caller).
+    /// The NE always uses the userspace stack (`system` is Android-only).
     ///
     /// # Safety
     /// `ptr` must be null or a valid NUL-terminated C string.
@@ -76,8 +77,9 @@ mod ffi {
             c.transport.server = Some(addr);
             return Some(c);
         }
-        // Otherwise a full TOML config — AnyTLS, handshake shaping, gambit, etc.
-        Config::from_toml_str(s).ok()
+        // Otherwise a full config — spark's native TOML (AnyTLS, shaping, gambit, …) or a Lantern
+        // `config_raw.json` payload, auto-detected and adapted by `Config::from_config_str`.
+        Config::from_config_str(s).ok()
     }
 
     /// Signal a running [`spark_tunnel_run`] to stop (from `stopTunnel`).
