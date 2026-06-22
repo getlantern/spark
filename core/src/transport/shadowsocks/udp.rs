@@ -298,49 +298,51 @@ impl PacketSource for ShadowsocksUdpSource {
         // bad datagram never surfaces as an error to the netstack.
         loop {
             let n = self.socket.recv(&mut self.scratch).await?;
+            // The separate header is only AES-ECB-decrypted here — keyed but UNAUTHENTICATED, so `sid`
+            // is attacker-influenceable (a spoofed datagram on the server's 4-tuple decrypts to some
+            // pseudo-random sid). We therefore authenticate the AEAD body BEFORE mutating any session
+            // state, so a forged packet can never create/evict a tracked replay window.
             let (sid, pid, sep) = match decrypt_separate_header(&self.block, &self.scratch[..n]) {
                 Ok(v) => v,
                 Err(_) => continue, // malformed -> drop
             };
-            // Ensure a cached session (derive its Cipher once). Bound the map: a server rotates
-            // session IDs rarely (SIP022 clients only need the current + one prior), so a much higher
-            // cap than that can only be hit by a misbehaving server, and we evict an arbitrary entry
-            // rather than grow unbounded.
-            if !self.sessions.contains_key(&sid) {
-                let cipher =
-                    match Cipher::new(self.method, &session_subkey(self.method, &self.psk, &sid)) {
-                        Ok(c) => c,
-                        Err(_) => continue,
+            let enc_body = &self.scratch[16..n];
+
+            // Fast path: an already-tracked server session — open with its cached cipher.
+            if let Some(st) = self.sessions.get_mut(&sid) {
+                let payload =
+                    match open_server_body(&st.cipher, &sep, enc_body, self.client_session_id) {
+                        Ok(p) => p,
+                        Err(_) => continue, // failed auth / bad header -> drop, window untouched
                     };
-                if self.sessions.len() >= MAX_SERVER_SESSIONS {
-                    if let Some(victim) = self.sessions.keys().next().copied() {
-                        self.sessions.remove(&victim);
-                    }
+                if !st.window.accept(pid) {
+                    continue; // replay / out-of-window -> drop
                 }
-                self.sessions.insert(
-                    sid,
-                    SessionState {
-                        window: ReplayWindow::new(),
-                        cipher,
-                    },
-                );
+                let len = payload.len().min(buf.len());
+                buf[..len].copy_from_slice(&payload[..len]);
+                return Ok(len);
             }
-            let st = match self.sessions.get_mut(&sid) {
-                Some(s) => s,
-                None => continue,
-            };
-            let payload = match open_server_body(
-                &st.cipher,
-                &sep,
-                &self.scratch[16..n],
-                self.client_session_id,
-            ) {
+
+            // New server session id: derive a cipher and AUTHENTICATE before touching the map.
+            let cipher =
+                match Cipher::new(self.method, &session_subkey(self.method, &self.psk, &sid)) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+            let payload = match open_server_body(&cipher, &sep, enc_body, self.client_session_id) {
                 Ok(p) => p,
-                Err(_) => continue, // failed auth / bad header -> drop
+                Err(_) => continue, // forged / unauthenticated -> drop, NO map mutation
             };
-            if !st.window.accept(pid) {
-                continue; // replay / out-of-window -> drop
+            // Authentic packet from a new server session. Refuse to start tracking once at capacity
+            // rather than evicting an active window — evicting then accepting a reused id would reset
+            // replay state (SIP022 §3.2.4). The cap is far above the current+prior a real server needs,
+            // so this only bites a misbehaving server, which is itself the trust root here.
+            if self.sessions.len() >= MAX_SERVER_SESSIONS {
+                continue;
             }
+            let mut window = ReplayWindow::new();
+            window.accept(pid); // first packet of a fresh window — always fresh
+            self.sessions.insert(sid, SessionState { window, cipher });
             let len = payload.len().min(buf.len());
             buf[..len].copy_from_slice(&payload[..len]);
             return Ok(len);
@@ -471,6 +473,50 @@ mod tests {
         let mut buf = [0u8; 2048];
         let n = source.recv(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"pong");
+    }
+
+    #[tokio::test]
+    async fn source_refuses_over_cap_sessions_instead_of_evicting() {
+        // Once the per-association session map is full, an additional authentic server session must be
+        // dropped — NOT accepted by evicting an active window (which would reset that window's replay
+        // state). Authentication also happens before any map mutation, so this can't be driven by
+        // forged packets. With the old arbitrary-eviction code this over-cap packet would be delivered.
+        let method = SsMethod::Aes256Gcm;
+        let psk = vec![5u8; 32];
+        let target: SocketAddr = "8.8.8.8:53".parse().unwrap();
+        let client_sid = [1u8; 8];
+
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+        let client = Arc::new(client);
+        let client_addr = client.local_addr().unwrap();
+        let mut source =
+            ShadowsocksUdpSource::new(Arc::clone(&client), method, psk.clone(), client_sid)
+                .unwrap();
+
+        // Fill the cap with distinct, authentic server sessions.
+        for i in 0..MAX_SERVER_SESSIONS as u8 {
+            let pkt =
+                build_server_packet_for_test(method, &psk, [i; 8], 0, client_sid, &target, b"ok");
+            server.send_to(&pkt, client_addr).await.unwrap();
+            let mut buf = [0u8; 64];
+            let n = source.recv(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"ok");
+        }
+
+        // A new (over-cap) authentic session must be refused — recv should time out, not deliver it.
+        let over =
+            build_server_packet_for_test(method, &psk, [0xAA; 8], 0, client_sid, &target, b"over");
+        server.send_to(&over, client_addr).await.unwrap();
+        let mut buf = [0u8; 64];
+        let r = tokio::time::timeout(std::time::Duration::from_millis(300), source.recv(&mut buf))
+            .await;
+        assert!(
+            r.is_err(),
+            "over-cap session must be refused, not delivered by eviction"
+        );
     }
 
     #[test]
