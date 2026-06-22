@@ -345,7 +345,12 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ShadowsocksStream<S> {
         }
         me.tx_pending.extend_from_slice(&len_chunk);
         me.tx_pending.extend_from_slice(&payload);
-        let _ = me.flush_pending(cx);
+        // Opportunistically push the chunk now. Surface an immediate write error (e.g. broken pipe)
+        // rather than hiding it until a later flush; a `Pending` flush is fine — the bytes are buffered
+        // and drain on the next poll_write/poll_flush.
+        if let Poll::Ready(Err(e)) = me.flush_pending(cx) {
+            return Poll::Ready(Err(e));
+        }
         Poll::Ready(Ok(take))
     }
 
