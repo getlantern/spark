@@ -74,6 +74,11 @@ pub mod samizdat;
 /// Gated behind `multi-server` so the base build pulls no `flint-dial` dependency.
 #[cfg(feature = "multi-server")]
 pub mod select;
+/// Shadowsocks 2022 transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with deployed
+/// shadowsocks-rust servers. Behind the `shadowsocks` feature so the base build pulls neither
+/// `blake3` nor `aes`.
+#[cfg(feature = "shadowsocks")]
+pub mod shadowsocks;
 pub mod tcp_tunnel;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.
