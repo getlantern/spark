@@ -82,6 +82,16 @@ wat = "1"
 uniffi = { version = "0.31" }
 blake3 = { version = "1", default-features = false }
 aes = "0.8"
+# Hysteria 2 transport (ADR 0010): QUIC client interoperable with apernet/hysteria, with
+# Salamander+Gecko obfuscation. `rustls-ring` uses the ring backend (CLAUDE.md locked stack);
+# `runtime-tokio` is the async runtime bridge. Off by default — only the `hysteria2` feature pulls them.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+quinn-udp = "0.5"
+blake2 = { version = "0.10", default-features = false }
+# Mozilla's compiled-in CA bundle for the hysteria2 `system-roots` TLS mode. Pure-Rust, identical on
+# every platform (incl. Android/Apple), no OS trust-store integration. Tracks rustls-pki-types 1.x.
+# Off by default — only the `hysteria2` feature pulls it.
+webpki-roots = "1"
 # flutter_rust_bridge: generates the Dart<->Rust bridge for the desktop Flutter GUI (`gui/`). Used
 # ONLY by `spark-bridge`; never linked into core/cli/service. Pinned to EXACTLY match the codegen CLI
 # (`flutter_rust_bridge_codegen`) and the Dart `flutter_rust_bridge` package — all three must be the
