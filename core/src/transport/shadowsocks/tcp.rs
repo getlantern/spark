@@ -80,9 +80,101 @@ pub fn encode_request(
     })
 }
 
+/// Decoded response head: the response-side cipher/counter (for subsequent chunks) and the length of
+/// the first payload chunk (the fixed header doubles as the first length chunk).
+pub struct ResponseHead {
+    pub cipher: Cipher,
+    pub counter: NonceCounter,
+    pub first_chunk_len: usize,
+}
+
+/// Maximum tolerated clock skew on a timestamp (SIP022 §3.1.3).
+const MAX_SKEW_SECS: u64 = 30;
+const HEADER_TYPE_SERVER: u8 = 1;
+
+/// The number of `salt ‖ enc[fixed header]` bytes for a response (`salt + 1 + 8 + salt + 2 + 16`).
+pub fn response_head_len(method: SsMethod) -> usize {
+    let sl = method.salt_len();
+    sl + (1 + 8 + sl + 2) + 16
+}
+
+/// Parse and validate the response head from `wire` (at least `response_head_len(method)` bytes).
+pub fn decode_response_head(
+    method: SsMethod,
+    psk: &[u8],
+    request_salt: &[u8],
+    wire: &[u8],
+) -> Result<ResponseHead, CryptoError> {
+    let sl = method.salt_len();
+    if wire.len() < response_head_len(method) {
+        return Err(CryptoError::Auth); // too short to be a valid head
+    }
+    let resp_salt = &wire[..sl];
+    let subkey = session_subkey(method, psk, resp_salt);
+    let cipher = Cipher::new(method, &subkey)?;
+    let mut counter = NonceCounter::new();
+
+    let mut fixed_buf = wire[sl..sl + (1 + 8 + sl + 2) + 16].to_vec();
+    let fixed = cipher.open(counter.next(), &mut fixed_buf)?;
+
+    if fixed[0] != HEADER_TYPE_SERVER {
+        return Err(CryptoError::Auth);
+    }
+    let ts = u64::from_be_bytes(fixed[1..9].try_into().map_err(|_| CryptoError::Auth)?);
+    let now = now_secs();
+    if now.abs_diff(ts) > MAX_SKEW_SECS {
+        return Err(CryptoError::Auth);
+    }
+    if &fixed[9..9 + sl] != request_salt {
+        return Err(CryptoError::Auth);
+    }
+    let len_off = 9 + sl;
+    let first_chunk_len = u16::from_be_bytes(
+        fixed[len_off..len_off + 2]
+            .try_into()
+            .map_err(|_| CryptoError::Auth)?,
+    ) as usize;
+
+    Ok(ResponseHead {
+        cipher,
+        counter,
+        first_chunk_len,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_head_validates_request_salt() {
+        let method = SsMethod::Aes256Gcm;
+        let psk = vec![5u8; 32];
+        let request_salt = vec![5u8; 32];
+
+        // Build a server response head the way a server would.
+        let rng = ring::rand::SystemRandom::new();
+        let mut resp_salt = vec![0u8; 32];
+        ring::rand::SecureRandom::fill(&rng, &mut resp_salt).unwrap();
+        let subkey = session_subkey(method, &psk, &resp_salt);
+        let cipher = Cipher::new(method, &subkey).unwrap();
+        let mut ctr = NonceCounter::new();
+        let mut fixed = Vec::new();
+        fixed.push(1u8); // server stream
+        fixed.extend_from_slice(&now_secs().to_be_bytes());
+        fixed.extend_from_slice(&request_salt); // echoes our salt
+        fixed.extend_from_slice(&77u16.to_be_bytes()); // first payload length
+        cipher.seal(ctr.next(), &mut fixed);
+        let mut wire = resp_salt.clone();
+        wire.extend_from_slice(&fixed);
+
+        let head = decode_response_head(method, &psk, &request_salt, &wire).unwrap();
+        assert_eq!(head.first_chunk_len, 77);
+
+        // A wrong request_salt is rejected.
+        let bad_salt = vec![9u8; 32];
+        assert!(decode_response_head(method, &psk, &bad_salt, &wire).is_err());
+    }
 
     #[test]
     fn request_prefix_decodes_back() {
