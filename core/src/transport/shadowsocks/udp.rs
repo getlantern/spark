@@ -49,7 +49,7 @@ pub fn build_client_packet(
     let cipher = Cipher::new(method, &subkey)?;
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&sep[4..16]);
-    cipher.seal(nonce, &mut body);
+    cipher.seal(nonce, &mut body)?;
 
     let block = AesBlock::new(psk)?;
     block.encrypt(&mut sep);
@@ -155,7 +155,7 @@ pub fn build_server_packet_for_test(
     let cipher = Cipher::new(method, &subkey).unwrap();
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&sep[4..16]);
-    cipher.seal(nonce, &mut body);
+    cipher.seal(nonce, &mut body).unwrap();
     let block = AesBlock::new(psk).unwrap();
     block.encrypt(&mut sep);
     let mut out = sep.to_vec();

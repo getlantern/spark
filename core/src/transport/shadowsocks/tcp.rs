@@ -62,9 +62,9 @@ pub fn encode_request(
     // Assemble: salt ‖ enc[fixed] ‖ enc[var]  (each AEAD chunk appends a 16-byte tag).
     let mut bytes = Vec::with_capacity(salt.len() + fixed.len() + 16 + var.len() + 16);
     bytes.extend_from_slice(&salt);
-    cipher.seal(counter.next(), &mut fixed);
+    cipher.seal(counter.next(), &mut fixed)?;
     bytes.extend_from_slice(&fixed);
-    cipher.seal(counter.next(), &mut var);
+    cipher.seal(counter.next(), &mut var)?;
     bytes.extend_from_slice(&var);
 
     Ok(Request {
@@ -336,9 +336,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ShadowsocksStream<S> {
         }
         let take = buf.len().min(MAX_PAYLOAD);
         let mut len_chunk = (take as u16).to_be_bytes().to_vec();
-        me.tx.seal(me.tx_ctr.next(), &mut len_chunk);
+        if let Err(e) = me.tx.seal(me.tx_ctr.next(), &mut len_chunk) {
+            return Poll::Ready(Err(io::Error::other(e)));
+        }
         let mut payload = buf[..take].to_vec();
-        me.tx.seal(me.tx_ctr.next(), &mut payload);
+        if let Err(e) = me.tx.seal(me.tx_ctr.next(), &mut payload) {
+            return Poll::Ready(Err(io::Error::other(e)));
+        }
         me.tx_pending.extend_from_slice(&len_chunk);
         me.tx_pending.extend_from_slice(&payload);
         let _ = me.flush_pending(cx);
@@ -384,7 +388,7 @@ mod tests {
         fixed.extend_from_slice(&now_secs().to_be_bytes());
         fixed.extend_from_slice(&request_salt); // echoes our salt
         fixed.extend_from_slice(&77u16.to_be_bytes()); // first payload length
-        cipher.seal(ctr.next(), &mut fixed);
+        cipher.seal(ctr.next(), &mut fixed).unwrap();
         let mut wire = resp_salt.clone();
         wire.extend_from_slice(&fixed);
 
@@ -460,9 +464,9 @@ mod tests {
         hdr.extend_from_slice(&now_secs().to_be_bytes());
         hdr.extend_from_slice(&req_salt);
         hdr.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-        tx.seal(txc.next(), &mut hdr);
+        tx.seal(txc.next(), &mut hdr).unwrap();
         let mut body = payload.to_vec();
-        tx.seal(txc.next(), &mut body);
+        tx.seal(txc.next(), &mut body).unwrap();
         let mut out = resp_salt;
         out.extend_from_slice(&hdr);
         out.extend_from_slice(&body);
@@ -522,18 +526,18 @@ mod tests {
         hdr.extend_from_slice(&now_secs().to_be_bytes());
         hdr.extend_from_slice(&req_salt);
         hdr.extend_from_slice(&(first.len() as u16).to_be_bytes());
-        tx.seal(txc.next(), &mut hdr);
+        tx.seal(txc.next(), &mut hdr).unwrap();
         out.extend_from_slice(&hdr);
         let mut body = first.to_vec();
-        tx.seal(txc.next(), &mut body);
+        tx.seal(txc.next(), &mut body).unwrap();
         out.extend_from_slice(&body);
 
         for chunk in chunks {
             let mut len = (chunk.len() as u16).to_be_bytes().to_vec();
-            tx.seal(txc.next(), &mut len);
+            tx.seal(txc.next(), &mut len).unwrap();
             out.extend_from_slice(&len);
             let mut payload = chunk.to_vec();
-            tx.seal(txc.next(), &mut payload);
+            tx.seal(txc.next(), &mut payload).unwrap();
             out.extend_from_slice(&payload);
         }
         sock.write_all(&out).await.unwrap();

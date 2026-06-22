@@ -21,6 +21,8 @@ pub enum CryptoError {
     AesKeyLength { got: usize },
     #[error("OS RNG unavailable")]
     Rng,
+    #[error("AEAD seal failed")]
+    Seal,
 }
 
 /// Decode the base64 PSK and check its length matches the method (SIP022 §2.1).
@@ -149,15 +151,17 @@ impl Cipher {
         Ok(Cipher(aead::LessSafeKey::new(unbound)))
     }
 
-    /// Seal in place: `buf` becomes ciphertext ‖ 16-byte tag.
-    pub fn seal(&self, nonce: [u8; 12], buf: &mut Vec<u8>) {
+    /// Seal in place: `buf` becomes ciphertext ‖ 16-byte tag. Errors only if the input is too large
+    /// to append a tag (unreachable for SS-2022's bounded chunks), propagated for consistency with the
+    /// repo's ring-seal handling rather than panicking.
+    pub fn seal(&self, nonce: [u8; 12], buf: &mut Vec<u8>) -> Result<(), CryptoError> {
         self.0
             .seal_in_place_append_tag(
                 aead::Nonce::assume_unique_for_key(nonce),
                 aead::Aad::empty(),
                 buf,
             )
-            .expect("ring seal never fails for valid key/nonce");
+            .map_err(|_| CryptoError::Seal)
     }
 
     /// Open in place: `buf` is ciphertext ‖ tag; returns the plaintext slice on success.
@@ -277,7 +281,7 @@ mod tests {
         let cipher = Cipher::new(SsMethod::Aes256Gcm, &key).unwrap();
         let nonce = [1u8; 12];
         let mut buf = b"hello shadowsocks".to_vec();
-        cipher.seal(nonce, &mut buf);
+        cipher.seal(nonce, &mut buf).unwrap();
         assert_eq!(buf.len(), b"hello shadowsocks".len() + 16); // + tag
         let plain = cipher.open(nonce, &mut buf).unwrap();
         assert_eq!(plain, b"hello shadowsocks");
@@ -292,7 +296,7 @@ mod tests {
         ] {
             let cipher = Cipher::new(method, &vec![4u8; key_len]).unwrap();
             let mut buf = b"per-method payload".to_vec();
-            cipher.seal([2u8; 12], &mut buf);
+            cipher.seal([2u8; 12], &mut buf).unwrap();
             let plain = cipher.open([2u8; 12], &mut buf).unwrap();
             assert_eq!(plain, b"per-method payload", "round trip for {method:?}");
         }
@@ -303,7 +307,7 @@ mod tests {
         let key = vec![3u8; 32];
         let cipher = Cipher::new(SsMethod::Aes256Gcm, &key).unwrap();
         let mut buf = b"data".to_vec();
-        cipher.seal([0u8; 12], &mut buf);
+        cipher.seal([0u8; 12], &mut buf).unwrap();
         buf[0] ^= 0xff;
         assert!(cipher.open([0u8; 12], &mut buf).is_err());
     }
