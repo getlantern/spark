@@ -882,7 +882,7 @@ dependencies = [
 [[package]]
 name = "flint-dial"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=71623e6b39136fd98746dc06618be7fd9ac3605e#71623e6b39136fd98746dc06618be7fd9ac3605e"
+source = "git+https://github.com/getlantern/flint?rev=18a2c5d00ab33d661d256bf24282bf40b3f0483f#18a2c5d00ab33d661d256bf24282bf40b3f0483f"
 dependencies = [
  "flint-shaping",
  "flint-tls",
@@ -894,7 +894,7 @@ dependencies = [
 [[package]]
 name = "flint-dns"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=71623e6b39136fd98746dc06618be7fd9ac3605e#71623e6b39136fd98746dc06618be7fd9ac3605e"
+source = "git+https://github.com/getlantern/flint?rev=18a2c5d00ab33d661d256bf24282bf40b3f0483f#18a2c5d00ab33d661d256bf24282bf40b3f0483f"
 dependencies = [
  "bytes",
  "flint-dial",
@@ -911,7 +911,7 @@ dependencies = [
 [[package]]
 name = "flint-shaping"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=71623e6b39136fd98746dc06618be7fd9ac3605e#71623e6b39136fd98746dc06618be7fd9ac3605e"
+source = "git+https://github.com/getlantern/flint?rev=18a2c5d00ab33d661d256bf24282bf40b3f0483f#18a2c5d00ab33d661d256bf24282bf40b3f0483f"
 dependencies = [
  "ring",
  "tokio",
@@ -920,22 +920,25 @@ dependencies = [
 [[package]]
 name = "flint-tls"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=71623e6b39136fd98746dc06618be7fd9ac3605e#71623e6b39136fd98746dc06618be7fd9ac3605e"
+source = "git+https://github.com/getlantern/flint?rev=18a2c5d00ab33d661d256bf24282bf40b3f0483f#18a2c5d00ab33d661d256bf24282bf40b3f0483f"
 dependencies = [
+ "boring-sys2",
  "boring2",
  "flint-shaping",
+ "foreign-types-shared",
  "postcard",
  "ring",
  "serde",
  "thiserror",
  "tokio",
  "tokio-boring2",
+ "tracing",
 ]
 
 [[package]]
 name = "flint-verify"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=71623e6b39136fd98746dc06618be7fd9ac3605e#71623e6b39136fd98746dc06618be7fd9ac3605e"
+source = "git+https://github.com/getlantern/flint?rev=18a2c5d00ab33d661d256bf24282bf40b3f0483f#18a2c5d00ab33d661d256bf24282bf40b3f0483f"
 dependencies = [
  "ring",
  "thiserror",
