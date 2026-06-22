@@ -882,7 +882,7 @@ dependencies = [
 [[package]]
 name = "flint-dial"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=3b07e9459a2be21e6913dfc310a473c7d8fec13c#3b07e9459a2be21e6913dfc310a473c7d8fec13c"
+source = "git+https://github.com/getlantern/flint?rev=a85600a1b74b6219f661c34c44cb4a482d8066e7#a85600a1b74b6219f661c34c44cb4a482d8066e7"
 dependencies = [
  "flint-shaping",
  "flint-tls",
@@ -894,7 +894,7 @@ dependencies = [
 [[package]]
 name = "flint-dns"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=3b07e9459a2be21e6913dfc310a473c7d8fec13c#3b07e9459a2be21e6913dfc310a473c7d8fec13c"
+source = "git+https://github.com/getlantern/flint?rev=a85600a1b74b6219f661c34c44cb4a482d8066e7#a85600a1b74b6219f661c34c44cb4a482d8066e7"
 dependencies = [
  "bytes",
  "flint-dial",
@@ -911,7 +911,7 @@ dependencies = [
 [[package]]
 name = "flint-shaping"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=3b07e9459a2be21e6913dfc310a473c7d8fec13c#3b07e9459a2be21e6913dfc310a473c7d8fec13c"
+source = "git+https://github.com/getlantern/flint?rev=a85600a1b74b6219f661c34c44cb4a482d8066e7#a85600a1b74b6219f661c34c44cb4a482d8066e7"
 dependencies = [
  "ring",
  "tokio",
@@ -920,7 +920,7 @@ dependencies = [
 [[package]]
 name = "flint-tls"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=3b07e9459a2be21e6913dfc310a473c7d8fec13c#3b07e9459a2be21e6913dfc310a473c7d8fec13c"
+source = "git+https://github.com/getlantern/flint?rev=a85600a1b74b6219f661c34c44cb4a482d8066e7#a85600a1b74b6219f661c34c44cb4a482d8066e7"
 dependencies = [
  "boring-sys2",
  "boring2",
@@ -938,7 +938,7 @@ dependencies = [
 [[package]]
 name = "flint-verify"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=3b07e9459a2be21e6913dfc310a473c7d8fec13c#3b07e9459a2be21e6913dfc310a473c7d8fec13c"
+source = "git+https://github.com/getlantern/flint?rev=a85600a1b74b6219f661c34c44cb4a482d8066e7#a85600a1b74b6219f661c34c44cb4a482d8066e7"
 dependencies = [
  "ring",
  "thiserror",
