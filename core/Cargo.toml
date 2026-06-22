@@ -59,6 +59,8 @@ flint-verify = { git = "https://github.com/getlantern/flint", rev = "71623e6b391
 # pulls them (and the boring Chrome connector they dial over). Same rev as the other flint crates.
 flint-dial = { git = "https://github.com/getlantern/flint", rev = "71623e6b39136fd98746dc06618be7fd9ac3605e", optional = true }
 flint-dns = { git = "https://github.com/getlantern/flint", rev = "71623e6b39136fd98746dc06618be7fd9ac3605e", optional = true }
+blake3 = { workspace = true, optional = true }
+aes = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
@@ -93,3 +95,8 @@ samizdat = [
 # Latency-selecting multi-server pool (design: docs/multi-server-selection-design.md). Pulls
 # flint-dial for windowed probing. https callbacks additionally need `anytls` (boring TLS).
 multi-server = ["dep:flint-dial"]
+# Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with
+# deployed shadowsocks-rust servers. `ring` provides the AEADs; `blake3` derives session subkeys and
+# `aes` provides the raw block cipher for the UDP separate-header. Off by default so the base build
+# stays rustls/ring-only and cmake-free. See docs/shadowsocks-design.md.
+shadowsocks = ["dep:blake3", "dep:aes"]

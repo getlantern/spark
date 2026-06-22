@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
-use crate::config::{AnytlsConfig, Config, SamizdatConfig, WasmConfig};
+use crate::config::{AnytlsConfig, Config, SamizdatConfig, ShadowsocksConfig, WasmConfig};
 use crate::net::SocketProtector;
 use crate::BoxedStream;
 use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
@@ -74,6 +74,11 @@ pub mod samizdat;
 /// Gated behind `multi-server` so the base build pulls no `flint-dial` dependency.
 #[cfg(feature = "multi-server")]
 pub mod select;
+/// Shadowsocks 2022 transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with deployed
+/// shadowsocks-rust servers. Behind the `shadowsocks` feature so the base build pulls neither
+/// `blake3` nor `aes`.
+#[cfg(feature = "shadowsocks")]
+pub mod shadowsocks;
 pub mod tcp_tunnel;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.
@@ -98,8 +103,10 @@ pub(crate) async fn protected_tcp_connect(
     socket.connect(addr).await
 }
 
-/// Build a connected UDP socket to `target`, optionally pinned to a physical interface.
-fn protected_udp_socket(
+/// Build a bound, nonblocking UDP socket, optionally pinned to a physical interface (so its traffic
+/// bypasses the tunnel route). `target` only selects the address family for the bind; the caller
+/// `connect`s it to the destination afterward.
+pub(crate) fn protected_udp_socket(
     target: SocketAddr,
     protector: Option<&SocketProtector>,
 ) -> io::Result<socket2::Socket> {
@@ -136,6 +143,7 @@ pub(crate) fn build_one(
     match spec {
         ServerSpec::Anytls(cfg) => anytls_transport(cfg, protector.cloned(), wire.clone()),
         ServerSpec::Samizdat(cfg) => samizdat_transport(cfg, protector.cloned(), wire.clone()),
+        ServerSpec::Shadowsocks(cfg) => shadowsocks_transport(cfg, protector.cloned()),
         ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
         ServerSpec::Tunnel(cfg) => {
             let server = cfg.server.socket_addr()?;
@@ -230,6 +238,11 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
     if let Some(samizdat) = &config.transport.samizdat {
         let wire = wire_plan_from_config(&config.transport.shaping);
         return samizdat_transport(samizdat, protector, wire);
+    }
+    // Shadowsocks 2022 (ADR 0009) — like AnyTLS/Samizdat, takes precedence over the plain `server`
+    // tunnel. Not TLS, so it takes no shaping plan.
+    if let Some(ss) = &config.transport.shadowsocks {
+        return shadowsocks_transport(ss, protector);
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
@@ -450,6 +463,34 @@ fn samizdat_transport(
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.samizdat is configured but spark was built without the `samizdat` feature",
+    ))
+}
+
+/// Build the Shadowsocks transport (feature `shadowsocks`): decode + length-check the base64 PSK,
+/// then a [`shadowsocks::ShadowsocksTransport`] serving both TCP and UDP (UDP errors for the chacha
+/// method). SS is not TLS, so it takes no shaping plan.
+#[cfg(feature = "shadowsocks")]
+fn shadowsocks_transport(
+    cfg: &ShadowsocksConfig,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let server = cfg.server.socket_addr()?;
+    let psk = shadowsocks::decode_psk(cfg.method, &cfg.password)
+        .map_err(|e| io::Error::other(format!("transport.shadowsocks: {e}")))?;
+    let t = Arc::new(shadowsocks::ShadowsocksTransport::new(
+        server, cfg.method, psk, protector,
+    ));
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `shadowsocks` feature, a configured SS transport is a hard error (mirrors anytls/wasm).
+#[cfg(not(feature = "shadowsocks"))]
+fn shadowsocks_transport(
+    _cfg: &ShadowsocksConfig,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.shadowsocks is configured but spark was built without the `shadowsocks` feature",
     ))
 }
 
@@ -943,5 +984,34 @@ mod anytls_gambit_config_tests {
             "a gambit-module rollback must be rejected"
         );
         std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(all(test, feature = "shadowsocks"))]
+mod shadowsocks_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_config_builds_a_shadowsocks_transport() {
+        let toml = r#"
+[transport.shadowsocks]
+server = "1.2.3.4:8388"
+method = "2022-blake3-aes-256-gcm"
+password = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        let _ = from_config(&cfg).expect("shadowsocks transport builds");
+    }
+
+    #[test]
+    fn from_config_rejects_a_bad_length_psk() {
+        let toml = r#"
+[transport.shadowsocks]
+server = "1.2.3.4:8388"
+method = "2022-blake3-aes-256-gcm"
+password = "c2hvcnQ="
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        assert!(from_config(&cfg).is_err());
     }
 }
