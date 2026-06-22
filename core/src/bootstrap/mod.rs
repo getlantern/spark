@@ -193,6 +193,9 @@ pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver)
     if let Some(ss) = config.transport.shadowsocks.as_mut() {
         entries.push((&mut ss.server, None));
     }
+    if let Some(hy2) = config.transport.hysteria2.as_mut() {
+        entries.push((&mut hy2.server, Some(&mut hy2.sni)));
+    }
     for entry in config.transport.servers.iter_mut() {
         match &mut entry.spec {
             crate::config::ServerSpec::Anytls(c) => entries.push((&mut c.server, Some(&mut c.sni))),
@@ -200,6 +203,9 @@ pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver)
                 entries.push((&mut c.server, Some(&mut c.sni)))
             }
             crate::config::ServerSpec::Shadowsocks(c) => entries.push((&mut c.server, None)),
+            crate::config::ServerSpec::Hysteria2(c) => {
+                entries.push((&mut c.server, Some(&mut c.sni)))
+            }
             crate::config::ServerSpec::Tunnel(c) => entries.push((&mut c.server, Some(&mut c.sni))),
             crate::config::ServerSpec::Wasm(_) => {} // wasm.server is a SocketAddr, never a hostname
         }
