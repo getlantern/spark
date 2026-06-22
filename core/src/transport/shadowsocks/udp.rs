@@ -3,10 +3,17 @@
 // consumed by packet codec (Task 10) + sink/source (Task 11); remove at the final sweep.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+use tokio::net::UdpSocket;
+
 use crate::config::SsMethod;
+use crate::transport::{PacketSink, PacketSource};
 
 use super::crypto::{session_subkey, AesBlock, Cipher, CryptoError};
 use super::{read_socks_addr, write_socks_addr};
@@ -18,6 +25,9 @@ const TAG: usize = 16;
 
 /// Size of the replay window (bits behind the highest accepted packet ID).
 const WINDOW: u64 = 64;
+
+/// Cap on tracked server sessions per UDP association (bounds memory against session-ID rotation).
+const MAX_SERVER_SESSIONS: usize = 8;
 
 /// Current Unix time in seconds (SIP022 timestamps).
 // TODO(sweep): consolidate with tcp::now_secs into a shared pub(super) helper in mod.rs.
@@ -166,6 +176,120 @@ pub fn build_server_packet_for_test(
     out
 }
 
+/// Send half of an SS-2022 UDP association (AES methods).
+pub struct ShadowsocksUdpSink {
+    socket: Arc<UdpSocket>,
+    method: SsMethod,
+    psk: Vec<u8>,
+    target: SocketAddr,
+    session_id: [u8; 8],
+    packet_id: u64,
+}
+
+impl ShadowsocksUdpSink {
+    pub fn new(
+        socket: Arc<UdpSocket>,
+        method: SsMethod,
+        psk: Vec<u8>,
+        target: SocketAddr,
+        session_id: [u8; 8],
+    ) -> Self {
+        ShadowsocksUdpSink {
+            socket,
+            method,
+            psk,
+            target,
+            session_id,
+            packet_id: 0,
+        }
+    }
+}
+
+#[async_trait]
+impl PacketSink for ShadowsocksUdpSink {
+    async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
+        let pkt = build_client_packet(
+            self.method,
+            &self.psk,
+            self.session_id,
+            self.packet_id,
+            &self.target,
+            payload,
+        )
+        .map_err(io::Error::other)?;
+        self.packet_id = self.packet_id.wrapping_add(1);
+        self.socket.send(&pkt).await.map(|_| ())
+    }
+}
+
+/// Receive half of an SS-2022 UDP association (AES methods).
+///
+/// Drops malformed or replayed datagrams and keeps reading so that one bad packet never
+/// surfaces as an error to the netstack.
+pub struct ShadowsocksUdpSource {
+    socket: Arc<UdpSocket>,
+    method: SsMethod,
+    psk: Vec<u8>,
+    client_session_id: [u8; 8],
+    windows: HashMap<[u8; 8], ReplayWindow>,
+    scratch: Vec<u8>,
+}
+
+impl ShadowsocksUdpSource {
+    pub fn new(
+        socket: Arc<UdpSocket>,
+        method: SsMethod,
+        psk: Vec<u8>,
+        client_session_id: [u8; 8],
+    ) -> Self {
+        ShadowsocksUdpSource {
+            socket,
+            method,
+            psk,
+            client_session_id,
+            windows: HashMap::new(),
+            scratch: vec![0u8; 64 * 1024], // reused across recvs (one datagram at a time)
+        }
+    }
+}
+
+#[async_trait]
+impl PacketSource for ShadowsocksUdpSource {
+    async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Loop until a valid, non-replayed packet arrives; drop and keep reading otherwise so one
+        // bad datagram never surfaces as an error to the netstack.
+        loop {
+            let n = self.socket.recv(&mut self.scratch).await?;
+            let parsed = match parse_server_packet(
+                self.method,
+                &self.psk,
+                self.client_session_id,
+                &self.scratch[..n],
+            ) {
+                Ok(p) => p,
+                Err(_) => continue, // malformed / failed auth -> drop
+            };
+            // Bound the per-server-session window map: a server rotates session IDs rarely (SIP022
+            // clients only need the current + one prior), so a much higher cap than that can only be
+            // hit by a misbehaving server, and we evict an arbitrary entry rather than grow unbounded.
+            if !self.windows.contains_key(&parsed.server_session_id)
+                && self.windows.len() >= MAX_SERVER_SESSIONS
+            {
+                if let Some(victim) = self.windows.keys().next().copied() {
+                    self.windows.remove(&victim);
+                }
+            }
+            let window = self.windows.entry(parsed.server_session_id).or_default();
+            if !window.accept(parsed.packet_id) {
+                continue; // replay / out-of-window -> drop
+            }
+            let len = parsed.payload.len().min(buf.len());
+            buf[..len].copy_from_slice(&parsed.payload[..len]);
+            return Ok(len);
+        }
+    }
+}
+
 /// A sliding-window replay filter over u64 packet IDs (SIP022 §3.2.4).
 pub struct ReplayWindow {
     highest: u64,
@@ -223,7 +347,72 @@ mod tests {
     use super::super::crypto::{session_subkey, AesBlock, Cipher};
     use super::*;
     use crate::config::SsMethod;
+    use crate::transport::{PacketSink, PacketSource};
     use std::net::SocketAddr;
+    use std::sync::Arc;
+    use tokio::net::UdpSocket;
+
+    /// Server-side decrypt of a client packet (mirror of `parse_server_packet` for the client header).
+    ///
+    /// Client body layout: type(1) | ts(8) | padlen(2) | padding(padlen) | socks-addr | payload.
+    fn parse_client_payload(
+        method: SsMethod,
+        psk: &[u8],
+        expect_sid: [u8; 8],
+        pkt: &[u8],
+    ) -> Vec<u8> {
+        let block = AesBlock::new(psk).unwrap();
+        let mut sep = [0u8; 16];
+        sep.copy_from_slice(&pkt[..16]);
+        block.decrypt(&mut sep);
+        assert_eq!(&sep[..8], &expect_sid);
+        let cipher = Cipher::new(method, &session_subkey(method, psk, &sep[..8])).unwrap();
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&sep[4..16]);
+        let mut body = pkt[16..].to_vec();
+        let plain = cipher.open(nonce, &mut body).unwrap().to_vec();
+        // body: type(1) ts(8) padlen(2) padding(padlen) socks-addr payload
+        // padlen field is at offset 9 (after type + 8-byte ts), 0 for our sink
+        let pad_len = u16::from_be_bytes([plain[9], plain[10]]) as usize;
+        let addr_off = 11 + pad_len;
+        let (_a, consumed) = read_socks_addr(&plain[addr_off..]).unwrap();
+        plain[addr_off + consumed..].to_vec()
+    }
+
+    #[tokio::test]
+    async fn udp_halves_round_trip_over_loopback() {
+        let method = SsMethod::Aes256Gcm;
+        let psk = vec![5u8; 32];
+        let target: SocketAddr = "8.8.8.8:53".parse().unwrap();
+
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+        let client = Arc::new(client);
+
+        let session_id = [7u8; 8];
+        let mut sink =
+            ShadowsocksUdpSink::new(Arc::clone(&client), method, psk.clone(), target, session_id);
+        let mut source =
+            ShadowsocksUdpSource::new(Arc::clone(&client), method, psk.clone(), session_id);
+
+        sink.send(b"ping").await.unwrap();
+
+        let mut rbuf = [0u8; 2048];
+        let (n, from) = server.recv_from(&mut rbuf).await.unwrap();
+        assert_eq!(
+            parse_client_payload(method, &psk, session_id, &rbuf[..n]),
+            b"ping"
+        );
+        let reply =
+            build_server_packet_for_test(method, &psk, [8u8; 8], 0, session_id, &target, b"pong");
+        server.send_to(&reply, from).await.unwrap();
+
+        let mut buf = [0u8; 2048];
+        let n = source.recv(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"pong");
+    }
 
     #[test]
     fn client_packet_parses_as_a_server_would() {
