@@ -14,9 +14,10 @@
 
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 mod ffi {
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
     use std::net::SocketAddr;
     use std::os::raw::{c_char, c_int};
+    use std::ptr;
 
     use spark_core::config::Config;
 
@@ -83,5 +84,45 @@ mod ffi {
     #[no_mangle]
     pub extern "C" fn spark_tunnel_stop() {
         spark_core::fd_tunnel::stop();
+    }
+
+    /// The active server pool as the UI's JSON array (see `spark.h` / `fd_tunnel::servers_json`), or
+    /// `"[]"` when no pool is active. Heap-allocated; the caller frees it with [`spark_string_free`].
+    /// Returns null only on allocation failure (our JSON has no interior NUL, so `CString::new` can't
+    /// fail on content).
+    #[no_mangle]
+    pub extern "C" fn spark_servers_json() -> *mut c_char {
+        let json = spark_core::fd_tunnel::servers_json();
+        CString::new(json)
+            .map(|c| c.into_raw())
+            .unwrap_or(ptr::null_mut())
+    }
+
+    /// Free a string returned by [`spark_servers_json`].
+    ///
+    /// # Safety
+    /// `s` must be null or a pointer previously returned by [`spark_servers_json`] and not yet freed.
+    #[no_mangle]
+    pub unsafe extern "C" fn spark_string_free(s: *mut c_char) {
+        if !s.is_null() {
+            // SAFETY: caller contract — `s` came from `CString::into_raw` in `spark_servers_json`.
+            drop(unsafe { CString::from_raw(s) });
+        }
+    }
+
+    /// Pin which pool member new flows dial first: `index >= 0` pins that member; `index < 0` selects
+    /// auto (latency-ranked). Returns 0 on success, -1 if no server pool is active.
+    #[no_mangle]
+    pub extern "C" fn spark_select_server(index: c_int) -> c_int {
+        let pin = if index < 0 {
+            None
+        } else {
+            Some(index as usize)
+        };
+        if spark_core::fd_tunnel::select_server(pin) {
+            0
+        } else {
+            -1
+        }
     }
 }

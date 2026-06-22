@@ -11,23 +11,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::transport::probe::{CallbackUrl, ProbeOutcome};
-use crate::transport::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
+use crate::transport::{
+    BoxedPacketSink, BoxedPacketSource, MemberStatus, PoolControl, ServerMeta, Transport,
+    UdpTransport,
+};
 use crate::BoxedStream;
-
-/// Display metadata for a pool member, surfaced to the UI via [`SelectingTransport::snapshot`].
-/// All optional — sourced from the per-entry `[[transport.servers]]` location fields (Phase 2;
-/// the full `config_raw.json` shape is Phase 3). Does not affect transport behavior.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ServerMeta {
-    /// Short tag/identifier, e.g. `"sfo3"`.
-    pub name: Option<String>,
-    /// Display country, e.g. `"United States"`.
-    pub country: Option<String>,
-    /// ISO 3166-1 alpha-2 code, e.g. `"US"` (the UI renders a flag from it).
-    pub country_code: Option<String>,
-    /// Display city, e.g. `"San Francisco"`.
-    pub city: Option<String>,
-}
 
 /// A built pool member: its transport pair, the callback URL used to probe it, and UI metadata.
 pub(crate) struct Member {
@@ -51,22 +39,6 @@ impl Member {
             meta,
         }
     }
-}
-
-/// A point-in-time view of one pool member for the server-selection UI.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemberStatus {
-    /// Index into the pool (the stable handle the UI passes back to [`SelectingTransport::set_pin`]).
-    pub index: usize,
-    /// Display metadata (country/city/flag/name).
-    pub meta: ServerMeta,
-    /// Last measured probe latency in whole milliseconds; `None` if never measured or unhealthy.
-    pub latency_ms: Option<u64>,
-    /// Whether the last probe found this member healthy.
-    pub healthy: bool,
-    /// Whether new flows currently dial this member first (the pinned member, or — when on auto —
-    /// the latency-ranked best).
-    pub is_current: bool,
 }
 
 /// Ranked selection plus the state `snapshot()`/`set_pin()` read, all under one mutex.
@@ -222,6 +194,18 @@ impl SelectingTransport {
         let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         sel.pinned = index;
         tracing::debug!(?index, "server selection pin updated");
+    }
+}
+
+/// The dyn-dispatched control surface the fd-path tunnel registers for the platform FFI. Delegates
+/// to the inherent methods (disambiguated by the explicit `SelectingTransport::` path so the trait
+/// method doesn't recurse into itself).
+impl PoolControl for SelectingTransport {
+    fn snapshot(&self) -> Vec<MemberStatus> {
+        SelectingTransport::snapshot(self)
+    }
+    fn set_pin(&self, index: Option<usize>) {
+        SelectingTransport::set_pin(self, index)
     }
 }
 
