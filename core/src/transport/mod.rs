@@ -283,6 +283,18 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
     })
 }
 
+/// Merge a gambit's Layer-B record-split offsets into the dialer's wire plan. [`wire_plan_from_config`]
+/// maps Layer C only (`record_fragment` defaults to `None`), so the gambit's `records.split_offsets`
+/// is the sole source of `record_fragment`. An empty offsets list leaves the wire plan untouched.
+#[cfg(feature = "anytls")]
+fn with_record_split(mut wire: WirePlan, records: &flint_tls::gambit::Records) -> WirePlan {
+    if !records.split_offsets.is_empty() {
+        wire.record_fragment =
+            flint_shaping::RecordFragment::Offsets(records.split_offsets.clone());
+    }
+    wire
+}
+
 /// Build the AnyTLS transport (feature `anytls`) — TCP and UDP (sing UoT v2) over one session pool.
 #[cfg(feature = "anytls")]
 fn anytls_transport(
@@ -292,6 +304,12 @@ fn anytls_transport(
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     let server = cfg.server.socket_addr()?;
     let sni = cfg.sni.clone().unwrap_or_else(|| server.ip().to_string());
+    // Fold the static-config gambit's Layer-B record-split into the (static, per-transport) wire plan
+    // so both the static and dynamic-gambit construction paths below inherit it. Note: a *dynamic*
+    // gambit re-resolves only the Layer-A/B-clienthello Profile per connection; its
+    // `records.split_offsets` won't reach this static WirePlan (a per-connection WirePlan refactor is
+    // deferred), so dynamic per-connection record-split is a known limitation.
+    let wire = with_record_split(wire, &cfg.records);
     // Resolve the inline gambit genome (Layers A/B) onto the boring executor (ADR 0006 P2). Knobs
     // boring2 can't realize are surfaced once here, never silently dropped. This is also the fallback
     // profile when a dynamic gambit module (P3, below) faults or over-reaches.
@@ -1089,6 +1107,61 @@ auth = "s3cr3t"
             matches!(entry.spec, crate::config::ServerSpec::Hysteria2(_)),
             "expected a Hysteria2 pool entry, got: {:?}",
             entry.spec
+        );
+    }
+}
+
+/// P4a gambit realization: the Layer-B record-split wiring (`with_record_split`) and confirmation
+/// that the static-config explicit-order + session-id-inject knobs flow through to boring
+/// automatically via the bumped flint connector.
+#[cfg(all(test, feature = "anytls"))]
+mod anytls_gambit_realization_tests {
+    use super::*;
+    use flint_tls::gambit::{Capability, Gambit, Records};
+
+    #[test]
+    fn record_split_offsets_become_record_fragment_offsets() {
+        let recs = Records {
+            split_offsets: vec![6, 12],
+            ..Default::default()
+        };
+        let wire = with_record_split(WirePlan::default(), &recs);
+        assert!(
+            matches!(wire.record_fragment, flint_shaping::RecordFragment::Offsets(ref o) if o == &vec![6, 12]),
+            "split_offsets must map to RecordFragment::Offsets"
+        );
+
+        // Empty offsets ⇒ wire untouched (record_fragment stays the default None).
+        let empty = Records {
+            split_offsets: vec![],
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                with_record_split(WirePlan::default(), &empty).record_fragment,
+                flint_shaping::RecordFragment::None
+            ),
+            "empty split_offsets must leave record_fragment at its None default"
+        );
+    }
+
+    #[test]
+    fn session_id_inject_gambit_is_accepted_by_boring_now() {
+        // A gambit requiring SessionIdInject must pass for_boring: the bumped flint advertises the
+        // capability (BORING_CAPABILITIES), so for_boring no longer declines it.
+        let g = Gambit {
+            genome_version: 1,
+            version: 1,
+            id: "g".into(),
+            anchor: Default::default(),
+            clienthello: Default::default(),
+            records: Default::default(),
+            wire: Default::default(),
+            requires: vec![Capability::SessionIdInject],
+        };
+        assert!(
+            flint_tls::Profile::for_boring(&g).is_ok(),
+            "a session_id_inject gambit must be accepted by boring"
         );
     }
 }
