@@ -465,14 +465,25 @@ pub enum Hysteria2TlsMode {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hysteria2Obfs {
-    /// Only `"salamander"` in v1.
+    /// Obfuscation type. Only `salamander` is supported (Gecko is the `gecko` flag below, layered on
+    /// Salamander); an unknown value is rejected at config-parse time.
     #[serde(rename = "type")]
-    pub kind: String,
+    pub kind: Hysteria2ObfsType,
     /// Obfuscation pre-shared key.
     pub password: String,
     /// Wrap Salamander with Gecko handshake-fragmentation.
     #[serde(default)]
     pub gecko: bool,
+}
+
+/// The Hysteria 2 obfuscation type. Only Salamander exists in v1 (Gecko wraps it via the
+/// [`Hysteria2Obfs::gecko`] flag, not a separate type). A strongly-typed enum so a misconfigured
+/// `type` fails at parse time instead of silently behaving as Salamander.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Hysteria2ObfsType {
+    /// Salamander XOR obfuscation (Hysteria 2 spec §Salamander).
+    Salamander,
 }
 
 /// The plain `tcp_tunnel` client kind for a pool entry — a tunnel server addressed by `server`,
@@ -926,9 +937,18 @@ gecko = true
         assert_eq!(h.server, "proxy.example.com:443".parse().unwrap());
         assert_eq!(h.auth, "secret");
         let obfs = h.obfs.unwrap();
+        assert_eq!(obfs.kind, Hysteria2ObfsType::Salamander);
         assert_eq!(obfs.password, "obfskey");
         assert!(obfs.gecko);
         assert!(matches!(h.tls.mode, Hysteria2TlsMode::SystemRoots)); // default
+    }
+
+    #[test]
+    fn hysteria2_rejects_unknown_obfs_type() {
+        // An unknown obfs `type` must fail at parse time, not silently behave as Salamander.
+        let toml = "[transport.hysteria2]\nserver = \"1.2.3.4:443\"\nauth = \"x\"\n\n\
+                    [transport.hysteria2.obfs]\ntype = \"bogus\"\npassword = \"k\"\n";
+        assert!(Config::from_toml_str(toml).is_err());
     }
 
     #[test]

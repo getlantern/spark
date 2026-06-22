@@ -293,13 +293,16 @@ impl quinn::AsyncUdpSocket for SalamanderGeckoSocket {
         if bufs.is_empty() || meta.is_empty() {
             return Poll::Ready(Ok(0));
         }
+        // Hoisted out of the loop: the receive scratch (64 KiB) and meta are fully overwritten by each
+        // `recv`, so a single allocation is reused across retries (buffered Gecko fragments / spurious
+        // readiness) instead of reserving a large stack frame every iteration.
+        let mut scratch = [0u8; RECV_SCRATCH];
+        let mut raw_meta = [quinn_udp::RecvMeta::default()];
         loop {
             // Register the waker if the inner socket is not yet readable.
             std::task::ready!(self.inner.poll_recv_ready(cx))?;
 
             // Receive one raw on-wire datagram into scratch, capturing ECN/src via quinn-udp.
-            let mut scratch = [0u8; RECV_SCRATCH];
-            let mut raw_meta = [quinn_udp::RecvMeta::default()];
             let res = self.inner.try_io(tokio::io::Interest::READABLE, || {
                 let mut slices = [io::IoSliceMut::new(&mut scratch)];
                 self.state
