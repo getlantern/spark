@@ -279,8 +279,7 @@ server   = "proxy.example.com:443"   # IP:port or host:port (resolved at startup
 auth     = "<credential string>"      # Hysteria-Auth value
 sni      = "proxy.example.com"         # optional; defaults to the server hostname
 # congestion-control advertisement (Brutal deferred; this just sets Hysteria-CC-RX)
-up_mbps   = 0                          # 0 = unknown -> server uses BBR
-down_mbps = 0
+down_mbps = 0                          # 0 = unknown -> server uses BBR
 
 [transport.hysteria2.tls]
 mode       = "system-roots"            # "system-roots" | "pin-sha256" | "insecure"

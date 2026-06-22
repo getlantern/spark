@@ -205,10 +205,13 @@ fn make_verifier(tls: &Hysteria2Tls) -> Result<Arc<dyn ServerCertVerifier>, Hyst
         Hysteria2TlsMode::Insecure => Ok(Arc::new(InsecureVerifier { supported })),
         Hysteria2TlsMode::PinSha256 => {
             let pin = tls.pin_sha256.as_deref().ok_or(Hysteria2Error::Tls)?;
-            Ok(Arc::new(PinVerifier {
-                pin_hex: normalize_pin(pin),
-                supported,
-            }))
+            let pin_hex = normalize_pin(pin);
+            // A SHA-256 pin is exactly 32 bytes = 64 hex chars. Validate here so a malformed pin is a
+            // clear config error rather than a confusing TLS handshake failure later.
+            if pin_hex.len() != 64 || !pin_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(Hysteria2Error::Tls);
+            }
+            Ok(Arc::new(PinVerifier { pin_hex, supported }))
         }
         Hysteria2TlsMode::SystemRoots => Err(Hysteria2Error::Tls),
     }
@@ -581,24 +584,27 @@ impl UdpTransport for Hysteria2Transport {
             }
         };
 
-        // A fresh random 32-bit session id keys this association in the receive pump's registry.
-        let mut sid_bytes = [0u8; 4];
-        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut sid_bytes)
-            .map_err(|_| io::Error::other("hysteria2 UDP: rng failure"))?;
-        let session_id = u32::from_be_bytes(sid_bytes);
-
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-        {
-            // Register the delivery channel; drop the guard immediately (synchronous insert).
-            match state.sessions.lock() {
-                Ok(mut m) => {
-                    m.insert(session_id, tx);
-                }
-                Err(p) => {
-                    p.into_inner().insert(session_id, tx);
+        // Register the delivery channel under a fresh, collision-free 32-bit session id (the id keys
+        // this association in the receive pump's registry). Retrying on the astronomically unlikely
+        // clash avoids overwriting — and silently hijacking — a live association's channel. All
+        // synchronous: the guard is never held across an `.await`.
+        let session_id = {
+            let mut sessions = match state.sessions.lock() {
+                Ok(m) => m,
+                Err(p) => p.into_inner(),
+            };
+            let mut sid_bytes = [0u8; 4];
+            loop {
+                ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut sid_bytes)
+                    .map_err(|_| io::Error::other("hysteria2 UDP: rng failure"))?;
+                let candidate = u32::from_be_bytes(sid_bytes);
+                if let std::collections::hash_map::Entry::Vacant(e) = sessions.entry(candidate) {
+                    e.insert(tx);
+                    break candidate;
                 }
             }
-        }
+        };
 
         let sink = Hysteria2UdpSink {
             conn: state.conn.clone(),

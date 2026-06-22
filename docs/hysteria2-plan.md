@@ -1,6 +1,6 @@
 # Hysteria 2 Transport Implementation Plan
 
-> **For implementers:** work this plan task-by-task — TDD each task (failing test first), keep the tree green at every boundary, and commit per task. Steps use checkbox (`- [ ]`) syntax for tracking. REQUIRED SUB-SKILL: superpowers:subagent-driven-development (recommended) or superpowers:executing-plans.
+> **For implementers:** work this plan task-by-task — TDD each task (failing test first), keep the tree green at every boundary, and commit per task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a Hysteria 2 client `Transport` + `UdpTransport` to spark, interoperable with deployed `apernet/hysteria` servers — spark's first QUIC transport, on `quinn` (rustls/ring), with Salamander + Gecko obfuscation.
 

@@ -19,17 +19,27 @@ fn blake2b256(input: &[u8]) -> [u8; 32] {
 
 const SALT_LEN: usize = 8;
 
+/// Fill `buf` from the OS CSRNG, surfacing a (practically impossible) failure as an [`io::Error`].
+///
+/// The obfuscation send path is `try_send` (which returns `io::Result`), so an RNG failure is
+/// propagated rather than panicked or silently ignored — per the project anti-patterns (no `expect`
+/// outside tests, never ignore a `Result`).
+fn fill_random(buf: &mut [u8]) -> io::Result<()> {
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), buf)
+        .map_err(|_| io::Error::other("hysteria2 obfs: OS RNG failure"))
+}
+
 /// Salamander: prepend an 8-byte random salt and XOR the packet with the BLAKE2b-256(key‖salt)
 /// keystream (repeating every 32 bytes), per the Hysteria 2 spec §Salamander.
-pub fn salamander_obfuscate(key: &[u8], packet: &[u8]) -> Vec<u8> {
+pub fn salamander_obfuscate(key: &[u8], packet: &[u8]) -> io::Result<Vec<u8>> {
     let mut salt = [0u8; SALT_LEN];
-    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut salt).expect("OS RNG"); // infallible-in-practice OS CSRNG; per-packet hot path, unrecoverable on failure
+    fill_random(&mut salt)?;
     let mut payload = packet.to_vec();
     salamander_xor_with_salt(key, &salt, &mut payload);
     let mut out = Vec::with_capacity(SALT_LEN + payload.len());
     out.extend_from_slice(&salt);
     out.extend_from_slice(&payload);
-    out
+    Ok(out)
 }
 
 /// Reverse of [`salamander_obfuscate`]. Returns `None` if the datagram is too short to carry a salt.
@@ -71,14 +81,12 @@ const GECKO_FLAG: u8 = 0x80;
 /// `seed` perturbs the msgID per call (callers pass a per-packet value; tests
 /// pass a fixed one). Split sizing, padding, and msgID are sender-side choices
 /// (not negotiated with the server).
-pub fn gecko_split(packet: &[u8], seed: u8) -> Vec<Vec<u8>> {
+pub fn gecko_split(packet: &[u8], seed: u8) -> io::Result<Vec<Vec<u8>>> {
     if packet.is_empty() || packet[0] & GECKO_FLAG == 0 {
-        return vec![packet.to_vec()];
+        return Ok(vec![packet.to_vec()]);
     }
-    let rng = ring::rand::SystemRandom::new();
     let mut rb = [0u8; 2];
-    // OS CSRNG; unrecoverable on failure — treat as infallible.
-    let _ = ring::rand::SecureRandom::fill(&rng, &mut rb);
+    fill_random(&mut rb)?;
     let total = 2 + (rb[0] % 7) as usize; // 2..=8
     let msg_id = rb[1] ^ seed;
     let base = packet.len() / total;
@@ -93,10 +101,10 @@ pub fn gecko_split(packet: &[u8], seed: u8) -> Vec<Vec<u8>> {
         let chunk = &packet[off..end];
         off = end;
         let mut padb = [0u8; 1];
-        let _ = ring::rand::SecureRandom::fill(&rng, &mut padb);
+        fill_random(&mut padb)?;
         let pad_len = (padb[0] % 16) as usize;
         let mut padding = vec![0u8; pad_len];
-        let _ = ring::rand::SecureRandom::fill(&rng, &mut padding);
+        fill_random(&mut padding)?;
         let mut frame = Vec::with_capacity(5 + pad_len + chunk.len());
         frame.push(GECKO_FLAG);
         frame.push(msg_id);
@@ -106,7 +114,7 @@ pub fn gecko_split(packet: &[u8], seed: u8) -> Vec<Vec<u8>> {
         frame.extend_from_slice(chunk);
         frames.push(frame);
     }
-    frames
+    Ok(frames)
 }
 
 /// Reassembles Gecko frames keyed by msgID.
@@ -234,10 +242,10 @@ impl SalamanderGeckoSocket {
     }
 
     /// Encode one outgoing QUIC packet into one or more on-wire datagrams: Gecko-split (if enabled)
-    /// then Salamander-obfuscate each resulting piece.
-    fn encode_out(&self, packet: &[u8], seed: u8) -> Vec<Vec<u8>> {
+    /// then Salamander-obfuscate each resulting piece. Surfaces an OS-RNG failure as an `io::Error`.
+    fn encode_out(&self, packet: &[u8], seed: u8) -> io::Result<Vec<Vec<u8>>> {
         let pieces = if self.gecko {
-            gecko_split(packet, seed)
+            gecko_split(packet, seed)?
         } else {
             vec![packet.to_vec()]
         };
@@ -256,7 +264,7 @@ impl quinn::AsyncUdpSocket for SalamanderGeckoSocket {
     fn try_send(&self, transmit: &quinn_udp::Transmit<'_>) -> io::Result<()> {
         // Seed the Gecko msgID per destination so concurrent flows do not collide on msgID.
         let seed = transmit.destination.port() as u8;
-        for dg in self.encode_out(transmit.contents, seed) {
+        for dg in self.encode_out(transmit.contents, seed)? {
             let t = quinn_udp::Transmit {
                 destination: transmit.destination,
                 ecn: transmit.ecn,
@@ -340,14 +348,22 @@ impl quinn::AsyncUdpSocket for SalamanderGeckoSocket {
                 };
 
                 let dst = bufs[emitted].as_mut();
-                let len = packet.len().min(dst.len());
-                dst[..len].copy_from_slice(&packet[..len]);
+                // Drop a packet that doesn't fit rather than truncating it — a truncated QUIC packet
+                // would corrupt the stream. (quinn sizes its recv buffers to the max datagram, so this
+                // is a defensive guard, not an expected path.)
+                if packet.len() > dst.len() {
+                    continue;
+                }
+                let len = packet.len();
+                dst[..len].copy_from_slice(&packet);
                 meta[emitted] = quinn_udp::RecvMeta {
                     addr: rm.addr,
                     len,
                     stride: len,
                     ecn: rm.ecn,
-                    dst_ip: None,
+                    // Preserve the local-address metadata quinn-udp captured (quinn may use it for
+                    // path / connection-migration logic).
+                    dst_ip: rm.dst_ip,
                 };
                 emitted += 1;
             }
@@ -395,7 +411,7 @@ mod tests {
     fn salamander_round_trips() {
         let key = b"presharedkey";
         let packet = b"a fake QUIC packet payload";
-        let on_wire = salamander_obfuscate(key, packet);
+        let on_wire = salamander_obfuscate(key, packet).unwrap();
         assert_eq!(on_wire.len(), 8 + packet.len()); // salt + xored
         let back = salamander_deobfuscate(key, &on_wire).unwrap();
         assert_eq!(back.as_slice(), packet.as_ref());
@@ -423,7 +439,7 @@ mod tests {
     fn gecko_short_header_passes_through() {
         // high bit clear => short header => one piece, unchanged
         let packet = vec![0x40, 1, 2, 3];
-        let frames = gecko_split(&packet, 7);
+        let frames = gecko_split(&packet, 7).unwrap();
         assert_eq!(frames, vec![packet]);
     }
 
@@ -436,7 +452,7 @@ mod tests {
             .collect();
         let mut packet = packet;
         packet[0] = 0xC0; // ensure long header
-        let frames = gecko_split(&packet, 0x55);
+        let frames = gecko_split(&packet, 0x55).unwrap();
         assert!(
             frames.len() >= 2 && frames.len() <= 8,
             "got {} frames",

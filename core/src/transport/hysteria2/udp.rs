@@ -71,12 +71,17 @@ pub fn encode_udp_message(
     out
 }
 
-/// Decode a UDPMessage datagram. Returns `None` if the buffer is truncated or invalid UTF-8.
+/// Decode a UDPMessage datagram. Returns `None` if the buffer is truncated, the fragment header is
+/// invalid (`frag_count == 0`, or `frag_id >= frag_count`), or the address is invalid UTF-8.
 pub fn decode_udp_message(buf: &[u8]) -> Option<UdpMessage> {
     let session_id = u32::from_be_bytes(buf.get(0..4)?.try_into().ok()?);
     let packet_id = u16::from_be_bytes(buf.get(4..6)?.try_into().ok()?);
     let frag_id = *buf.get(6)?;
     let frag_count = *buf.get(7)?;
+    // A valid UDPMessage uses frag_count >= 1 (1 = unfragmented) with frag_id < frag_count.
+    if frag_count == 0 || frag_id >= frag_count {
+        return None;
+    }
     let (alen, rest) = read_varint(buf.get(8..)?)?;
     let alen = alen as usize;
     let addr = std::str::from_utf8(rest.get(..alen)?).ok()?.to_owned();
@@ -203,6 +208,20 @@ mod tests {
     #[test]
     fn decode_udp_message_rejects_truncated() {
         assert!(decode_udp_message(&[0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn decode_udp_message_rejects_bad_frag_header() {
+        // session_id=1, packet_id=1, frag_id=0, frag_count=0 (invalid: must be >= 1), then addr.
+        let mut frag_count_zero = vec![0, 0, 0, 1, 0, 1, 0, 0];
+        write_varint(&mut frag_count_zero, 3);
+        frag_count_zero.extend_from_slice(b"a:1");
+        assert!(decode_udp_message(&frag_count_zero).is_none());
+        // frag_id=2 with frag_count=2 (invalid: frag_id must be < frag_count).
+        let mut frag_id_oob = vec![0, 0, 0, 1, 0, 1, 2, 2];
+        write_varint(&mut frag_id_oob, 3);
+        frag_id_oob.extend_from_slice(b"a:1");
+        assert!(decode_udp_message(&frag_id_oob).is_none());
     }
 
     #[test]

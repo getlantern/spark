@@ -62,6 +62,7 @@ fn config_from_env() -> Option<Config> {
         "[transport.hysteria2]\nserver = \"{server}\"\nauth = \"{auth}\"\nsni = \"{sni}\"\n\n\
          [transport.hysteria2.tls]\nmode = \"insecure\"\n"
     );
+    let mut obfs_desc = "off".to_owned();
     if let Ok(obfs_pw) = std::env::var("SPARK_HY2_OBFS") {
         if !obfs_pw.is_empty() {
             let gecko = std::env::var("SPARK_HY2_GECKO")
@@ -70,10 +71,19 @@ fn config_from_env() -> Option<Config> {
             toml.push_str(&format!(
                 "\n[transport.hysteria2.obfs]\ntype = \"salamander\"\npassword = \"{obfs_pw}\"\ngecko = {gecko}\n"
             ));
+            obfs_desc = if gecko {
+                "salamander+gecko".into()
+            } else {
+                "salamander".into()
+            };
         }
     }
 
-    println!("--- hysteria2 interop config ---\n{toml}---");
+    // Log the active mode for debugging, but NOT the `auth` credential or the obfs password — those
+    // are proxy secrets and `--nocapture` is encouraged for this gate (CLAUDE.md: never echo secrets).
+    println!(
+        "--- hysteria2 interop: server={server} sni={sni} tls=insecure obfs={obfs_desc} (auth/obfs-password redacted) ---"
+    );
     match Config::from_toml_str(&toml) {
         Ok(cfg) => Some(cfg),
         Err(e) => panic!("SPARK_HY2_* env produced an invalid config: {e}"),
