@@ -635,7 +635,8 @@ impl Config {
         }
     }
 
-    /// Load a [`Config`] from a TOML file.
+    /// Load a [`Config`] from a file — native TOML or a Lantern `config_raw.json`, auto-detected via
+    /// [`from_config_str`](Self::from_config_str).
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
         let contents = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.display().to_string(),

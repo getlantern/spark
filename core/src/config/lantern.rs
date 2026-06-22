@@ -30,19 +30,21 @@ pub enum ConfigRawError {
     /// Parsed fine, but none of the `found` outbounds is a transport spark can use — so there is no
     /// pool to build. Surfaced (rather than returning an empty pool) so the caller fails loudly
     /// instead of silently falling back to direct, untunneled forwarding.
-    #[error("config_raw.json has no usable outbound ({found} present, all unsupported)")]
+    #[error("config_raw.json has no outbound spark can use (found {found}, none supported)")]
     NoSupportedOutbounds {
         /// How many outbounds were present (all unsupported).
         found: usize,
     },
 }
 
-/// True if `s` looks like a `config_raw.json` payload (a JSON object with an `outbounds` array) vs
-/// spark's native TOML — a cheap pre-check so the loader can route it to [`from_config_raw_json`].
-/// The full parse there is the real validation.
+/// True if `s` looks like a `config_raw.json` payload (a JSON object with an `options.outbounds`
+/// array) vs spark's native TOML — a cheap pre-check so the loader can route it to
+/// [`from_config_raw_json`]. Requires both `"options"` and `"outbounds"` so unrelated JSON (or a
+/// malformed config_raw missing `options`) isn't mis-routed into the adapter; the full parse there
+/// is the real validation.
 pub fn looks_like_config_raw(s: &str) -> bool {
     let t = s.trim_start();
-    t.starts_with('{') && t.contains("\"outbounds\"")
+    t.starts_with('{') && t.contains("\"options\"") && t.contains("\"outbounds\"")
 }
 
 /// Parse a Lantern `config_raw.json` string and map its proxy outbounds into a spark [`Config`]'s
@@ -340,6 +342,8 @@ mod tests {
             "[transport]\nserver = \"1.2.3.4:443\"\n"
         ));
         assert!(!looks_like_config_raw("{}"));
+        // A bare `outbounds` key without `options` is not config_raw — don't mis-route it.
+        assert!(!looks_like_config_raw(r#"{ "outbounds": [1, 2] }"#));
     }
 
     #[test]
