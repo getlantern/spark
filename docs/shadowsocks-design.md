@@ -251,7 +251,7 @@ there is no session pool to manage — simpler than AnyTLS/Samizdat).
 
 `ShadowsocksTransport::dial_udp(target)` (AES methods only; chacha returns "unsupported in this build"):
 
-1. `protected_udp_socket(server, protector)` — a connected UDP socket to the SS server.
+1. `protected_udp_socket(server, protector)` binds a protector-pinned UDP socket, which `dial_udp` then `connect`s to the SS server.
 2. Generate a random 8-byte **client session ID**; a u64 **packet ID** counter starts at 0.
 3. Return `(BoxedPacketSink, BoxedPacketSource)`:
    - **Sink (`send`)** owns the send-side state (client session ID, packet-ID counter, the AES block
@@ -291,7 +291,7 @@ sequenceDiagram
     T->>C: salt → blake3 subkey
     Co->>S: salt ‖ enc[fixed hdr type0,ts,len] ‖ enc[var hdr ATYP+addr+port,pad]  (one write) ⚠️
     S-->>Co: salt ‖ enc[fixed hdr type1,ts,request_salt,len] ‖ enc[payload]…
-    Co->>C: verify request_salt == ours, |ts|≤30s 🐛 replay binding
+    Co->>C: verify request_salt == ours, |ts|≤30s 🔒 replay binding
     Co-->>Net: BoxedStream (length+payload AEAD chunks ⇄ bytes)
     end
     rect rgba(220,255,220,0.25)
@@ -301,7 +301,7 @@ sequenceDiagram
     Co->>S: enc_sep_header(16) ‖ AES_GCM(subkey, nonce=sep[4..16], main hdr ‖ payload)
     S-->>Co: enc_sep_header ‖ enc_body (server session)
     Co->>C: AES_block_decrypt; subkey(server_session_id); AES_GCM.open
-    Co->>Co: sliding-window replay check (advance after header validates) 🐛
+    Co->>Co: sliding-window replay check (advance after header validates) 🔒
     Co-->>Net: payload (PacketSource::recv)
     end
 ```
@@ -397,5 +397,10 @@ This framing is the reason chacha-over-UDP and EIH are deferrable without hurtin
   connected single-target case.
 - **chacha-over-UDP deferral.** A config pairing `2022-blake3-chacha20-poly1305` with a UDP flow gets a
   clear error, not a silent TCP-only fallback. Revisit as a localized increment (+`chacha20poly1305`).
+- **UDP recv allocations (follow-up).** `open_server_body` allocates twice per datagram (copy the
+  ciphertext out of `scratch`, then the parsed payload). The per-packet key-schedule cost was already
+  removed (cipher caching); eliminating these copies (decrypt in place in `scratch`, copy the payload
+  straight into the caller's `buf`) is a safe follow-up, deferred to avoid further churn on the
+  security-sensitive recv path at review time.
 - **ADR.** On approval, record the decision (SS-2022 from scratch; RustCrypto `blake3`+`aes` over the
   aws-lc-rs fallback; AES-UDP-only v1) as **ADR 0009**.

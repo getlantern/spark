@@ -1,6 +1,6 @@
 # Shadowsocks 2022 Transport Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For implementers:** work this plan task-by-task — TDD each task (failing test first), keep the tree green at every boundary, and commit per task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Shadowsocks 2022 (SIP022) as a spark client `Transport` (TCP, three `2022-blake3-*` ciphers) and `UdpTransport` (UDP, the two AES methods), wire-interoperable with deployed `shadowsocks-rust` servers.
 
