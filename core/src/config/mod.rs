@@ -231,6 +231,10 @@ pub struct TransportConfig {
     /// Requires the `samizdat` build feature (else `from_config` errors). TCP only (v1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub samizdat: Option<SamizdatConfig>,
+    /// Shadowsocks 2022 transport (ADR 0009): when set, flows tunnel through this SS-2022 server.
+    /// Takes precedence over the plain `server` tunnel. Requires the `shadowsocks` build feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowsocks: Option<ShadowsocksConfig>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
     /// and Samizdat handshakes (both build their `WirePlan` from this). Default: no shaping.
@@ -259,6 +263,7 @@ impl Default for TransportConfig {
             anytls: None,
             wasm: None,
             samizdat: None,
+            shadowsocks: None,
             shaping: ShapingConfig::default(),
             servers: Vec::new(),
             callback_url: None,
@@ -364,6 +369,53 @@ pub struct SamizdatConfig {
     pub sni: Option<String>,
 }
 
+/// The Shadowsocks 2022 (SIP022) methods spark implements. The `rename` values are the canonical
+/// method names used by shadowsocks-rust / sing-box config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum SsMethod {
+    /// `2022-blake3-aes-128-gcm` — 16-byte key/salt. TCP + UDP.
+    #[serde(rename = "2022-blake3-aes-128-gcm")]
+    Aes128Gcm,
+    /// `2022-blake3-aes-256-gcm` — 32-byte key/salt. TCP + UDP.
+    #[serde(rename = "2022-blake3-aes-256-gcm")]
+    Aes256Gcm,
+    /// `2022-blake3-chacha20-poly1305` — 32-byte key/salt. TCP only in v1 (UDP needs XChaCha20).
+    #[serde(rename = "2022-blake3-chacha20-poly1305")]
+    Chacha20Poly1305,
+}
+
+impl SsMethod {
+    /// PSK / session-subkey length in bytes (SIP022 §2.1).
+    pub fn key_len(self) -> usize {
+        match self {
+            SsMethod::Aes128Gcm => 16,
+            SsMethod::Aes256Gcm | SsMethod::Chacha20Poly1305 => 32,
+        }
+    }
+    /// Per-stream random salt length — equal to the key length (SIP022 §2.2).
+    pub fn salt_len(self) -> usize {
+        self.key_len()
+    }
+    /// Whether this is an AES-GCM method (the UDP-capable family in v1).
+    pub fn is_aes(self) -> bool {
+        matches!(self, SsMethod::Aes128Gcm | SsMethod::Aes256Gcm)
+    }
+}
+
+/// Shadowsocks 2022 (SIP022) transport configuration (ADR 0009). A pre-shared-key AEAD tunnel,
+/// wire-interoperable with deployed shadowsocks-rust / sing-box SS-2022 servers. See
+/// `docs/shadowsocks-design.md`. Requires the `shadowsocks` build feature (else `from_config` errors).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowsocksConfig {
+    /// The SS server address — `IP:port` or `host:port` (resolved at startup).
+    pub server: Endpoint,
+    /// The SS-2022 method (cipher); sets key/salt size and the AEAD construction.
+    pub method: SsMethod,
+    /// The pre-shared key, base64-encoded. Decoded length MUST equal `method.key_len()`.
+    pub password: String,
+}
+
 /// The plain `tcp_tunnel` client kind for a pool entry — a tunnel server addressed by `server`,
 /// with no extra mimicry (mirrors the legacy top-level `transport.server`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -390,6 +442,8 @@ pub enum ServerSpec {
     Wasm(WasmConfig),
     /// Plain `tcp_tunnel` client.
     Tunnel(TunnelConfig),
+    /// Shadowsocks 2022 (ADR 0009).
+    Shadowsocks(ShadowsocksConfig),
 }
 
 /// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
@@ -490,11 +544,13 @@ impl Config {
         let singles = [
             self.transport.anytls.as_ref().map(|c| &c.server),
             self.transport.samizdat.as_ref().map(|c| &c.server),
+            self.transport.shadowsocks.as_ref().map(|c| &c.server),
         ];
         let pool = self.transport.servers.iter().filter_map(|e| match &e.spec {
             ServerSpec::Anytls(c) => Some(&c.server),
             ServerSpec::Samizdat(c) => Some(&c.server),
             ServerSpec::Tunnel(c) => Some(&c.server),
+            ServerSpec::Shadowsocks(c) => Some(&c.server),
             ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
         });
         singles
@@ -573,6 +629,7 @@ mod tests {
                     protect_interface: Some("en0".into()),
                     anytls: None,
                     samizdat: None,
+                    shadowsocks: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
@@ -776,6 +833,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c2.first_unresolved_host(), None);
+    }
+
+    #[test]
+    fn shadowsocks_method_sizes() {
+        assert_eq!(SsMethod::Aes128Gcm.key_len(), 16);
+        assert_eq!(SsMethod::Aes128Gcm.salt_len(), 16);
+        assert_eq!(SsMethod::Aes256Gcm.key_len(), 32);
+        assert!(SsMethod::Aes256Gcm.is_aes());
+        assert_eq!(SsMethod::Chacha20Poly1305.key_len(), 32);
+        assert!(!SsMethod::Chacha20Poly1305.is_aes());
+    }
+
+    #[test]
+    fn shadowsocks_config_round_trips_through_toml() {
+        let toml = r#"
+[transport.shadowsocks]
+server = "1.2.3.4:8388"
+method = "2022-blake3-aes-256-gcm"
+password = "c29tZS1iYXNlNjQtcHNr"
+"#;
+        let cfg = Config::from_toml_str(toml).unwrap();
+        let ss = cfg.transport.shadowsocks.clone().unwrap();
+        assert_eq!(ss.server, "1.2.3.4:8388".parse().unwrap());
+        assert_eq!(ss.method, SsMethod::Aes256Gcm);
+        assert_eq!(ss.password, "c29tZS1iYXNlNjQtcHNr");
+        let out = cfg.to_toml_string().unwrap();
+        assert!(out.contains("2022-blake3-aes-256-gcm"));
+    }
+
+    #[test]
+    fn parses_a_shadowsocks_pool_entry() {
+        let c = Config::from_toml_str(
+            "[transport]\ncallback_url = \"http://127.0.0.1/ok\"\n\n[[transport.servers]]\nkind = \"shadowsocks\"\nserver = \"1.2.3.4:8388\"\nmethod = \"2022-blake3-aes-128-gcm\"\npassword = \"MTIzNDU2Nzg5MDEyMzQ1Ng==\"\n",
+        )
+        .unwrap();
+        match &c.transport.servers[0].spec {
+            ServerSpec::Shadowsocks(ss) => {
+                assert_eq!(ss.method, SsMethod::Aes128Gcm);
+                assert_eq!(ss.server, "1.2.3.4:8388".parse().unwrap());
+            }
+            other => panic!("expected a shadowsocks pool entry, got {other:?}"),
+        }
     }
 
     #[test]
