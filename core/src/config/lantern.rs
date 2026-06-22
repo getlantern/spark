@@ -100,10 +100,21 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
 /// Map one raw sing-box outbound into a spark [`ServerSpec`], or `None` if spark can't represent it
 /// (unsupported `type`, a missing required field, or a non-SS-2022 Shadowsocks method).
 fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
-    let endpoint = || {
-        format!("{}:{}", ob.server, ob.server_port)
-            .parse::<Endpoint>()
-            .ok()
+    // Build the endpoint from the separate host + port directly. Formatting `"{server}:{port}"` and
+    // re-parsing would mangle an IPv6 literal (`"2001:db8::1"` + 443 → an unbracketed, unparseable
+    // string) and silently drop the outbound.
+    let endpoint = || -> Option<Endpoint> {
+        if ob.server.is_empty() {
+            return None;
+        }
+        match ob.server.parse::<std::net::IpAddr>() {
+            Ok(ip) => Some(Endpoint::Ip(std::net::SocketAddr::new(ip, ob.server_port))),
+            // Not an IP literal → a hostname, resolved at startup by the bootstrap phase.
+            Err(_) => Some(Endpoint::Host {
+                host: ob.server.clone(),
+                port: ob.server_port,
+            }),
+        }
     };
     match ob.kind.as_str() {
         "samizdat" => Some(ServerSpec::Samizdat(SamizdatConfig {
@@ -382,5 +393,21 @@ mod tests {
         ]}}"#;
         from_config_raw_json(raw).expect_err("all-unsupported config_raw must error");
         assert!(Config::from_config_str(raw).is_err());
+    }
+
+    #[test]
+    fn maps_ipv6_server() {
+        // sing-box gives `server` + `server_port` separately; an IPv6 literal must become a bracketed
+        // socket addr, not a `"2001:db8::1:443"` mash-up that fails to parse (and gets dropped).
+        let raw = r#"{ "options": { "outbounds": [
+            { "type": "samizdat", "tag": "v6", "server": "2001:db8::1", "server_port": 443,
+              "public_key": "ab", "short_id": "cd", "server_name": "x" }
+        ]}}"#;
+        let cfg = from_config_raw_json(raw).expect("ipv6 samizdat adapts");
+        assert_eq!(cfg.transport.servers.len(), 1);
+        let ServerSpec::Samizdat(s) = &cfg.transport.servers[0].spec else {
+            panic!("expected samizdat")
+        };
+        assert_eq!(s.server.to_string(), "[2001:db8::1]:443");
     }
 }
