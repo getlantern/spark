@@ -37,14 +37,20 @@ pub enum ConfigRawError {
     },
 }
 
-/// True if `s` looks like a `config_raw.json` payload (a JSON object with an `options.outbounds`
-/// array) vs spark's native TOML — a cheap pre-check so the loader can route it to
-/// [`from_config_raw_json`]. Requires both `"options"` and `"outbounds"` so unrelated JSON (or a
-/// malformed config_raw missing `options`) isn't mis-routed into the adapter; the full parse there
-/// is the real validation.
+/// True if `s` parses as a JSON object with an `options.outbounds` array — the `config_raw.json`
+/// shape — vs spark's native TOML, so the loader can route the string to [`from_config_raw_json`].
+/// A structural check (not a substring scan): unrelated JSON — including one that merely mentions
+/// `options`/`outbounds` in string values — isn't mis-routed. `from_config_raw_json` re-parses and
+/// is the real validation; the extra parse here is fine since config load is infrequent.
 pub fn looks_like_config_raw(s: &str) -> bool {
-    let t = s.trim_start();
-    t.starts_with('{') && t.contains("\"options\"") && t.contains("\"outbounds\"")
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| {
+            v.get("options")
+                .and_then(|o| o.get("outbounds"))
+                .map(serde_json::Value::is_array)
+        })
+        .unwrap_or(false)
 }
 
 /// Parse a Lantern `config_raw.json` string and map its proxy outbounds into a spark [`Config`]'s
@@ -344,6 +350,14 @@ mod tests {
         assert!(!looks_like_config_raw("{}"));
         // A bare `outbounds` key without `options` is not config_raw — don't mis-route it.
         assert!(!looks_like_config_raw(r#"{ "outbounds": [1, 2] }"#));
+        // `options`/`outbounds` appearing only as string *values* (not keys) must not match.
+        assert!(!looks_like_config_raw(
+            r#"{ "note": "mentions options and outbounds" }"#
+        ));
+        // `options.outbounds` present but not an array is not the expected shape.
+        assert!(!looks_like_config_raw(
+            r#"{ "options": { "outbounds": 5 } }"#
+        ));
     }
 
     #[test]
