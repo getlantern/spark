@@ -20,6 +20,19 @@ pub fn write_varint(out: &mut Vec<u8>, v: u64) {
     }
 }
 
+/// Number of bytes [`write_varint`] would emit for `v` (RFC 9000 §16: 1/2/4/8).
+pub fn varint_len(v: u64) -> usize {
+    if v < 64 {
+        1
+    } else if v < 16384 {
+        2
+    } else if v < 1_073_741_824 {
+        4
+    } else {
+        8
+    }
+}
+
 /// Read a QUIC varint; returns `(value, rest)` or `None` if truncated.
 pub fn read_varint(buf: &[u8]) -> Option<(u64, &[u8])> {
     let first = *buf.first()?;
