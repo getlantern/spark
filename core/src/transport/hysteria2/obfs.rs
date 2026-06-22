@@ -82,12 +82,18 @@ const GECKO_FLAG: u8 = 0x80;
 /// pass a fixed one). Split sizing, padding, and msgID are sender-side choices
 /// (not negotiated with the server).
 pub fn gecko_split(packet: &[u8], seed: u8) -> io::Result<Vec<Vec<u8>>> {
-    if packet.is_empty() || packet[0] & GECKO_FLAG == 0 {
+    // A Gecko frame needs >= 2 chunks of >= 1 byte each; a long-header packet smaller than 2 bytes
+    // can't be framed, so it (and short-header / empty packets) passes through unchanged.
+    if packet.len() < 2 || packet[0] & GECKO_FLAG == 0 {
         return Ok(vec![packet.to_vec()]);
     }
     let mut rb = [0u8; 2];
     fill_random(&mut rb)?;
-    let total = 2 + (rb[0] % 7) as usize; // 2..=8
+    // Clamp the chunk count to the packet length so every chunk gets >= 1 byte (base >= 1); for the
+    // real (large) long-header packets this is always 2..=8, unchanged. Avoids empty chunks / extra
+    // datagrams on pathologically small packets.
+    let max_chunks = packet.len().min(8);
+    let total = 2 + (rb[0] as usize % (max_chunks - 1)); // 2..=max_chunks
     let msg_id = rb[1] ^ seed;
     let base = packet.len() / total;
     let mut frames = Vec::with_capacity(total);
