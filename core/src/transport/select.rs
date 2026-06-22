@@ -42,21 +42,38 @@ struct Selection {
 }
 
 /// A latency-selecting transport over a pool of [`Member`]s.
+///
+/// When no member can serve a flow (the pool is all-unhealthy, or every dial in the current order
+/// fails), the transport **fails open to direct** rather than erroring — see [`Self::dial`].
 pub struct SelectingTransport {
     members: Arc<Vec<Member>>,
     selection: Arc<Mutex<Selection>>,
     reprobe: Arc<tokio::sync::Notify>,
     prober: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Fail-open fallback (issue #11; the product fail-open default, `docs/process-architecture-and-ipc.md`
+    /// §5): when no pool member can serve a flow, dial through these directly so traffic degrades to
+    /// a direct connection instead of blackholing. Built from the same `protect_interface` as the
+    /// pool, so the direct dial still bypasses the tunnel route.
+    direct_tcp: Arc<dyn Transport>,
+    direct_udp: Arc<dyn UdpTransport>,
 }
 
 impl SelectingTransport {
     /// Build a selecting transport over `members`, spawning a background prober. Must be called inside
     /// a tokio runtime (as `from_config`'s callers are). The prober runs an initial round immediately,
-    /// then re-probes every `interval`; `window` bounds probe concurrency.
-    pub(crate) fn new(members: Vec<Member>, interval: std::time::Duration, window: usize) -> Self {
+    /// then re-probes every `interval`; `window` bounds probe concurrency. `direct_tcp`/`direct_udp`
+    /// are the fail-open fallback dialed when no member can serve a flow (see the struct doc).
+    pub(crate) fn new(
+        members: Vec<Member>,
+        interval: std::time::Duration,
+        window: usize,
+        direct_tcp: Arc<dyn Transport>,
+        direct_udp: Arc<dyn UdpTransport>,
+    ) -> Self {
         let members = Arc::new(members);
-        // Seed with config order so flows can dial (with failover) before the first probe round; an
-        // empty ranking would make startup dials fail with "no healthy server".
+        // Seed with config order so flows can dial (with failover) before the first probe round;
+        // without it, startup flows would fail open to direct (below) before the pool ever got a
+        // chance to prove itself.
         let seeded: Arc<[usize]> = (0..members.len()).collect();
         let selection = Arc::new(Mutex::new(Selection { ranked: seeded }));
         let reprobe = Arc::new(tokio::sync::Notify::new());
@@ -74,6 +91,8 @@ impl SelectingTransport {
             selection,
             reprobe,
             prober: Mutex::new(Some(task)),
+            direct_tcp,
+            direct_udp,
         }
     }
 
@@ -107,46 +126,53 @@ impl SelectingTransport {
 
 #[async_trait]
 impl Transport for SelectingTransport {
+    /// Dial through the best-ranked pool member, failing over to the next on error. If no member
+    /// can serve the flow — the pool is all-unhealthy (empty order) or every dial fails — **fail
+    /// open to a direct dial** (loudly logged) so traffic degrades to a direct connection rather
+    /// than blackholing (issue #11; arch doc §5 fail-open default).
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
         let order = self.order();
-        if order.is_empty() {
-            return Err(io::Error::other("no healthy server in the pool"));
-        }
-        let mut last_err = None;
         for &i in order.iter() {
             match self.members[i].transport.dial(target).await {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     self.demote(i);
-                    last_err = Some(e); // failover to next-best
+                    tracing::debug!(member = i, error = %e, "pool member dial failed; failing over");
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| io::Error::other("no healthy server in the pool")))
+        tracing::warn!(
+            %target,
+            pool = self.members.len(),
+            "no pool member could serve the flow; failing open to a direct dial"
+        );
+        self.direct_tcp.dial(target).await
     }
 }
 
 #[async_trait]
 impl UdpTransport for SelectingTransport {
+    /// UDP counterpart of [`SelectingTransport::dial`], with the same fail-open-to-direct floor.
     async fn dial_udp(
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         let order = self.order();
-        if order.is_empty() {
-            return Err(io::Error::other("no healthy server in the pool"));
-        }
-        let mut last_err = None;
         for &i in order.iter() {
             match self.members[i].udp.dial_udp(target).await {
                 Ok(p) => return Ok(p),
                 Err(e) => {
                     self.demote(i);
-                    last_err = Some(e);
+                    tracing::debug!(member = i, error = %e, "pool member udp dial failed; failing over");
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| io::Error::other("no healthy server in the pool")))
+        tracing::warn!(
+            %target,
+            pool = self.members.len(),
+            "no pool member could serve the udp flow; failing open to a direct dial"
+        );
+        self.direct_udp.dial_udp(target).await
     }
 }
 
@@ -250,6 +276,7 @@ fn next_order(current: &[usize], fresh: &[(usize, ProbeOutcome)]) -> Vec<usize> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::{PacketSink, PacketSource};
 
     struct Serve204;
     #[async_trait]
@@ -286,6 +313,8 @@ mod tests {
             vec![member(true), member(true)],
             std::time::Duration::from_secs(300),
             8,
+            Arc::new(FakeT { ok: true }),
+            Arc::new(NoUdp),
         );
         assert_eq!(&*st.order(), &[0usize, 1][..]); // seeded synchronously; prober hasn't run yet
     }
@@ -299,7 +328,13 @@ mod tests {
         // generous 10s wall-clock deadline — comfortably longer than a probe round even on a slow,
         // loaded CI runner (the probes are in-memory and finish in ms; the budget just can't be
         // tighter than the round, which the old 1s budget was — that flaked on windows-latest).
-        let st = SelectingTransport::new(members, std::time::Duration::from_secs(1), 8);
+        let st = SelectingTransport::new(
+            members,
+            std::time::Duration::from_secs(1),
+            8,
+            Arc::new(FakeT { ok: true }),
+            Arc::new(NoUdp),
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while st.order().as_ref() != [0usize].as_slice() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -335,6 +370,32 @@ mod tests {
             Err(io::Error::other("no udp"))
         }
     }
+    // A UDP transport whose dial always succeeds with no-op sink/source halves — used as the
+    // fail-open direct fallback in the UDP tests.
+    struct OkUdp;
+    #[async_trait]
+    impl UdpTransport for OkUdp {
+        async fn dial_udp(
+            &self,
+            _t: SocketAddr,
+        ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            Ok((Box::new(NopSink), Box::new(NopSource)))
+        }
+    }
+    struct NopSink;
+    #[async_trait]
+    impl PacketSink for NopSink {
+        async fn send(&mut self, _payload: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    struct NopSource;
+    #[async_trait]
+    impl PacketSource for NopSource {
+        async fn recv(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
     fn member(ok: bool) -> Member {
         Member {
             transport: Arc::new(FakeT { ok }),
@@ -347,7 +408,22 @@ mod tests {
             },
         }
     }
+    // A selecting transport with a healthy direct fallback (TCP + UDP both succeed), so the tests
+    // that exercise fail-open observe a successful direct dial.
     fn selecting(members: Vec<Member>, ranked: Vec<usize>) -> SelectingTransport {
+        selecting_with_direct(
+            members,
+            ranked,
+            Arc::new(FakeT { ok: true }),
+            Arc::new(OkUdp),
+        )
+    }
+    fn selecting_with_direct(
+        members: Vec<Member>,
+        ranked: Vec<usize>,
+        direct_tcp: Arc<dyn Transport>,
+        direct_udp: Arc<dyn UdpTransport>,
+    ) -> SelectingTransport {
         SelectingTransport {
             members: Arc::new(members),
             selection: Arc::new(Mutex::new(Selection {
@@ -355,6 +431,8 @@ mod tests {
             })),
             reprobe: Arc::new(tokio::sync::Notify::new()),
             prober: Mutex::new(None),
+            direct_tcp,
+            direct_udp,
         }
     }
 
@@ -365,15 +443,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dial_errors_when_no_healthy() {
+    async fn dial_falls_open_to_direct_when_no_healthy() {
+        // Empty ranking (no healthy pool member) → fail open to the direct fallback rather than
+        // erroring (issue #11).
         let t = selecting(vec![member(true)], vec![]);
+        assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dial_falls_open_to_direct_when_all_down() {
+        // Every pool member's dial fails → fail open to the direct fallback.
+        let t = selecting(vec![member(false), member(false)], vec![0, 1]);
+        assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dial_errors_when_pool_and_direct_both_fail() {
+        // Pool all-down AND the direct fallback also fails → the error surfaces. Fail-open must not
+        // manufacture a false success when even a direct dial can't connect.
+        let t = selecting_with_direct(
+            vec![member(false)],
+            vec![0],
+            Arc::new(FakeT { ok: false }),
+            Arc::new(NoUdp),
+        );
         assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_err());
     }
 
     #[tokio::test]
-    async fn dial_errors_when_all_down() {
-        let t = selecting(vec![member(false), member(false)], vec![0, 1]);
-        assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_err());
+    async fn dial_udp_falls_open_to_direct_when_all_down() {
+        // member's UDP (NoUdp) errors → fail open to the direct UDP fallback (OkUdp).
+        let t = selecting(vec![member(false)], vec![0]);
+        assert!(t.dial_udp("1.2.3.4:80".parse().unwrap()).await.is_ok());
     }
 
     #[tokio::test]
