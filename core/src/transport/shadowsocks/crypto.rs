@@ -22,6 +22,8 @@ pub enum CryptoError {
     Auth,
     #[error("AES key must be 16 or 32 bytes, got {got}")]
     AesKeyLength { got: usize },
+    #[error("OS RNG unavailable")]
+    Rng,
 }
 
 /// Decode the base64 PSK and check its length matches the method (SIP022 §2.1).
