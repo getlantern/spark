@@ -30,12 +30,12 @@ md-5.workspace = true
 postcard.workspace = true
 # Opening-handshake wire shaping (tcp_split + record_fragment), extracted to the reusable flint crate.
 # Non-optional: the gambit genome (always compiled) bridges its Layer C to flint_shaping::WirePlan.
-flint-shaping = { git = "https://github.com/getlantern/flint", rev = "18a2c5d00ab33d661d256bf24282bf40b3f0483f" }
+flint-shaping = { git = "https://github.com/getlantern/flint", rev = "3b07e9459a2be21e6913dfc310a473c7d8fec13c" }
 # Chrome-mimicry TLS: the gambit ClientHello genome, JA4, the boring Chrome connector + Profile + the
 # JA4 anchor — extracted to flint. Non-optional (gambit/ja4/profile are always compiled, e.g. by
 # `config` and `discovery`); the boring connector rides flint-tls's `boring` feature, enabled by
 # spark's `anytls`. Pinned to the same rev as flint-shaping (flint-tls path-depends on it).
-flint-tls = { git = "https://github.com/getlantern/flint", rev = "18a2c5d00ab33d661d256bf24282bf40b3f0483f" }
+flint-tls = { git = "https://github.com/getlantern/flint", rev = "3b07e9459a2be21e6913dfc310a473c7d8fec13c" }
 # AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
 # `pq-experimental` exposes Chrome's post-quantum group X25519MLKEM768; `cert-compression` exposes
 # brotli cert compression — both part of the Chrome ClientHello profile.
@@ -52,13 +52,13 @@ http = { workspace = true, optional = true }
 wasmi = { workspace = true, optional = true }
 # Signed-blob verification (Ed25519 + versioned framing + anti-rollback), extracted from this crate's
 # wasm `signing.rs` into the reusable flint crate. Only the `wasm-transport` feature pulls it.
-flint-verify = { git = "https://github.com/getlantern/flint", rev = "18a2c5d00ab33d661d256bf24282bf40b3f0483f", optional = true }
+flint-verify = { git = "https://github.com/getlantern/flint", rev = "3b07e9459a2be21e6913dfc310a473c7d8fec13c", optional = true }
 # Bootstrap control-plane name resolution (design: docs/bootstrap-resolver-design.md). flint-dial
 # supplies happy-eyeballs racing (race_with / race_windowed); flint-dns supplies the un-poisoned DoH
 # resolver + the A/AAAA codec + answer validation. Both optional — only the `bootstrap-dns` feature
 # pulls them (and the boring Chrome connector they dial over). Same rev as the other flint crates.
-flint-dial = { git = "https://github.com/getlantern/flint", rev = "18a2c5d00ab33d661d256bf24282bf40b3f0483f", optional = true }
-flint-dns = { git = "https://github.com/getlantern/flint", rev = "18a2c5d00ab33d661d256bf24282bf40b3f0483f", optional = true }
+flint-dial = { git = "https://github.com/getlantern/flint", rev = "3b07e9459a2be21e6913dfc310a473c7d8fec13c", optional = true }
+flint-dns = { git = "https://github.com/getlantern/flint", rev = "3b07e9459a2be21e6913dfc310a473c7d8fec13c", optional = true }
 blake3 = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }

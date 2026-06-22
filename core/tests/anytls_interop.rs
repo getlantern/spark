@@ -34,17 +34,20 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// what's on the wire — an injected 32-byte `legacy_session_id` (the kID recipe) and a TLS-record
 /// split (`records.split_offsets`) — so a passing handshake proves a real server accepts them.
 fn config_from_env() -> Option<Config> {
-    let server = std::env::var("SPARK_ANYTLS_SERVER")
+    const SKIP: &str = "SKIP: set SPARK_ANYTLS_SERVER and SPARK_ANYTLS_PASSWORD (optionally \
+                        SPARK_ANYTLS_SNI) to run the live AnyTLS P4a-gambit interop gate";
+    let Some(server) = std::env::var("SPARK_ANYTLS_SERVER")
         .ok()
-        .filter(|s| !s.is_empty())?;
-    let password = std::env::var("SPARK_ANYTLS_PASSWORD")
+        .filter(|s| !s.is_empty())
+    else {
+        println!("{SKIP}");
+        return None;
+    };
+    let Some(password) = std::env::var("SPARK_ANYTLS_PASSWORD")
         .ok()
-        .filter(|s| !s.is_empty());
-    let Some(password) = password else {
-        println!(
-            "SKIP: set SPARK_ANYTLS_SERVER and SPARK_ANYTLS_PASSWORD (optionally SPARK_ANYTLS_SNI) \
-             to run the live AnyTLS P4a-gambit interop gate"
-        );
+        .filter(|s| !s.is_empty())
+    else {
+        println!("{SKIP}");
         return None;
     };
     let sni = std::env::var("SPARK_ANYTLS_SNI").unwrap_or_else(|_| "example.com".to_owned());
@@ -53,8 +56,14 @@ fn config_from_env() -> Option<Config> {
     // records at two offsets. (Explicit extension/cipher order is covered by flint-tls's CH-parse +
     // JA4 unit tests; here we exercise the two knobs that most change the on-wire opening a server
     // must accept.)
+    // Escape the env-supplied values as TOML string literals — `toml::Value`'s Display emits a
+    // quoted, escaped string, so a password containing `"`, `\`, or a newline can't break (or
+    // silently reshape) the config. The fixed hex/offsets below are safe to inline.
+    let server_lit = toml::Value::from(server.clone()).to_string();
+    let password_lit = toml::Value::from(password.clone()).to_string();
+    let sni_lit = toml::Value::from(sni.clone()).to_string();
     let toml = format!(
-        "[transport.anytls]\nserver = \"{server}\"\npassword = \"{password}\"\nsni = \"{sni}\"\n\n\
+        "[transport.anytls]\nserver = {server_lit}\npassword = {password_lit}\nsni = {sni_lit}\n\n\
          [transport.anytls.clienthello]\n\
          session_id = {{ mode = \"inject\", hex = \"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\" }}\n\n\
          [transport.anytls.records]\nsplit_offsets = [6, 12]\n"
@@ -77,11 +86,18 @@ async fn p4a_gambit_tcp_get_through_live_server() {
     let Some(cfg) = config_from_env() else { return };
     let (tcp, _udp) = from_config(&cfg).expect("from_config should build the anytls transport");
 
-    let target = timeout(TIMEOUT, tokio::net::lookup_host("example.com:80"))
+    let addrs: Vec<_> = timeout(TIMEOUT, tokio::net::lookup_host("example.com:80"))
         .await
         .expect("DNS lookup timed out")
         .expect("resolve example.com:80")
-        .next()
+        .collect();
+    // Prefer an IPv4 target: if the AnyTLS server host lacks IPv6, an IPv6-first DNS result would be
+    // a false-negative interop failure. Fall back to the first address when no IPv4 is present.
+    let target = addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
         .expect("example.com:80 resolved to no addresses");
     println!("dialing example.com:80 ({target}) through the anytls server (P4a gambit)");
 
