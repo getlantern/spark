@@ -611,7 +611,7 @@ pub enum ConfigError {
     #[error("failed to parse TOML config")]
     Parse(#[from] toml::de::Error),
     /// A `config_raw.json` (Lantern API) payload failed to parse or adapt.
-    #[error("failed to adapt config_raw.json")]
+    #[error("failed to adapt config_raw.json: {0}")]
     ConfigRaw(#[from] lantern::ConfigRawError),
 }
 
@@ -622,10 +622,11 @@ impl Config {
     }
 
     /// Parse a [`Config`] from either spark's native TOML or a Lantern `config_raw.json` payload,
-    /// auto-detected: a JSON object carrying an `outbounds` array goes through the
-    /// [`lantern`](crate::config::lantern) adapter; anything else through the TOML parser. This is
-    /// the single entry point for an externally-supplied config string (file / `SPARK_CONFIG` / the
-    /// NE control channel) so every caller accepts both formats.
+    /// auto-detected: a JSON object carrying an `options.outbounds` array goes through the
+    /// [`lantern`](crate::config::lantern) adapter; anything else through the TOML parser. The single
+    /// entry point for an externally-supplied config string — [`from_path`](Self::from_path) (file),
+    /// the `SPARK_CONFIG` env, and the Apple NE control channel all route through it, so every caller
+    /// accepts both formats.
     pub fn from_config_str(s: &str) -> Result<Self, ConfigError> {
         if lantern::looks_like_config_raw(s) {
             Ok(lantern::from_config_raw_json(s)?)
@@ -640,7 +641,8 @@ impl Config {
             path: path.display().to_string(),
             source,
         })?;
-        Self::from_toml_str(&contents)
+        // Accept either native TOML or a Lantern config_raw.json file (auto-detected).
+        Self::from_config_str(&contents)
     }
 
     /// Render this config back to TOML (used for round-trip tests and `--print-config`).

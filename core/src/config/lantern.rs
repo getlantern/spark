@@ -27,6 +27,14 @@ pub enum ConfigRawError {
     /// The string was not valid JSON / not the expected `config_raw` shape.
     #[error("config_raw JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
+    /// Parsed fine, but none of the `found` outbounds is a transport spark can use — so there is no
+    /// pool to build. Surfaced (rather than returning an empty pool) so the caller fails loudly
+    /// instead of silently falling back to direct, untunneled forwarding.
+    #[error("config_raw.json has no usable outbound ({found} present, all unsupported)")]
+    NoSupportedOutbounds {
+        /// How many outbounds were present (all unsupported).
+        found: usize,
+    },
 }
 
 /// True if `s` looks like a `config_raw.json` payload (a JSON object with an `outbounds` array) vs
@@ -69,6 +77,13 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
             city: loc.and_then(|l| l.city.clone()),
             latitude: loc.and_then(|l| l.latitude),
             longitude: loc.and_then(|l| l.longitude),
+        });
+    }
+    // An empty pool would make `from_config` fall back to direct (untunneled) forwarding, silently
+    // running unprotected despite a config_raw.json being supplied — fail loudly instead.
+    if cfg.transport.servers.is_empty() {
+        return Err(ConfigRawError::NoSupportedOutbounds {
+            found: raw.options.outbounds.len(),
         });
     }
     Ok(cfg)
@@ -337,5 +352,17 @@ mod tests {
             .expect("toml parses");
         assert!(cfg2.transport.server.is_some());
         assert!(cfg2.transport.servers.is_empty());
+    }
+
+    #[test]
+    fn errors_when_no_supported_outbounds() {
+        // A config_raw with only outbounds spark can't represent must error rather than yield an
+        // empty pool — an empty pool falls back to direct (untunneled) forwarding, which would
+        // silently run unprotected despite a config being supplied.
+        let raw = r#"{ "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub", "server": "", "server_port": 0 }
+        ]}}"#;
+        from_config_raw_json(raw).expect_err("all-unsupported config_raw must error");
+        assert!(Config::from_config_str(raw).is_err());
     }
 }
