@@ -432,9 +432,10 @@ pub mod ne_spike {
             Some(MainManager(mgr.clone()));
     }
 
-    /// A `Send` handle to the started manager for use in a main-queue closure, or `None` if the
-    /// tunnel wasn't started in this app session.
-    fn take_started_manager() -> Option<MainManager> {
+    /// A cloned `Send` handle to the started manager for use in a main-queue closure, or `None` if
+    /// the tunnel wasn't started in this app session. Clones (retains) the stored handle and leaves it
+    /// in place — it does NOT `take` it out of the slot (the slot is cleared on disconnect).
+    fn clone_started_manager() -> Option<MainManager> {
         started_manager()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -480,7 +481,7 @@ pub mod ne_spike {
         ne_debug(&format!("[send] start msg={message}"));
         // Hypothesis #1: reuse the manager that *started* the tunnel rather than a fresh `loadAll`
         // instance — the messaging channel appears bound to the started session.
-        let Some(mgr) = take_started_manager() else {
+        let Some(mgr) = clone_started_manager() else {
             ne_debug("[send] no retained manager (connect this app session first)");
             return Err("no active tunnel manager — connect first".to_owned());
         };
