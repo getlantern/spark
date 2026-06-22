@@ -231,6 +231,14 @@ pub struct TransportConfig {
     /// Requires the `samizdat` build feature (else `from_config` errors). TCP only (v1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub samizdat: Option<SamizdatConfig>,
+    /// Shadowsocks 2022 transport (ADR 0009): when set, flows tunnel through this SS-2022 server.
+    /// Takes precedence over the plain `server` tunnel. Requires the `shadowsocks` build feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowsocks: Option<ShadowsocksConfig>,
+    /// Hysteria 2 transport (ADR 0010): when set, flows tunnel through this Hysteria 2 server over
+    /// QUIC, optionally obfuscated with Salamander+Gecko. Requires the `hysteria2` build feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hysteria2: Option<Hysteria2Config>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
     /// and Samizdat handshakes (both build their `WirePlan` from this). Default: no shaping.
@@ -259,6 +267,8 @@ impl Default for TransportConfig {
             anytls: None,
             wasm: None,
             samizdat: None,
+            shadowsocks: None,
+            hysteria2: None,
             shaping: ShapingConfig::default(),
             servers: Vec::new(),
             callback_url: None,
@@ -364,6 +374,118 @@ pub struct SamizdatConfig {
     pub sni: Option<String>,
 }
 
+/// The Shadowsocks 2022 (SIP022) methods spark implements. The `rename` values are the canonical
+/// method names used by shadowsocks-rust / sing-box config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum SsMethod {
+    /// `2022-blake3-aes-128-gcm` — 16-byte key/salt. TCP + UDP.
+    #[serde(rename = "2022-blake3-aes-128-gcm")]
+    Aes128Gcm,
+    /// `2022-blake3-aes-256-gcm` — 32-byte key/salt. TCP + UDP.
+    #[serde(rename = "2022-blake3-aes-256-gcm")]
+    Aes256Gcm,
+    /// `2022-blake3-chacha20-poly1305` — 32-byte key/salt. TCP only in v1 (UDP needs XChaCha20).
+    #[serde(rename = "2022-blake3-chacha20-poly1305")]
+    Chacha20Poly1305,
+}
+
+impl SsMethod {
+    /// PSK / session-subkey length in bytes (SIP022 §2.1).
+    pub fn key_len(self) -> usize {
+        match self {
+            SsMethod::Aes128Gcm => 16,
+            SsMethod::Aes256Gcm | SsMethod::Chacha20Poly1305 => 32,
+        }
+    }
+    /// Per-stream random salt length — equal to the key length (SIP022 §2.2).
+    pub fn salt_len(self) -> usize {
+        self.key_len()
+    }
+    /// Whether this is an AES-GCM method (the UDP-capable family in v1).
+    pub fn is_aes(self) -> bool {
+        matches!(self, SsMethod::Aes128Gcm | SsMethod::Aes256Gcm)
+    }
+}
+
+/// Shadowsocks 2022 (SIP022) transport configuration (ADR 0009). A pre-shared-key AEAD tunnel,
+/// wire-interoperable with deployed shadowsocks-rust / sing-box SS-2022 servers. See
+/// `docs/shadowsocks-design.md`. Requires the `shadowsocks` build feature (else `from_config` errors).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowsocksConfig {
+    /// The SS server address — `IP:port` or `host:port` (resolved at startup).
+    pub server: Endpoint,
+    /// The SS-2022 method (cipher); sets key/salt size and the AEAD construction.
+    pub method: SsMethod,
+    /// The pre-shared key, base64-encoded. Decoded length MUST equal `method.key_len()`.
+    pub password: String,
+}
+
+/// Hysteria 2 transport configuration (ADR 0010). A QUIC client interoperable with apernet/hysteria.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hysteria2Config {
+    /// Server address — `IP:port` or `host:port` (resolved at startup).
+    pub server: Endpoint,
+    /// `Hysteria-Auth` credential.
+    pub auth: String,
+    /// TLS SNI. When omitted: bootstrap fills it with the hostname; for an IP it defaults to the IP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    /// Client receive-rate hint sent as `Hysteria-CC-RX` (Mbps; 0 = unknown → server uses BBR).
+    #[serde(default)]
+    pub down_mbps: u32,
+    /// TLS verification mode.
+    #[serde(default)]
+    pub tls: Hysteria2Tls,
+    /// Optional Salamander/Gecko obfuscation. Omit for plain QUIC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs: Option<Hysteria2Obfs>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hysteria2Tls {
+    #[serde(default)]
+    pub mode: Hysteria2TlsMode,
+    /// Hex SHA-256 of the server cert; required when `mode = "pin-sha256"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Hysteria2TlsMode {
+    #[default]
+    SystemRoots,
+    PinSha256,
+    Insecure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hysteria2Obfs {
+    /// Obfuscation type. Only `salamander` is supported (Gecko is the `gecko` flag below, layered on
+    /// Salamander); an unknown value is rejected at config-parse time.
+    #[serde(rename = "type")]
+    pub kind: Hysteria2ObfsType,
+    /// Obfuscation pre-shared key.
+    pub password: String,
+    /// Wrap Salamander with Gecko handshake-fragmentation.
+    #[serde(default)]
+    pub gecko: bool,
+}
+
+/// The Hysteria 2 obfuscation type. Only Salamander exists in v1 (Gecko wraps it via the
+/// [`Hysteria2Obfs::gecko`] flag, not a separate type). A strongly-typed enum so a misconfigured
+/// `type` fails at parse time instead of silently behaving as Salamander.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Hysteria2ObfsType {
+    /// Salamander XOR obfuscation (Hysteria 2 spec §Salamander).
+    Salamander,
+}
+
 /// The plain `tcp_tunnel` client kind for a pool entry — a tunnel server addressed by `server`,
 /// with no extra mimicry (mirrors the legacy top-level `transport.server`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -390,6 +512,10 @@ pub enum ServerSpec {
     Wasm(WasmConfig),
     /// Plain `tcp_tunnel` client.
     Tunnel(TunnelConfig),
+    /// Shadowsocks 2022 (ADR 0009).
+    Shadowsocks(ShadowsocksConfig),
+    /// Hysteria 2 (ADR 0010).
+    Hysteria2(Hysteria2Config),
 }
 
 /// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
@@ -502,11 +628,15 @@ impl Config {
         let singles = [
             self.transport.anytls.as_ref().map(|c| &c.server),
             self.transport.samizdat.as_ref().map(|c| &c.server),
+            self.transport.shadowsocks.as_ref().map(|c| &c.server),
+            self.transport.hysteria2.as_ref().map(|c| &c.server),
         ];
         let pool = self.transport.servers.iter().filter_map(|e| match &e.spec {
             ServerSpec::Anytls(c) => Some(&c.server),
             ServerSpec::Samizdat(c) => Some(&c.server),
             ServerSpec::Tunnel(c) => Some(&c.server),
+            ServerSpec::Shadowsocks(c) => Some(&c.server),
+            ServerSpec::Hysteria2(c) => Some(&c.server),
             ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
         });
         singles
@@ -585,6 +715,8 @@ mod tests {
                     protect_interface: Some("en0".into()),
                     anytls: None,
                     samizdat: None,
+                    shadowsocks: None,
+                    hysteria2: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
@@ -788,6 +920,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c2.first_unresolved_host(), None);
+    }
+
+    #[test]
+    fn shadowsocks_method_sizes() {
+        assert_eq!(SsMethod::Aes128Gcm.key_len(), 16);
+        assert_eq!(SsMethod::Aes128Gcm.salt_len(), 16);
+        assert_eq!(SsMethod::Aes256Gcm.key_len(), 32);
+        assert!(SsMethod::Aes256Gcm.is_aes());
+        assert_eq!(SsMethod::Chacha20Poly1305.key_len(), 32);
+        assert!(!SsMethod::Chacha20Poly1305.is_aes());
+    }
+
+    #[test]
+    fn hysteria2_config_round_trips_through_toml() {
+        let toml = r#"
+[transport.hysteria2]
+server = "proxy.example.com:443"
+auth = "secret"
+
+[transport.hysteria2.obfs]
+type = "salamander"
+password = "obfskey"
+gecko = true
+"#;
+        let cfg = Config::from_toml_str(toml).unwrap();
+        let h = cfg.transport.hysteria2.clone().unwrap();
+        assert_eq!(h.server, "proxy.example.com:443".parse().unwrap());
+        assert_eq!(h.auth, "secret");
+        let obfs = h.obfs.unwrap();
+        assert_eq!(obfs.kind, Hysteria2ObfsType::Salamander);
+        assert_eq!(obfs.password, "obfskey");
+        assert!(obfs.gecko);
+        assert!(matches!(h.tls.mode, Hysteria2TlsMode::SystemRoots)); // default
+    }
+
+    #[test]
+    fn hysteria2_rejects_unknown_obfs_type() {
+        // An unknown obfs `type` must fail at parse time, not silently behave as Salamander.
+        let toml = "[transport.hysteria2]\nserver = \"1.2.3.4:443\"\nauth = \"x\"\n\n\
+                    [transport.hysteria2.obfs]\ntype = \"bogus\"\npassword = \"k\"\n";
+        assert!(Config::from_toml_str(toml).is_err());
+    }
+
+    #[test]
+    fn shadowsocks_config_round_trips_through_toml() {
+        let toml = r#"
+[transport.shadowsocks]
+server = "1.2.3.4:8388"
+method = "2022-blake3-aes-256-gcm"
+password = "c29tZS1iYXNlNjQtcHNr"
+"#;
+        let cfg = Config::from_toml_str(toml).unwrap();
+        let ss = cfg.transport.shadowsocks.clone().unwrap();
+        assert_eq!(ss.server, "1.2.3.4:8388".parse().unwrap());
+        assert_eq!(ss.method, SsMethod::Aes256Gcm);
+        assert_eq!(ss.password, "c29tZS1iYXNlNjQtcHNr");
+        let out = cfg.to_toml_string().unwrap();
+        assert!(out.contains("2022-blake3-aes-256-gcm"));
+    }
+
+    #[test]
+    fn parses_a_shadowsocks_pool_entry() {
+        let c = Config::from_toml_str(
+            "[transport]\ncallback_url = \"http://127.0.0.1/ok\"\n\n[[transport.servers]]\nkind = \"shadowsocks\"\nserver = \"1.2.3.4:8388\"\nmethod = \"2022-blake3-aes-128-gcm\"\npassword = \"MTIzNDU2Nzg5MDEyMzQ1Ng==\"\n",
+        )
+        .unwrap();
+        match &c.transport.servers[0].spec {
+            ServerSpec::Shadowsocks(ss) => {
+                assert_eq!(ss.method, SsMethod::Aes128Gcm);
+                assert_eq!(ss.server, "1.2.3.4:8388".parse().unwrap());
+            }
+            other => panic!("expected a shadowsocks pool entry, got {other:?}"),
+        }
     }
 
     #[test]

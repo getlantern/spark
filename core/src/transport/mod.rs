@@ -23,7 +23,9 @@ use async_trait::async_trait;
 use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
-use crate::config::{AnytlsConfig, Config, SamizdatConfig, WasmConfig};
+use crate::config::{
+    AnytlsConfig, Config, Hysteria2Config, SamizdatConfig, ShadowsocksConfig, WasmConfig,
+};
 use crate::net::SocketProtector;
 use crate::BoxedStream;
 use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
@@ -64,6 +66,11 @@ pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
+/// Hysteria 2 transport (ADR 0010): a QUIC client (quinn/rustls-ring) interoperable with deployed
+/// apernet/hysteria servers, with Salamander+Gecko obfuscation. Behind the `hysteria2` feature so the
+/// base build pulls no QUIC stack.
+#[cfg(feature = "hysteria2")]
+pub mod hysteria2;
 pub mod probe;
 /// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
 /// mux, wire-interoperable with deployed lantern-box `"samizdat"` servers. Behind the `samizdat`
@@ -74,6 +81,11 @@ pub mod samizdat;
 /// Gated behind `multi-server` so the base build pulls no `flint-dial` dependency.
 #[cfg(feature = "multi-server")]
 pub mod select;
+/// Shadowsocks 2022 transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with deployed
+/// shadowsocks-rust servers. Behind the `shadowsocks` feature so the base build pulls neither
+/// `blake3` nor `aes`.
+#[cfg(feature = "shadowsocks")]
+pub mod shadowsocks;
 pub mod tcp_tunnel;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.
@@ -98,8 +110,10 @@ pub(crate) async fn protected_tcp_connect(
     socket.connect(addr).await
 }
 
-/// Build a connected UDP socket to `target`, optionally pinned to a physical interface.
-fn protected_udp_socket(
+/// Build a bound, nonblocking UDP socket, optionally pinned to a physical interface (so its traffic
+/// bypasses the tunnel route). `target` only selects the address family for the bind; the caller
+/// `connect`s it to the destination afterward.
+pub(crate) fn protected_udp_socket(
     target: SocketAddr,
     protector: Option<&SocketProtector>,
 ) -> io::Result<socket2::Socket> {
@@ -136,6 +150,8 @@ pub(crate) fn build_one(
     match spec {
         ServerSpec::Anytls(cfg) => anytls_transport(cfg, protector.cloned(), wire.clone()),
         ServerSpec::Samizdat(cfg) => samizdat_transport(cfg, protector.cloned(), wire.clone()),
+        ServerSpec::Shadowsocks(cfg) => shadowsocks_transport(cfg, protector.cloned()),
+        ServerSpec::Hysteria2(cfg) => hysteria2_transport(cfg, protector.cloned()),
         ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
         ServerSpec::Tunnel(cfg) => {
             let server = cfg.server.socket_addr()?;
@@ -265,6 +281,18 @@ pub fn from_config_with_control(
     if let Some(samizdat) = &config.transport.samizdat {
         let wire = wire_plan_from_config(&config.transport.shaping);
         let (tcp, udp) = samizdat_transport(samizdat, protector, wire)?;
+        return Ok((tcp, udp, None));
+    }
+    // Shadowsocks 2022 (ADR 0009) — like AnyTLS/Samizdat, takes precedence over the plain `server`
+    // tunnel. Not TLS, so it takes no shaping plan. Not a pool, so no control handle.
+    if let Some(ss) = &config.transport.shadowsocks {
+        let (tcp, udp) = shadowsocks_transport(ss, protector)?;
+        return Ok((tcp, udp, None));
+    }
+    // Hysteria 2 (ADR 0010) — QUIC transport; like the others, takes precedence over the plain
+    // `server` tunnel. Not TLS, so no shaping plan. Not a pool, so no control handle.
+    if let Some(hy2) = &config.transport.hysteria2 {
+        let (tcp, udp) = hysteria2_transport(hy2, protector)?;
         return Ok((tcp, udp, None));
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
@@ -488,6 +516,64 @@ fn samizdat_transport(
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.samizdat is configured but spark was built without the `samizdat` feature",
+    ))
+}
+
+/// Build the Shadowsocks transport (feature `shadowsocks`): decode + length-check the base64 PSK,
+/// then a [`shadowsocks::ShadowsocksTransport`] serving both TCP and UDP (UDP errors for the chacha
+/// method). SS is not TLS, so it takes no shaping plan.
+#[cfg(feature = "shadowsocks")]
+fn shadowsocks_transport(
+    cfg: &ShadowsocksConfig,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let server = cfg.server.socket_addr()?;
+    let psk = shadowsocks::decode_psk(cfg.method, &cfg.password)
+        .map_err(|e| io::Error::other(format!("transport.shadowsocks: {e}")))?;
+    let t = Arc::new(shadowsocks::ShadowsocksTransport::new(
+        server, cfg.method, psk, protector,
+    ));
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `shadowsocks` feature, a configured SS transport is a hard error (mirrors anytls/wasm).
+#[cfg(not(feature = "shadowsocks"))]
+fn shadowsocks_transport(
+    _cfg: &ShadowsocksConfig,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.shadowsocks is configured but spark was built without the `shadowsocks` feature",
+    ))
+}
+
+/// Build the Hysteria 2 transport (feature `hysteria2`): a QUIC client serving both TCP and UDP.
+///
+/// `protector`, when set, pins the QUIC data-plane UDP socket to the physical interface so the
+/// transport's own packets bypass the tunnel route.
+#[cfg(feature = "hysteria2")]
+fn hysteria2_transport(
+    cfg: &Hysteria2Config,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let server = cfg.server.socket_addr()?;
+    let t = Arc::new(hysteria2::Hysteria2Transport::new(
+        cfg.clone(),
+        server,
+        protector,
+    ));
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `hysteria2` feature, a configured Hysteria 2 transport is a hard error (mirrors
+/// anytls/shadowsocks/wasm).
+#[cfg(not(feature = "hysteria2"))]
+fn hysteria2_transport(
+    _cfg: &Hysteria2Config,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.hysteria2 is configured but spark was built without the `hysteria2` feature",
     ))
 }
 
@@ -1146,5 +1232,68 @@ mod anytls_gambit_config_tests {
             "a gambit-module rollback must be rejected"
         );
         std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(all(test, feature = "shadowsocks"))]
+mod shadowsocks_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_config_builds_a_shadowsocks_transport() {
+        let toml = r#"
+[transport.shadowsocks]
+server = "1.2.3.4:8388"
+method = "2022-blake3-aes-256-gcm"
+password = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        let _ = from_config(&cfg).expect("shadowsocks transport builds");
+    }
+
+    #[test]
+    fn from_config_rejects_a_bad_length_psk() {
+        let toml = r#"
+[transport.shadowsocks]
+server = "1.2.3.4:8388"
+method = "2022-blake3-aes-256-gcm"
+password = "c2hvcnQ="
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        assert!(from_config(&cfg).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "hysteria2"))]
+mod hysteria2_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_config_builds_a_hysteria2_transport() {
+        // IP:port literal so no DNS resolution is needed; `Hysteria2Transport::new` is lazy.
+        let toml = r#"
+[transport.hysteria2]
+server = "1.2.3.4:443"
+auth = "s3cr3t"
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        let _ = from_config(&cfg).expect("hysteria2 transport builds");
+    }
+
+    #[test]
+    fn from_config_parses_a_hysteria2_pool_entry() {
+        let toml = r#"
+[[transport.servers]]
+kind = "hysteria2"
+server = "1.2.3.4:443"
+auth = "s3cr3t"
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        let entry = &cfg.transport.servers[0];
+        assert!(
+            matches!(entry.spec, crate::config::ServerSpec::Hysteria2(_)),
+            "expected a Hysteria2 pool entry, got: {:?}",
+            entry.spec
+        );
     }
 }
