@@ -27,12 +27,13 @@ use super::tcp::{read_varint, write_varint};
 const H3_FRAME_HEADERS: u64 = 0x01;
 
 // ---------------------------------------------------------------------------
-// QPACK static-table names we care about (RFC 9204 Appendix A).
+// QPACK static-table entries we care about (RFC 9204 Appendix A).
 //
-// We only need to map an index -> field *name* (values are read from the literal that
-// follows a name-reference, never from the table). The `:status` pseudo-header appears at
-// several indices; we list all of them so a name reference to any `:status` entry resolves
-// correctly regardless of which one quic-go's qpack happens to pick.
+// For most field lines we map an index -> field *name* and read the value from the literal that
+// follows a name-reference. For an *indexed* field line, though, the static entry carries both name
+// and value, so we also map the `:status` indices -> value (see `static_status_value`). The
+// `:status` pseudo-header appears at several indices; we list all of them so a reference to any
+// `:status` entry resolves regardless of which one quic-go's qpack picks.
 // ---------------------------------------------------------------------------
 
 /// `:status` lives at these static-table indices (RFC 9204 Appendix A): 24 (103), 25 (200),
@@ -54,6 +55,30 @@ fn static_name(index: u64) -> Option<&'static str> {
         22 | 23 => Some(":scheme"),
         _ => None,
     }
+}
+
+/// Resolve a QPACK static-table `:status` index to its value (RFC 9204 Appendix A). An *indexed*
+/// field line carries both name and value, so a server returning a standard status (e.g. 403/404,
+/// which are in the static table) may encode it as an index rather than a literal; without this we
+/// would surface a codec error instead of the real status code.
+fn static_status_value(index: u64) -> Option<&'static str> {
+    Some(match index {
+        24 => "103",
+        25 => "200",
+        26 => "304",
+        27 => "404",
+        28 => "503",
+        63 => "100",
+        64 => "204",
+        65 => "206",
+        66 => "302",
+        67 => "400",
+        68 => "403",
+        69 => "421",
+        70 => "425",
+        71 => "500",
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -148,19 +173,41 @@ fn headers_frame(field_section: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A random alphanumeric `Hysteria-Padding` value to vary the `/auth` request size (the server
+/// ignores it; it only defeats size-based fingerprinting of the request). Length is random in
+/// `[64, 512]`. Returns an `io::Error` if the OS RNG fails.
+pub fn random_padding() -> io::Result<String> {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let rng = ring::rand::SystemRandom::new();
+    let mut lenb = [0u8; 2];
+    ring::rand::SecureRandom::fill(&rng, &mut lenb)
+        .map_err(|_| io::Error::other("hysteria2 auth: OS RNG failure"))?;
+    let len = 64 + (u16::from_be_bytes(lenb) as usize % 449); // 64..=512
+    let mut raw = vec![0u8; len];
+    ring::rand::SecureRandom::fill(&rng, &mut raw)
+        .map_err(|_| io::Error::other("hysteria2 auth: OS RNG failure"))?;
+    Ok(raw
+        .iter()
+        .map(|b| CHARSET[*b as usize % CHARSET.len()] as char)
+        .collect())
+}
+
 /// Encode the Hysteria 2 /auth request as a single HTTP/3 HEADERS frame.
 ///
-/// `credential` is the shared secret sent in `Hysteria-Auth`; `rx_bps` is the client's
-/// declared receive rate in bytes/s (`0` means "unknown") sent in `Hysteria-CC-RX`.
-pub fn encode_auth_request(credential: &str, rx_bps: u64) -> Vec<u8> {
+/// `credential` is the shared secret sent in `Hysteria-Auth`; `rx_bps` is the client's declared
+/// receive rate in bytes/s (`0` means "unknown") sent in `Hysteria-CC-RX`; `padding` is the
+/// `Hysteria-Padding` value (random, server-ignored — see [`random_padding`]) that varies the
+/// request size.
+pub fn encode_auth_request(credential: &str, rx_bps: u64, padding: &str) -> Vec<u8> {
     let rx = rx_bps.to_string();
-    let headers: [(&str, &str); 6] = [
+    let headers: [(&str, &str); 7] = [
         (":method", "POST"),
         (":path", "/auth"),
         (":scheme", "https"),
         (":authority", "hysteria"),
         ("hysteria-auth", credential),
         ("hysteria-cc-rx", &rx),
+        ("hysteria-padding", padding),
     ];
     headers_frame(&encode_field_section(&headers))
 }
@@ -350,17 +397,21 @@ fn parse_field_line(buf: &[u8]) -> io::Result<(FieldLine, &[u8])> {
     let &first = buf.first().ok_or_else(|| eof("field line: empty"))?;
 
     if first & 0x80 != 0 {
-        // Indexed Field Line: 1 T <6-bit index>. T (0x40) selects static/dynamic. No value
-        // follows — the entry carries both name and value. We resolve the name when we can
-        // (only static entries) and never have a literal value here.
+        // Indexed Field Line: 1 T <6-bit index>. T (0x40) selects static/dynamic. The entry carries
+        // BOTH name and value, so for a static `:status` index we resolve the value too — a server
+        // returning a standard status (e.g. 403/404, in the static table) may encode it as an index
+        // rather than a literal, and we must surface it as that status, not a codec error.
         let t_static = first & 0x40 != 0;
         let (index, rest) = read_prefixed_int(buf, 6).ok_or_else(|| eof("indexed: bad index"))?;
-        let name = if t_static {
-            static_name(index).map(str::to_owned)
+        let (name, value) = if t_static {
+            (
+                static_name(index).map(str::to_owned),
+                static_status_value(index).map(str::to_owned),
+            )
         } else {
-            None
+            (None, None)
         };
-        return Ok((FieldLine { name, value: None }, rest));
+        return Ok((FieldLine { name, value }, rest));
     }
 
     if first & 0x40 != 0 {
@@ -634,11 +685,37 @@ mod tests {
 
     #[test]
     fn auth_request_is_an_h3_headers_frame() {
-        let f = encode_auth_request("mysecret", 0);
+        let f = encode_auth_request("mysecret", 0, "pad");
         assert_eq!(f[0], 0x01); // HEADERS frame type
         let (flen, rest) = super::super::tcp::read_varint(&f[1..]).unwrap();
         assert_eq!(flen as usize, rest.len()); // length covers exactly the field section
         assert_eq!(&rest[..2], &[0x00, 0x00]); // QPACK field-section prefix: RIC=0, Base=0
+    }
+
+    #[test]
+    fn random_padding_varies_and_is_alphanumeric() {
+        let a = random_padding().unwrap();
+        let b = random_padding().unwrap();
+        assert!(
+            (64..=512).contains(&a.len()),
+            "len out of range: {}",
+            a.len()
+        );
+        assert!(a.bytes().all(|c| c.is_ascii_alphanumeric()));
+        assert_ne!(a, b, "two paddings should (almost surely) differ");
+    }
+
+    #[test]
+    fn indexed_static_status_resolves_value() {
+        // A server may encode a standard status as a static *indexed* field line (the entry carries
+        // both name and value). Index 68 = `:status 403`; it must decode to Auth status 403, not a
+        // codec error. (Pseudo-headers precede regular headers, so `:status` is the first line.)
+        let mut section = Vec::new();
+        section.push(0x00);
+        section.push(0x00);
+        encode_prefixed_int(&mut section, 6, 0xc0, 68); // indexed, static, index 68 = :status 403
+        let frame = headers_frame(&section);
+        assert_eq!(decode_auth_status(&frame).unwrap(), 403);
     }
 
     #[test]

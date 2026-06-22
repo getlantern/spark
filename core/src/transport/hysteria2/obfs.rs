@@ -145,13 +145,15 @@ impl GeckoReassembler {
 
     /// Feed one (already Salamander-deobfuscated) datagram.
     ///
-    /// A short-header datagram (flags high bit clear) is itself a complete QUIC
-    /// packet and is returned as-is. A Gecko frame is buffered; the reassembled
-    /// QUIC packet is returned when its msgID completes. Malformed frames
-    /// return `None`.
+    /// A Gecko frame is identified by a leading byte of *exactly* `0x80` (the documented frame
+    /// marker, with the low 7 bits zero); anything else is a complete QUIC packet returned as-is.
+    /// Matching the exact byte rather than just the high bit matters because a QUIC long-header
+    /// packet also has the high bit set (`0xC0`+) — a non-fragmented long-header packet must pass
+    /// through, not be misparsed as a frame and dropped. A Gecko frame is buffered; the reassembled
+    /// QUIC packet is returned when its msgID completes. Malformed frames return `None`.
     pub fn accept(&mut self, datagram: &[u8]) -> Option<Vec<u8>> {
         let &flags = datagram.first()?;
-        if flags & GECKO_FLAG == 0 {
+        if flags != GECKO_FLAG {
             return Some(datagram.to_vec());
         }
         if datagram.len() < 5 {
@@ -477,6 +479,9 @@ mod tests {
         assert!(r.accept(&[0x80, 1]).is_none()); // truncated frame (< 5 bytes header)
                                                  // a short-header datagram (flags high bit clear) is returned as-is (passthrough), not None:
         assert_eq!(r.accept(&[0x40, 9, 9]).unwrap(), vec![0x40, 9, 9]);
+        // a QUIC long-header packet (0xC0, high bit set but != 0x80) must pass through, NOT be
+        // misparsed as a Gecko frame and dropped:
+        assert_eq!(r.accept(&[0xc0, 1, 2, 3]).unwrap(), vec![0xc0, 1, 2, 3]);
         // totalChunks out of range (frame = flags, msgID, packed, padLen_hi, padLen_lo):
         assert!(r.accept(&[0x80, 0, 0x09, 0, 0]).is_none()); // total=9 (>8)
         assert!(r.accept(&[0x80, 0, 0x01, 0, 0]).is_none()); // total=1 (<2)

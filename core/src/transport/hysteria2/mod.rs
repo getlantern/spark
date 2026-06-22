@@ -329,7 +329,8 @@ async fn authenticate(
 ) -> Result<bool, Hysteria2Error> {
     let (mut send, mut recv) = conn.open_bi().await.map_err(Hysteria2Error::Quic)?;
 
-    let frame = auth::encode_auth_request(&cfg.auth, rx_bps(cfg.down_mbps));
+    let padding = auth::random_padding().map_err(Hysteria2Error::Io)?;
+    let frame = auth::encode_auth_request(&cfg.auth, rx_bps(cfg.down_mbps), &padding);
     send.write_all(&frame)
         .await
         .map_err(|e| Hysteria2Error::Io(e.into()))?;

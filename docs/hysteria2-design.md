@@ -94,8 +94,9 @@ Hysteria-Auth:   <credential string>
 Hysteria-CC-RX:  <uint>     # client's max receive rate, bytes/s; 0 = unknown
 Hysteria-Padding: <random>  # obfuscation only; ignored
 ```
-Success → HTTP `233 HyOK` with `Hysteria-UDP: true/false`, `Hysteria-CC-RX: <uint|"auto">`,
-`Hysteria-Padding`. Any status ≠ 233 → auth failed, disconnect. After 233 (and only then) the QUIC
+Success → HTTP `233 HyOK` with `Hysteria-UDP: true/false`, `Hysteria-CC-RX: <uint|"auto">`, and
+`Hysteria-Padding` (the client walks past / ignores the response padding — it reads only `:status`
+and `Hysteria-UDP`). Any status ≠ 233 → auth failed, disconnect. After 233 (and only then) the QUIC
 connection is a proxy connection; **all subsequent proxying uses raw QUIC streams/datagrams, not H3.**
 
 **TCP (raw QUIC bidi stream, per connection).** Client opens a bidi stream and sends:
