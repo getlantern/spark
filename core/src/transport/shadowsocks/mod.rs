@@ -6,6 +6,8 @@ mod crypto;
 mod tcp;
 mod udp;
 
+pub(crate) use crypto::decode_psk;
+
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;

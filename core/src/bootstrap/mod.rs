@@ -182,28 +182,36 @@ impl NameResolver for ProxyResolver {
 /// default SNI to the resolved IP literal — surprising for a `host:port` dial, which conventionally
 /// presents the hostname. An explicitly-set `sni` (e.g. a cover-site name) is always preserved.
 pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver) -> io::Result<()> {
-    // Each boring transport's (server, sni) pair — disjoint fields, so the two mutable borrows are OK.
-    let mut entries: Vec<(&mut Endpoint, &mut Option<String>)> = Vec::new();
+    // (endpoint, optional SNI slot). SS-2022 has no SNI; the TLS transports do.
+    let mut entries: Vec<(&mut Endpoint, Option<&mut Option<String>>)> = Vec::new();
     if let Some(anytls) = config.transport.anytls.as_mut() {
-        entries.push((&mut anytls.server, &mut anytls.sni));
+        entries.push((&mut anytls.server, Some(&mut anytls.sni)));
     }
     if let Some(samizdat) = config.transport.samizdat.as_mut() {
-        entries.push((&mut samizdat.server, &mut samizdat.sni));
+        entries.push((&mut samizdat.server, Some(&mut samizdat.sni)));
+    }
+    if let Some(ss) = config.transport.shadowsocks.as_mut() {
+        entries.push((&mut ss.server, None));
     }
     for entry in config.transport.servers.iter_mut() {
         match &mut entry.spec {
-            crate::config::ServerSpec::Anytls(c) => entries.push((&mut c.server, &mut c.sni)),
-            crate::config::ServerSpec::Samizdat(c) => entries.push((&mut c.server, &mut c.sni)),
-            crate::config::ServerSpec::Tunnel(c) => entries.push((&mut c.server, &mut c.sni)),
+            crate::config::ServerSpec::Anytls(c) => entries.push((&mut c.server, Some(&mut c.sni))),
+            crate::config::ServerSpec::Samizdat(c) => {
+                entries.push((&mut c.server, Some(&mut c.sni)))
+            }
+            crate::config::ServerSpec::Shadowsocks(c) => entries.push((&mut c.server, None)),
+            crate::config::ServerSpec::Tunnel(c) => entries.push((&mut c.server, Some(&mut c.sni))),
             crate::config::ServerSpec::Wasm(_) => {} // wasm.server is a SocketAddr, never a hostname
         }
     }
     for (ep, sni) in entries {
         if let Some((host, port)) = ep.unresolved() {
             let host = host.to_owned();
-            // Preserve the hostname for SNI before the rewrite discards it (unless explicitly set).
-            if sni.is_none() {
-                *sni = Some(host.clone());
+            if let Some(sni) = sni {
+                // Preserve the hostname for SNI before the rewrite discards it (unless explicitly set).
+                if sni.is_none() {
+                    *sni = Some(host.clone());
+                }
             }
             let addr = resolver
                 .resolve(&host, port)
