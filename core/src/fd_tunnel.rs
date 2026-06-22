@@ -47,6 +47,44 @@ fn deregister(stop: &Arc<Notify>) {
     registry().lock().unwrap().retain(|n| !Arc::ptr_eq(n, stop));
 }
 
+/// The active server pool's control handle, if the running tunnel built a multi-server pool. The NE
+/// runs one tunnel per process, so a single slot suffices: set while a pool tunnel is up, cleared on
+/// teardown. The platform FFI ([`servers_json`]/[`select_server`]) reads it from its own thread, so
+/// it is behind a mutex; the pool's own methods are independently thread-safe.
+fn pool() -> &'static Mutex<Option<Arc<dyn transport::PoolControl>>> {
+    static POOL: OnceLock<Mutex<Option<Arc<dyn transport::PoolControl>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(None))
+}
+
+fn set_pool(control: Option<Arc<dyn transport::PoolControl>>) {
+    *pool().lock().unwrap() = control;
+}
+
+fn current_pool() -> Option<Arc<dyn transport::PoolControl>> {
+    pool().lock().unwrap().clone()
+}
+
+/// The current pool's member snapshot as the server-selection UI's JSON array (`"[]"` when no pool
+/// is active — direct/single-tunnel/AnyTLS configs have no pool to choose among). Called across the
+/// platform FFI.
+pub fn servers_json() -> String {
+    match current_pool() {
+        Some(c) => transport::snapshot_to_json(&c.snapshot()),
+        None => "[]".to_string(),
+    }
+}
+
+/// Pin which pool member new flows dial first: `Some(index)` pins (overrides latency ranking),
+/// `None` returns to auto. Returns `true` only when the pin was actually applied; `false` when no
+/// server pool is active (nothing to pin) *or* the index was out of range — so the FFI/UI can tell
+/// a real selection from a no-op. Takes effect for new flows only. Called across the platform FFI.
+pub fn select_server(index: Option<usize>) -> bool {
+    match current_pool() {
+        Some(c) => c.set_pin(index),
+        None => false,
+    }
+}
+
 /// Build the fd-path [`Config`] from the host primitives the platform shims share: direct
 /// forwarding with the given tun `addr`/`prefix` and netstack selection. `system_stack` picks the
 /// kernel-TCP stack (Android only — it requires the `system-stack` build feature and errors at
@@ -108,7 +146,11 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
             unsafe { Tun::from_fd(fd, mtu) }.map_err(|e| std::io::Error::other(e.to_string()))?,
         );
 
-        let (tcp_transport, udp_transport) = transport::from_config(&config)?;
+        let (tcp_transport, udp_transport, control) =
+            transport::from_config_with_control(&config)?;
+        // Register the pool's control handle (if any) so the platform FFI can drive the
+        // server-selection UI while this tunnel is up; cleared on teardown below.
+        set_pool(control);
         let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
         let idle = Duration::from_secs(config.udp.idle_timeout_secs);
         if let Some((udp_inbound, udp_reply)) = udp_surface {
@@ -132,6 +174,8 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
         Ok(())
     });
     deregister(&stop);
+    // Drop the pool control handle for this (now torn-down) tunnel so the FFI reports no active pool.
+    set_pool(None);
     result
 }
 

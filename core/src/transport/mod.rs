@@ -171,10 +171,15 @@ pub(crate) fn build_one(
 /// Build a `SelectingTransport` over `config.transport.servers`. Each entry's callback URL is its
 /// per-entry override or the global `transport.callback_url`; the pool needs at least one callback.
 #[cfg(feature = "multi-server")]
+#[allow(clippy::type_complexity)]
 fn build_selecting(
     config: &Config,
     protector: Option<SocketProtector>,
-) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+) -> io::Result<(
+    Arc<dyn Transport>,
+    Arc<dyn UdpTransport>,
+    Option<Arc<dyn PoolControl>>,
+)> {
     use crate::transport::probe::CallbackUrl;
     use crate::transport::select::{Member, SelectingTransport};
     let wire = wire_plan_from_config(&config.transport.shaping);
@@ -194,7 +199,13 @@ fn build_selecting(
             )));
         }
         let (transport, udp) = build_one(&entry.spec, protector.as_ref(), &wire)?;
-        members.push(Member::new(transport, udp, callback));
+        let meta = ServerMeta {
+            name: entry.name.clone(),
+            country: entry.country.clone(),
+            country_code: entry.country_code.clone(),
+            city: entry.city.clone(),
+        };
+        members.push(Member::new(transport, udp, callback, meta));
     }
     // Fail-open fallback (issue #11): when the whole pool is unhealthy the selecting transport dials
     // directly instead of blackholing. Built with the same protector as the members, so the direct
@@ -209,59 +220,87 @@ fn build_selecting(
     ));
     Ok((
         st.clone() as Arc<dyn Transport>,
-        st as Arc<dyn UdpTransport>,
+        st.clone() as Arc<dyn UdpTransport>,
+        Some(st as Arc<dyn PoolControl>),
     ))
 }
 
 #[cfg(not(feature = "multi-server"))]
+#[allow(clippy::type_complexity)]
 fn build_selecting(
     _config: &Config,
     _protector: Option<SocketProtector>,
-) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+) -> io::Result<(
+    Arc<dyn Transport>,
+    Arc<dyn UdpTransport>,
+    Option<Arc<dyn PoolControl>>,
+)> {
     Err(io::Error::other(
         "transport.servers is configured but spark was built without the `multi-server` feature",
     ))
 }
 
 /// Build the TCP + UDP transports from `config`: a tunnel client when `transport.server` is
-/// set, otherwise direct; both pinned to `transport.protect_interface` when configured.
+/// set, otherwise direct; both pinned to `transport.protect_interface` when configured. A thin
+/// wrapper over [`from_config_with_control`] that discards the (pool-only) control handle, for the
+/// callers that don't drive the server-selection UI.
 pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    from_config_with_control(config).map(|(tcp, udp, _control)| (tcp, udp))
+}
+
+/// Like [`from_config`], but also returns the runtime [`PoolControl`] handle when the config builds a
+/// multi-server pool (`Some` only for a `[[transport.servers]]` pool; `None` for direct/tunnel/AnyTLS/
+/// Samizdat/wasm). The fd-path tunnel registers this handle so the platform FFI can drive the
+/// server-selection UI (`fd_tunnel::servers_json`/`select_server`).
+#[allow(clippy::type_complexity)]
+pub fn from_config_with_control(
+    config: &Config,
+) -> io::Result<(
+    Arc<dyn Transport>,
+    Arc<dyn UdpTransport>,
+    Option<Arc<dyn PoolControl>>,
+)> {
     let protector = match config.transport.protect_interface.as_deref() {
         Some(name) => Some(SocketProtector::for_interface(name)?),
         None => None,
     };
     // A configured server pool supersedes the single-transport fields: build a latency-selecting
-    // transport over it.
+    // transport over it (the only path with a control handle).
     if !config.transport.servers.is_empty() {
         return build_selecting(config, protector);
     }
     // AnyTLS takes precedence over the plain `server` tunnel when configured.
     if let Some(anytls) = &config.transport.anytls {
         let wire = wire_plan_from_config(&config.transport.shaping);
-        return anytls_transport(anytls, protector, wire);
+        let (tcp, udp) = anytls_transport(anytls, protector, wire)?;
+        return Ok((tcp, udp, None));
     }
     // Samizdat (ADR 0007) — like AnyTLS, takes precedence over the plain `server` tunnel. It reuses
     // the shared `[transport.shaping]` plan to fragment the ClientHello (Geneva-style, on by default
     // in the Go client).
     if let Some(samizdat) = &config.transport.samizdat {
         let wire = wire_plan_from_config(&config.transport.shaping);
-        return samizdat_transport(samizdat, protector, wire);
+        let (tcp, udp) = samizdat_transport(samizdat, protector, wire)?;
+        return Ok((tcp, udp, None));
     }
     // Shadowsocks 2022 (ADR 0009) — like AnyTLS/Samizdat, takes precedence over the plain `server`
-    // tunnel. Not TLS, so it takes no shaping plan.
+    // tunnel. Not TLS, so it takes no shaping plan. Not a pool, so no control handle.
     if let Some(ss) = &config.transport.shadowsocks {
-        return shadowsocks_transport(ss, protector);
+        let (tcp, udp) = shadowsocks_transport(ss, protector)?;
+        return Ok((tcp, udp, None));
     }
     // Hysteria 2 (ADR 0010) — QUIC transport; like the others, takes precedence over the plain
-    // `server` tunnel. Not TLS, so no shaping plan.
+    // `server` tunnel. Not TLS, so no shaping plan. Not a pool, so no control handle.
     if let Some(hy2) = &config.transport.hysteria2 {
-        return hysteria2_transport(hy2, protector);
+        let (tcp, udp) = hysteria2_transport(hy2, protector)?;
+        return Ok((tcp, udp, None));
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
-        return wasm_transport(wasm, protector);
+        let (tcp, udp) = wasm_transport(wasm, protector)?;
+        return Ok((tcp, udp, None));
     }
-    Ok(match config.transport.server {
+    let (tcp, udp) = match config.transport.server {
         Some(server) => {
             let mut client = tcp_tunnel::client::TunnelClient::new(server);
             if let Some(p) = protector {
@@ -280,7 +319,8 @@ pub fn from_config(config: &Config) -> io::Result<(Arc<dyn Transport>, Arc<dyn U
                 direct as Arc<dyn UdpTransport>,
             )
         }
-    })
+    };
+    Ok((tcp, udp, None))
 }
 
 /// Build the AnyTLS transport (feature `anytls`) — TCP and UDP (sing UoT v2) over one session pool.
@@ -593,6 +633,103 @@ mod wasm_floor {
     }
 }
 
+/// Display metadata for a pool member, surfaced to the server-selection UI via [`PoolControl::snapshot`].
+/// All optional — sourced from the per-entry `[[transport.servers]]` location fields (Phase 2; the
+/// full `config_raw.json` shape is Phase 3). Does not affect transport behavior. Lives here (not in
+/// the feature-gated `select` module) so [`PoolControl`] has a uniform signature in every build.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerMeta {
+    /// Short tag/identifier, e.g. `"sfo3"`.
+    pub name: Option<String>,
+    /// Display country, e.g. `"United States"`.
+    pub country: Option<String>,
+    /// ISO 3166-1 alpha-2 code, e.g. `"US"` (the UI renders a flag from it).
+    pub country_code: Option<String>,
+    /// Display city, e.g. `"San Francisco"`.
+    pub city: Option<String>,
+}
+
+/// A point-in-time view of one pool member for the server-selection UI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberStatus {
+    /// Index into the pool (the stable handle the UI passes back to [`PoolControl::set_pin`]).
+    pub index: usize,
+    /// Display metadata (country/city/flag/name).
+    pub meta: ServerMeta,
+    /// Last measured probe latency in whole milliseconds; `None` if never measured or unhealthy.
+    pub latency_ms: Option<u64>,
+    /// Whether the last probe found this member healthy.
+    pub healthy: bool,
+    /// Whether new flows currently dial this member first (the pinned member, or — on auto — the
+    /// latency-ranked best).
+    pub is_current: bool,
+}
+
+/// Runtime control surface for a configured server pool, exposed to the platform FFI so the UI can
+/// read per-member status and pin a choice. Only the multi-server [`select::SelectingTransport`]
+/// implements it; non-pool transports have no control handle (`from_config_with_control` returns
+/// `None`).
+pub trait PoolControl: Send + Sync {
+    /// Per-member status snapshot, ordered by pool index.
+    fn snapshot(&self) -> Vec<MemberStatus>;
+    /// Pin which member new flows dial first: `Some(index)` overrides the latency ranking, `None`
+    /// returns to auto. New flows only; in-flight unaffected. Returns `true` if applied, `false` if
+    /// an out-of-range index was ignored (so callers can report a real failure instead of a no-op).
+    fn set_pin(&self, index: Option<usize>) -> bool;
+}
+
+/// JSON-escape a string for [`snapshot_to_json`] (only the characters JSON requires: quote,
+/// backslash, and C0 control chars). Hand-rolled so core needs no JSON dependency.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A JSON string literal for an optional value (`"..."` escaped, or `null`).
+fn json_opt_str(v: &Option<String>) -> String {
+    match v {
+        Some(s) => format!("\"{}\"", json_escape(s)),
+        None => "null".to_string(),
+    }
+}
+
+/// Serialize a member snapshot to the JSON array the UI consumes (camelCase keys), e.g.
+/// `[{"index":0,"name":"sfo3","country":"United States","countryCode":"US","city":"San Francisco",
+/// "latencyMs":19,"healthy":true,"isCurrent":true}]`. Hand-rolled to keep core JSON-dependency-free;
+/// the shape is small and fixed. Used by `fd_tunnel::servers_json` across the FFI.
+pub fn snapshot_to_json(members: &[MemberStatus]) -> String {
+    let objs: Vec<String> = members
+        .iter()
+        .map(|m| {
+            format!(
+                "{{\"index\":{},\"name\":{},\"country\":{},\"countryCode\":{},\"city\":{},\"latencyMs\":{},\"healthy\":{},\"isCurrent\":{}}}",
+                m.index,
+                json_opt_str(&m.meta.name),
+                json_opt_str(&m.meta.country),
+                json_opt_str(&m.meta.country_code),
+                json_opt_str(&m.meta.city),
+                m.latency_ms
+                    .map(|l| l.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+                m.healthy,
+                m.is_current,
+            )
+        })
+        .collect();
+    format!("[{}]", objs.join(","))
+}
+
 /// A way to obtain a bidirectional byte stream to a target address.
 ///
 /// The target is a [`SocketAddr`] because that is what the netstack surfaces (the original
@@ -701,6 +838,62 @@ struct DirectPacketSource(Arc<UdpSocket>);
 impl PacketSource for DirectPacketSource {
     async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.recv(buf).await
+    }
+}
+
+#[cfg(test)]
+mod snapshot_json_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_to_json_shapes_members_camelcase_with_nulls() {
+        let members = vec![
+            MemberStatus {
+                index: 0,
+                meta: ServerMeta {
+                    name: Some("sfo3".into()),
+                    country: Some("United States".into()),
+                    country_code: Some("US".into()),
+                    city: Some("San Francisco".into()),
+                },
+                latency_ms: Some(19),
+                healthy: true,
+                is_current: true,
+            },
+            MemberStatus {
+                index: 1,
+                meta: ServerMeta::default(),
+                latency_ms: None,
+                healthy: false,
+                is_current: false,
+            },
+        ];
+        assert_eq!(
+            snapshot_to_json(&members),
+            "[{\"index\":0,\"name\":\"sfo3\",\"country\":\"United States\",\"countryCode\":\"US\",\"city\":\"San Francisco\",\"latencyMs\":19,\"healthy\":true,\"isCurrent\":true},\
+             {\"index\":1,\"name\":null,\"country\":null,\"countryCode\":null,\"city\":null,\"latencyMs\":null,\"healthy\":false,\"isCurrent\":false}]"
+        );
+    }
+
+    #[test]
+    fn snapshot_to_json_escapes_quotes_and_backslashes() {
+        let members = vec![MemberStatus {
+            index: 0,
+            meta: ServerMeta {
+                city: Some("a\"b\\c".into()),
+                ..Default::default()
+            },
+            latency_ms: None,
+            healthy: false,
+            is_current: false,
+        }];
+        let json = snapshot_to_json(&members);
+        assert!(json.contains(r#""city":"a\"b\\c""#), "got: {json}");
+    }
+
+    #[test]
+    fn empty_snapshot_is_empty_json_array() {
+        assert_eq!(snapshot_to_json(&[]), "[]");
     }
 }
 
@@ -877,6 +1070,10 @@ mod pool_config_tests {
                         sni: None,
                     }),
                     callback_url: None,
+                    name: None,
+                    country: None,
+                    country_code: None,
+                    city: None,
                 }],
                 callback_url: Some("http://127.0.0.1:80/ok".into()),
                 ..Default::default()
@@ -897,6 +1094,10 @@ mod pool_config_tests {
                         sni: None,
                     }),
                     callback_url: None,
+                    name: None,
+                    country: None,
+                    country_code: None,
+                    city: None,
                 }],
                 callback_url: Some("https://canary.example/x".into()),
                 ..Default::default()
@@ -919,6 +1120,10 @@ mod pool_config_tests {
                         sni: None,
                     }),
                     callback_url: None,
+                    name: None,
+                    country: None,
+                    country_code: None,
+                    city: None,
                 }],
                 callback_url: None,
                 ..Default::default()

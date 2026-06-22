@@ -15,10 +15,31 @@ export interface SparkStatus {
   failOpen: boolean;
 }
 
+// One server in the latency-selected pool, as the server-selection screen renders it. Mirrors the
+// Rust `MemberStatus` JSON (see core `snapshot_to_json`): optional location metadata, last-probe
+// latency, health, and whether new flows currently dial it.
+export interface ServerInfo {
+  /** Stable pool index — the handle passed back to selectServer(). */
+  index: number;
+  name?: string | null;
+  country?: string | null;
+  countryCode?: string | null;
+  city?: string | null;
+  /** Last measured probe latency in ms; null if never measured / unhealthy. */
+  latencyMs?: number | null;
+  healthy: boolean;
+  /** Whether new flows currently dial this member first (pinned, or the auto-ranked best). */
+  isCurrent: boolean;
+}
+
 export interface SparkBackend {
   status(): Promise<SparkStatus>;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
+  /** The current pool's members (empty when no pool is active). */
+  servers(): Promise<ServerInfo[]>;
+  /** Pin a server by index, or pass null for auto (fastest). */
+  selectServer(index: number | null): Promise<void>;
 }
 
 // MockBackend simulates the service for U0: connect → connecting → (≈900ms) →
@@ -28,6 +49,18 @@ export interface SparkBackend {
 export class MockBackend implements SparkBackend {
   private state: ConnState = "disconnected";
   private timer: ReturnType<typeof setTimeout> | null = null;
+  // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
+  // fully usable at `npm run dev`; the TauriBackend reads the real pool over the NE channel.
+  private readonly pool: ServerInfo[] = [
+    { index: 0, name: "sfo3", country: "United States", countryCode: "US", city: "San Francisco", latencyMs: 19, healthy: true, isCurrent: false },
+    { index: 1, name: "nyc3", country: "United States", countryCode: "US", city: "New York", latencyMs: 71, healthy: true, isCurrent: false },
+    { index: 2, name: "lon1", country: "United Kingdom", countryCode: "GB", city: "London", latencyMs: 138, healthy: true, isCurrent: false },
+    { index: 3, name: "fra1", country: "Germany", countryCode: "DE", city: "Frankfurt", latencyMs: 149, healthy: true, isCurrent: false },
+    { index: 4, name: "sgp1", country: "Singapore", countryCode: "SG", city: "Singapore", latencyMs: 189, healthy: true, isCurrent: false },
+    { index: 5, name: "blr1", country: "India", countryCode: "IN", city: "Bangalore", latencyMs: 212, healthy: true, isCurrent: false },
+  ];
+  // Manual pin; null = auto (fastest healthy member is current).
+  private pinned: number | null = null;
 
   async status(): Promise<SparkStatus> {
     return {
@@ -52,5 +85,23 @@ export class MockBackend implements SparkBackend {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.state = "disconnected";
+  }
+
+  async servers(): Promise<ServerInfo[]> {
+    // Current = the pin if set, else the fastest healthy member.
+    const healthy = this.pool.filter((s) => s.healthy);
+    const fastest = healthy.reduce<number>(
+      (best, s) =>
+        best < 0 || (s.latencyMs ?? Infinity) < (this.pool[best].latencyMs ?? Infinity)
+          ? s.index
+          : best,
+      -1,
+    );
+    const current = this.pinned ?? fastest;
+    return this.pool.map((s) => ({ ...s, isCurrent: s.index === current }));
+  }
+
+  async selectServer(index: number | null): Promise<void> {
+    this.pinned = index;
   }
 }

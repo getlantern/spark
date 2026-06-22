@@ -11,14 +11,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::transport::probe::{CallbackUrl, ProbeOutcome};
-use crate::transport::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
+use crate::transport::{
+    BoxedPacketSink, BoxedPacketSource, MemberStatus, PoolControl, ServerMeta, Transport,
+    UdpTransport,
+};
 use crate::BoxedStream;
 
-/// A built pool member: its transport pair + the callback URL used to probe it.
+/// A built pool member: its transport pair, the callback URL used to probe it, and UI metadata.
 pub(crate) struct Member {
     pub(crate) transport: Arc<dyn Transport>,
     pub(crate) udp: Arc<dyn UdpTransport>,
     pub(crate) callback: CallbackUrl,
+    pub(crate) meta: ServerMeta,
 }
 
 impl Member {
@@ -26,19 +30,28 @@ impl Member {
         transport: Arc<dyn Transport>,
         udp: Arc<dyn UdpTransport>,
         callback: CallbackUrl,
+        meta: ServerMeta,
     ) -> Self {
         Member {
             transport,
             udp,
             callback,
+            meta,
         }
     }
 }
 
-/// Ranked selection: indices into the pool, best-first; empty = nothing healthy.
+/// Ranked selection plus the state `snapshot()`/`set_pin()` read, all under one mutex.
 #[derive(Default)]
 struct Selection {
+    /// Indices into the pool, best (lowest latency) first; empty = nothing healthy.
     ranked: Arc<[usize]>,
+    /// Latest probe outcome per member index (len == pool size once the first round runs); `None`
+    /// before a member has been measured. Drives the latency/health columns in `snapshot()`.
+    latest: Vec<Option<ProbeOutcome>>,
+    /// Manual pin: when `Some(i)`, new flows dial member `i` first regardless of latency ranking
+    /// (the user chose it); `None` = auto (follow `ranked`). See [`SelectingTransport::set_pin`].
+    pinned: Option<usize>,
 }
 
 /// A latency-selecting transport over a pool of [`Member`]s.
@@ -75,7 +88,11 @@ impl SelectingTransport {
         // without it, startup flows would fail open to direct (below) before the pool ever got a
         // chance to prove itself.
         let seeded: Arc<[usize]> = (0..members.len()).collect();
-        let selection = Arc::new(Mutex::new(Selection { ranked: seeded }));
+        let selection = Arc::new(Mutex::new(Selection {
+            ranked: seeded,
+            latest: vec![None; members.len()],
+            pinned: None,
+        }));
         let reprobe = Arc::new(tokio::sync::Notify::new());
         // Clamp to ≥1s so a misconfigured `probe_interval_secs = 0` can't spin the prober.
         let interval = interval.max(std::time::Duration::from_secs(1));
@@ -96,14 +113,22 @@ impl SelectingTransport {
         }
     }
 
-    /// Current best-first order (snapshot; lock not held across `.await`). Returns a cheap
-    /// `Arc` clone — a refcount bump, no heap allocation on the hot path.
+    /// The order in which `dial` tries members for a new flow: the pinned member first (if any),
+    /// then the latency-ranked rest. On auto (no pin) this is just the ranked order. Snapshot; the
+    /// lock is never held across `.await`. The common (unpinned) path returns a cheap `Arc` clone.
     fn order(&self) -> Arc<[usize]> {
-        self.selection
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .ranked
-            .clone()
+        let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+        match sel.pinned {
+            // Pin first, then the ranked rest (minus the pin). Even an unhealthy pin (not in
+            // `ranked`) is tried first — the user chose it — then we fail over to healthy members.
+            Some(p) if p < self.members.len() => {
+                let mut v = Vec::with_capacity(self.members.len());
+                v.push(p);
+                v.extend(sel.ranked.iter().copied().filter(|&i| i != p));
+                v.into()
+            }
+            _ => sel.ranked.clone(),
+        }
     }
 
     /// Move a failed member to the back of the ranking (so new flows stop trying it first) and wake
@@ -121,6 +146,71 @@ impl SelectingTransport {
             }
         }
         self.reprobe.notify_one();
+    }
+
+    /// A point-in-time view of every pool member — metadata, last-probe latency/health, and which
+    /// one new flows currently dial first — for the server-selection UI. Reads the live state under
+    /// the short selection lock (never across `.await`); ordered by pool index (the UI groups/sorts).
+    pub fn snapshot(&self) -> Vec<MemberStatus> {
+        let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+        // The member new flows dial first: the pin if valid, else the latency-ranked best.
+        let current = match sel.pinned {
+            Some(p) if p < self.members.len() => Some(p),
+            _ => sel.ranked.first().copied(),
+        };
+        (0..self.members.len())
+            .map(|i| {
+                let outcome = sel.latest.get(i).copied().flatten();
+                MemberStatus {
+                    index: i,
+                    meta: self.members[i].meta.clone(),
+                    // Latency is only meaningful for a healthy probe (`latency` is `Duration::MAX`
+                    // on failure), so report `None` unless healthy.
+                    latency_ms: outcome
+                        .filter(|o| o.healthy)
+                        .map(|o| o.latency.as_millis() as u64),
+                    healthy: outcome.map(|o| o.healthy).unwrap_or(false),
+                    is_current: Some(i) == current,
+                }
+            })
+            .collect()
+    }
+
+    /// Manually pin which member new flows dial first: `Some(index)` overrides the latency ranking
+    /// (the user's explicit choice), `None` returns to auto (latency-ranked). Out-of-range indices
+    /// are ignored (logged) so a stale UI handle can't silently flip the pool to auto. Takes effect
+    /// for **new** flows; in-flight connections are unaffected.
+    ///
+    /// Returns `true` when the pin was applied (auto, or a valid index) and `false` when an
+    /// out-of-range index was ignored — so the FFI/UI layer can distinguish a real pin from a no-op
+    /// instead of always reporting success.
+    pub fn set_pin(&self, index: Option<usize>) -> bool {
+        if let Some(i) = index {
+            if i >= self.members.len() {
+                tracing::warn!(
+                    index = i,
+                    pool = self.members.len(),
+                    "set_pin ignored: index out of range"
+                );
+                return false;
+            }
+        }
+        let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+        sel.pinned = index;
+        tracing::debug!(?index, "server selection pin updated");
+        true
+    }
+}
+
+/// The dyn-dispatched control surface the fd-path tunnel registers for the platform FFI. Delegates
+/// to the inherent methods (disambiguated by the explicit `SelectingTransport::` path so the trait
+/// method doesn't recurse into itself).
+impl PoolControl for SelectingTransport {
+    fn snapshot(&self) -> Vec<MemberStatus> {
+        SelectingTransport::snapshot(self)
+    }
+    fn set_pin(&self, index: Option<usize>) -> bool {
+        SelectingTransport::set_pin(self, index)
     }
 }
 
@@ -207,6 +297,15 @@ async fn prober_loop(
         .await;
         {
             let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
+            // Record the latest per-member outcome for `snapshot()` before re-ranking.
+            if sel.latest.len() != members.len() {
+                sel.latest = vec![None; members.len()];
+            }
+            for (i, o) in &outcomes {
+                if let Some(slot) = sel.latest.get_mut(*i) {
+                    *slot = Some(*o);
+                }
+            }
             sel.ranked = if measured {
                 next_order(&sel.ranked, &outcomes).into()
             } else {
@@ -304,6 +403,7 @@ mod tests {
                 port: 80,
                 path: "/".into(),
             },
+            meta: ServerMeta::default(),
         }
     }
 
@@ -397,6 +497,9 @@ mod tests {
         }
     }
     fn member(ok: bool) -> Member {
+        member_with_meta(ok, ServerMeta::default())
+    }
+    fn member_with_meta(ok: bool, meta: ServerMeta) -> Member {
         Member {
             transport: Arc::new(FakeT { ok }),
             udp: Arc::new(NoUdp),
@@ -406,6 +509,14 @@ mod tests {
                 port: 80,
                 path: "/".into(),
             },
+            meta,
+        }
+    }
+    fn meta(name: &str, cc: &str) -> ServerMeta {
+        ServerMeta {
+            name: Some(name.into()),
+            country_code: Some(cc.into()),
+            ..Default::default()
         }
     }
     // A selecting transport with a healthy direct fallback (TCP + UDP both succeed), so the tests
@@ -424,10 +535,13 @@ mod tests {
         direct_tcp: Arc<dyn Transport>,
         direct_udp: Arc<dyn UdpTransport>,
     ) -> SelectingTransport {
+        let n = members.len();
         SelectingTransport {
             members: Arc::new(members),
             selection: Arc::new(Mutex::new(Selection {
                 ranked: ranked.into(),
+                latest: vec![None; n],
+                pinned: None,
             })),
             reprobe: Arc::new(tokio::sync::Notify::new()),
             prober: Mutex::new(None),
@@ -484,6 +598,77 @@ mod tests {
         assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_ok()); // fails over 0→1
                                                                       // 0 was demoted to the back; the live order now leads with 1.
         assert_eq!(&*t.order(), &[1usize, 0][..]);
+    }
+
+    #[tokio::test]
+    async fn set_pin_overrides_then_releases_dial_order() {
+        // Auto order leads with the ranked best (1). Pinning 0 puts it first; unpinning restores auto.
+        let t = selecting(vec![member(true), member(true)], vec![1, 0]);
+        assert_eq!(&*t.order(), &[1usize, 0][..], "auto follows the ranking");
+        assert!(t.set_pin(Some(0)), "valid pin reports applied");
+        assert_eq!(
+            &*t.order(),
+            &[0usize, 1][..],
+            "pin leads, ranked rest follows"
+        );
+        assert!(t.set_pin(None), "unpin (auto) reports applied");
+        assert_eq!(&*t.order(), &[1usize, 0][..], "unpin returns to auto");
+    }
+
+    #[tokio::test]
+    async fn set_pin_ignores_out_of_range() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        assert!(
+            !t.set_pin(Some(99)), // no such member → ignored, reports not-applied
+            "out-of-range pin reports failure, not a silent success"
+        );
+        assert_eq!(&*t.order(), &[0usize, 1][..]);
+        assert!(t.snapshot()[0].is_current, "still on the ranked best");
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_metadata_latency_health_and_current() {
+        let t = selecting(
+            vec![
+                member_with_meta(true, meta("sfo3", "US")),
+                member_with_meta(true, meta("lon1", "GB")),
+            ],
+            vec![0, 1],
+        );
+        // Seed the latest probe outcomes the prober would normally record.
+        {
+            let mut sel = t.selection.lock().unwrap();
+            sel.latest = vec![
+                Some(ProbeOutcome {
+                    latency: Duration::from_millis(20),
+                    healthy: true,
+                }),
+                Some(ProbeOutcome {
+                    latency: Duration::MAX,
+                    healthy: false,
+                }),
+            ];
+        }
+        let snap = t.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].meta.name.as_deref(), Some("sfo3"));
+        assert_eq!(snap[0].meta.country_code.as_deref(), Some("US"));
+        assert_eq!(snap[0].latency_ms, Some(20));
+        assert!(snap[0].healthy);
+        assert!(snap[0].is_current, "ranked best is current on auto");
+        // Unhealthy member: latency is suppressed (Duration::MAX is not a real measurement).
+        assert_eq!(snap[1].latency_ms, None);
+        assert!(!snap[1].healthy);
+        assert!(!snap[1].is_current);
+    }
+
+    #[tokio::test]
+    async fn snapshot_is_current_follows_pin() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        t.set_pin(Some(1));
+        let snap = t.snapshot();
+        assert!(!snap[0].is_current);
+        assert!(snap[1].is_current, "the pinned member is current");
     }
 
     #[test]

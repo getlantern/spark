@@ -142,9 +142,9 @@ pub mod ne_spike {
     pub fn ui_state(raw: isize) -> &'static str {
         match raw {
             3 => "connected",
-            2 | 4 => "connecting",  // connecting / reasserting
-            -2 | -3 => "failed",    // -2 = status load timed out, -3 = loadAll error
-            _ => "disconnected",    // invalid / disconnected / disconnecting; -1 = no managers
+            2 | 4 => "connecting", // connecting / reasserting
+            -2 | -3 => "failed",   // -2 = status load timed out, -3 = loadAll error
+            _ => "disconnected",   // invalid / disconnected / disconnecting; -1 = no managers
         }
     }
 
@@ -156,7 +156,9 @@ pub mod ne_spike {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject};
     use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
-    use objc2_foundation::{ns_string, NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_foundation::{
+        ns_string, NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString,
+    };
     use objc2_network_extension::NETunnelProviderProtocol;
     use objc2_system_extensions::{
         OSSystemExtensionManager, OSSystemExtensionProperties, OSSystemExtensionReplacementAction,
@@ -214,17 +216,31 @@ pub mod ne_spike {
             fn did_finish(
                 &self,
                 _request: &OSSystemExtensionRequest,
-                _result: OSSystemExtensionRequestResult,
+                result: OSSystemExtensionRequestResult,
             ) {
+                // `WillCompleteAfterReboot` means the replacement extension is only *staged*: the
+                // previously-active version keeps running until a reboot, and an already-running
+                // provider is never hot-swapped. Reporting Ok here is exactly what let stale versions
+                // pile up as `terminated_waiting_to_uninstall_on_reboot` while `connect` ran against
+                // the wrong binary (cost us a full debugging day, 2026-06-22). Surface it instead so
+                // the UI can tell the user to reboot rather than silently "succeeding".
+                if result == OSSystemExtensionRequestResult::WillCompleteAfterReboot {
+                    let _ = self.ivars().tx.send(Err(
+                        "the updated Spark network extension needs a restart to activate — quit \
+                         Spark, reboot, then open Spark and tap Connect again"
+                            .to_owned(),
+                    ));
+                    return;
+                }
                 let _ = self.ivars().tx.send(Ok(()));
             }
 
             #[unsafe(method(request:didFailWithError:))]
             fn did_fail(&self, _request: &OSSystemExtensionRequest, error: &NSError) {
-                let _ = self
-                    .ivars()
-                    .tx
-                    .send(Err(format!("activation failed: {}", error.localizedDescription())));
+                let _ = self.ivars().tx.send(Err(format!(
+                    "activation failed: {}",
+                    error.localizedDescription()
+                )));
             }
         }
     );
@@ -258,11 +274,15 @@ pub mod ne_spike {
         // Wait for a terminal callback. `request`/`delegate` stay alive on this frame
         // for the whole window so a pending approval can still complete (dropping the
         // request cancels it). Generous timeout to let the user approve in Settings.
-        let outcome = rx.recv_timeout(Duration::from_secs(150)).unwrap_or_else(|_| {
-            Err("system extension approval timed out — approve Spark in System \
+        let outcome = rx
+            .recv_timeout(Duration::from_secs(150))
+            .unwrap_or_else(|_| {
+                Err(
+                    "system extension approval timed out — approve Spark in System \
                  Settings → General → Login Items & Extensions, then tap Connect again"
-                .to_owned())
-        });
+                        .to_owned(),
+                )
+            });
         drop(request);
         drop(delegate);
         outcome
@@ -288,7 +308,10 @@ pub mod ne_spike {
                 // / profile) — surface it instead of silently falling back to a fresh
                 // manager and hitting a confusing downstream save/start timeout.
                 if !e.is_null() {
-                    let _ = tx.send(Err(format!("loadAllFromPreferences failed: {}", err_str(e))));
+                    let _ = tx.send(Err(format!(
+                        "loadAllFromPreferences failed: {}",
+                        err_str(e)
+                    )));
                     return;
                 }
                 let mgr: Retained<NETunnelProviderManager> = unsafe {
@@ -338,6 +361,12 @@ pub mod ne_spike {
                         }
                         let r = unsafe { mgr_start.connection().startVPNTunnelAndReturnError() }
                             .map_err(|e| format!("start failed: {e}"));
+                        // Retain the started manager so the control channel reuses this exact session
+                        // instance for sendProviderMessage (hypothesis #1).
+                        if r.is_ok() {
+                            store_started_manager(&mgr_start);
+                            ne_debug("[connect] retained started manager for messaging");
+                        }
                         let _ = tx_load.send(r);
                     });
                     unsafe { mgr_save.loadFromPreferencesWithCompletionHandler(&load_block) };
@@ -380,6 +409,152 @@ pub mod ne_spike {
         unsafe { NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler(&h) };
         rx.recv_timeout(Duration::from_secs(10))
             .map_err(|_| "disconnect timed out".to_owned())?
+    }
+
+    /// The `NETunnelProviderManager` that started the running tunnel, retained so the control channel
+    /// messages the SAME session instance instead of a freshly `loadAll`-ed one (hypothesis #1: the
+    /// messaging channel is bound to the started manager). Only ever *used* on the main dispatch
+    /// queue; the `Send` impl is sound because moving it across threads only transfers an
+    /// atomically-refcounted handle, and the object's methods are called solely in main-queue work.
+    struct MainManager(Retained<NETunnelProviderManager>);
+    // SAFETY: see the doc above — used only on the main queue; cross-thread moves transfer a handle.
+    unsafe impl Send for MainManager {}
+
+    fn started_manager() -> &'static std::sync::Mutex<Option<MainManager>> {
+        static M: std::sync::OnceLock<std::sync::Mutex<Option<MainManager>>> =
+            std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(None))
+    }
+
+    /// Retain the manager that just started the tunnel (called from `connect` on the main queue).
+    fn store_started_manager(mgr: &Retained<NETunnelProviderManager>) {
+        *started_manager().lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(MainManager(mgr.clone()));
+    }
+
+    /// A cloned `Send` handle to the started manager for use in a main-queue closure, or `None` if
+    /// the tunnel wasn't started in this app session. Clones (retains) the stored handle and leaves it
+    /// in place — it does NOT `take` it out of the slot (the slot is cleared on disconnect).
+    fn clone_started_manager() -> Option<MainManager> {
+        started_manager()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|m| MainManager(m.0.clone()))
+    }
+
+    /// Diagnostic trace to `~/spark-ne-debug.log` — the unified log isn't readable from the headless
+    /// tooling context, so this gives a file the host can read while debugging the NE channel.
+    /// Off by default (no file written); set `SPARK_NE_DEBUG=1` to enable. Best-effort, append-only.
+    /// The call sites are deliberately kept — this trace is what localized the `application-identifier`
+    /// IPC failure (see Release.entitlements), so it earns its keep behind the flag.
+    pub fn ne_debug(msg: &str) {
+        if std::env::var_os("SPARK_NE_DEBUG").is_none() {
+            return;
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            use std::io::Write;
+            let path = std::path::Path::new(&home).join("spark-ne-debug.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(f, "{msg}");
+            }
+        }
+    }
+
+    /// Send a control message to the running tunnel provider via `sendProviderMessage` and return its
+    /// reply (a UTF-8 JSON string). The provider's `handleAppMessage` (spark-apple) understands
+    /// `{"cmd":"servers"}` and `{"cmd":"select","index":N}`. Reuses the manager retained at
+    /// `connect` (so messaging targets the started session, not a fresh `loadAll` one) and dispatches
+    /// the send onto a fresh MAIN-queue turn; this (worker) thread then waits on a channel. MUST be
+    /// called off the main thread (the Tauri commands are `command(async)`). Returns an error if the
+    /// tunnel wasn't started in this app session (no retained manager).
+    pub fn send_provider_message(message: String) -> Result<String, String> {
+        // `Retained`, `RcBlock`, `NSArray`, `NSError`, `Duration`, `err_str` are in scope from the
+        // module-level imports; `NSData`/`NETunnelProviderSession` are specific to this call.
+        use objc2_foundation::NSData;
+        use objc2_network_extension::NETunnelProviderSession;
+
+        ne_debug(&format!("[send] start msg={message}"));
+        // Hypothesis #1: reuse the manager that *started* the tunnel rather than a fresh `loadAll`
+        // instance — the messaging channel appears bound to the started session.
+        let Some(mgr) = clone_started_manager() else {
+            ne_debug("[send] no retained manager (connect this app session first)");
+            return Err("no active tunnel manager — connect first".to_owned());
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        // Hypothesis #2: run the send on a fresh MAIN-queue turn, not synchronously inside a
+        // `loadAll` completion. `MainManager` (`Send`) is only ever touched here, on the main queue.
+        DispatchQueue::main().exec_async(move || {
+            // Capture the whole `MainManager` (which is `Send`), not just its inner `Retained` field
+            // — edition-2021 disjoint closure captures would otherwise grab the non-`Send` field and
+            // fail the `exec_async` `Send` bound.
+            let mgr = mgr;
+            let connection = unsafe { mgr.0.connection() };
+            let status = unsafe { connection.status() }.0;
+            ne_debug(&format!("[send] (main) connection status={status}"));
+            let session = match connection.downcast::<NETunnelProviderSession>() {
+                Ok(s) => {
+                    ne_debug("[send] (main) downcast NETunnelProviderSession ok");
+                    s
+                }
+                Err(_) => {
+                    ne_debug("[send] (main) downcast FAILED");
+                    let _ = tx.send(Err("tunnel connection is not a provider session".to_owned()));
+                    return;
+                }
+            };
+            let data = NSData::with_bytes(message.as_bytes());
+            let tx_resp = tx.clone();
+            let handler = RcBlock::new(move |resp: *mut NSData| {
+                // A null reply means the provider sent no response — an unrecognized command, or a
+                // control channel that isn't actually delivering (the exact failure mode this PR
+                // fixed: entitlement rejection surfaced as responseHandler(nil) while ok=true).
+                // Surface it as an error rather than a silent empty-string success, so callers don't
+                // parse "" as JSON or mask a dead channel.
+                // SAFETY: `resp` is the framework-provided reply NSData (or null = no reply).
+                if resp.is_null() {
+                    let _ = tx_resp.send(Err("provider sent no response".to_owned()));
+                    return;
+                }
+                let bytes = unsafe { &*resp }.to_vec();
+                let s = String::from_utf8_lossy(&bytes).into_owned();
+                let _ = tx_resp.send(Ok(s));
+            });
+            let mut err: Option<Retained<NSError>> = None;
+            // SAFETY: standard NE control API; NE copies the escaping response block.
+            let ok = unsafe {
+                session.sendProviderMessage_returnError_responseHandler(
+                    &data,
+                    Some(&mut err),
+                    Some(&handler),
+                )
+            };
+            let errstr = err
+                .as_ref()
+                .map(|e| e.localizedDescription().to_string())
+                .unwrap_or_default();
+            ne_debug(&format!(
+                "[send] (main) sendProviderMessage ok={ok} err='{errstr}'"
+            ));
+            if !ok {
+                let msg = if errstr.is_empty() {
+                    "sendProviderMessage failed".to_owned()
+                } else {
+                    errstr
+                };
+                let _ = tx.send(Err(msg));
+            }
+            // On success, the response handler sends the reply.
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| Err("provider message timed out".to_owned()));
+        ne_debug(&format!("[send] result={result:?}"));
+        result
     }
 }
 
@@ -455,6 +630,71 @@ fn spark_disconnect() -> Result<(), String> {
     Err("disconnect unsupported on this platform".to_owned())
 }
 
+// Server selection (P2.3): query/choose pool members over the NE control channel
+// (`sendProviderMessage` → the provider's `handleAppMessage` → the Rust core's pool control).
+// Both run off-main (`command(async)`) for the same main-queue-completion reason as status/connect.
+
+/// The live server pool as a JSON array (see `spark_servers_json`/`snapshot_to_json`): one object
+/// per member with index, location metadata, `latencyMs`, `healthy`, `isCurrent`. Empty array when
+/// no pool is active (direct / single relay / AnyTLS).
+#[cfg(target_os = "macos")]
+#[tauri::command(async)]
+fn spark_servers() -> Result<Vec<config::ServerInfo>, String> {
+    // Static list from config first, so the screen shows the pool even before connecting (the list
+    // is config data, not tunnel state).
+    let mut list = config::servers_from_config();
+    // Overlay live latency / health / current — but only when actually connected, else
+    // sendProviderMessage to a down session just burns the 5s timeout on every poll.
+    let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
+    if ne_spike::ui_state(raw) == "connected" {
+        if let Ok(json) = ne_spike::send_provider_message("{\"cmd\":\"servers\"}".to_owned()) {
+            if let Ok(live) = serde_json::from_str::<Vec<config::ServerInfo>>(&json) {
+                if list.is_empty() {
+                    list = live; // no static config (e.g. base64) → use the live pool outright
+                } else {
+                    for l in &live {
+                        if let Some(s) = list.get_mut(l.index) {
+                            s.latency_ms = l.latency_ms;
+                            s.healthy = l.healthy;
+                            s.is_current = l.is_current;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(list)
+}
+
+/// Pin which pool member new flows use: `index >= 0` pins that member; `index < 0` selects auto
+/// (latency-ranked). Errors if the selection wasn't applied (e.g. no active pool).
+#[cfg(target_os = "macos")]
+#[tauri::command(async)]
+fn spark_select_server(index: i32) -> Result<(), String> {
+    let resp =
+        ne_spike::send_provider_message(format!("{{\"cmd\":\"select\",\"index\":{index}}}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("invalid select response: {e}"))?;
+    if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err("server selection was not applied (no active pool?)".to_owned())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn spark_servers() -> Result<Vec<config::ServerInfo>, String> {
+    // No NE channel off-macOS, but the static config list is still useful.
+    Ok(config::servers_from_config())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn spark_select_server(_index: i32) -> Result<(), String> {
+    Err("server selection unsupported on this platform".to_owned())
+}
+
 // U1b-2a: the UI now drives a real SparkBackend command surface — `spark_status`
 // reads the live NE connection state; `spark_connect`/`spark_disconnect` resolve
 // config and report honest "pending" until the U1b-2b write path lands. (The U1a
@@ -466,7 +706,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             spark_status,
             spark_connect,
-            spark_disconnect
+            spark_disconnect,
+            spark_servers,
+            spark_select_server
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
