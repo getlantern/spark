@@ -892,4 +892,34 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn parses_server_location_metadata() {
+        // The per-entry location fields (Phase 2) sit alongside the flattened spec. This also guards
+        // that TunnelConfig's deny_unknown_fields doesn't reject them (they're consumed by
+        // ServerEntry, not the flattened spec).
+        let toml = "\
+[transport]
+callback_url = \"http://127.0.0.1/ok\"
+
+[[transport.servers]]
+kind = \"tunnel\"
+server = \"144.126.208.126:9000\"
+callback_url = \"http://144.126.208.126:8080/\"
+name = \"sfo3\"
+country = \"United States\"
+country_code = \"US\"
+city = \"San Francisco\"
+";
+        let c = Config::from_toml_str(toml).unwrap();
+        let s = &c.transport.servers[0];
+        assert!(matches!(s.spec, ServerSpec::Tunnel(_)));
+        assert_eq!(s.name.as_deref(), Some("sfo3"));
+        assert_eq!(s.country.as_deref(), Some("United States"));
+        assert_eq!(s.country_code.as_deref(), Some("US"));
+        assert_eq!(s.city.as_deref(), Some("San Francisco"));
+        // The optional fields round-trip through serialization.
+        let back = Config::from_toml_str(&c.to_toml_string().unwrap()).unwrap();
+        assert_eq!(c, back);
+    }
 }
