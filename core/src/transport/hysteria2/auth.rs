@@ -180,21 +180,164 @@ fn malformed(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-/// Read a `prefix_bits`-bit-prefix string literal (RFC 9204 §4.1.2): one H bit (which we
-/// reject when set — we don't implement Huffman) followed by the length, then the bytes.
-/// The H bit is the most-significant bit of the first byte, i.e. bit `1 << prefix_bits`.
+/// Read a `prefix_bits`-bit-prefix string literal (RFC 9204 §4.1.2): one H bit followed by the
+/// length, then the bytes. When the H bit is set the bytes are RFC 7541 Huffman-encoded and are
+/// decoded via [`huffman_decode`]; otherwise they are taken verbatim. The H bit is the
+/// most-significant bit of the first byte, i.e. bit `1 << prefix_bits`.
 fn read_string_literal(buf: &[u8], prefix_bits: u8) -> io::Result<(Vec<u8>, &[u8])> {
     let &first = buf.first().ok_or_else(|| eof("string literal: empty"))?;
-    if first & (1 << prefix_bits) != 0 {
-        return Err(malformed("string literal: Huffman not supported"));
-    }
+    let huffman = first & (1 << prefix_bits) != 0;
     let (len, rest) =
         read_prefixed_int(buf, prefix_bits).ok_or_else(|| eof("string literal: bad length"))?;
     let len = len as usize;
     let bytes = rest
         .get(..len)
         .ok_or_else(|| eof("string literal: truncated"))?;
-    Ok((bytes.to_vec(), &rest[len..]))
+    let value = if huffman {
+        huffman_decode(bytes)?
+    } else {
+        bytes.to_vec()
+    };
+    Ok((value, &rest[len..]))
+}
+
+/// The RFC 7541 Appendix B Huffman code table for symbols `0..=255`, as `(code, bits)` pairs
+/// indexed by the symbol's octet value. `code` is the Huffman code aligned to its LSB (the
+/// "code as hex" column); `bits` is its length (the "len" column). The EOS symbol (index 256,
+/// the 30-bit all-ones code `0x3FFF_FFFF`) is intentionally absent: it is never an emittable
+/// symbol — it appears only as trailing padding (handled in [`huffman_decode`]).
+///
+/// Transcribed verbatim from RFC 7541 Appendix B; the canonical-vector unit tests guard against
+/// any transcription error.
+#[rustfmt::skip]
+const HUFFMAN_TABLE: [(u32, u8); 256] = [
+    (0x1ff8, 13), (0x7fffd8, 23), (0xfffffe2, 28), (0xfffffe3, 28),
+    (0xfffffe4, 28), (0xfffffe5, 28), (0xfffffe6, 28), (0xfffffe7, 28),
+    (0xfffffe8, 28), (0xffffea, 24), (0x3ffffffc, 30), (0xfffffe9, 28),
+    (0xfffffea, 28), (0x3ffffffd, 30), (0xfffffeb, 28), (0xfffffec, 28),
+    (0xfffffed, 28), (0xfffffee, 28), (0xfffffef, 28), (0xffffff0, 28),
+    (0xffffff1, 28), (0xffffff2, 28), (0x3ffffffe, 30), (0xffffff3, 28),
+    (0xffffff4, 28), (0xffffff5, 28), (0xffffff6, 28), (0xffffff7, 28),
+    (0xffffff8, 28), (0xffffff9, 28), (0xffffffa, 28), (0xffffffb, 28),
+    (0x14, 6), (0x3f8, 10), (0x3f9, 10), (0xffa, 12),
+    (0x1ff9, 13), (0x15, 6), (0xf8, 8), (0x7fa, 11),
+    (0x3fa, 10), (0x3fb, 10), (0xf9, 8), (0x7fb, 11),
+    (0xfa, 8), (0x16, 6), (0x17, 6), (0x18, 6),
+    (0x0, 5), (0x1, 5), (0x2, 5), (0x19, 6),
+    (0x1a, 6), (0x1b, 6), (0x1c, 6), (0x1d, 6),
+    (0x1e, 6), (0x1f, 6), (0x5c, 7), (0xfb, 8),
+    (0x7ffc, 15), (0x20, 6), (0xffb, 12), (0x3fc, 10),
+    (0x1ffa, 13), (0x21, 6), (0x5d, 7), (0x5e, 7),
+    (0x5f, 7), (0x60, 7), (0x61, 7), (0x62, 7),
+    (0x63, 7), (0x64, 7), (0x65, 7), (0x66, 7),
+    (0x67, 7), (0x68, 7), (0x69, 7), (0x6a, 7),
+    (0x6b, 7), (0x6c, 7), (0x6d, 7), (0x6e, 7),
+    (0x6f, 7), (0x70, 7), (0x71, 7), (0x72, 7),
+    (0xfc, 8), (0x73, 7), (0xfd, 8), (0x1ffb, 13),
+    (0x7fff0, 19), (0x1ffc, 13), (0x3ffc, 14), (0x22, 6),
+    (0x7ffd, 15), (0x3, 5), (0x23, 6), (0x4, 5),
+    (0x24, 6), (0x5, 5), (0x25, 6), (0x26, 6),
+    (0x27, 6), (0x6, 5), (0x74, 7), (0x75, 7),
+    (0x28, 6), (0x29, 6), (0x2a, 6), (0x7, 5),
+    (0x2b, 6), (0x76, 7), (0x2c, 6), (0x8, 5),
+    (0x9, 5), (0x2d, 6), (0x77, 7), (0x78, 7),
+    (0x79, 7), (0x7a, 7), (0x7b, 7), (0x7ffe, 15),
+    (0x7fc, 11), (0x3ffd, 14), (0x1ffd, 13), (0xffffffc, 28),
+    (0xfffe6, 20), (0x3fffd2, 22), (0xfffe7, 20), (0xfffe8, 20),
+    (0x3fffd3, 22), (0x3fffd4, 22), (0x3fffd5, 22), (0x7fffd9, 23),
+    (0x3fffd6, 22), (0x7fffda, 23), (0x7fffdb, 23), (0x7fffdc, 23),
+    (0x7fffdd, 23), (0x7fffde, 23), (0xffffeb, 24), (0x7fffdf, 23),
+    (0xffffec, 24), (0xffffed, 24), (0x3fffd7, 22), (0x7fffe0, 23),
+    (0xffffee, 24), (0x7fffe1, 23), (0x7fffe2, 23), (0x7fffe3, 23),
+    (0x7fffe4, 23), (0x1fffdc, 21), (0x3fffd8, 22), (0x7fffe5, 23),
+    (0x3fffd9, 22), (0x7fffe6, 23), (0x7fffe7, 23), (0xffffef, 24),
+    (0x3fffda, 22), (0x1fffdd, 21), (0xfffe9, 20), (0x3fffdb, 22),
+    (0x3fffdc, 22), (0x7fffe8, 23), (0x7fffe9, 23), (0x1fffde, 21),
+    (0x7fffea, 23), (0x3fffdd, 22), (0x3fffde, 22), (0xfffff0, 24),
+    (0x1fffdf, 21), (0x3fffdf, 22), (0x7fffeb, 23), (0x7fffec, 23),
+    (0x1fffe0, 21), (0x1fffe1, 21), (0x3fffe0, 22), (0x1fffe2, 21),
+    (0x7fffed, 23), (0x3fffe1, 22), (0x7fffee, 23), (0x7fffef, 23),
+    (0xfffea, 20), (0x3fffe2, 22), (0x3fffe3, 22), (0x3fffe4, 22),
+    (0x7ffff0, 23), (0x3fffe5, 22), (0x3fffe6, 22), (0x7ffff1, 23),
+    (0x3ffffe0, 26), (0x3ffffe1, 26), (0xfffeb, 20), (0x7fff1, 19),
+    (0x3fffe7, 22), (0x7ffff2, 23), (0x3fffe8, 22), (0x1ffffec, 25),
+    (0x3ffffe2, 26), (0x3ffffe3, 26), (0x3ffffe4, 26), (0x7ffffde, 27),
+    (0x7ffffdf, 27), (0x3ffffe5, 26), (0xfffff1, 24), (0x1ffffed, 25),
+    (0x7fff2, 19), (0x1fffe3, 21), (0x3ffffe6, 26), (0x7ffffe0, 27),
+    (0x7ffffe1, 27), (0x3ffffe7, 26), (0x7ffffe2, 27), (0xfffff2, 24),
+    (0x1fffe4, 21), (0x1fffe5, 21), (0x3ffffe8, 26), (0x3ffffe9, 26),
+    (0xffffffd, 28), (0x7ffffe3, 27), (0x7ffffe4, 27), (0x7ffffe5, 27),
+    (0xfffec, 20), (0xfffff3, 24), (0xfffed, 20), (0x1fffe6, 21),
+    (0x3fffe9, 22), (0x1fffe7, 21), (0x1fffe8, 21), (0x7ffff3, 23),
+    (0x3fffea, 22), (0x3fffeb, 22), (0x1ffffee, 25), (0x1ffffef, 25),
+    (0xfffff4, 24), (0xfffff5, 24), (0x3ffffea, 26), (0x7ffff4, 23),
+    (0x3ffffeb, 26), (0x7ffffe6, 27), (0x3ffffec, 26), (0x3ffffed, 26),
+    (0x7ffffe7, 27), (0x7ffffe8, 27), (0x7ffffe9, 27), (0x7ffffea, 27),
+    (0x7ffffeb, 27), (0xffffffe, 28), (0x7ffffec, 27), (0x7ffffed, 27),
+    (0x7ffffee, 27), (0x7ffffef, 27), (0x7fffff0, 27), (0x3ffffee, 26),
+];
+
+/// The EOS symbol's code length (RFC 7541 Appendix B): the 30-bit all-ones code `0x3FFF_FFFF`.
+/// Trailing padding in a Huffman-coded string is, per RFC 7541 §5.2, the most-significant bits
+/// of this code, so valid padding is fewer than 8 all-ones bits.
+const HUFFMAN_MAX_CODE_BITS: u8 = 30;
+
+/// Decode an RFC 7541 §5.2 / Appendix B Huffman-coded byte string.
+///
+/// `input` is the raw Huffman bytes (already length-bounded by the caller's QPACK length field —
+/// this function never allocates from an attacker-controlled length). Bits are consumed
+/// most-significant-first across the input. The function accumulates `(code, len)` bit by bit and
+/// emits a symbol as soon as the accumulated code matches a table entry, then resets.
+///
+/// Because this decodes untrusted server input it is strictly bounded and never panics:
+///
+/// - An accumulated prefix that reaches [`HUFFMAN_MAX_CODE_BITS`] without matching any symbol is
+///   rejected (`huffman: invalid code`) — no real code is longer.
+/// - The EOS symbol (the 30-bit all-ones code) decoded as a value is rejected
+///   (`huffman: EOS in input`); per RFC 7541 §5.2 EOS must appear only as padding.
+/// - Any leftover bits after the final symbol are padding and MUST be fewer than 8 bits and all
+///   `1`s (a strict prefix of the EOS code); otherwise rejected (`huffman: bad padding`).
+///
+/// # Examples
+///
+/// ```ignore
+/// // RFC 7541 C.6.1: the Huffman coding of ":status" value "302".
+/// assert_eq!(huffman_decode(&[0x64, 0x02]).unwrap(), b"302");
+/// ```
+fn huffman_decode(input: &[u8]) -> io::Result<Vec<u8>> {
+    // (len, code) -> symbol. Input header values are short, so building this per call is fine.
+    let lookup: std::collections::HashMap<(u8, u32), u8> = HUFFMAN_TABLE
+        .iter()
+        .enumerate()
+        .map(|(sym, &(code, bits))| ((bits, code), sym as u8))
+        .collect();
+
+    let mut out = Vec::with_capacity(input.len() * 8 / 5 + 1);
+    let mut code: u32 = 0;
+    let mut bits: u8 = 0;
+    for &byte in input {
+        for shift in (0..8).rev() {
+            let bit = (byte >> shift) & 1;
+            code = (code << 1) | bit as u32;
+            bits += 1;
+            if bits == HUFFMAN_MAX_CODE_BITS && code == (1 << HUFFMAN_MAX_CODE_BITS) - 1 {
+                // The full EOS code decoded as a symbol is forbidden (RFC 7541 §5.2).
+                return Err(malformed("huffman: EOS in input"));
+            }
+            if let Some(&sym) = lookup.get(&(bits, code)) {
+                out.push(sym);
+                code = 0;
+                bits = 0;
+            } else if bits >= HUFFMAN_MAX_CODE_BITS {
+                return Err(malformed("huffman: invalid code"));
+            }
+        }
+    }
+    // Whatever bits remain are padding: must be < 8 bits and all 1s (a prefix of EOS).
+    if bits >= 8 || (bits > 0 && code != (1 << bits) - 1) {
+        return Err(malformed("huffman: bad padding"));
+    }
+    Ok(out)
 }
 
 /// One decoded field line: its name (resolved if it came from the static table) and value.
@@ -359,6 +502,79 @@ pub fn decode_auth_status(headers_frame: &[u8]) -> io::Result<u16> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn huffman_decode_rfc_vectors() {
+        // Canonical RFC 7541 Appendix C vectors: huffman_decode(<bytes>) == <string>.
+        let cases: &[(&[u8], &str)] = &[
+            // C.6.1 :status value.
+            (&[0x64, 0x02], "302"),
+            // C.6.1 cache-control value.
+            (&[0xae, 0xc3, 0x77, 0x1a, 0x4b], "private"),
+            // C.4.1 :authority value.
+            (
+                &[
+                    0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff,
+                ],
+                "www.example.com",
+            ),
+            // C.4.2 cache-control value.
+            (&[0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf], "no-cache"),
+            // C.4.3 custom header name.
+            (
+                &[0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f],
+                "custom-key",
+            ),
+            // C.4.3 custom header value.
+            (
+                &[0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xb8, 0xe8, 0xb4, 0xbf],
+                "custom-value",
+            ),
+            // C.6.2 content-encoding value.
+            (&[0x9b, 0xd9, 0xab], "gzip"),
+            // C.6.1 date value.
+            (
+                &[
+                    0xd0, 0x7a, 0xbe, 0x94, 0x10, 0x54, 0xd4, 0x44, 0xa8, 0x20, 0x05, 0x95, 0x04,
+                    0x0b, 0x81, 0x66, 0xe0, 0x82, 0xa6, 0x2d, 0x1b, 0xff,
+                ],
+                "Mon, 21 Oct 2013 20:13:21 GMT",
+            ),
+            // C.4.1 location value (multi-symbol).
+            (
+                &[
+                    0x9d, 0x29, 0xad, 0x17, 0x18, 0x63, 0xc7, 0x8f, 0x0b, 0x97, 0xc8, 0xe9, 0xae,
+                    0x82, 0xae, 0x43, 0xd3,
+                ],
+                "https://www.example.com",
+            ),
+        ];
+        for (bytes, expected) in cases {
+            let got = huffman_decode(bytes).expect("RFC vector must decode");
+            assert_eq!(got, expected.as_bytes(), "decoding {bytes:02x?}");
+        }
+    }
+
+    #[test]
+    fn huffman_decode_rejects_zero_byte_padding() {
+        // A single zero byte is 8 zero bits: not valid padding (padding must be < 8 bits, all 1s).
+        assert!(huffman_decode(&[0x00]).is_err());
+    }
+
+    #[test]
+    fn huffman_decode_empty_input_is_empty_string() {
+        // Empty input decodes to an empty string (no leftover bits, no padding to validate).
+        assert_eq!(huffman_decode(&[]).unwrap(), b"");
+    }
+
+    #[test]
+    fn read_string_literal_decodes_huffman_value() {
+        // H bit set via prefix_bits=7 -> 0x80 | len(2) = 0x82, then the "302" Huffman bytes.
+        let buf = [0x82, 0x64, 0x02];
+        let (value, rest) = read_string_literal(&buf, 7).expect("huffman literal must decode");
+        assert_eq!(value, b"302".to_vec());
+        assert!(rest.is_empty());
+    }
+
     /// Build a response HEADERS frame with `:status <n>` encoded as a Literal Field Line With
     /// Literal Name, plus a dummy header so the parser must advance past another line first.
     fn test_response_headers_literal(status: u16) -> Vec<u8> {
@@ -517,16 +733,18 @@ mod tests {
     }
 
     /// Append a field line that `parse_field_line` cannot decode: a "Literal Field Line With
-    /// Literal Name" (`001` pattern) with a valid literal name but a value string-literal whose
-    /// H (Huffman) bit is set. `read_string_literal(rest, 7)` rejects any value whose first byte
-    /// has bit `1 << 7 = 0x80` set ("Huffman not supported"), so the whole line is undecodable.
-    fn push_undecodable_field_line(section: &mut Vec<u8>, name: &str, value: &[u8]) {
+    /// Literal Name" (`001` pattern) with a valid literal name but a value string-literal that is
+    /// Huffman-flagged AND carries invalid Huffman bytes. A single `0x00` byte is eight zero bits,
+    /// which is neither a complete symbol nor valid (all-ones) padding, so [`huffman_decode`]
+    /// rejects it — making the whole line undecodable.
+    fn push_undecodable_field_line(section: &mut Vec<u8>, name: &str) {
         // Name: 001 N H NameLen(3-bit) — pattern 0x20, N=0, H=0, then the name bytes.
         encode_prefixed_int(section, 3, 0x20, name.len() as u64);
         section.extend_from_slice(name.as_bytes());
-        // Value: 7-bit-prefix string literal with the H bit (0x80) set — Huffman-flagged.
-        section.push(0x80 | value.len() as u8);
-        section.extend_from_slice(value);
+        // Value: 7-bit-prefix string literal, H bit (0x80) set, length 1, then an invalid
+        // Huffman byte (0x00 = eight zero bits, not a valid code or padding).
+        section.push(0x80 | 1);
+        section.push(0x00);
     }
 
     #[test]
@@ -537,7 +755,7 @@ mod tests {
         section.push(0x00); // Required Insert Count = 0
         section.push(0x00); // S=0, Delta Base = 0
         encode_literal_field(&mut section, ":status", "233");
-        push_undecodable_field_line(&mut section, "x-bad", b"oops");
+        push_undecodable_field_line(&mut section, "x-bad");
         let frame = headers_frame(&section);
 
         let r = decode_auth_response(&frame)
@@ -556,7 +774,7 @@ mod tests {
         let mut section = Vec::with_capacity(32);
         section.push(0x00); // Required Insert Count = 0
         section.push(0x00); // S=0, Delta Base = 0
-        push_undecodable_field_line(&mut section, "x-bad", b"oops");
+        push_undecodable_field_line(&mut section, "x-bad");
         let frame = headers_frame(&section);
 
         assert!(
