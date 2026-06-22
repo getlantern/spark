@@ -64,6 +64,11 @@ pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
+/// Hysteria 2 transport (ADR 0010): a QUIC client (quinn/rustls-ring) interoperable with deployed
+/// apernet/hysteria servers, with Salamander+Gecko obfuscation. Behind the `hysteria2` feature so the
+/// base build pulls no QUIC stack.
+#[cfg(feature = "hysteria2")]
+pub mod hysteria2;
 pub mod probe;
 /// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
 /// mux, wire-interoperable with deployed lantern-box `"samizdat"` servers. Behind the `samizdat`

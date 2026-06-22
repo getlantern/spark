@@ -235,6 +235,10 @@ pub struct TransportConfig {
     /// Takes precedence over the plain `server` tunnel. Requires the `shadowsocks` build feature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shadowsocks: Option<ShadowsocksConfig>,
+    /// Hysteria 2 transport (ADR 0010): when set, flows tunnel through this Hysteria 2 server over
+    /// QUIC, optionally obfuscated with Salamander+Gecko. Requires the `hysteria2` build feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hysteria2: Option<Hysteria2Config>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
     /// and Samizdat handshakes (both build their `WirePlan` from this). Default: no shaping.
@@ -264,6 +268,7 @@ impl Default for TransportConfig {
             wasm: None,
             samizdat: None,
             shadowsocks: None,
+            hysteria2: None,
             shaping: ShapingConfig::default(),
             servers: Vec::new(),
             callback_url: None,
@@ -416,6 +421,60 @@ pub struct ShadowsocksConfig {
     pub password: String,
 }
 
+/// Hysteria 2 transport configuration (ADR 0010). A QUIC client interoperable with apernet/hysteria.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hysteria2Config {
+    /// Server address — `IP:port` or `host:port` (resolved at startup).
+    pub server: Endpoint,
+    /// `Hysteria-Auth` credential.
+    pub auth: String,
+    /// TLS SNI. When omitted: bootstrap fills it with the hostname; for an IP it defaults to the IP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+    /// Client receive-rate hint sent as `Hysteria-CC-RX` (Mbps; 0 = unknown → server uses BBR).
+    #[serde(default)]
+    pub down_mbps: u32,
+    /// TLS verification mode.
+    #[serde(default)]
+    pub tls: Hysteria2Tls,
+    /// Optional Salamander/Gecko obfuscation. Omit for plain QUIC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs: Option<Hysteria2Obfs>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hysteria2Tls {
+    #[serde(default)]
+    pub mode: Hysteria2TlsMode,
+    /// Hex SHA-256 of the server cert; required when `mode = "pin-sha256"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Hysteria2TlsMode {
+    #[default]
+    SystemRoots,
+    PinSha256,
+    Insecure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hysteria2Obfs {
+    /// Only `"salamander"` in v1.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Obfuscation pre-shared key.
+    pub password: String,
+    /// Wrap Salamander with Gecko handshake-fragmentation.
+    #[serde(default)]
+    pub gecko: bool,
+}
+
 /// The plain `tcp_tunnel` client kind for a pool entry — a tunnel server addressed by `server`,
 /// with no extra mimicry (mirrors the legacy top-level `transport.server`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -444,6 +503,8 @@ pub enum ServerSpec {
     Tunnel(TunnelConfig),
     /// Shadowsocks 2022 (ADR 0009).
     Shadowsocks(ShadowsocksConfig),
+    /// Hysteria 2 (ADR 0010).
+    Hysteria2(Hysteria2Config),
 }
 
 /// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
@@ -545,12 +606,14 @@ impl Config {
             self.transport.anytls.as_ref().map(|c| &c.server),
             self.transport.samizdat.as_ref().map(|c| &c.server),
             self.transport.shadowsocks.as_ref().map(|c| &c.server),
+            self.transport.hysteria2.as_ref().map(|c| &c.server),
         ];
         let pool = self.transport.servers.iter().filter_map(|e| match &e.spec {
             ServerSpec::Anytls(c) => Some(&c.server),
             ServerSpec::Samizdat(c) => Some(&c.server),
             ServerSpec::Tunnel(c) => Some(&c.server),
             ServerSpec::Shadowsocks(c) => Some(&c.server),
+            ServerSpec::Hysteria2(c) => Some(&c.server),
             ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
         });
         singles
@@ -630,6 +693,7 @@ mod tests {
                     anytls: None,
                     samizdat: None,
                     shadowsocks: None,
+                    hysteria2: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
@@ -843,6 +907,28 @@ mod tests {
         assert!(SsMethod::Aes256Gcm.is_aes());
         assert_eq!(SsMethod::Chacha20Poly1305.key_len(), 32);
         assert!(!SsMethod::Chacha20Poly1305.is_aes());
+    }
+
+    #[test]
+    fn hysteria2_config_round_trips_through_toml() {
+        let toml = r#"
+[transport.hysteria2]
+server = "proxy.example.com:443"
+auth = "secret"
+
+[transport.hysteria2.obfs]
+type = "salamander"
+password = "obfskey"
+gecko = true
+"#;
+        let cfg = Config::from_toml_str(toml).unwrap();
+        let h = cfg.transport.hysteria2.clone().unwrap();
+        assert_eq!(h.server, "proxy.example.com:443".parse().unwrap());
+        assert_eq!(h.auth, "secret");
+        let obfs = h.obfs.unwrap();
+        assert_eq!(obfs.password, "obfskey");
+        assert!(obfs.gecko);
+        assert!(matches!(h.tls.mode, Hysteria2TlsMode::SystemRoots)); // default
     }
 
     #[test]

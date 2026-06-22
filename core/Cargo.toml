@@ -61,6 +61,9 @@ flint-dial = { git = "https://github.com/getlantern/flint", rev = "71623e6b39136
 flint-dns = { git = "https://github.com/getlantern/flint", rev = "71623e6b39136fd98746dc06618be7fd9ac3605e", optional = true }
 blake3 = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+quinn-udp = { workspace = true, optional = true }
+blake2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
@@ -100,3 +103,6 @@ multi-server = ["dep:flint-dial"]
 # `aes` provides the raw block cipher for the UDP separate-header. Off by default so the base build
 # stays rustls/ring-only and cmake-free. See docs/shadowsocks-design.md.
 shadowsocks = ["dep:blake3", "dep:aes"]
+# Hysteria 2 transport (ADR 0010): QUIC (quinn/rustls-ring) client interoperable with apernet/hysteria,
+# with Salamander+Gecko obfuscation. Off by default so the base build pulls no QUIC stack.
+hysteria2 = ["dep:quinn", "dep:quinn-udp", "dep:blake2"]
