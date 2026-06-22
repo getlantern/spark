@@ -28,6 +28,10 @@ use serde::{Deserialize, Serialize};
 
 use flint_tls::gambit::{ClientHello, Records};
 
+/// Adapter from the Lantern API's `config_raw.json` payload (a sing-box-style config) into
+/// [`Config`] (Phase 3). See [`lantern::from_config_raw_json`].
+pub mod lantern;
+
 /// A proxy server address: a literal `IP:port` ([`Endpoint::Ip`], the unchanged path with no startup
 /// DNS) or a `host:port` to resolve before dialing ([`Endpoint::Host`], requires the `bootstrap-dns`
 /// feature). Deserializes from a single TOML string. See `docs/bootstrap-resolver-design.md`.
@@ -120,7 +124,9 @@ impl Serialize for Endpoint {
 
 /// Top-level configuration. Each section has defaults, so missing sections and fields fall
 /// back rather than erroring.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+// No `Eq`: `ServerEntry` carries `f64` lat/long (Phase 3), and `f64: !Eq`. `PartialEq` is kept
+// (used by tests / equality checks); nothing requires full `Eq` on the config types.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// TUN device settings.
@@ -202,7 +208,7 @@ impl Default for TunConfig {
 }
 
 /// How upstream traffic is reached.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)] // no Eq: contains ServerEntry (f64 lat/long)
 #[serde(default, deny_unknown_fields)]
 pub struct TransportConfig {
     /// Tunnel server address. When set, flows are tunneled through it; when `None`, flows
@@ -521,7 +527,7 @@ pub enum ServerSpec {
 /// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
 /// to `transport.callback_url`). `#[serde(flatten)]` puts the spec's `kind` + fields and the
 /// `callback_url` at the same TOML level. (`deny_unknown_fields` is incompatible with `flatten`.)
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)] // no Eq: f64 lat/long
 pub struct ServerEntry {
     /// The transport kind + its config.
     #[serde(flatten)]
@@ -541,6 +547,12 @@ pub struct ServerEntry {
     pub country_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,
+    /// Geographic coordinates (Phase 3, from `config_raw.json`'s `outbound_locations`) for the
+    /// selection UI's map / distance hints. Optional; absent → the textual location is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latitude: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longitude: Option<f64>,
 }
 
 /// A signed Path-B module that computes a gambit per connection (ADR 0006 P3). Verified by the same
@@ -598,6 +610,9 @@ pub enum ConfigError {
     /// The TOML failed to parse or violated the schema.
     #[error("failed to parse TOML config")]
     Parse(#[from] toml::de::Error),
+    /// A `config_raw.json` (Lantern API) payload failed to parse or adapt.
+    #[error("failed to adapt config_raw.json: {0}")]
+    ConfigRaw(#[from] lantern::ConfigRawError),
 }
 
 impl Config {
@@ -606,13 +621,29 @@ impl Config {
         Ok(toml::from_str(s)?)
     }
 
-    /// Load a [`Config`] from a TOML file.
+    /// Parse a [`Config`] from either spark's native TOML or a Lantern `config_raw.json` payload,
+    /// auto-detected: a JSON object carrying an `options.outbounds` array goes through the
+    /// [`lantern`](crate::config::lantern) adapter; anything else through the TOML parser. The single
+    /// entry point for an externally-supplied config string — [`from_path`](Self::from_path) (file),
+    /// the `SPARK_CONFIG` env, and the Apple NE control channel all route through it, so every caller
+    /// accepts both formats.
+    pub fn from_config_str(s: &str) -> Result<Self, ConfigError> {
+        if lantern::looks_like_config_raw(s) {
+            Ok(lantern::from_config_raw_json(s)?)
+        } else {
+            Self::from_toml_str(s)
+        }
+    }
+
+    /// Load a [`Config`] from a file — native TOML or a Lantern `config_raw.json`, auto-detected via
+    /// [`from_config_str`](Self::from_config_str).
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
         let contents = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.display().to_string(),
             source,
         })?;
-        Self::from_toml_str(&contents)
+        // Accept either native TOML or a Lantern config_raw.json file (auto-detected).
+        Self::from_config_str(&contents)
     }
 
     /// Render this config back to TOML (used for round-trip tests and `--print-config`).

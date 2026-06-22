@@ -1074,6 +1074,8 @@ mod pool_config_tests {
                     country: None,
                     country_code: None,
                     city: None,
+                    latitude: None,
+                    longitude: None,
                 }],
                 callback_url: Some("http://127.0.0.1:80/ok".into()),
                 ..Default::default()
@@ -1098,6 +1100,8 @@ mod pool_config_tests {
                     country: None,
                     country_code: None,
                     city: None,
+                    latitude: None,
+                    longitude: None,
                 }],
                 callback_url: Some("https://canary.example/x".into()),
                 ..Default::default()
@@ -1124,6 +1128,8 @@ mod pool_config_tests {
                     country: None,
                     country_code: None,
                     city: None,
+                    latitude: None,
+                    longitude: None,
                 }],
                 callback_url: None,
                 ..Default::default()
