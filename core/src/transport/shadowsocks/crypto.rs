@@ -3,6 +3,8 @@
 // Items here are consumed by tcp.rs / udp.rs in subsequent tasks; suppress dead-code until then.
 #![allow(dead_code)]
 
+use ring::aead;
+
 use crate::config::SsMethod;
 
 /// Errors from SS-2022 crypto setup.
@@ -16,6 +18,10 @@ pub enum CryptoError {
         got: usize,
         want: usize,
     },
+    #[error("AEAD authentication failed")]
+    Auth,
+    #[error("AES key must be 16 or 32 bytes, got {got}")]
+    AesKeyLength { got: usize },
 }
 
 /// Decode the base64 PSK and check its length matches the method (SIP022 §2.1).
@@ -124,6 +130,95 @@ impl Default for NonceCounter {
     }
 }
 
+/// An SS-2022 AEAD keyed by a session subkey. The caller supplies the nonce per operation (SS uses a
+/// counter, not a `NonceSequence`), so `ring::aead::LessSafeKey` is the right primitive.
+pub struct Cipher(aead::LessSafeKey);
+
+impl Cipher {
+    /// Build the AEAD for `method` from `key` (the session subkey; must be `method.key_len()` bytes).
+    pub fn new(method: SsMethod, key: &[u8]) -> Result<Self, CryptoError> {
+        let alg: &'static aead::Algorithm = match method {
+            SsMethod::Aes128Gcm => &aead::AES_128_GCM,
+            SsMethod::Aes256Gcm => &aead::AES_256_GCM,
+            SsMethod::Chacha20Poly1305 => &aead::CHACHA20_POLY1305,
+        };
+        let unbound = aead::UnboundKey::new(alg, key).map_err(|_| CryptoError::KeyLength {
+            method,
+            got: key.len(),
+            want: method.key_len(),
+        })?;
+        Ok(Cipher(aead::LessSafeKey::new(unbound)))
+    }
+
+    /// Seal in place: `buf` becomes ciphertext ‖ 16-byte tag.
+    pub fn seal(&self, nonce: [u8; 12], buf: &mut Vec<u8>) {
+        self.0
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::empty(),
+                buf,
+            )
+            .expect("ring seal never fails for valid key/nonce");
+    }
+
+    /// Open in place: `buf` is ciphertext ‖ tag; returns the plaintext slice on success.
+    pub fn open<'a>(&self, nonce: [u8; 12], buf: &'a mut [u8]) -> Result<&'a [u8], CryptoError> {
+        self.0
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce),
+                aead::Aad::empty(),
+                buf,
+            )
+            .map(|plain| &*plain)
+            .map_err(|_| CryptoError::Auth)
+    }
+}
+
+/// A raw AES block cipher keyed by the PSK directly — used only for the SS-2022 UDP separate-header
+/// (a single ECB block; SIP022 §3.2.1). AES methods only.
+pub struct AesBlock(AesKind);
+
+enum AesKind {
+    A128(Box<aes::Aes128>),
+    A256(Box<aes::Aes256>),
+}
+
+impl AesBlock {
+    /// Build from a 16- or 32-byte key.
+    pub fn new(key: &[u8]) -> Result<Self, CryptoError> {
+        use aes::cipher::KeyInit;
+        match key.len() {
+            16 => Ok(AesBlock(AesKind::A128(Box::new(aes::Aes128::new(
+                aes::cipher::generic_array::GenericArray::from_slice(key),
+            ))))),
+            32 => Ok(AesBlock(AesKind::A256(Box::new(aes::Aes256::new(
+                aes::cipher::generic_array::GenericArray::from_slice(key),
+            ))))),
+            n => Err(CryptoError::AesKeyLength { got: n }),
+        }
+    }
+
+    /// Encrypt the 16-byte block in place.
+    pub fn encrypt(&self, block: &mut [u8; 16]) {
+        use aes::cipher::BlockEncrypt;
+        let b = aes::cipher::generic_array::GenericArray::from_mut_slice(block);
+        match &self.0 {
+            AesKind::A128(c) => c.encrypt_block(b),
+            AesKind::A256(c) => c.encrypt_block(b),
+        }
+    }
+
+    /// Decrypt the 16-byte block in place.
+    pub fn decrypt(&self, block: &mut [u8; 16]) {
+        use aes::cipher::BlockDecrypt;
+        let b = aes::cipher::generic_array::GenericArray::from_mut_slice(block);
+        match &self.0 {
+            AesKind::A128(c) => c.decrypt_block(b),
+            AesKind::A256(c) => c.decrypt_block(b),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +270,64 @@ mod tests {
     #[test]
     fn base64_rejects_padding_in_a_non_final_group() {
         assert!(base64_decode("TWE=TWFu").is_none());
+    }
+
+    #[test]
+    fn aead_seal_open_round_trips() {
+        let key = vec![3u8; 32];
+        let cipher = Cipher::new(SsMethod::Aes256Gcm, &key).unwrap();
+        let nonce = [1u8; 12];
+        let mut buf = b"hello shadowsocks".to_vec();
+        cipher.seal(nonce, &mut buf);
+        assert_eq!(buf.len(), b"hello shadowsocks".len() + 16); // + tag
+        let plain = cipher.open(nonce, &mut buf).unwrap();
+        assert_eq!(plain, b"hello shadowsocks");
+    }
+
+    #[test]
+    fn aead_round_trips_for_every_method() {
+        for (method, key_len) in [
+            (SsMethod::Aes128Gcm, 16),
+            (SsMethod::Aes256Gcm, 32),
+            (SsMethod::Chacha20Poly1305, 32),
+        ] {
+            let cipher = Cipher::new(method, &vec![4u8; key_len]).unwrap();
+            let mut buf = b"per-method payload".to_vec();
+            cipher.seal([2u8; 12], &mut buf);
+            let plain = cipher.open([2u8; 12], &mut buf).unwrap();
+            assert_eq!(plain, b"per-method payload", "round trip for {method:?}");
+        }
+    }
+
+    #[test]
+    fn aead_open_rejects_tampering() {
+        let key = vec![3u8; 32];
+        let cipher = Cipher::new(SsMethod::Aes256Gcm, &key).unwrap();
+        let mut buf = b"data".to_vec();
+        cipher.seal([0u8; 12], &mut buf);
+        buf[0] ^= 0xff;
+        assert!(cipher.open([0u8; 12], &mut buf).is_err());
+    }
+
+    #[test]
+    fn aes_block_round_trips_fips197_vector() {
+        // FIPS-197 AES-128 example: key 000102..0f, plaintext 00112233..ff, ciphertext 69c4e0d8...
+        let key = (0u8..16).collect::<Vec<u8>>();
+        let block = AesBlock::new(&key).unwrap();
+        let mut b = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        block.encrypt(&mut b);
+        assert_eq!(
+            b,
+            [
+                0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
+                0xc5, 0x5a
+            ]
+        );
+        block.decrypt(&mut b);
+        assert_eq!(b[0], 0x00);
+        assert_eq!(b[15], 0xff);
     }
 }
