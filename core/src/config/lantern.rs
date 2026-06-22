@@ -104,7 +104,8 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
     // re-parsing would mangle an IPv6 literal (`"2001:db8::1"` + 443 → an unbracketed, unparseable
     // string) and silently drop the outbound.
     let endpoint = || -> Option<Endpoint> {
-        if ob.server.is_empty() {
+        // No host, or a missing/zero port (`server_port` defaults to 0): not a dialable endpoint.
+        if ob.server.is_empty() || ob.server_port == 0 {
             return None;
         }
         match ob.server.parse::<std::net::IpAddr>() {
@@ -409,5 +410,15 @@ mod tests {
             panic!("expected samizdat")
         };
         assert_eq!(s.server.to_string(), "[2001:db8::1]:443");
+    }
+
+    #[test]
+    fn skips_outbound_with_zero_or_missing_port() {
+        // A missing/zero server_port is not a dialable endpoint — skip it rather than build a pool
+        // entry that would dial port 0 at runtime. (Here it's the only outbound, so the pool errors.)
+        let raw = r#"{ "options": { "outbounds": [
+            { "type": "hysteria2", "tag": "noport", "server": "198.51.100.9", "password": "x" }
+        ]}}"#;
+        from_config_raw_json(raw).expect_err("zero-port outbound must not form a pool entry");
     }
 }
