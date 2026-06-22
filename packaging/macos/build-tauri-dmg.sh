@@ -9,6 +9,8 @@
 #   NOTARY_PROFILE  notarytool keychain profile, OR
 #   AC_USERNAME + AC_PASSWORD  Apple-ID + app-specific password
 #   SKIP_NOTARIZE=1 build signed-but-not-notarized (fast local iteration)
+#   REUSE_SYSEXT    path to a prebuilt .systemextension to embed instead of building one (keeps the
+#                   sysext version stable → reinstall needs no reboot; for app-only Rust/JS changes)
 #   OUTPUT_DIR      where Spark.app/Spark.dmg land (default: dist/)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -61,15 +63,25 @@ locate_profile() {
 APP_PROFILE="${APP_PROFILE:-$(locate_profile || true)}"
 [[ -f "$APP_PROFILE" ]] || { echo "no 'Spark macOS App' provisioning profile found (set APP_PROFILE)" >&2; exit 1; }
 
-# 1. Signed system extension (platforms/apple archive) + extract it.
-log "building the system extension (platforms/apple archive)"
-"$APPLE_DIR/build-xcframework.sh"
-( cd "$APPLE_DIR" && xcodegen generate )
-xcodebuild -project "$APPLE_DIR/Spark.xcodeproj" -scheme SparkApp -configuration Release \
-  -destination 'generic/platform=macOS' -archivePath "$ARCHIVE" \
-  ARCHS=arm64 CURRENT_PROJECT_VERSION="$(date +%s)" archive
-SYSEXT_SRC="$ARCHIVE/Products/Applications/SparkApp.app/Contents/Library/SystemExtensions/$SYSEXT_ID.systemextension"
-[[ -d "$SYSEXT_SRC" ]] || { echo "system extension not found in archive: $SYSEXT_SRC" >&2; exit 1; }
+# 1. System extension: build fresh, OR reuse a prebuilt .systemextension via REUSE_SYSEXT to keep
+#    its version stable. App-only changes (Rust/JS) don't need a new sysext, and a fresh build bumps
+#    CURRENT_PROJECT_VERSION, which forces the user to reboot to re-activate the replacement (macOS
+#    stages it as `terminated_waiting_to_uninstall_on_reboot` while the old one keeps running).
+#    Reusing the existing sysext makes the reinstall a no-reboot, no-re-approval drop-in.
+if [[ -n "${REUSE_SYSEXT:-}" ]]; then
+  log "reusing prebuilt system extension (no version bump): $REUSE_SYSEXT"
+  SYSEXT_SRC="$REUSE_SYSEXT"
+  [[ -d "$SYSEXT_SRC" ]] || { echo "REUSE_SYSEXT not found: $SYSEXT_SRC" >&2; exit 1; }
+else
+  log "building the system extension (platforms/apple archive)"
+  "$APPLE_DIR/build-xcframework.sh"
+  ( cd "$APPLE_DIR" && xcodegen generate )
+  xcodebuild -project "$APPLE_DIR/Spark.xcodeproj" -scheme SparkApp -configuration Release \
+    -destination 'generic/platform=macOS' -archivePath "$ARCHIVE" \
+    ARCHS=arm64 CURRENT_PROJECT_VERSION="$(date +%s)" archive
+  SYSEXT_SRC="$ARCHIVE/Products/Applications/SparkApp.app/Contents/Library/SystemExtensions/$SYSEXT_ID.systemextension"
+  [[ -d "$SYSEXT_SRC" ]] || { echo "system extension not found in archive: $SYSEXT_SRC" >&2; exit 1; }
+fi
 
 # 2. The Tauri controlling app (config resolves at runtime via config.rs: config.toml → SPARK_CONFIG
 #    → SPARK_PROXY → direct, so there's nothing to bake here).

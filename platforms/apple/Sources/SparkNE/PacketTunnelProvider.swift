@@ -90,6 +90,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         _ messageData: Data,
         completionHandler: ((Data?) -> Void)?
     ) {
+        // Diagnostic: fires before any guard, so we can tell whether NE invokes the handler at all
+        // (and on which thread / with a completion handler). `.public` so values aren't redacted.
+        log.notice(
+            "handleAppMessage ENTER: \(messageData.count, privacy: .public)B hasCompletion=\(completionHandler != nil, privacy: .public) mainThread=\(Thread.isMainThread, privacy: .public)"
+        )
         guard let completionHandler else { return }
         guard
             let obj = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],

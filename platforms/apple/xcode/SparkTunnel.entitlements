@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Entitlements for the Packet Tunnel Provider SYSTEM EXTENSION (Developer ID + notarized path).
      `packet-tunnel-provider-systemextension` is the system-extension flavor (vs the App-Store
-     `packet-tunnel-provider`). Sandbox off + network client/server, mirroring lantern's
-     production PacketTunnel.entitlements. The entitlement is authorized by a Developer-ID
-     provisioning profile (auto-created under team ACZRKC3LQ9). -->
+     `packet-tunnel-provider`). Sandbox ON + app-group + network client/server, mirroring
+     lantern's *shipping* PacketTunnel{Release,Debug}.entitlements (both app-sandbox=true).
+     The sandbox is load-bearing: on macOS it is the sandbox + application-groups pair that
+     registers the NEMachServiceName (group.org.getlantern.spark.packet) into the app-group
+     Mach namespace where the container app's sendProviderMessage looks it up. With the
+     sandbox OFF the tunnel still runs but that control Mach service is never vended, so
+     sendProviderMessage succeeds while handleAppMessage is never delivered. (lantern's stale,
+     unused PacketTunnel.entitlements has app-sandbox=false — do NOT mirror that one.) The
+     entitlement is authorized by a Developer-ID provisioning profile (team ACZRKC3LQ9). -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -12,7 +18,7 @@
         <string>packet-tunnel-provider-systemextension</string>
     </array>
     <key>com.apple.security.app-sandbox</key>
-    <false/>
+    <true/>
     <key>com.apple.security.application-groups</key>
     <array>
         <string>group.org.getlantern.spark</string>

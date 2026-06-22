@@ -149,8 +149,6 @@
                   <div class="meta"><div class="name">{s.city || serverLabel(s)}</div></div>
                   {#if s.latencyMs != null}
                     <span class="pill {latencyClass(s.latencyMs)}">{s.latencyMs} ms</span>
-                  {:else}
-                    <span class="pill muted">offline</span>
                   {/if}
                   {#if $selectedIndex === s.index}<span class="check" aria-label="Selected">✓</span>{/if}
                 </button>
@@ -216,7 +214,6 @@
   .pill.good { color: var(--lat-good); background: rgba(31, 157, 85, 0.12); }
   .pill.amber { color: var(--lat-amber); background: rgba(201, 138, 0, 0.12); }
   .pill.slow { color: var(--lat-slow); background: rgba(192, 52, 29, 0.12); }
-  .pill.muted { color: var(--text-tertiary); background: var(--border); }
 
   .bolt { font-size: 17px; opacity: 0.28; }
   .bolt.on { opacity: 1; color: var(--bolt); }
