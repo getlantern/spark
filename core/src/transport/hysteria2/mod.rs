@@ -5,8 +5,14 @@ mod obfs;
 mod tcp;
 mod udp;
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio::io::AsyncReadExt;
+
+use crate::transport::{BoxedStream, Transport};
 
 // rustls is not a direct dependency of this crate; it is the exact same locked version re-exported
 // by quinn, so we reach it through `quinn::rustls` to avoid declaring a redundant dependency.
@@ -23,8 +29,6 @@ use crate::config::{Hysteria2Config, Hysteria2Tls, Hysteria2TlsMode};
 /// One [`thiserror`]-derived enum per module (project standard). `Quic` and `Io` carry their
 /// underlying error via `#[from]` (distinct source types, so no conflict); the remaining variants
 /// are produced by manual `map_err` at the call sites.
-// consumed by Hysteria2Transport (Task 9); remove at the final sweep
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum Hysteria2Error {
     /// `Endpoint::connect` rejected the configuration or address before the handshake began
@@ -56,8 +60,6 @@ pub enum Hysteria2Error {
 /// Convert a configured downlink rate in Mbps to the bytes-per-second value Hysteria 2 carries in
 /// the `Hysteria-CC-RX` header. `0` is passed through unchanged: per the protocol it means "rate
 /// unknown", which tells the server to use BBR congestion control instead of a fixed Brutal rate.
-// consumed by Hysteria2Transport (Task 9); remove at the final sweep
-#[allow(dead_code)]
 fn rx_bps(down_mbps: u32) -> u64 {
     (down_mbps as u64) * 125_000
 }
@@ -218,8 +220,6 @@ fn make_verifier(tls: &Hysteria2Tls) -> Result<Arc<dyn ServerCertVerifier>, Hyst
 /// - `Insecure`: a custom verifier that accepts any certificate.
 ///
 /// The ALPN is set to `h3`, which Hysteria 2 reuses.
-// consumed by Hysteria2Transport (Task 9); remove at the final sweep
-#[allow(dead_code)]
 fn rustls_client_config(cfg: &Hysteria2Config) -> Result<rustls::ClientConfig, Hysteria2Error> {
     let provider = Arc::new(ring_provider::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider)
@@ -252,8 +252,6 @@ fn rustls_client_config(cfg: &Hysteria2Config) -> Result<rustls::ClientConfig, H
 /// quinn (the spawned endpoint driver holds a strong reference to the `EndpointRef`, and the
 /// `Connection` shares it), so this returns only the `Connection`; dropping the local `Endpoint`
 /// handle does not tear down the live connection.
-// consumed by Hysteria2Transport (Task 9); remove at the final sweep
-#[allow(dead_code)]
 async fn connect(
     cfg: &Hysteria2Config,
     server: SocketAddr,
@@ -309,8 +307,6 @@ async fn connect(
 /// and advertised downlink rate), reads the response, and checks the `:status`. A status of `233`
 /// is success; anything else is [`Hysteria2Error::Auth`]. Must be called once, immediately after
 /// [`connect`], before any proxy stream is opened.
-// consumed by Hysteria2Transport (Task 9); remove at the final sweep
-#[allow(dead_code)]
 async fn authenticate(
     conn: &quinn::Connection,
     cfg: &Hysteria2Config,
@@ -334,9 +330,181 @@ async fn authenticate(
     Ok(())
 }
 
+/// Read exactly `buf.len()` bytes from `r` into `buf`, mapping any error to [`io::Error`].
+///
+/// Generic over the reader so that, inside this function, `read_exact` resolves to tokio's
+/// [`AsyncReadExt::read_exact`] (with `io::Error` semantics) rather than quinn's inherent
+/// `RecvStream::read_exact` (which returns `ReadExactError`). Callers pass `&mut RecvStream`,
+/// which works because `RecvStream: tokio::io::AsyncRead`.
+async fn read_exact<R: tokio::io::AsyncRead + Unpin>(r: &mut R, buf: &mut [u8]) -> io::Result<()> {
+    r.read_exact(buf).await.map(|_| ())
+}
+
+/// Read and discard one varint-length-prefixed blob from `r`: a QUIC varint giving the byte
+/// length, followed by that many bytes.
+///
+/// Used to skip the message and padding fields of a Hysteria 2 `TCPResponse`. The discard is
+/// chunked through a fixed scratch buffer so a hostile or corrupt length cannot drive an
+/// unbounded allocation; an oversized length simply reads until the stream ends (yielding an
+/// `UnexpectedEof`). Generic over `R` for the same reason as [`read_exact`].
+async fn drain_varint_blob<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> io::Result<()> {
+    // Decode the QUIC varint length: the first byte's top 2 bits give the encoded width 2^n; the
+    // remaining bytes are big-endian (matches `tcp::read_varint`).
+    let mut first = [0u8; 1];
+    read_exact(r, &mut first).await?;
+    let len = 1usize << (first[0] >> 6);
+    let mut value = (first[0] & 0x3f) as u64;
+    if len > 1 {
+        let mut rest = [0u8; 7];
+        read_exact(r, &mut rest[..len - 1]).await?;
+        for &b in &rest[..len - 1] {
+            value = (value << 8) | b as u64;
+        }
+    }
+
+    // Discard `value` bytes in bounded chunks so a garbage length can't allocate unboundedly.
+    let mut remaining = value;
+    let mut scratch = [0u8; 4096];
+    while remaining > 0 {
+        let take = remaining.min(scratch.len() as u64) as usize;
+        read_exact(r, &mut scratch[..take]).await?;
+        remaining -= take as u64;
+    }
+    Ok(())
+}
+
+/// A [`Transport`] over a single Hysteria 2 QUIC connection, opening one bidirectional stream per
+/// dialed TCP target.
+///
+/// The connection is cached (a [`quinn::Connection`] is a cheap, clonable `Arc` handle) and reused
+/// across dials; a dropped or closed connection is transparently re-established on the next dial via
+/// [`connect`] + [`authenticate`].
+pub struct Hysteria2Transport {
+    cfg: Hysteria2Config,
+    server: SocketAddr,
+    /// The cached, authenticated connection, or `None` before the first dial / after teardown.
+    /// Guarded by a tokio mutex held only for the brief check/store windows — never across the
+    /// `connect`/`authenticate` awaits (see [`Self::connection`]).
+    conn: tokio::sync::Mutex<Option<quinn::Connection>>,
+}
+
+impl Hysteria2Transport {
+    /// Build a transport for `cfg` against `server`. No connection is opened until the first dial.
+    pub fn new(cfg: Hysteria2Config, server: SocketAddr) -> Self {
+        Self {
+            cfg,
+            server,
+            conn: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Return a live, authenticated connection, reusing the cached one when possible.
+    ///
+    /// Double-checked locking keeps the mutex guard out of every `.await`: the guard is taken in a
+    /// small block that ends before the (un-guarded) `connect`/`authenticate` awaits, and a fresh
+    /// guard is taken afterward to store the result — re-checking so a connection another task built
+    /// concurrently wins (our freshly built one is then dropped).
+    async fn connection(&self) -> Result<quinn::Connection, Hysteria2Error> {
+        // Fast path: a live cached connection. Guard dropped at the end of this block.
+        {
+            let guard = self.conn.lock().await;
+            if let Some(c) = guard.as_ref() {
+                if c.close_reason().is_none() {
+                    return Ok(c.clone());
+                }
+            }
+        }
+
+        // Slow path: build a new connection with NO guard held across these awaits.
+        let c = connect(&self.cfg, self.server).await?;
+        authenticate(&c, &self.cfg).await?;
+
+        // Re-lock and re-check: prefer a live connection another task installed meanwhile.
+        let mut guard = self.conn.lock().await;
+        if let Some(existing) = guard.as_ref() {
+            if existing.close_reason().is_none() {
+                return Ok(existing.clone());
+            }
+        }
+        *guard = Some(c.clone());
+        Ok(c)
+    }
+}
+
+#[async_trait]
+impl Transport for Hysteria2Transport {
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        let conn = self.connection().await.map_err(io::Error::other)?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(io::Error::other)?;
+
+        // Send the TCPRequest. `write_all` here is quinn's inherent `SendStream::write_all`
+        // (returning `WriteError`), shadowing tokio's extension method — map its error explicitly.
+        send.write_all(&tcp::encode_tcp_request(&target.to_string()))
+            .await
+            .map_err(io::Error::other)?;
+
+        // Read the TCPResponse: a status byte (0x00 = OK), then a varint-prefixed message and a
+        // varint-prefixed padding block, both discarded. All reads route through the generic
+        // helpers so tokio's `io::Error`-returning `read_exact` is used, not quinn's inherent one.
+        let mut status = [0u8; 1];
+        read_exact(&mut recv, &mut status).await?;
+        if status[0] != 0x00 {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "hysteria2 TCP error status",
+            ));
+        }
+        drain_varint_blob(&mut recv).await?; // message
+        drain_varint_blob(&mut recv).await?; // padding
+
+        // Pair the recv (AsyncRead) and send (AsyncWrite) halves into one bidirectional stream.
+        Ok(Box::new(tokio::io::join(recv, send)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn drain_varint_blob_consumes_one_byte_blob_and_leaves_trailer() {
+        // 1-byte varint length 3, then 3 payload bytes, then a trailer the drain must NOT touch.
+        let buf = [0x03u8, 0xaa, 0xbb, 0xcc, b'X', b'Y', b'Z'];
+        let mut r: &[u8] = &buf;
+        drain_varint_blob(&mut r).await.expect("drain succeeds");
+        // The reader is now positioned at the trailer.
+        assert_eq!(r, b"XYZ");
+    }
+
+    #[tokio::test]
+    async fn drain_varint_blob_handles_two_byte_varint_length() {
+        // 2-byte varint length 200 (>= 64, so encoded as 0x4000 | 200), then 200 payload bytes.
+        let mut buf = Vec::new();
+        tcp::write_varint(&mut buf, 200);
+        assert_eq!(buf.len(), 2, "200 must encode as a 2-byte QUIC varint");
+        buf.extend(std::iter::repeat_n(0x5a, 200));
+        buf.extend_from_slice(b"tail");
+        let mut r: &[u8] = &buf;
+        drain_varint_blob(&mut r).await.expect("drain succeeds");
+        assert_eq!(r, b"tail");
+    }
+
+    #[tokio::test]
+    async fn drain_varint_blob_handles_empty_blob() {
+        // 1-byte varint length 0: nothing to discard; the trailer remains.
+        let buf = [0x00u8, b'a', b'b'];
+        let mut r: &[u8] = &buf;
+        drain_varint_blob(&mut r).await.expect("drain succeeds");
+        assert_eq!(r, b"ab");
+    }
+
+    #[tokio::test]
+    async fn drain_varint_blob_errors_on_truncation() {
+        // 1-byte varint length 5, but only 2 payload bytes present → unexpected EOF.
+        let buf = [0x05u8, 0x01, 0x02];
+        let mut r: &[u8] = &buf;
+        assert!(drain_varint_blob(&mut r).await.is_err());
+    }
 
     #[test]
     fn rx_bps_converts_mbps_to_bytes_per_second() {
