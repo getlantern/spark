@@ -266,12 +266,32 @@ fn parse_field_line(buf: &[u8]) -> io::Result<(FieldLine, &[u8])> {
     Err(malformed("field line: unsupported QPACK representation"))
 }
 
-/// Parse an HTTP/3 HEADERS frame containing the /auth response and return the HTTP status.
+/// The decoded result of a Hysteria 2 `/auth` response: the HTTP `:status` and whether the
+/// server advertised UDP relay support.
+///
+/// `udp` mirrors the `Hysteria-UDP` response header: `true` when the header is absent
+/// (optimistic default, matching the reference client) or any value other than `false`,
+/// `false` only when the server explicitly sends `Hysteria-UDP: false` to disable UDP.
+pub struct AuthResponse {
+    /// The HTTP `:status` pseudo-header (`233` = "HyOK"; anything else is a rejection).
+    pub status: u16,
+    /// Whether the server relays UDP (the `Hysteria-UDP` header; default `true` when absent).
+    pub udp: bool,
+}
+
+/// Parse an HTTP/3 HEADERS frame containing the /auth response into its [`AuthResponse`].
 ///
 /// Reads the frame header (type must be `0x01`, then the length), then walks the QPACK field
-/// section looking for the `:status` pseudo-header. Success is status **233**; the caller
-/// decides what to do with any other value.
-pub fn decode_auth_status(headers_frame: &[u8]) -> io::Result<u16> {
+/// section capturing the `:status` pseudo-header (required) and the `Hysteria-UDP` header
+/// (optional, default `true`). Success is `:status` **233**; the caller decides what to do with
+/// any other value.
+///
+/// HTTP/3 guarantees `:status` (a pseudo-header) precedes the regular `Hysteria-UDP` header, so
+/// `:status` is always captured first. For robustness against a later field line we cannot
+/// decode (e.g. a Huffman-encoded value, which this minimal QPACK codec rejects), once `:status`
+/// has been captured a subsequent [`parse_field_line`] error stops the walk and returns what we
+/// have rather than failing auth; an error *before* `:status` is found is propagated.
+pub fn decode_auth_response(headers_frame: &[u8]) -> io::Result<AuthResponse> {
     let (frame_type, rest) =
         read_varint(headers_frame).ok_or_else(|| eof("HEADERS frame: missing type"))?;
     if frame_type != H3_FRAME_HEADERS {
@@ -291,21 +311,48 @@ pub fn decode_auth_status(headers_frame: &[u8]) -> io::Result<u16> {
         read_prefixed_int(after_ric, 7).ok_or_else(|| eof("field prefix: bad base"))?;
     section = after_base;
 
+    let mut status: Option<u16> = None;
+    let mut udp = true; // optimistic default: UDP enabled unless the server says `false`.
     while !section.is_empty() {
-        let (line, rest) = parse_field_line(section)?;
+        let (line, rest) = match parse_field_line(section) {
+            Ok(parsed) => parsed,
+            // A field line we can't decode after `:status` is known must not fail auth — stop the
+            // walk and return what we have. Before `:status`, the error is fatal.
+            Err(_) if status.is_some() => break,
+            Err(e) => return Err(e),
+        };
         section = rest;
-        if line.name.as_deref() == Some(":status") {
-            let value = line
-                .value
-                .ok_or_else(|| malformed(":status had no literal value"))?;
-            return value
-                .parse::<u16>()
-                .map_err(|_| malformed(":status value not a number"));
+        match line.name.as_deref() {
+            Some(":status") => {
+                let value = line
+                    .value
+                    .ok_or_else(|| malformed(":status had no literal value"))?;
+                status = Some(
+                    value
+                        .parse::<u16>()
+                        .map_err(|_| malformed(":status value not a number"))?,
+                );
+            }
+            Some(name) if name.eq_ignore_ascii_case("hysteria-udp") => {
+                udp = !line
+                    .value
+                    .as_deref()
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case("false");
+            }
+            _ => {}
         }
     }
-    Err(malformed(
-        ":status pseudo-header not found in /auth response",
-    ))
+    let status =
+        status.ok_or_else(|| malformed(":status pseudo-header not found in /auth response"))?;
+    Ok(AuthResponse { status, udp })
+}
+
+/// Parse an HTTP/3 HEADERS frame containing the /auth response and return the HTTP status.
+///
+/// A thin wrapper over [`decode_auth_response`] for callers that only need the status code.
+pub fn decode_auth_status(headers_frame: &[u8]) -> io::Result<u16> {
+    decode_auth_response(headers_frame).map(|r| r.status)
 }
 
 #[cfg(test)]
@@ -434,5 +481,87 @@ mod tests {
         write_varint(&mut frame, 10); // claims 10 bytes
         frame.extend_from_slice(&[0x00, 0x00]); // only 2 present
         assert!(decode_auth_status(&frame).is_err());
+    }
+
+    /// Build a response HEADERS frame carrying `:status` followed (when `udp` is `Some`) by a
+    /// `Hysteria-UDP` header, mirroring real responses where `:status` (a pseudo-header) precedes
+    /// regular headers. Both are encoded as Literal Field Lines With Literal Name.
+    fn test_response_headers_with_udp(status: u16, udp: Option<&str>) -> Vec<u8> {
+        let status = status.to_string();
+        let mut headers: Vec<(&str, &str)> = vec![(":status", &status)];
+        if let Some(v) = udp {
+            headers.push(("hysteria-udp", v));
+        }
+        headers_frame(&encode_field_section(&headers))
+    }
+
+    #[test]
+    fn auth_response_captures_status_and_udp_true() {
+        let r = decode_auth_response(&test_response_headers_with_udp(233, Some("true"))).unwrap();
+        assert_eq!(r.status, 233);
+        assert!(r.udp);
+    }
+
+    #[test]
+    fn auth_response_honors_explicit_udp_false() {
+        let r = decode_auth_response(&test_response_headers_with_udp(233, Some("false"))).unwrap();
+        assert_eq!(r.status, 233);
+        assert!(!r.udp, "explicit Hysteria-UDP: false must disable UDP");
+    }
+
+    #[test]
+    fn auth_response_defaults_udp_true_when_header_absent() {
+        let r = decode_auth_response(&test_response_headers_with_udp(233, None)).unwrap();
+        assert_eq!(r.status, 233);
+        assert!(r.udp, "UDP defaults to enabled when the header is absent");
+    }
+
+    /// Append a field line that `parse_field_line` cannot decode: a "Literal Field Line With
+    /// Literal Name" (`001` pattern) with a valid literal name but a value string-literal whose
+    /// H (Huffman) bit is set. `read_string_literal(rest, 7)` rejects any value whose first byte
+    /// has bit `1 << 7 = 0x80` set ("Huffman not supported"), so the whole line is undecodable.
+    fn push_undecodable_field_line(section: &mut Vec<u8>, name: &str, value: &[u8]) {
+        // Name: 001 N H NameLen(3-bit) — pattern 0x20, N=0, H=0, then the name bytes.
+        encode_prefixed_int(section, 3, 0x20, name.len() as u64);
+        section.extend_from_slice(name.as_bytes());
+        // Value: 7-bit-prefix string literal with the H bit (0x80) set — Huffman-flagged.
+        section.push(0x80 | value.len() as u8);
+        section.extend_from_slice(value);
+    }
+
+    #[test]
+    fn decode_auth_response_tolerates_undecodable_header_after_status() {
+        // `:status 233` first (HTTP/3 puts pseudo-headers before regular headers), then an
+        // undecodable (Huffman-flagged) header line. The trailing line must be tolerated.
+        let mut section = Vec::with_capacity(32);
+        section.push(0x00); // Required Insert Count = 0
+        section.push(0x00); // S=0, Delta Base = 0
+        encode_literal_field(&mut section, ":status", "233");
+        push_undecodable_field_line(&mut section, "x-bad", b"oops");
+        let frame = headers_frame(&section);
+
+        let r = decode_auth_response(&frame)
+            .expect("an undecodable header after :status must not fail auth");
+        assert_eq!(r.status, 233, "status captured before the undecodable line");
+        assert!(
+            r.udp,
+            "udp keeps its default (true) since no hysteria-udp header was readable"
+        );
+    }
+
+    #[test]
+    fn decode_auth_response_propagates_error_before_status() {
+        // The undecodable (Huffman-flagged) header line comes first, with NO `:status` before
+        // it, so the decode error must propagate rather than be swallowed.
+        let mut section = Vec::with_capacity(32);
+        section.push(0x00); // Required Insert Count = 0
+        section.push(0x00); // S=0, Delta Base = 0
+        push_undecodable_field_line(&mut section, "x-bad", b"oops");
+        let frame = headers_frame(&section);
+
+        assert!(
+            decode_auth_response(&frame).is_err(),
+            "an undecodable header before :status must propagate the error"
+        );
     }
 }

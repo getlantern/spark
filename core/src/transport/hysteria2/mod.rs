@@ -12,7 +12,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
-use crate::transport::{BoxedStream, Transport};
+use crate::transport::{
+    BoxedPacketSink, BoxedPacketSource, BoxedStream, PacketSink, PacketSource, Transport,
+    UdpTransport,
+};
 
 // rustls is not a direct dependency of this crate; it is the exact same locked version re-exported
 // by quinn, so we reach it through `quinn::rustls` to avoid declaring a redundant dependency.
@@ -301,16 +304,17 @@ async fn connect(
     Ok(conn)
 }
 
-/// Run the Hysteria 2 `/auth` handshake over `conn`.
+/// Run the Hysteria 2 `/auth` handshake over `conn`, returning whether the server relays UDP.
 ///
 /// Opens a bidirectional QUIC stream, sends the HTTP/3 `POST /auth` request (with the credential
 /// and advertised downlink rate), reads the response, and checks the `:status`. A status of `233`
-/// is success; anything else is [`Hysteria2Error::Auth`]. Must be called once, immediately after
-/// [`connect`], before any proxy stream is opened.
+/// is success; anything else is [`Hysteria2Error::Auth`]. The returned `bool` is the server's
+/// `Hysteria-UDP` capability (default `true` when the header is absent). Must be called once,
+/// immediately after [`connect`], before any proxy stream is opened.
 async fn authenticate(
     conn: &quinn::Connection,
     cfg: &Hysteria2Config,
-) -> Result<(), Hysteria2Error> {
+) -> Result<bool, Hysteria2Error> {
     let (mut send, mut recv) = conn.open_bi().await.map_err(Hysteria2Error::Quic)?;
 
     let frame = auth::encode_auth_request(&cfg.auth, rx_bps(cfg.down_mbps));
@@ -323,11 +327,11 @@ async fn authenticate(
         .read_to_end(64 * 1024)
         .await
         .map_err(|e| Hysteria2Error::Io(std::io::Error::other(e)))?;
-    let status = auth::decode_auth_status(&resp).map_err(|_| Hysteria2Error::Codec)?;
-    if status != 233 {
-        return Err(Hysteria2Error::Auth(status));
+    let parsed = auth::decode_auth_response(&resp).map_err(|_| Hysteria2Error::Codec)?;
+    if parsed.status != 233 {
+        return Err(Hysteria2Error::Auth(parsed.status));
     }
-    Ok(())
+    Ok(parsed.udp)
 }
 
 /// Read exactly `buf.len()` bytes from `r` into `buf`, mapping any error to [`io::Error`].
@@ -373,19 +377,86 @@ async fn drain_varint_blob<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> io::Re
     Ok(())
 }
 
-/// A [`Transport`] over a single Hysteria 2 QUIC connection, opening one bidirectional stream per
-/// dialed TCP target.
+/// Maps a live UDP `session_id` to its per-association delivery channel.
 ///
-/// The connection is cached (a [`quinn::Connection`] is a cheap, clonable `Arc` handle) and reused
-/// across dials; a dropped or closed connection is transparently re-established on the next dial via
-/// [`connect`] + [`authenticate`].
+/// A `std::sync::Mutex` (not a tokio one): it is locked only for the brief insert/lookup/remove/
+/// clone windows and the guard is always dropped before any `.await`. The delivery itself is a
+/// synchronous `try_send` on the cloned [`Sender`](tokio::sync::mpsc::Sender), so no guard is ever
+/// held across an await (project HARD RULE).
+type SessionMap =
+    std::sync::Mutex<std::collections::HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>;
+
+/// Per-connection shared state for a single authenticated Hysteria 2 QUIC connection.
+///
+/// Holds the connection, the server's UDP capability (from the `/auth` `Hysteria-UDP` header), the
+/// live UDP session registry, and the datagram receive-pump task. The pump's [`JoinHandle`] is
+/// owned here and aborted on drop, so the pump's lifetime is tied to this state (project rule: a
+/// spawned task's handle must be stored somewhere that can cancel it).
+///
+/// [`JoinHandle`]: tokio::task::JoinHandle
+struct ConnState {
+    /// The authenticated QUIC connection (a cheap, clonable `Arc` handle).
+    conn: quinn::Connection,
+    /// Whether the server relays UDP (the `/auth` `Hysteria-UDP` header).
+    udp_ok: bool,
+    /// `session_id -> delivery channel` for every live UDP association on this connection.
+    sessions: Arc<SessionMap>,
+    /// The datagram receive pump; aborted when this state is dropped.
+    pump: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ConnState {
+    fn drop(&mut self) {
+        // Tie the pump's lifetime to the connection state: once the cached state is replaced or
+        // dropped, the pump (which borrows nothing else) is cancelled.
+        self.pump.abort();
+    }
+}
+
+/// The datagram receive pump for one connection: reads QUIC datagrams, reassembles fragmented
+/// UDPMessages, and routes each completed payload to its session's delivery channel.
+///
+/// Runs as a spawned task owned by [`ConnState`] (aborted on drop). The [`UdpReassembler`] is owned
+/// solely by this loop — no sharing, no lock. Unknown/closed sessions and full channels are dropped
+/// silently (UDP is lossy); the loop ends when `read_datagram` errors (the connection closed).
+///
+/// [`UdpReassembler`]: udp::UdpReassembler
+async fn udp_receive_pump(conn: quinn::Connection, sessions: Arc<SessionMap>) {
+    let mut reasm = udp::UdpReassembler::new();
+    // The loop ends when `read_datagram` errors (the connection closed): no more datagrams arrive.
+    while let Ok(bytes) = conn.read_datagram().await {
+        let Some(msg) = udp::decode_udp_message(&bytes) else {
+            continue;
+        };
+        let sid = msg.session_id;
+        if let Some(payload) = reasm.accept(msg) {
+            // Clone the Sender under the lock, then drop the guard before `try_send`.
+            let tx = match sessions.lock() {
+                Ok(m) => m.get(&sid).cloned(),
+                Err(p) => p.into_inner().get(&sid).cloned(),
+            };
+            if let Some(tx) = tx {
+                // Drop the datagram if the channel is full or its source was dropped.
+                let _ = tx.try_send(payload);
+            }
+        }
+    }
+}
+
+/// A [`Transport`]/[`UdpTransport`] over a single Hysteria 2 QUIC connection: one bidirectional
+/// stream per dialed TCP target, and QUIC datagrams (multiplexed by session id) for UDP.
+///
+/// The connection is cached as an [`Arc<ConnState>`] and reused across dials; a dropped or closed
+/// connection is transparently re-established on the next dial via [`connect`] + [`authenticate`]
+/// (which also spawns a fresh datagram receive pump). Replacing the cached state drops the old
+/// [`ConnState`], aborting its pump.
 pub struct Hysteria2Transport {
     cfg: Hysteria2Config,
     server: SocketAddr,
-    /// The cached, authenticated connection, or `None` before the first dial / after teardown.
+    /// The cached, authenticated connection state, or `None` before the first dial / after teardown.
     /// Guarded by a tokio mutex held only for the brief check/store windows — never across the
     /// `connect`/`authenticate` awaits (see [`Self::connection`]).
-    conn: tokio::sync::Mutex<Option<quinn::Connection>>,
+    conn: tokio::sync::Mutex<Option<Arc<ConnState>>>,
 }
 
 impl Hysteria2Transport {
@@ -398,43 +469,53 @@ impl Hysteria2Transport {
         }
     }
 
-    /// Return a live, authenticated connection, reusing the cached one when possible.
+    /// Return live, authenticated connection state, reusing the cached one when possible.
     ///
     /// Double-checked locking keeps the mutex guard out of every `.await`: the guard is taken in a
     /// small block that ends before the (un-guarded) `connect`/`authenticate` awaits, and a fresh
-    /// guard is taken afterward to store the result — re-checking so a connection another task built
-    /// concurrently wins (our freshly built one is then dropped).
-    async fn connection(&self) -> Result<quinn::Connection, Hysteria2Error> {
+    /// guard is taken afterward to store the result — re-checking so state another task built
+    /// concurrently wins (our freshly built one is then dropped, aborting its pump).
+    async fn connection(&self) -> Result<Arc<ConnState>, Hysteria2Error> {
         // Fast path: a live cached connection. Guard dropped at the end of this block.
         {
             let guard = self.conn.lock().await;
-            if let Some(c) = guard.as_ref() {
-                if c.close_reason().is_none() {
-                    return Ok(c.clone());
+            if let Some(state) = guard.as_ref() {
+                if state.conn.close_reason().is_none() {
+                    return Ok(state.clone());
                 }
             }
         }
 
         // Slow path: build a new connection with NO guard held across these awaits.
         let c = connect(&self.cfg, self.server).await?;
-        authenticate(&c, &self.cfg).await?;
+        let udp_ok = authenticate(&c, &self.cfg).await?;
+        let sessions: Arc<SessionMap> = Arc::new(std::sync::Mutex::new(Default::default()));
+        let pump = tokio::spawn(udp_receive_pump(c.clone(), sessions.clone()));
+        let state = Arc::new(ConnState {
+            conn: c,
+            udp_ok,
+            sessions,
+            pump,
+        });
 
-        // Re-lock and re-check: prefer a live connection another task installed meanwhile.
+        // Re-lock and re-check: prefer a live connection another task installed meanwhile (our
+        // freshly built `state` is then dropped, aborting its just-spawned pump).
         let mut guard = self.conn.lock().await;
         if let Some(existing) = guard.as_ref() {
-            if existing.close_reason().is_none() {
+            if existing.conn.close_reason().is_none() {
                 return Ok(existing.clone());
             }
         }
-        *guard = Some(c.clone());
-        Ok(c)
+        *guard = Some(state.clone());
+        Ok(state)
     }
 }
 
 #[async_trait]
 impl Transport for Hysteria2Transport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
-        let conn = self.connection().await.map_err(io::Error::other)?;
+        let state = self.connection().await.map_err(io::Error::other)?;
+        let conn = state.conn.clone();
         let (mut send, mut recv) = conn.open_bi().await.map_err(io::Error::other)?;
 
         // Send the TCPRequest. `write_all` here is quinn's inherent `SendStream::write_all`
@@ -459,6 +540,134 @@ impl Transport for Hysteria2Transport {
 
         // Pair the recv (AsyncRead) and send (AsyncWrite) halves into one bidirectional stream.
         Ok(Box::new(tokio::io::join(recv, send)))
+    }
+}
+
+#[async_trait]
+impl UdpTransport for Hysteria2Transport {
+    async fn dial_udp(
+        &self,
+        target: SocketAddr,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        let state = self.connection().await.map_err(io::Error::other)?;
+        // Honor both the server's `Hysteria-UDP` capability AND the QUIC datagram extension: a
+        // `max_datagram_size` of `None` means the peer never enabled datagrams, so UDP relay is
+        // impossible. Either condition is a hard "unsupported".
+        let max_datagram = match (state.udp_ok, state.conn.max_datagram_size()) {
+            (true, Some(n)) => n,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "hysteria2 server did not enable UDP relay",
+                ))
+            }
+        };
+
+        // A fresh random 32-bit session id keys this association in the receive pump's registry.
+        let mut sid_bytes = [0u8; 4];
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut sid_bytes)
+            .map_err(|_| io::Error::other("hysteria2 UDP: rng failure"))?;
+        let session_id = u32::from_be_bytes(sid_bytes);
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+        {
+            // Register the delivery channel; drop the guard immediately (synchronous insert).
+            match state.sessions.lock() {
+                Ok(mut m) => {
+                    m.insert(session_id, tx);
+                }
+                Err(p) => {
+                    p.into_inner().insert(session_id, tx);
+                }
+            }
+        }
+
+        let sink = Hysteria2UdpSink {
+            conn: state.conn.clone(),
+            session_id,
+            target: target.to_string(),
+            packet_id: 0,
+            max_datagram,
+        };
+        let source = Hysteria2UdpSource {
+            rx,
+            sessions: state.sessions.clone(),
+            session_id,
+        };
+        Ok((Box::new(sink), Box::new(source)))
+    }
+}
+
+/// The send half of a Hysteria 2 UDP association: encodes each datagram as one or more UDPMessage
+/// fragments and ships them as QUIC datagrams.
+///
+/// `packet_id` is a per-association wrapping counter; `send` is `&mut self`, so a plain `u16`
+/// suffices (no atomics). A datagram the codec cannot represent (no room for payload, or >255
+/// fragments) yields an empty fragment list — `send` then sends nothing and returns `Ok`, the
+/// intended drop behavior.
+struct Hysteria2UdpSink {
+    conn: quinn::Connection,
+    session_id: u32,
+    target: String,
+    packet_id: u16,
+    max_datagram: usize,
+}
+
+#[async_trait]
+impl PacketSink for Hysteria2UdpSink {
+    async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
+        let pid = self.packet_id;
+        self.packet_id = self.packet_id.wrapping_add(1);
+        for frag in udp::encode_udp_message(
+            self.session_id,
+            pid,
+            &self.target,
+            payload,
+            self.max_datagram,
+        ) {
+            self.conn
+                .send_datagram(bytes::Bytes::from(frag))
+                .map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
+}
+
+/// The receive half of a Hysteria 2 UDP association: yields reassembled payloads the connection's
+/// receive pump routed to this session's channel.
+///
+/// On drop it de-registers its `session_id` from the shared [`SessionMap`] so the pump stops
+/// holding a stale [`Sender`](tokio::sync::mpsc::Sender) for a closed association.
+struct Hysteria2UdpSource {
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    sessions: Arc<SessionMap>,
+    session_id: u32,
+}
+
+#[async_trait]
+impl PacketSource for Hysteria2UdpSource {
+    async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.rx.recv().await {
+            Some(payload) => {
+                // UDP truncation: copy what fits, drop the excess, but consume the whole datagram.
+                let n = payload.len().min(buf.len());
+                buf[..n].copy_from_slice(&payload[..n]);
+                Ok(n)
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "hysteria2 UDP association closed",
+            )),
+        }
+    }
+}
+
+impl Drop for Hysteria2UdpSource {
+    fn drop(&mut self) {
+        // De-register this session; a poisoned lock means the pump is gone anyway, so skip it.
+        if let Ok(mut m) = self.sessions.lock() {
+            m.remove(&self.session_id);
+        }
     }
 }
 
@@ -528,6 +737,49 @@ mod tests {
         assert!(
             msg.contains("403"),
             "expected status in message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_source_delivers_truncates_and_deregisters_on_drop() {
+        // A shared registry with this session registered, so the Drop dedup has something to remove.
+        let session_id = 0x1234_5678u32;
+        let sessions: Arc<SessionMap> = Arc::new(std::sync::Mutex::new(Default::default()));
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        sessions
+            .lock()
+            .expect("lock")
+            .insert(session_id, tx.clone());
+
+        let mut source = Hysteria2UdpSource {
+            rx,
+            sessions: sessions.clone(),
+            session_id,
+        };
+
+        // A datagram that fits the buffer is copied verbatim.
+        tx.try_send(b"hello".to_vec()).expect("send fits");
+        let mut buf = [0u8; 16];
+        let n = source.recv(&mut buf).await.expect("recv");
+        assert_eq!(n, 5);
+        assert_eq!(&buf[..n], b"hello");
+
+        // A datagram longer than the buffer truncates to buf.len(), consuming the whole datagram.
+        tx.try_send(vec![0xabu8; 32]).expect("send big");
+        let mut small = [0u8; 8];
+        let n = source.recv(&mut small).await.expect("recv truncated");
+        assert_eq!(n, 8, "recv must truncate to the buffer length");
+        assert_eq!(&small, &[0xab; 8]);
+
+        // Dropping the source de-registers its session id from the shared registry.
+        assert!(
+            sessions.lock().expect("lock").contains_key(&session_id),
+            "session must be registered before drop"
+        );
+        drop(source);
+        assert!(
+            !sessions.lock().expect("lock").contains_key(&session_id),
+            "Drop must de-register the session id"
         );
     }
 }
