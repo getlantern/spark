@@ -1,13 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { MockBackend, type SparkBackend, type SparkStatus } from "$lib/spark_backend";
+  import { goto } from "$app/navigation";
+  import { MockBackend, type SparkBackend, type SparkStatus, type ServerInfo } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
-  // Urbanist — the actual Lantern app font (getlantern/lantern app_text_styles.dart),
-  // bundled locally (CSP-safe, no CDN).
-  import "@fontsource/urbanist/latin-400.css";
-  import "@fontsource/urbanist/latin-500.css";
-  import "@fontsource/urbanist/latin-600.css";
-  import "@fontsource/urbanist/latin-700.css";
+  import { selectedIndex } from "$lib/selection";
+  import { flagEmoji, serverLabel } from "$lib/format";
+  // Fonts + global design tokens live in +layout.svelte (shared across home ↔ server selection).
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -19,11 +17,14 @@
   });
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
+  let servers = $state<ServerInfo[]>([]);
   let poll: ReturnType<typeof setInterval>;
   let refreshing = false; // re-entrancy guard: status() can block ~3s, longer than the 2s poll
 
   const connected = $derived(status.state === "connected");
   const connecting = $derived(status.state === "connecting");
+  // The server new flows currently dial — shown in the Smart-location tile.
+  const current = $derived(servers.find((s) => s.isCurrent));
 
   // Capitalized status value, matching Lantern's VpnStatus row (vpnStatus.name.capitalize).
   const statusValue = $derived(
@@ -42,6 +43,17 @@
     refreshing = true;
     try {
       status = await backend.status();
+      // The pool can only be queried over a live tunnel; skip (and clear) when not connected so a
+      // disconnected poll doesn't error every tick.
+      if (status.state === "connected") {
+        try {
+          servers = await backend.servers();
+        } catch {
+          servers = [];
+        }
+      } else {
+        servers = [];
+      }
       errorMsg = null; // clear a prior (transient) error once the backend recovers
     } catch (e) {
       errorMsg = String(e);
@@ -117,6 +129,24 @@
         </div>
       </div>
       <div class="divider"></div>
+      <!-- Smart-location row (Lantern location_setting.dart) → server selection screen -->
+      <button class="tile nav" onclick={() => goto("/servers")}>
+        <div class="tile-head">
+          <span class="ic">
+            {#if current}<span class="emoji">{flagEmoji(current.countryCode)}</span>{:else}{@render pin()}{/if}
+          </span>
+          <span class="label">{$selectedIndex === null ? "Smart location" : "Selected location"}</span>
+        </div>
+        <div class="tile-body">
+          <span class="value">{current ? serverLabel(current) : "Fastest server"}</span>
+          {#if $selectedIndex === null}<span class="locbolt" aria-label="Auto">⚡</span>{/if}
+          <span class="chev">{@render chevron()}</span>
+        </div>
+        {#if current?.latencyMs != null}
+          <div class="locsub">{current.latencyMs} ms</div>
+        {/if}
+      </button>
+      <div class="divider"></div>
       <!-- Protocol row -->
       <div class="tile">
         <div class="tile-head">
@@ -156,35 +186,12 @@
 {#snippet chevron()}
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
 {/snippet}
+{#snippet pin()}
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z"/><circle cx="12" cy="11" r="2.2"/></svg>
+{/snippet}
 
 <style>
-  /* Lantern palette (app_colors.dart) + semantic mappings (app_semantic_colors.dart). */
-  :global(:root) {
-    --bg: #f8fafb;          /* gray1  bg.surface */
-    --surface: #ffffff;     /* gray0  card */
-    --brand: #00bdd6;       /* blue4  toggle-brand-active */
-    --off: #616569;         /* gray7  toggle-disabled */
-    --knob: #ffffff;        /* gray0  toggle-knob */
-    --text-primary: #1b1c1d;   /* gray9 */
-    --text-secondary: #3e464e; /* gray8 */
-    --text-tertiary: #616569;  /* gray7 */
-    --border: #edefef;      /* gray2 */
-    --success: #00531f;     /* green8  status-success-text */
-    --indicator-off: #dedfdf; /* gray3 */
-    --shadow: rgba(0, 97, 98, 0.098); /* shadowColor 0x19006162 (teal-tinted) */
-    --font: "Urbanist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  }
-  :global(html),
-  :global(body) {
-    margin: 0;
-    height: 100%;
-    background: var(--bg);
-    font-family: var(--font);
-    color: var(--text-primary);
-    -webkit-font-smoothing: antialiased;
-    user-select: none;
-  }
-
+  /* Design tokens + html/body base live in +layout.svelte (shared across routes). */
   .app { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
   /* AppBar */
@@ -259,12 +266,21 @@
     flex-shrink: 0;
   }
   .tile { padding: 10px 16px; }
+  /* The Smart-location tile is a full-width button (navigates to /servers). */
+  .tile.nav {
+    display: block; width: 100%; text-align: left; border: none; cursor: pointer;
+    background: none; font-family: var(--font);
+  }
+  .tile.nav:hover { background: rgba(0, 0, 0, 0.02); }
   .tile-head { display: flex; align-items: center; gap: 8px; }
   .ic { width: 24px; display: inline-flex; justify-content: center; color: var(--text-secondary); }
+  .emoji { font-size: 18px; line-height: 1; }
   .label { font-size: 14px; font-weight: 400; color: var(--text-secondary); }
-  .tile-body { display: flex; align-items: center; padding-left: 32px; margin-top: 2px; }
+  .tile-body { display: flex; align-items: center; gap: 6px; padding-left: 32px; margin-top: 2px; }
   .value { flex: 1; font-size: 16px; font-weight: 600; color: var(--text-primary); }
   .value.ok { color: var(--success); }
+  .locbolt { color: var(--bolt); font-size: 16px; }
+  .locsub { padding-left: 32px; font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
   .chev { color: var(--text-tertiary); display: inline-flex; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--indicator-off); }
   .dot.on { background: var(--success); }
