@@ -115,8 +115,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             spark_string_free(cstr)
             completionHandler(json.data(using: .utf8))
         case "select":
-            // Missing/invalid index → -1 (auto).
-            let index = (obj["index"] as? Int).map(Int32.init) ?? -1
+            // Missing / non-integer / out-of-Int32-range index → -1 (auto). `Int32(exactly:)` is
+            // non-trapping, unlike `Int32.init`, which would crash the extension on a huge index from
+            // a malformed app message — this handler must tolerate untrusted input.
+            let index = (obj["index"] as? Int).flatMap { Int32(exactly: $0) } ?? -1
             let rc = spark_select_server(index)
             log.notice("handleAppMessage: select index=\(index) rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))

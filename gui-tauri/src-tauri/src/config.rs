@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 /// carries both the static (config-derived) list and the live overlay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
-    #[serde(default)]
+    // Required (no `serde(default)`): `index` is the handle the live overlay matches on and that the
+    // UI passes back to `spark_select_server`, so a reply missing it must fail `from_str` (handled as
+    // non-fatal by the caller) rather than silently deserialize to 0 and overlay/pin the wrong member.
     pub index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
