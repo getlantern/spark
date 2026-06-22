@@ -11,59 +11,22 @@
 //! session is never actually resumed — the server negotiates a fresh 1.3 handshake.
 
 use std::io;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use boring2::ssl::ConnectConfiguration;
-use foreign_types_shared::ForeignTypeRef; // provides `as_ptr` on boring2's SslRef
 
 use super::auth::SESSION_ID_LEN;
 
-/// TLS 1.2 wire version, for `SSL_SESSION_set_protocol_version` (forces the `kID` path).
-const TLS1_2_VERSION: u16 = 0x0303;
-/// A long lifetime so the fabricated session is always "time-valid" when offered.
-const SESSION_TIMEOUT_SECS: u32 = 7 * 24 * 3600;
-
 /// Install `session_id` as the ClientHello `legacy_session_id` on `config`. Call after
 /// `SslConnector::configure()` and before the handshake. See the module docs for the mechanism.
+///
+/// Delegates to the shared [`flint_tls::connector::inject_session_id`] implementation — the single
+/// source of truth for the unsafe BoringSSL `kID`-session FFI (riding flint-tls's `boring` feature,
+/// which spark's `samizdat` feature enables via `anytls`).
 pub fn inject_session_id(
     config: &mut ConnectConfiguration,
     session_id: &[u8; SESSION_ID_LEN],
 ) -> io::Result<()> {
-    let ssl = config.as_ptr();
-    // SAFETY: `ssl` is the valid `SSL*` owned by `config` for the duration of this call. We own the
-    // `SSL_SESSION` returned by `SSL_SESSION_new` until `SSL_set_session` takes its own reference
-    // (it up-refs), after which we free ours. All pointers/lengths passed in are valid.
-    unsafe {
-        let ctx = boring_sys2::SSL_get_SSL_CTX(ssl);
-        let sess = boring_sys2::SSL_SESSION_new(ctx);
-        if sess.is_null() {
-            return Err(io::Error::other("samizdat: SSL_SESSION_new failed"));
-        }
-        // TLS 1.2 + an id + no ticket ⇒ a `kID` session, whose id boring emits as the
-        // ClientHello's `legacy_session_id` (even in a 1.3 hello). See the module docs.
-        let configured = boring_sys2::SSL_SESSION_set_protocol_version(sess, TLS1_2_VERSION) == 1
-            && boring_sys2::SSL_SESSION_set1_id(sess, session_id.as_ptr(), session_id.len()) == 1;
-        if !configured {
-            boring_sys2::SSL_SESSION_free(sess);
-            return Err(io::Error::other(
-                "samizdat: configuring the kID session failed",
-            ));
-        }
-        // Keep the session "time-valid" so it is offered rather than dropped as expired.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        boring_sys2::SSL_SESSION_set_time(sess, now);
-        boring_sys2::SSL_SESSION_set_timeout(sess, SESSION_TIMEOUT_SECS);
-
-        let rc = boring_sys2::SSL_set_session(ssl, sess);
-        boring_sys2::SSL_SESSION_free(sess); // SSL_set_session up-ref'd it; drop our reference
-        if rc != 1 {
-            return Err(io::Error::other("samizdat: SSL_set_session failed"));
-        }
-    }
-    Ok(())
+    flint_tls::connector::inject_session_id(config, session_id)
 }
 
 #[cfg(test)]
