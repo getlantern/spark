@@ -2317,6 +2317,37 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (design §10); AnyTLS/Samizdat remain the spearhead. Design: `docs/shadowsocks-design.md`
   (status flipped to Accepted); decision: **ADR 0009**.
 
+- 2026-06-22 (Hysteria 2 transport SHIPPED — spark's first QUIC transport; live-gated vs
+  apernet/hysteria v2.9.2; ADR 0010): Added **Hysteria 2** as a spark client `Transport` (TCP) +
+  `UdpTransport` (UDP), **implemented from scratch in Rust** (no apernet/hysteria dependency),
+  wire-interoperable with deployed `apernet/hysteria` servers. Gated behind a new `hysteria2` cargo
+  feature (`= ["dep:quinn", "dep:quinn-udp", "dep:blake2", "dep:webpki-roots"]`, OFF by default →
+  base build untouched; `cargo tree` confirms no quinn/blake2/webpki-roots leak). Code:
+  `core/src/transport/hysteria2/{mod,obfs,tcp,udp,auth}.rs`; config `ServerSpec::Hysteria2` +
+  `[transport.hysteria2]`. **QUIC stack = quinn 0.11 on rustls/ring** (NOT aws-lc-rs — avoids a 2nd
+  C crypto lib next to the boring fork); **"quinn now, noq later"** — the QUIC lib sits behind the
+  transport traits, so the future `noq`/multipath swap is one module (strategic seam for QUIC-
+  everywhere: slipstream/unbounded-QUIC). **TCP** = one bidi stream/flow (`varint(0x401) ‖ addr ‖
+  pad`, parse TCPResponse, relay via `tokio::io::join`); **UDP** = QUIC datagrams (RFC 9221) carrying
+  UDPMessage `(session_id,packet_id,frag_id,frag_count,addr,payload)` + client fragmentation, one
+  per-connection receive pump routing to per-session mpsc; honors `Hysteria-UDP:false`. **Auth** =
+  hand-rolled minimal HTTP/3 + QPACK `POST /auth` (`Hysteria-Auth` → require status 233). **Obfs** =
+  `SalamanderGeckoSocket` (a `quinn::AsyncUdpSocket`): **Salamander** (8-byte salt + BLAKE2b-256
+  keystream XOR/packet) and **Gecko** (long-header packets fragmented into 2–8 padded frames, each
+  Salamander-obfs'd; wraps Salamander w/ the same password) — GSO/GRO disabled for clean per-packet
+  obfs; wire format byte-exact to upstream `extras/obfs/gecko*.go`. TLS = rustls/ring, TLS1.3-only,
+  ALPN `h3`, verifier modes system-roots (webpki-roots, chosen over rustls-platform-verifier for a
+  small portable mobile-clean bundle)/pin-sha256 (normalized, sig still verified)/insecure. **The one
+  interop fix the live gate surfaced:** the quic-go server **Huffman-encodes** QPACK response values,
+  so the `/auth` decoder needed an **RFC 7541 Appendix B Huffman decoder** (T7 had flagged this risk);
+  with it, auth=233 + TCP+UDP worked on first interop. **Live-interop gate PASSED** against
+  apernet/hysteria v2.9.2: TCP HTTP 200 + UDP DNS through the tunnel with **obfs off, Salamander, and
+  Gecko** (all 2×3 = 6 green). Out of scope v1: Brutal CC, port hopping, masquerade site, server side,
+  multipath (the noq swap). **Deferred limitation:** `SocketProtector` not yet applied to the QUIC/
+  obfs UDP socket (binds 0.0.0.0:0). All feature combos build/clippy/test clean; base build stays
+  rustls/ring-only. Design: `docs/hysteria2-design.md` (status flipped to Accepted); decision:
+  **ADR 0010**.
+
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
 - [x] U1 (NE Model A — **DONE + PROVEN e2e 2026-06-21**: U1a/U1b/U1b-1/U1b-2a/U1b-4 + U1b-2b connect/disconnect + U1b-2b-ii OSSystemExtensionRequest activation; live test through a remote DO relay showed real TCP+UDP traffic egressing via the tunnel. Notarized DMG carries the Lantern-matched UI.)

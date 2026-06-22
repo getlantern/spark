@@ -1,6 +1,8 @@
 # Hysteria 2 transport — design
 
-- **Status:** Proposed — awaiting implementation plan. On approval, record the decision as **ADR 0010**.
+- **Status:** Accepted — implemented and **live-gated** end-to-end against `apernet/hysteria` v2.9.2
+  (TCP HTTP 200 + UDP DNS through the tunnel; obfs off + Salamander + Gecko all green), 2026-06-22.
+  Recorded as **ADR 0010**.
 - **Scope:** Add **Hysteria 2** (the apernet/hysteria "v2"/internally-"v4" protocol) as a spark client
   `Transport` + `UdpTransport`, **wire-interoperable with deployed `apernet/hysteria` servers** (client
   side only; the server stays Go). spark's **first QUIC transport** — built on **`quinn`** (pure-Rust
