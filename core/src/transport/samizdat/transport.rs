@@ -3,7 +3,8 @@
 //! as HTTP/2 CONNECT streams. Ties together [`auth`], [`session_id`], and [`super::h2_mux`], reusing
 //! the AnyTLS boring connector ([`flint_tls::configure`]) for the Chrome hello.
 //!
-//! TCP only (v1). UDP is reported unsupported — see ADR 0007 §1 / the design doc §11.
+//! TCP via H2 CONNECT; UDP via sing-box **UDP-over-TCP v2** over a CONNECT stream whose `:authority`
+//! is the UoT magic address (shared [`crate::transport::uot`] framing, same as AnyTLS).
 
 use std::io;
 use std::net::SocketAddr;
@@ -12,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::net::SocketProtector;
+use crate::transport::uot::{self, UOT_MAGIC};
 use crate::transport::{
     protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, BoxedStream, Transport, UdpTransport,
 };
@@ -147,35 +149,28 @@ impl Transport for SamizdatTransport {
 impl UdpTransport for SamizdatTransport {
     async fn dial_udp(
         &self,
-        _target: SocketAddr,
+        target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        // Samizdat is TCP-only (it proxies via HTTP/2 CONNECT). UDP-over-CONNECT would need server
-        // support and is deferred (ADR 0007 §1, design §11).
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "samizdat: UDP is not supported (TCP-only transport)",
-        ))
+        // UDP-over-stream via sing-box UoT v2 (the same framing AnyTLS uses): open a CONNECT stream
+        // whose `:authority` is the UoT magic address, so the (sing-box) server switches that stream
+        // into a UDP association, then run the shared UoT framing over the CONNECT body. The magic is
+        // the *destination*, so it rides the authority here rather than in-band (see `transport::uot`).
+        let authority = format!("{UOT_MAGIC}:0");
+        let conn = self.conn().await?;
+        let stream = match conn.connect(&authority).await {
+            Ok(s) => s,
+            // A CONNECT rejection is stream-level (the shared connection is fine); surface it.
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => return Err(e),
+            // Otherwise the shared connection likely died — re-establish once and retry (mirrors `dial`).
+            Err(_) => {
+                self.invalidate(&conn);
+                let conn = self.conn().await?;
+                conn.connect(&authority).await?
+            }
+        };
+        uot::associate(stream, target).await
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn udp_is_unsupported() {
-        let t = SamizdatTransport::new(
-            "192.0.2.1:443".parse().unwrap(),
-            [0u8; 32],
-            [0u8; 8],
-            "cover.example".to_owned(),
-            WirePlan::default(),
-            None,
-        );
-        // The Ok tuple (boxed sink/source) isn't `Debug`, so match rather than `expect_err`.
-        match t.dial_udp("192.0.2.2:53".parse().unwrap()).await {
-            Err(e) => assert_eq!(e.kind(), io::ErrorKind::Unsupported),
-            Ok(_) => panic!("UDP must be unsupported"),
-        }
-    }
-}
+// UDP is exercised by the shared UoT framing tests in `crate::transport::uot`; samizdat's
+// CONNECT-to-magic-authority path is covered by staging interop against a live sing-box server.

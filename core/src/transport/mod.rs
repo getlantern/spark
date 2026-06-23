@@ -87,6 +87,10 @@ pub mod select;
 #[cfg(feature = "shadowsocks")]
 pub mod shadowsocks;
 pub mod tcp_tunnel;
+/// UDP-over-TCP v2 (sing-box UoT) framing, shared by the stream transports that tunnel UDP over a
+/// reliable stream (AnyTLS, Samizdat). Gated on those transports so the base build pulls no UoT code.
+#[cfg(any(feature = "anytls", feature = "samizdat"))]
+pub(crate) mod uot;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.
 #[cfg(feature = "wasm-transport")]
