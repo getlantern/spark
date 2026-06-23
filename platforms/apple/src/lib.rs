@@ -27,24 +27,60 @@ mod ffi {
     /// The caller (the Swift NE provider) hands ownership of `fd` to native for the tunnel's
     /// lifetime; the core closes it on stop.
     ///
-    /// `config` selects the data path (dual-mode for back-compat):
+    /// `config` selects the data path:
     /// - null/empty → forward each flow **directly** (no tunnel).
+    /// - `"lantern-api"` → self-fetch config from the Lantern config-new API into `data_dir` (the
+    ///   app-group container path) and run the tunnel from it, refreshing in the background. Requires
+    ///   the `config-fetch` feature (macOS/darwin slice only); the iOS slice returns -1. `data_dir`
+    ///   must be non-null in this mode — it is used to cache `device_id` and the fetched config.
     /// - a bare `host:port` IP literal → tunnel every flow through that **plain spark relay**.
     /// - any other string → a full **TOML [`Config`]** (AnyTLS + handshake shaping + gambit, …),
     ///   parsed via [`Config::from_toml_str`]; the whole transport stack applies (ADR 0006). AnyTLS
     ///   requires the staticlib to be built with the `anytls` feature (the macOS slice is), else the
     ///   core returns -1.
     ///
-    /// A non-null, non-empty `config` that is neither a `SocketAddr` nor valid TOML returns -1.
+    /// A non-null, non-empty `config` that is neither `"lantern-api"`, a `SocketAddr`, nor valid TOML
+    /// returns -1.
     ///
     /// # Safety
     /// `config` must be null or a valid NUL-terminated C string for the duration of this call.
+    /// `data_dir` must be null or a valid NUL-terminated C string for the duration of this call.
     #[no_mangle]
     pub unsafe extern "C" fn spark_tunnel_run(
         fd: c_int,
         mtu: c_int,
         config: *const c_char,
+        data_dir: *const c_char,
     ) -> c_int {
+        // `lantern-api` mode: self-fetch config from the Lantern config-new API into `data_dir` (the
+        // app-group container path) and run the tunnel from it, refreshing in the background. Gated on
+        // `config-fetch` (darwin slice only — it pulls the BoringSSL build); the iOS slice returns -1.
+        if !config.is_null() {
+            // SAFETY: caller contract — `config` is a valid NUL-terminated C string when non-null.
+            if let Ok("lantern-api") = unsafe { CStr::from_ptr(config) }.to_str().map(str::trim) {
+                #[cfg(feature = "config-fetch")]
+                {
+                    // SAFETY: caller contract — `data_dir` is null or a valid NUL-terminated C string.
+                    let dir = if data_dir.is_null() {
+                        None
+                    } else {
+                        unsafe { CStr::from_ptr(data_dir) }
+                            .to_str()
+                            .ok()
+                            .map(std::path::PathBuf::from)
+                    };
+                    return match dir {
+                        Some(d) => spark_core::fd_tunnel::run_fd_lantern_api(fd, mtu as u16, d),
+                        None => -1, // api mode needs a data dir to cache device_id + config
+                    };
+                }
+                #[cfg(not(feature = "config-fetch"))]
+                {
+                    let _ = data_dir; // unused without config-fetch (iOS slice)
+                    return -1; // `lantern-api` unsupported in this slice
+                }
+            }
+        }
         // SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
         let config = match unsafe { build_config(config) } {
             Some(c) => c,

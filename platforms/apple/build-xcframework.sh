@@ -17,7 +17,7 @@ for t in "${TARGETS[@]}"; do
     # only the macOS slice gets `anytls` — the iOS slices share the ABI but return -1 for AnyTLS.
     # `multi-server` (latency pool) is boring-free; enabled on the macOS slice alongside anytls.
     feat=()
-    [[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server)
+    [[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server,config-fetch)
     # ${feat[@]+...} guards the empty-array expansion so `set -u` doesn't trip on
     # macOS's stock bash 3.2 (where `env bash` resolves), which errors on
     # "${empty[@]}" unlike bash >=4.4.
