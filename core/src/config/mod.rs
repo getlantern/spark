@@ -32,6 +32,10 @@ use flint_tls::gambit::{ClientHello, Records};
 /// [`Config`] (Phase 3). See [`lantern::from_config_raw_json`].
 pub mod lantern;
 
+/// Fetch config from the Lantern `config-new` API and feed it into [`lantern`] (Phase 3 fetch half).
+#[cfg(feature = "config-fetch")]
+pub mod fetch;
+
 /// A proxy server address: a literal `IP:port` ([`Endpoint::Ip`], the unchanged path with no startup
 /// DNS) or a `host:port` to resolve before dialing ([`Endpoint::Host`], requires the `bootstrap-dns`
 /// feature). Deserializes from a single TOML string. See `docs/bootstrap-resolver-design.md`.
