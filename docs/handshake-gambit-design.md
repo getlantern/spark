@@ -15,10 +15,13 @@ ahead of the code; **§3.5 (Client realization) is the authoritative account of 
 actually decodes, can realize today, and does with a gambit** — read it for the precise client-side
 contract.
 
-Terminology: a **gambit** is the specification of a flow's *opening* — the ClientHello content, the
-TLS record framing, and the TCP-segment/timing of the first ~5 packets — **and nothing after**
-(§3.6). An **executor** runs a gambit on the wire (`boring`/`btls` in spark/Rust; `uTLS` in
-lantern/Go). The genome is the *interchange format* between the discovery loop and both executors.
+Terminology: a **gambit** is the specification of a flow's *opening* — the bytes a censor judges in
+the first ~5 packets — **and nothing after** (§3.6). In the v1 **TLS dialect** that opening is the
+ClientHello content, the TLS-record framing, and the TCP-segment/timing; the genome is
+dialect-extensible to other protocols' openings (QUIC, DNS, WebRTC, HTTP, …), of which TLS is the one
+realized today — see §3.7. An **executor** runs a gambit on the wire (`boring`/`btls` in spark/Rust;
+`uTLS` in lantern/Go). The genome is the *interchange format* between the discovery loop and both
+executors.
 
 ---
 
@@ -193,7 +196,7 @@ inter_segment_delay_ms: jitter(5,25)}` → **both** executors: emit a byte-exact
 to 700 B, with ECH-GREASE, then write it as ≥2 TCP segments split at the SNI with 5–25 ms between
 them. No `requires` beyond `ech`/`alps` → portable, well-formed, keeps a working handshake on boring.
 
-### 3.5 Client realization (spark/boring) — the authoritative client-side contract
+### 3.5 Client realization (spark/boring, TLS dialect) — the authoritative client-side contract
 
 What the spark client actually *does* with a gambit, against the real `flint_tls` APIs. The decode →
 verify → gate → realize → fall-back chain:
@@ -268,25 +271,36 @@ and at that point the transport and the gambit must agree on **who owns data-pla
 gambit or the transport's own scheme) to avoid double-shaping. This is a documented reservation, not
 code.
 
-### 3.7 Cross-transport applicability
+### 3.7 Protocol dialects — the gambit beyond TLS
 
-A gambit is **TLS-handshake-shaped**: it assumes a ClientHello, TLS records, and the TCP segments
-carrying them. It maps onto the **TLS-handshake transports** (AnyTLS, Samizdat — boring/btls). It does
-**not** apply as-is to **QUIC** transports (hysteria2), whose opening is a QUIC Initial packet with an
-encrypted ClientHello inside QUIC crypto frames — a different shaping surface, already addressed by
-Salamander/Gecko. "The client realizes the gambit" therefore means specifically the TLS-handshake
-transports; a QUIC opening-gambit would be a separate, future genome dialect (a natural Layer-A
-sibling, not a v1 concern).
+A gambit shapes a flow's **opening**, and an opening is whatever a protocol leads with — not
+necessarily a TLS ClientHello. The genome's structure — a signed, versioned, anchor-relative set of
+opening deltas, scored by what reaches the server — is **dialect-agnostic by design**: a template for
+*any* opening whose fingerprint a censor judges in the first packets. **TLS is the first dialect, not
+the boundary** — the one realized in the client today (§3.5), with the rest of the family on the
+roadmap.
 
-More generally, the genome's structure (a signed, versioned, anchor-relative set of opening deltas)
-is **not intrinsically TLS-specific** — it is a template for *any* opening whose fingerprint a censor
-judges early. Future **opening dialects** could shape the prelude of other high-collateral,
-wire-distinct protocols on their own ports — e.g. a **TURN/STUN** opening (the magic-cookie framing on
-3478/5349), an **RDP** or **STARTTLS-mail** prelude (a cleartext line-protocol negotiation before the
-inline TLS upgrade) — each inheriting that protocol's collateral-freedom on its port while reusing the
-genome's signing, versioning, capability-gating, and discovery machinery. These are explicitly **out
-of v1 scope** (v1 is the TLS-handshake dialect above); they are noted so the genome's
-dialect-agnostic shape is a deliberate design property, not an accident.
+A **dialect** binds the genome to one protocol's opening: the protocol's anchor (a genuine sample of
+its real traffic), the layers that opening exposes to shaping, and the executor that emits them.
+Everything else — signing, versioning, capability-gating, anchor/drift control, the discovery loop —
+is reused **unchanged** across dialects; only the opening surface and the executor differ. The
+intended family:
+
+| Dialect | The opening it shapes | Status |
+|---|---|---|
+| **TLS** | ClientHello content + TLS-record framing + TCP segment/timing (Layers A/B/C), on boring/btls (spark) and uTLS (Go) | ✅ **realized** — the v1 dialect (§3.5) |
+| **QUIC** | the QUIC Initial — an encrypted ClientHello inside QUIC crypto frames — plus the UDP datagram shape | roadmap (hysteria2 already shapes its QUIC opening via Salamander/Gecko; a dialect folds that into the genome) |
+| **DNS** | the query itself — name encoding, EDNS options, transport (Do53 / DoT / DoH) — the resolution every flow needs first | roadmap |
+| **WebRTC** | the STUN binding + DTLS handshake — the shape of every video call | roadmap |
+| **HTTP** | the request line + headers, and CDN-fronting (a `Host` ≠ `SNI` / ECH-fronted opening — i.e. domain fronting / meek) | roadmap |
+| **STARTTLS-pattern** (RDP, SMTP/IMAP) | a cleartext line-protocol prelude on a fixed port before the inline TLS upgrade | roadmap |
+| **TURN/STUN** | the STUN magic-cookie framing on the STUN/TURN ports (3478 / 5349) | roadmap |
+
+Each dialect inherits its protocol's **collateral-freedom** and takes the **port** it speaks on as
+part of the move — block the port and you block the real thing that lives there. The roadmap dialects
+are **not yet realized in the client** (only the TLS dialect is built today), but they are the
+deliberate shape of the genome, not an afterthought: adding one is a new opening surface + executor
+binding, **not a new genome**. v1 ships the TLS dialect; the dialect family is how the book widens.
 
 ---
 
