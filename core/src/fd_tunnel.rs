@@ -192,9 +192,20 @@ pub fn run_tunnel_with_config(fd: i32, mtu: u16, config: Config) -> std::io::Res
 /// [`TunnelHandle`]) or the data path exits, registering `stop` for its lifetime so the no-arg
 /// [`stop`] can find it.
 fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std::io::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?;
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // We never adopted `fd` (no `Tun::from_fd`) and never flipped readiness `Up`. Close the fd
+            // (the caller transferred ownership to native) and mark down so a `wait_ready` waiter fails
+            // the connect instead of timing out. SAFETY: nothing else owns `fd` on this path.
+            unsafe { libc::close(fd) };
+            set_ready(Readiness::Down);
+            return Err(e);
+        }
+    };
     register(&stop);
     let waiter = Arc::clone(&stop);
     let result = runtime.block_on(run_tunnel_data_path(fd, mtu, config, &waiter));
@@ -259,6 +270,10 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "lantern-api: runtime build failed");
+            // `fd` was never adopted; close it (NE ownership transfer) and unblock a `wait_ready`
+            // waiter. SAFETY: nothing else owns `fd` on this pre-adoption path.
+            unsafe { libc::close(fd) };
+            set_ready(Readiness::Down);
             return -1;
         }
     };
@@ -271,23 +286,31 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
         // or stop fires while we wait. `load_or_fetch` returns instantly on a warm cache.
         let mut attempt = 0u32;
         let (config, _meta) = loop {
-            match fetch::load_or_fetch(&data_dir, &env).await {
-                Ok(c) => break c,
-                Err(e) => {
-                    warn!(error = %e, "lantern-api: waiting for config (offline?)");
-                    attempt = attempt.saturating_add(1);
-                    let wait = Duration::from_secs(((attempt as u64) * 5).clamp(5, 30));
-                    tokio::select! {
-                        _ = tokio::time::sleep(wait) => {}
-                        _ = waiter.notified() => {
-                            // Stopped before we adopted `fd` into the netstack. The NE transferred fd
-                            // ownership to native; on the normal path `Tun::from_fd`'s drop closes it,
-                            // but here it's never adopted — close it explicitly so we don't leak the utun.
-                            // SAFETY: nothing else owns `fd` on this pre-adoption path.
-                            unsafe { libc::close(fd) };
-                            return Ok(());
+            // Race the (possibly slow) fetch against stop so a teardown during an in-flight attempt
+            // cancels it promptly — rather than waiting out `fetch_once`'s timeout — and unblocks the
+            // readiness waiter. `fd` isn't adopted yet on any of these paths.
+            tokio::select! {
+                res = fetch::load_or_fetch(&data_dir, &env) => match res {
+                    Ok(c) => break c,
+                    Err(e) => {
+                        warn!(error = %e, "lantern-api: waiting for config (offline?)");
+                        attempt = attempt.saturating_add(1);
+                        let wait = Duration::from_secs(((attempt as u64) * 5).clamp(5, 30));
+                        tokio::select! {
+                            _ = tokio::time::sleep(wait) => {}
+                            _ = waiter.notified() => {
+                                // SAFETY: nothing else owns `fd` on this pre-adoption path.
+                                unsafe { libc::close(fd) };
+                                return Ok(());
+                            }
                         }
                     }
+                },
+                _ = waiter.notified() => {
+                    // Stopped during an in-flight fetch — close the (still-unadopted) fd and bail.
+                    // SAFETY: nothing else owns `fd` on this pre-adoption path.
+                    unsafe { libc::close(fd) };
+                    return Ok(());
                 }
             }
         };

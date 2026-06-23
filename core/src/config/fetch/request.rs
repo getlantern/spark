@@ -78,6 +78,17 @@ pub struct Conditional {
     pub last_modified: Option<String>,
 }
 
+/// Strip CR/LF from a value before it's interpolated into a header line, so a tampered/corrupt
+/// non-constant source (the on-disk device id, the env-derived timezone, or a cached server-origin
+/// `ETag`/`Last-Modified`) can't inject extra headers or break request framing. Borrows when clean.
+fn header_safe(v: &str) -> std::borrow::Cow<'_, str> {
+    if v.contains(['\r', '\n']) {
+        std::borrow::Cow::Owned(v.replace(['\r', '\n'], ""))
+    } else {
+        std::borrow::Cow::Borrowed(v)
+    }
+}
+
 /// Build the full HTTP/1.1 request bytes for `POST {path}` to `host` with `body_json`.
 ///
 /// Headers mirror radiance `common/headers.go`. `X-Lantern-Time-Zone` carries `req.time_zone` (the
@@ -99,21 +110,24 @@ pub fn build_request_bytes(
     head.push_str(&format!("X-Lantern-App-Version: {}\r\n", req.version));
     head.push_str(&format!("X-Lantern-Version: {}\r\n", req.version));
     head.push_str(&format!("X-Lantern-Platform: {}\r\n", req.platform));
-    head.push_str(&format!("X-Lantern-Device-Id: {}\r\n", req.device_id));
-    head.push_str(&format!("X-Lantern-Time-Zone: {}\r\n", req.time_zone));
+    // `device_id` (read from a writable file) and `time_zone` (derived from the `/etc/localtime`
+    // symlink) are not compile-time constants like the other values, so strip CR/LF in case a
+    // tampered/corrupt source smuggles a newline — same guard as the cached server headers below.
+    head.push_str(&format!(
+        "X-Lantern-Device-Id: {}\r\n",
+        header_safe(&req.device_id)
+    ));
+    head.push_str(&format!(
+        "X-Lantern-Time-Zone: {}\r\n",
+        header_safe(&req.time_zone)
+    ));
     head.push_str("Content-Type: application/json\r\n");
     head.push_str("Cache-Control: no-cache\r\n");
     if let Some(etag) = &cond.etag {
-        head.push_str(&format!(
-            "If-None-Match: {}\r\n",
-            etag.replace(['\r', '\n'], "")
-        ));
+        head.push_str(&format!("If-None-Match: {}\r\n", header_safe(etag)));
     }
     if let Some(lm) = &cond.last_modified {
-        head.push_str(&format!(
-            "If-Modified-Since: {}\r\n",
-            lm.replace(['\r', '\n'], "")
-        ));
+        head.push_str(&format!("If-Modified-Since: {}\r\n", header_safe(lm)));
     }
     head.push_str(&format!("Content-Length: {}\r\n", body.len()));
     head.push_str("Connection: close\r\n\r\n");
@@ -205,5 +219,26 @@ mod tests {
             "CRLF in ETag must not inject a header"
         );
         assert!(s.contains("If-None-Match: \"e\"X-Injected: 1\r\n"));
+    }
+
+    #[test]
+    fn identity_header_values_are_crlf_stripped() {
+        // A tampered on-disk device id (or env-derived timezone) carrying CRLF must not inject a header.
+        let mut req = ConfigRequest::new("dev\r\nX-Evil: 1".into());
+        req.time_zone = "Zone\r\nX-Evil2: 2".into();
+        let s = String::from_utf8(
+            build_request_bytes("h", "/p", &req, &Conditional::default()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !s.contains("\r\nX-Evil:"),
+            "CRLF in device_id must not inject a header"
+        );
+        assert!(
+            !s.contains("\r\nX-Evil2:"),
+            "CRLF in time_zone must not inject a header"
+        );
+        assert!(s.contains("X-Lantern-Device-Id: devX-Evil: 1\r\n"));
+        assert!(s.contains("X-Lantern-Time-Zone: ZoneX-Evil2: 2\r\n"));
     }
 }
