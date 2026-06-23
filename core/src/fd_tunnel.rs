@@ -293,7 +293,7 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
         // Cold-start resilience (design §6): keep retrying until a config is obtained (cache or fetch)
         // or stop fires while we wait. `load_or_fetch` returns instantly on a warm cache.
         let mut attempt = 0u32;
-        let (config, _meta) = loop {
+        let (mut config, _meta) = loop {
             // Race the (possibly slow) fetch against stop so a teardown during an in-flight attempt
             // cancels it promptly — rather than waiting out `fetch_once`'s timeout — and unblocks the
             // readiness waiter. `fd` isn't adopted yet on any of these paths.
@@ -320,6 +320,21 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
                 }
             }
         };
+        // Pin the proxy's own sockets to the physical interface so they bypass our tunnel. The NE
+        // does this automatically for TCP but NOT for UDP/QUIC, so without it hysteria2's QUIC
+        // handshake loops back into the tunnel and hangs (samizdat/TCP is unaffected). A fetched
+        // config carries no `protect_interface`, so discover it here; respect an explicit one.
+        if config.transport.protect_interface.is_none() {
+            match crate::net::default_physical_interface() {
+                Some(iface) => {
+                    info!(interface = %iface, "lantern-api: pinning proxy sockets to physical interface (UDP/QUIC tunnel bypass)");
+                    config.transport.protect_interface = Some(iface);
+                }
+                None => warn!(
+                    "lantern-api: no physical interface found to pin to; UDP/QUIC transports may not egress"
+                ),
+            }
+        }
         info!(
             servers = config.transport.servers.len(),
             "lantern-api: boot config ready, bringing tunnel up"
