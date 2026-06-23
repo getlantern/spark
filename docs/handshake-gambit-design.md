@@ -292,7 +292,7 @@ intended family:
 | **QUIC** | the QUIC Initial — an encrypted ClientHello inside QUIC crypto frames — plus the UDP datagram shape | roadmap (hysteria2 already shapes its QUIC opening via Salamander/Gecko; a dialect folds that into the genome) |
 | **DNS** | the query itself — name encoding, EDNS options, transport (Do53 / DoT / DoH) — the resolution every flow needs first | roadmap |
 | **WebRTC** | the STUN binding + DTLS handshake — the shape of every video call | roadmap |
-| **HTTP** | the request line + headers, and CDN-fronting (a `Host`≠SNI / ECH-fronted opening — i.e. domain fronting / meek) | roadmap |
+| **HTTP** | the request line + headers, and CDN-fronting (a `Host` ≠ `SNI` / ECH-fronted opening — i.e. domain fronting / meek) | roadmap |
 | **STARTTLS-pattern** (RDP, SMTP/IMAP) | a cleartext line-protocol prelude on a fixed port before the inline TLS upgrade | roadmap |
 | **TURN/STUN** | the STUN magic-cookie framing on the STUN/TURN ports (3478 / 5349) | roadmap |
 
