@@ -19,7 +19,7 @@ for t in "${TARGETS[@]}"; do
     # `bootstrap-dns` resolves hostname pool members (config_raw file or `lantern-api` fetch) — without
     # it a hostname server is a hard error at connect; `config-fetch` enables `lantern-api` self-fetch.
     feat=()
-    [[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server,bootstrap-dns,config-fetch)
+    [[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2)
     # ${feat[@]+...} guards the empty-array expansion so `set -u` doesn't trip on
     # macOS's stock bash 3.2 (where `env bash` resolves), which errors on
     # "${empty[@]}" unlike bash >=4.4.
