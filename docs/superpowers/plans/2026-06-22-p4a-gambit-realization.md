@@ -12,7 +12,7 @@
 
 **VERIFY discipline (project rule):** Some `boring2` 4.15 calls below are version-sensitive. Where a step says **VERIFY**, the implementer MUST confirm the exact signature against the `boring2`/`boring-sys2` 4.15.15 source under `~/.cargo/registry/src/` (and spark's existing usage) before writing it — do not guess. The deterministic parts (struct fields, `resolve()` logic, the shaper variant, test scaffolding) are given complete.
 
-**Worktrees:** flint work in a fresh worktree of `/Users/afisk/go/src/github.com/getlantern/flint` (branch off `main` @ `d22dcb5`); spark work in the existing `spark-p4a` worktree (branch `p4a-gambit-realization`).
+**Worktrees:** flint work in a fresh worktree of the flint repo (`getlantern/flint`, branch off `main`); spark work in a worktree of the spark repo on branch `p4a-gambit-realization`. (Use whatever local checkout paths you have; this was executed from a `spark-p4a` worktree off `flint@d22dcb5`, but neither the absolute path nor that base commit is load-bearing.)
 
 ---
 
@@ -259,7 +259,7 @@ and at the end (after `config` is built, near `set_enable_ech_grease`):
         inject_session_id(&mut config, id)?;
     }
 ```
-**VERIFY:** (a) `SslConnectorBuilder::set_extension_permutation` exact signature + the `ExtensionType` enum + how a `u16` ext id maps to `ExtensionType` (a `from_u16`/`From` or a match); unknown ids → skip-with-`tracing::warn!`, never fail. (b) the `boring2` cipher-name strings for the anchor's cipher ids (build `cipher_ids_to_list` as an id→name match over the anchor's cipher set; unknown ids → skip-with-warn). Write these two small mappers (`ids_to_extension_types`, `cipher_ids_to_list`) in `connector.rs`.
+**VERIFY:** (a) `SslConnectorBuilder::set_extension_permutation` exact signature + the `ExtensionType` enum + how a `u16` ext id maps to `ExtensionType` (a `from_u16`/`From` or a match); unmapped ext ids are still **forwarded** (boring ignores ids not in its permutation table — not reordered, not removed) with a `tracing::warn!`, never failing. (b) the `boring2` cipher-name strings for the anchor's cipher ids (build `cipher_ids_to_list` as an id→name match over the anchor's cipher set; unknown cipher ids are genuinely **skipped** (filtered out) with a `warn!`). Write these two small mappers (`ids_to_extension_types`, `cipher_ids_to_list`) in `connector.rs`.
 
 - [ ] **Step 5: Run, expect PASS** + JA4 check.
   Run: `cargo test -p flint-tls --features boring connector:: -- --nocapture` → PASS.
@@ -349,4 +349,4 @@ git commit -m "feat(anytls): realize Layer-B split + session-id-inject gambits"
 - **Spec coverage:** §2 scope → Tasks 1–8; §3.1 flint → T1–T3; §3.2 spark → T5–T7; §3.3 samizdat → T6; §4 per-knob → T2/T3/T5; §5 testing → T2/T3 (unit+CH-parse+JA4) + T8 (live); §6 build order → T1–T8 ordering + T4 rev bump; §7 (P4b/dialects) → out of scope here, captured in T7 §3.7 doc only.
 - **Type consistency:** `Profile.extension_order/cipher_order: Option<Vec<u16>>`, `Profile.session_id: Option<[u8;32]>`, `RecordFragment::Offsets(Vec<usize>)`, `BORING_CAPABILITIES` incl. `SessionIdInject` — used identically across T2/T3/T5.
 - **VERIFY (not placeholders) — version-sensitive boring2 surface:** `set_extension_permutation` signature + `ExtensionType` mapping (T3), cipher-id→name list (T3), the `boring_sys2` kID symbols (T3 S1), the `ja4.rs` capture/JA4 API (T3 S2/S6), and spark's exact `WirePlan` construction site + live-gate file (T5/T8). Confirm each against source before writing — per spark's verification discipline; the surrounding logic and tests are given complete.
-- **Never break connectivity:** unknown ext/cipher ids skip-with-warn; an unrealizable/erroring gambit falls back to the portable default (unchanged invariant) — assert the fallback still holds after T5.
+- **Never break connectivity:** unmapped ext ids are forwarded-with-warn (boring ignores them — not reordered, not removed), unknown cipher ids are skipped-with-warn; an unrealizable/erroring gambit falls back to the portable default (unchanged invariant) — assert the fallback still holds after T5.

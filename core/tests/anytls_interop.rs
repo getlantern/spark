@@ -62,7 +62,7 @@ fn config_from_env() -> Option<Config> {
     let server_lit = toml::Value::from(server.clone()).to_string();
     let password_lit = toml::Value::from(password.clone()).to_string();
     let sni_lit = toml::Value::from(sni.clone()).to_string();
-    let toml = format!(
+    let toml_str = format!(
         "[transport.anytls]\nserver = {server_lit}\npassword = {password_lit}\nsni = {sni_lit}\n\n\
          [transport.anytls.clienthello]\n\
          session_id = {{ mode = \"inject\", hex = \"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\" }}\n\n\
@@ -71,7 +71,7 @@ fn config_from_env() -> Option<Config> {
     println!(
         "--- anytls P4a interop: server={server} sni={sni} (session-id inject + record split) ---"
     );
-    match Config::from_toml_str(&toml) {
+    match Config::from_toml_str(&toml_str) {
         Ok(cfg) => Some(cfg),
         Err(e) => panic!("SPARK_ANYTLS_* env produced an invalid config: {e}"),
     }

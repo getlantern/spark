@@ -93,9 +93,10 @@ wire change to samizdat.
   `legacy_session_id` is exactly `id` (verified by the existing parse test). Capability-gated by
   `SessionIdInject` (now in `BORING_CAPABILITIES`).
 - **explicit extension order** — `Profile.extension_order: Some(vec![ext_id,…])` ⇒
-  `set_extension_permutation(&ids.map(ExtensionType::from))`. Unknown/unsupported ext ids: decide at
-  build (skip-with-log vs decline-gambit) — **skip-with-log**, consistent with "never break
-  connectivity," and surface in `unrealizable`.
+  `set_extension_permutation(&ids.map(ExtensionType::from))`. Unknown/unsupported ext ids are **still
+  forwarded** to `set_extension_permutation` (boring silently ignores ids not in its permutation
+  table — they won't be reordered, but aren't removed), surfaced with a `warn!`; we never decline the
+  gambit, consistent with "never break connectivity."
 - **explicit cipher order** — `Profile.cipher_order: Some(vec![cipher_id,…])` ⇒ ordered
   `set_cipher_list`. Needs a `u16` cipher-id → boring cipher-name map for the ciphers the anchor uses;
   unknown ids skipped-with-log.
