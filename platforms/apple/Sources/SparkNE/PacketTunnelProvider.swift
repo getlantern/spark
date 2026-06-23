@@ -33,6 +33,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         handler?(error)
     }
 
+    /// Whether a start is still pending — i.e. `stopTunnel`/`finishStart` hasn't resolved it yet.
+    /// `startTunnel`'s async stages check this and bail if the connect was cancelled mid-startup, so we
+    /// don't resolve an fd or spawn a worker after teardown has begun.
+    private func startPending() -> Bool {
+        startLock.lock()
+        defer { startLock.unlock() }
+        return pendingStart != nil
+    }
+
     override func startTunnel(
         options _: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
@@ -50,6 +59,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self else { return }
+            // `stopTunnel` may have fired before this async callback ran (connect cancelled
+            // mid-startup); if so the start is already resolved — don't resolve an fd or spawn a worker.
+            guard self.startPending() else {
+                self.log.notice("startup cancelled before settings callback; skipping")
+                return
+            }
             if let error {
                 self.log.error("setTunnelNetworkSettings failed: \(error.localizedDescription)")
                 self.finishStart(error)
@@ -96,6 +111,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             worker.name = "spark-tunnel"
             worker.stackSize = 1 << 20
+
+            // Re-check right before spawning: `stopTunnel` may have fired during this callback. If the
+            // start was cancelled, don't spawn the worker (it would run on past teardown). Narrow
+            // residual: a stop in the gap before the worker registers its stop handle is the shared
+            // registry's pre-existing limitation; the stray worker dies with the extension on teardown.
+            guard self.startPending() else {
+                self.log.notice("startup cancelled before worker start; skipping")
+                return
+            }
             self.worker = worker
 
             // Mark connecting BEFORE starting the worker, so the readiness waiter below can't observe a
