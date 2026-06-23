@@ -23,8 +23,16 @@ use tracing::{span, Event, Level, Metadata, Subscriber};
 /// NUL-terminated UTF-8 C string valid only for the duration of the call (copy it synchronously).
 pub type LogCallback = extern "C" fn(level: u8, msg: *const c_char);
 
-/// INFO and more severe — the default verbosity forwarded to the host.
-const DEFAULT_MAX: u8 = 2;
+/// DEBUG and more severe — forwarded to the host. DEBUG is included so the on-device diagnostics
+/// (per-member probe failures, pool re-probe summaries, dial failovers) are visible; the target
+/// filter below keeps dependency-internal DEBUG/TRACE noise out.
+const DEFAULT_MAX: u8 = 3;
+
+/// Only forward events from spark's own crates (`spark_core`, `spark_apple`), so turning DEBUG on
+/// doesn't flood the host log with `tokio`/`h2`/`quinn`/`boring` internals.
+fn is_spark_target(target: &str) -> bool {
+    target.starts_with("spark")
+}
 
 /// Severity as a small integer the C side can map to `os_log` types. Lower = more severe.
 fn level_to_u8(level: &Level) -> u8 {
@@ -91,7 +99,7 @@ impl BridgeSubscriber {
 
 impl Subscriber for BridgeSubscriber {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        level_to_u8(metadata.level()) <= self.max
+        level_to_u8(metadata.level()) <= self.max && is_spark_target(metadata.target())
     }
 
     fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
@@ -106,7 +114,7 @@ impl Subscriber for BridgeSubscriber {
     fn event(&self, event: &Event<'_>) {
         let meta = event.metadata();
         let level = level_to_u8(meta.level());
-        if level > self.max {
+        if level > self.max || !is_spark_target(meta.target()) {
             return;
         }
         let mut visitor = EventVisitor::default();

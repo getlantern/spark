@@ -292,7 +292,14 @@ async fn prober_loop(
             // Clone the (cheap) Arc + CallbackUrl into the future so it borrows nothing from `members`.
             let transport = Arc::clone(&members[i].transport);
             let callback = members[i].callback.clone();
-            async move { probe(&transport, &callback, per_probe).await }
+            // Identify the member in probe-failure logs (name, else index) so a mixed-protocol pool's
+            // failures are attributable.
+            let label = members[i]
+                .meta
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("#{i}"));
+            async move { probe(&transport, &callback, per_probe, &label).await }
         })
         .await;
         {
