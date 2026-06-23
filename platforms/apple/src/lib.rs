@@ -27,19 +27,24 @@ mod ffi {
     /// The caller (the Swift NE provider) hands ownership of `fd` to native for the tunnel's
     /// lifetime; the core closes it on stop.
     ///
-    /// `config` selects the data path:
-    /// - null/empty → forward each flow **directly** (no tunnel).
-    /// - `"lantern-api"` → self-fetch config from the Lantern config-new API into `data_dir` (the
-    ///   app-group container path) and run the tunnel from it, refreshing in the background. Requires
-    ///   the `config-fetch` feature (macOS/darwin slice only); the iOS slice returns -1. `data_dir`
-    ///   must be non-null in this mode — it is used to cache `device_id` and the fetched config.
-    /// - a bare `host:port` IP literal → tunnel every flow through that **plain spark relay**.
+    /// `config` selects the data path. The daemon owns config acquisition: on the `config-fetch`
+    /// slice (macOS/darwin), the **absence** of an explicit config is the signal to self-fetch — the
+    /// fetch must bypass the tunnel, and only the extension can guarantee that (its own dials egress
+    /// the real interface by design), so the decision lives here, not in the controlling app.
+    /// - null/empty (or the explicit `"lantern-api"` sentinel) → **self-fetch** config from the
+    ///   Lantern config-new API into `data_dir` (the app-group container path) and run the tunnel
+    ///   from it, refreshing in the background. This is the default on the `config-fetch` slice;
+    ///   `data_dir` must be non-null (it caches `device_id` and the fetched config). On the iOS slice
+    ///   (no `config-fetch`), null/empty falls back to **direct** and an explicit `"lantern-api"`
+    ///   returns -1 (self-fetch unsupported there).
+    /// - a bare `host:port` IP literal → tunnel every flow through that **plain spark relay**
+    ///   (explicit override, e.g. dev/testing).
     /// - any other string → a full **[`Config`]** — spark's native TOML *or* a Lantern
     ///   `config_raw.json` payload (auto-detected), parsed via [`Config::from_config_str`]; the whole
     ///   transport stack applies (ADR 0006). AnyTLS requires the staticlib to be built with the
     ///   `anytls` feature (the macOS slice is), else the core returns -1.
     ///
-    /// A non-null, non-empty `config` that is neither `"lantern-api"`, a `SocketAddr`, nor a valid
+    /// A non-null, non-empty explicit `config` that is neither a `SocketAddr` nor a valid
     /// TOML / `config_raw.json` config returns -1.
     ///
     /// # Safety
@@ -52,45 +57,58 @@ mod ffi {
         config: *const c_char,
         data_dir: *const c_char,
     ) -> c_int {
-        // `lantern-api` mode: self-fetch config from the Lantern config-new API into `data_dir` (the
-        // app-group container path) and run the tunnel from it, refreshing in the background. Gated on
-        // `config-fetch` (darwin slice only — it pulls the BoringSSL build); the iOS slice returns -1.
-        if !config.is_null() {
-            // SAFETY: caller contract — `config` is a valid NUL-terminated C string when non-null.
-            if let Ok("lantern-api") = unsafe { CStr::from_ptr(config) }.to_str().map(str::trim) {
-                #[cfg(feature = "config-fetch")]
-                {
-                    // SAFETY: caller contract — `data_dir` is null or a valid NUL-terminated C string.
-                    let dir = if data_dir.is_null() {
-                        None
-                    } else {
-                        // Trim and reject empty: an empty path would cache into the process cwd.
-                        unsafe { CStr::from_ptr(data_dir) }
-                            .to_str()
-                            .ok()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(std::path::PathBuf::from)
-                    };
-                    return match dir {
-                        Some(d) => spark_core::fd_tunnel::run_fd_lantern_api(fd, mtu as u16, d),
-                        None => {
-                            // api mode needs a data dir to cache device_id + config; close the fd
-                            // (ownership was transferred) + unblock any waiter, then fail the connect.
-                            spark_core::fd_tunnel::abandon_fd(fd);
-                            -1
-                        }
-                    };
-                }
-                #[cfg(not(feature = "config-fetch"))]
-                {
-                    let _ = data_dir; // unused without config-fetch (iOS slice)
-                    spark_core::fd_tunnel::abandon_fd(fd); // close fd + unblock waiter; can't serve it here
-                    return -1; // `lantern-api` unsupported in this slice
-                }
-            }
-        }
+        // Resolve the config string once (null and empty both mean "no explicit config").
         // SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
+        let cfg_str = if config.is_null() {
+            ""
+        } else {
+            unsafe { CStr::from_ptr(config) }
+                .to_str()
+                .unwrap_or("")
+                .trim()
+        };
+
+        // Daemon-owned config fetch: on the `config-fetch` slice (darwin only — it pulls the BoringSSL
+        // build), the *absence* of an explicit config — or the explicit `"lantern-api"` sentinel —
+        // means "fetch the pool from the Lantern config-new API myself, then run from it and refresh
+        // in the background". The controlling app no longer decides this; the daemon does, because the
+        // fetch must bypass the tunnel and only the extension can guarantee that.
+        #[cfg(feature = "config-fetch")]
+        if cfg_str.is_empty() || cfg_str == "lantern-api" {
+            // SAFETY: caller contract — `data_dir` is null or a valid NUL-terminated C string.
+            let dir = if data_dir.is_null() {
+                None
+            } else {
+                // Trim and reject empty: an empty path would cache into the process cwd.
+                unsafe { CStr::from_ptr(data_dir) }
+                    .to_str()
+                    .ok()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from)
+            };
+            return match dir {
+                Some(d) => spark_core::fd_tunnel::run_fd_lantern_api(fd, mtu as u16, d),
+                None => {
+                    // fetch mode needs a data dir to cache device_id + config; close the fd
+                    // (ownership was transferred) + unblock any waiter, then fail the connect.
+                    spark_core::fd_tunnel::abandon_fd(fd);
+                    -1
+                }
+            };
+        }
+
+        // iOS slice (no `config-fetch`): self-fetch is unsupported. An empty config falls through to
+        // `build_config` (→ direct), but the explicit `"lantern-api"` sentinel can't be served here.
+        #[cfg(not(feature = "config-fetch"))]
+        if cfg_str == "lantern-api" {
+            let _ = data_dir; // unused without config-fetch
+            spark_core::fd_tunnel::abandon_fd(fd); // close fd + unblock waiter; can't serve it here
+            return -1;
+        }
+
+        // An explicit config (host:port / TOML / config_raw.json), or — on the iOS slice — empty =
+        // direct. SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
         let config = match unsafe { build_config(config) } {
             Some(c) => c,
             None => {

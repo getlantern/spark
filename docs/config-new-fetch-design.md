@@ -110,18 +110,25 @@ flowchart TD
     loop -. server poll_interval / backoff .-> loop
 ```
 
-Config resolution gains a source, selected by the config string the app already passes down
-(`providerConfiguration["config"]`): a reserved sentinel **`lantern-api`** selects API mode; an
-explicit config (TOML / host:port / config_raw) is used as today and takes precedence; an *empty*
-config still means "direct / no tunnel" (unchanged — so API mode is opt-in via the sentinel, not the
-default). In **API mode** the bootstrap is **fetch-first**: every connect runs `ensure_user` +
-an unconditional `fetch_once`, adapts the fresh body, and **overwrites** the cache — so a cached copy
-never suppresses the fetch and you always get the current server pool. The cache is a **fallback
-only**: if the fetch fails (offline / API error) and a usable last-good cache exists, the tunnel boots
-from it; with no cache, connect retries with backoff until the first fetch succeeds. The Swift NE shim
-passes the app-group container path into `spark_tunnel_run` as the data dir (the extension can't
-compute it itself). Note the extension's own dials egress the real interface by design (loop
-avoidance), so the fetch is a **direct** dial in v1 — the *cache* is what keeps connect working through
+**The daemon (the NE extension) owns config acquisition — it is the default, not an app-selected
+opt-in.** The fetch must bypass the tunnel, and only the extension can guarantee that (its own dials
+egress the real interface by design — loop avoidance), so the *decision* to fetch lives in the daemon,
+not the controlling app. Concretely, `spark_tunnel_run` treats the **absence of an explicit config**
+(null/empty, or the `lantern-api` sentinel) as the signal to self-fetch on the `config-fetch` slice;
+an explicit config (TOML / host:port / config_raw) still overrides for dev/testing. The controlling
+app therefore passes **no** config on the normal path (`config::resolve()` → `None`); only a deliberate
+dev override (`SPARK_CONFIG` / `SPARK_PROXY`) is handed down. There is intentionally **no persistent
+app-side config file** — a stale local file would shadow the fetch — so the only on-disk config is the
+extension's own last-good cache, used solely as the offline fallback. (On the iOS slice, which lacks
+`config-fetch`, null/empty still means "direct" and an explicit `lantern-api` returns -1.)
+
+In fetch mode the bootstrap is **fetch-first**: every connect runs `ensure_user` + an unconditional
+`fetch_once`, adapts the fresh body, and **overwrites** the cache — so a cached copy never suppresses
+the fetch and you always get the current server pool. The cache is a **fallback only**: if the fetch
+fails (offline / API error) and a usable last-good cache exists, the tunnel boots from it; with no
+cache, connect retries with backoff until the first fetch succeeds. The Swift NE shim passes the
+app-group container path into `spark_tunnel_run` as the data dir (the extension can't compute it
+itself). The fetch is a **direct** dial in v1 — the *cache* is what keeps connect working through
 outages; the fronting milestone hardens the dial.
 
 ## 5. Caching
