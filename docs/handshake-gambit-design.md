@@ -174,16 +174,17 @@ the target fleet.
 | ALPS | btls patch | utls (ApplicationSettings) |
 | ECH (grease/real) | boring ECH API | utls ECH |
 | **padding to target_len** | padding ext knob | spec padding ext |
-| **session_id inject** | ❌ needs *patched* fork → `requires: session_id_inject` | ✅ mutate `HandshakeState.Hello.SessionId` |
-| **raw / malformed CH** | ❌ unconstrained byte-builder + module-driven handshake (ADR 0006 P4) | ✅ `MarshalClientHello` raw mode |
+| **session_id inject** | ✅ stock boring via the `kID` recipe (P4a; `requires: session_id_inject`) | ✅ mutate `HandshakeState.Hello.SessionId` |
+| **raw / malformed CH** | ❌ unconstrained byte-builder + module-driven handshake (ADR 0006 P4b) | ✅ `MarshalClientHello` raw mode |
 | **B: record framing** | lib + socket | lib + socket |
 | **C: segment split + timing** | socket-layer write control | socket-layer write control |
 
 Takeaways: the **constrained** rows are a clean shared subset (run on both today). `session_id_inject`
-runs on uTLS now, on spark only after the patched-boring work. `raw/malformed` is uTLS-now /
-spark-P4. Layers B/C are layer-agnostic — both control them at the socket. So **a constrained gambit
-is fully portable today; tagged gambits degrade gracefully** (an executor that can't satisfy
-`requires` declines the gambit and falls back to its best portable one).
+now runs on **both** — uTLS natively, spark via the stock-boring `kID` recipe (P4a, no fork).
+`raw/malformed` is uTLS-now / spark-**P4b** (the byte-builder). Layers B/C are layer-agnostic — both
+control them at the socket. So **a constrained gambit is fully portable today; tagged gambits degrade
+gracefully** (an executor that can't satisfy `requires` declines the gambit and falls back to its best
+portable one).
 
 ### Worked example
 
@@ -201,14 +202,18 @@ verify → gate → realize → fall-back chain:
    `key_id` among the **binary-pinned** Ed25519 keys, verifies the detached signature over the
    **postcard-canonical** `Gambit`, and rejects `version ≤ floor` (anti-rollback). Returns the `Gambit`.
 2. **Capability gate** — `Profile::for_boring(&gambit)` calls `gambit.check_supported(BORING_CAPABILITIES)`,
-   where `BORING_CAPABILITIES = [ech, alps, pq_kem]`. A gambit whose `requires` includes
-   `session_id_inject` or `raw_clienthello` is **declined** (`GambitError::Unsupported`); the caller
-   falls back to its best portable gambit (the static config profile, or the Chrome-137 default). **A
-   dynamic gambit never breaks connectivity** — boring always completes a handshake.
+   where `BORING_CAPABILITIES = [ech, alps, pq_kem, session_id_inject]` (P4a added `session_id_inject`).
+   Only a gambit whose `requires` includes `raw_clienthello` is now **declined**
+   (`GambitError::Unsupported`); the caller falls back to its best portable gambit (the static config
+   profile, or the Chrome-137 default). **A dynamic gambit never breaks connectivity** — boring always
+   completes a handshake.
 3. **Realize Layers A + B** — `Profile::resolve(&clienthello, &records)` maps the genome onto the
-   boring connector's on/off decisions (`Profile { grease, permute_extensions, pq_kem, ech_grease,
-   alps, record_size_limit }`), collecting every knob boring2 4.15 can't fully honor into
-   `Resolved.unrealizable` — **logged, never silently dropped.**
+   boring connector's decisions (`Profile { grease, permute_extensions, pq_kem, ech_grease, alps,
+   record_size_limit, extension_order, cipher_order, session_id }` — the last three added by P4a:
+   explicit `Perm::Explicit` orders and a valid-hex `session_id` inject), and folds
+   `records.split_offsets` into the Layer-B record-fragmenting shaper. Every knob boring2 4.15 can't
+   fully honor (seeded permute, padding-to-length, raw CH) is collected into `Resolved.unrealizable` —
+   **logged, never silently dropped.**
 4. **Realize Layer C** — `gambit.wire_plan()` → `WirePlan` drives the native `SegmentShapingStream`
    (split the opening write into TCP segments ± inter-segment delay/jitter; `tcp_nodelay`).
 5. **Dial** — boring emits the resolved ClientHello; the shaper splits/times the opening write; the
@@ -227,18 +232,21 @@ precise status of each knob on the spark/boring executor:
 | `grease_seed` | GREASE on/off only; exact seed not honored | ⚠️ approximated |
 | `extension_order: permute_seed` | permute on/off only; seed not honored | ⚠️ approximated |
 | `ech: real` | no ECHConfig wiring → uses grease | ⚠️ approximated |
-| `extension_order: explicit` | needs `raw_clienthello` / P4 byte-builder | ❌ ignored (logged) |
-| `cipher_order` (any) | boring has no cipher permutation | ❌ ignored (logged) |
-| `padding_target` | no boring2 4.15 API; needs P4 byte-builder | ❌ ignored (logged) |
-| `records.split_offsets` | no boring record-split API | ❌ ignored (logged) |
-| `session_id: inject` | requires `session_id_inject` | ⛔ declined (cap-gated) |
+| `extension_order: explicit` | honored via `set_extension_permutation` (ids → `ExtensionType`) | ✅ realized (P4a) |
+| `cipher_order: explicit` | honored via ordered `set_cipher_list` | ✅ realized (P4a) |
+| `records.split_offsets` | honored via flint-shaping's `RecordFragment::Offsets` | ✅ realized (P4a) |
+| `session_id: inject` | honored via the `kID` recipe (`session_id_inject` capability) | ✅ realized (P4a) |
+| `cipher_order: permute_seed` | ordered list only; no boring cipher-permute seed | ⚠️ approximated |
+| `padding_target` | no boring2 4.15 API; needs the P4b byte-builder | ❌ ignored (logged) |
 | `clienthello.raw` | requires `raw_clienthello` | ⛔ declined (cap-gated) |
 
-So **the discoverable space on the spark client today** = `{ech-grease, alps, pq_kem,
-record_size_limit, GREASE on/off, extension-permute on/off}` × the **full** Layer-C wire knobs. The
-richer Layer-A moves (explicit orders, exact seeds, padding-to-length, `session_id` inject, raw CH)
-light up only with the **P4 byte-builder** (spark) or on the **uTLS fleet** (Go) — and the capability
-tags keep that honest: a gambit needing more than boring offers is declined, never mis-run.
+So **the discoverable space on the spark client today** (after P4a) = `{ech-grease, alps, pq_kem,
+record_size_limit, GREASE on/off, extension-permute on/off, explicit extension order, explicit cipher
+order, session_id inject}` (Layer A) × `{record split-offsets}` (Layer B) × the **full** Layer-C wire
+knobs. Only the remaining byte-exact Layer-A moves — an exact GREASE/permute **seed**,
+**padding-to-length**, and a **raw ClientHello** — still light up only with the **P4b byte-builder**
+(spark) or on the **uTLS fleet** (Go), and the capability tags keep that honest: a gambit needing more
+than boring offers (today, just `raw_clienthello`) is declined, never mis-run.
 
 ### 3.6 Scope: a gambit is the *opening* only (+ a reserved Layer D)
 
@@ -269,6 +277,16 @@ encrypted ClientHello inside QUIC crypto frames — a different shaping surface,
 Salamander/Gecko. "The client realizes the gambit" therefore means specifically the TLS-handshake
 transports; a QUIC opening-gambit would be a separate, future genome dialect (a natural Layer-A
 sibling, not a v1 concern).
+
+More generally, the genome's structure (a signed, versioned, anchor-relative set of opening deltas)
+is **not intrinsically TLS-specific** — it is a template for *any* opening whose fingerprint a censor
+judges early. Future **opening dialects** could shape the prelude of other high-collateral,
+wire-distinct protocols on their own ports — e.g. a **TURN/STUN** opening (the magic-cookie framing on
+3478/5349), an **RDP** or **STARTTLS-mail** prelude (a cleartext line-protocol negotiation before the
+inline TLS upgrade) — each inheriting that protocol's collateral-freedom on its port while reusing the
+genome's signing, versioning, capability-gating, and discovery machinery. These are explicitly **out
+of v1 scope** (v1 is the TLS-handshake dialect above); they are noted so the genome's
+dialect-agnostic shape is a deliberate design property, not an accident.
 
 ---
 
