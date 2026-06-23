@@ -302,6 +302,14 @@ git add core/src/config/fetch/request.rs
 git commit -m "feat(config-fetch): ConfigRequest + HTTP request builder"
 ```
 
+> **Applied during code review (kept here so the plan stays accurate):**
+> - **Platform string:** `std::env::consts::OS` is `"macos"`, but the Lantern API (Go `runtime.GOOS`)
+>   expects `"darwin"` and keys outbound selection on it. Map via a pure `lantern_platform(os) -> &str`
+>   (`"macos" => "darwin"`, else passthrough) and test it host-OS-independently.
+> - **Header-injection guard:** `cond.etag`/`cond.last_modified` are server-origin and cached to disk,
+>   so strip `['\r','\n']` from each before interpolating into `If-None-Match`/`If-Modified-Since`.
+> - Use `rfind("zoneinfo/")` (last occurrence) in `local_timezone`.
+
 ---
 
 ## Task 3: HTTP response parse (`post_collect`)
@@ -670,8 +678,14 @@ impl FetchEnv {
     }
     /// Select via `SPARK_CONFIG_ENV=staging`, else prod.
     pub fn from_env() -> Self {
-        match std::env::var("SPARK_CONFIG_ENV").as_deref() {
-            Ok("staging") => Self::staging(),
+        Self::select(std::env::var("SPARK_CONFIG_ENV").ok().as_deref())
+    }
+
+    /// Pure selector behind [`from_env`](Self::from_env): `Some("staging")` → staging, else prod.
+    /// Split out so the choice is testable without mutating process-global env (parallel-test-safe).
+    fn select(env_value: Option<&str>) -> Self {
+        match env_value {
+            Some("staging") => Self::staging(),
             _ => Self::prod(),
         }
     }
@@ -687,19 +701,29 @@ pub enum FetchOutcome {
 }
 
 /// Do one direct fetch: dial the API host directly, TLS-wrap, POST the request, collect the response.
-/// Errors on any network/TLS/HTTP failure (the loop turns errors into backoff-retries).
+/// Errors on any network/TLS/HTTP failure (the loop turns errors into backoff-retries). The whole
+/// network sequence is bounded by `ATTEMPT_TIMEOUT` — `post_collect` reads to EOF with no internal
+/// timeout, so a hung/keep-alive server would otherwise stall the refresh loop forever instead of
+/// backing off. Timeout ⇒ error ⇒ backoff-retry, which is the offline-resilience contract.
 pub async fn fetch_once(
     env: &FetchEnv,
     device_id: &str,
     cond: &Conditional,
 ) -> std::io::Result<FetchOutcome> {
+    const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
     let req = ConfigRequest::new(device_id.to_string());
-    let bytes = build_request_bytes(&env.host, &env.path, &req, cond).map_err(std::io::Error::other)?;
-    let addr = crate::config::fetch::resolve(&env.host, env.port).await?;
-    let direct: Arc<dyn Transport> = Arc::new(DirectTransport::new(None));
-    let stream = direct.dial(addr).await?;
-    let tls = tls_wrap(stream, &env.host).await?;
-    let resp = post_collect(tls, &bytes, 4 * 1024 * 1024).await?;
+    let bytes =
+        build_request_bytes(&env.host, &env.path, &req, cond).map_err(std::io::Error::other)?;
+    let resp = tokio::time::timeout(ATTEMPT_TIMEOUT, async {
+        let addr = resolve(&env.host, env.port).await?;
+        let direct: Arc<dyn Transport> = Arc::new(DirectTransport::new(None));
+        let stream = direct.dial(addr).await?;
+        let tls = tls_wrap(stream, &env.host).await?;
+        post_collect(tls, &bytes, 4 * 1024 * 1024).await
+    })
+    .await
+    .map_err(|_| std::io::Error::other("config-new fetch timed out"))??;
     match resp.status {
         200 | 206 => {
             let raw = String::from_utf8(resp.body)
@@ -727,13 +751,11 @@ async fn resolve(host: &str, port: u16) -> std::io::Result<std::net::SocketAddr>
 
 ```rust
     #[test]
-    fn fetch_env_selects_prod_by_default_and_staging_by_var() {
-        // (Reads process env; run serially.) Default → prod.
-        std::env::remove_var("SPARK_CONFIG_ENV");
-        assert_eq!(FetchEnv::from_env().host, "df.iantem.io");
-        std::env::set_var("SPARK_CONFIG_ENV", "staging");
-        assert_eq!(FetchEnv::from_env().host, "api.staging.iantem.io");
-        std::env::remove_var("SPARK_CONFIG_ENV");
+    fn fetch_env_selects_staging_only_for_staging_value() {
+        // Pure selector — no process-env mutation, so it's parallel-test-safe.
+        assert_eq!(FetchEnv::select(None).host, "df.iantem.io");
+        assert_eq!(FetchEnv::select(Some("prod")).host, "df.iantem.io");
+        assert_eq!(FetchEnv::select(Some("staging")).host, "api.staging.iantem.io");
     }
 ```
 
@@ -969,6 +991,12 @@ cargo clippy -p spark-core --all-targets --features config-fetch -- -D warnings
 cargo test -p spark-core --features config-fetch config::fetch
 ```
 Expected: all clean; unit tests pass. (Optionally run the live test against staging by hand.)
+
+> **CI note:** the entire `config::fetch` module is behind `#[cfg(feature = "config-fetch")]`, so a
+> plain `cargo test`/`cargo clippy` does **not** compile or run any of it — the tests silently show up
+> as "filtered out". Whatever CI job covers `spark-core` must pass `--features config-fetch` (or a
+> feature set that implies it) or this whole module goes ungated in CI. Confirm/patch the CI workflow
+> as part of this task.
 
 - [ ] **Step 3: Commit**
 
