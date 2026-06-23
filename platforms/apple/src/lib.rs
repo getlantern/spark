@@ -3,7 +3,7 @@
 //!
 //! The Swift provider resolves the `utun` file descriptor (KVC `socket.fileDescriptor` → a
 //! public-symbol fd-scan fallback — the WireGuard/sing-box/Mullvad/Proton/lantern technique) and
-//! calls `spark_tunnel_run(fd, mtu)`; `spark_tunnel_stop()` on teardown. Packets never cross the
+//! calls `spark_tunnel_run(fd, mtu, config, data_dir)`; `spark_tunnel_stop()` on teardown. Packets never cross the
 //! FFI — Rust owns the fd and runs the whole netstack ([`spark_core::fd_tunnel`]), so the C ABI
 //! is control-only (mirroring the Android JNI). One core surface, two thin platform adapters.
 //!

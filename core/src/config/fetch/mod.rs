@@ -49,7 +49,8 @@ use crate::config::fetch::request::{build_request_bytes, Conditional, ConfigRequ
 use crate::config::Config;
 use crate::transport::{probe::tls_wrap, DirectTransport, Transport};
 
-/// Where to fetch from. Prod fronts via `df.iantem.io`; staging hits the API host directly.
+/// Where to fetch from. v1 is direct TLS to either host (no fronting — that's a later milestone):
+/// prod is `df.iantem.io`, staging is `api.staging.iantem.io`.
 #[derive(Debug, Clone)]
 pub struct FetchEnv {
     pub host: String,

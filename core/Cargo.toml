@@ -102,9 +102,12 @@ samizdat = [
 # flint-dial for windowed probing. https callbacks additionally need `anytls` (boring TLS).
 multi-server = ["dep:flint-dial"]
 # Fetch config from the Lantern config-new API (design: docs/config-new-fetch-design.md). Pulls
-# `anytls` for the boring TLS the hand-rolled HTTP client uses; `serde_json` (already a dep) parses
-# the JSON. Off by default; the Darwin/Apple build enables it.
-config-fetch = ["anytls"]
+# `anytls` for the boring TLS the hand-rolled HTTP client uses, and `multi-server` because the adapter
+# always maps a `config_raw.json` response into a `transport.servers` pool — without `multi-server`
+# `from_config_with_control` errors at connect. `serde_json` (already a dep) parses the JSON. Hostname
+# pool members additionally need `bootstrap-dns` (a build-level add, like the config_raw file path).
+# Off by default; the Darwin/Apple build enables it.
+config-fetch = ["anytls", "multi-server"]
 # Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with
 # deployed shadowsocks-rust servers. `ring` provides the AEADs; `blake3` derives session subkeys and
 # `aes` provides the raw block cipher for the UDP separate-header. Off by default so the base build

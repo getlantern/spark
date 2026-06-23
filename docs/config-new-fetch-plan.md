@@ -51,10 +51,17 @@ In `core/Cargo.toml` under `[features]`, after the `multi-server` line:
 
 ```toml
 # Fetch config from the Lantern config-new API (design: docs/config-new-fetch-design.md). Pulls
-# `anytls` for the boring TLS the hand-rolled HTTP client uses; `serde_json` (already a dep) parses
-# the JSON. Off by default; the Darwin/Apple build enables it.
-config-fetch = ["anytls"]
+# `anytls` for the boring TLS the hand-rolled HTTP client uses, AND `multi-server` — the adapter always
+# maps the response into a `transport.servers` pool, which `from_config_with_control` can't build
+# without it (errors at connect). `serde_json` (already a dep) parses the JSON. Hostname pool members
+# additionally need `bootstrap-dns`, a build-level add (see Task 10 Step 3). Off by default.
+config-fetch = ["anytls", "multi-server"]
 ```
+
+> **Note (final-review fix):** an earlier draft had `config-fetch = ["anytls"]`. That builds a binary
+> whose `lantern-api` mode always fails at connect, because the adapter unconditionally produces a
+> `transport.servers` pool and `build_selecting` is a `multi-server`-gated stub otherwise. `multi-server`
+> is therefore an unconditional dependency of `config-fetch`.
 
 - [ ] **Step 2: Declare the module (gated)**
 
@@ -1177,11 +1184,14 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
 
 `spark-apple` forwards features to `spark-core` (the existing `anytls`/`multi-server` features at
 `platforms/apple/Cargo.toml:21,25`). Mirror that pattern:
-- In `platforms/apple/Cargo.toml` `[features]`, add: `config-fetch = ["spark-core/config-fetch"]`.
-- In `platforms/apple/build-xcframework.sh:20`, add `config-fetch` to the **darwin-only** feature list:
-  `[[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server,config-fetch)`.
-Verify: `cargo build -p spark-apple --features config-fetch` (darwin-equivalent) and
-`cargo build -p spark-apple` (iOS-equivalent, no feature — the `lantern-api` branch compiles to `-1`).
+- In `platforms/apple/Cargo.toml` `[features]`, add `config-fetch = ["spark-core/config-fetch"]` AND
+  `bootstrap-dns = ["spark-core/bootstrap-dns"]` (the latter resolves hostname pool members — config_raw
+  *file* or `lantern-api` fetch — which otherwise hard-error at connect; darwin-only, it pulls the boring
+  DNS connector).
+- In `platforms/apple/build-xcframework.sh:20`, add both to the **darwin-only** feature list:
+  `[[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server,bootstrap-dns,config-fetch)`.
+Verify: `cargo build -p spark-apple --features anytls,multi-server,bootstrap-dns,config-fetch` (full darwin
+set) and `cargo build -p spark-apple` (iOS-equivalent, no feature — the `lantern-api` branch compiles to `-1`).
 
 - [ ] **Step 4: C ABI — `data_dir` arg + `lantern-api` dispatch**
 

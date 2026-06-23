@@ -24,9 +24,13 @@ anytls = ["spark-core/anytls"]
 # boring-free (flint-dial happy-eyeballs), enabled on the macOS slice alongside anytls.
 multi-server = ["spark-core/multi-server"]
 # Self-fetch config from the Lantern config-new API (docs/config-new-fetch-design.md): enable
-# spark-core's `config-fetch` so the NE provider can run `lantern-api` mode. Pulls `anytls` (BoringSSL),
-# so it's the macOS/darwin slice only — like `anytls`.
+# spark-core's `config-fetch` so the NE provider can run `lantern-api` mode. Pulls `anytls` (BoringSSL)
+# + `multi-server`, so it's the macOS/darwin slice only — like `anytls`.
 config-fetch = ["spark-core/config-fetch"]
+# Un-poisoned bootstrap DNS so hostname proxy servers in a fetched (or file) `config_raw.json` pool
+# resolve before dialing; without it a hostname member is a hard error at connect. Darwin slice only
+# (it pulls the boring connector). Benefits both `lantern-api` mode and the config_raw file path.
+bootstrap-dns = ["spark-core/bootstrap-dns"]
 
 [dependencies]
 spark-core = { path = "../../core" }
