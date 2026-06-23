@@ -43,8 +43,10 @@ pub fn poll_after(server_seconds: u64) -> Duration {
     }
 }
 
+use crate::config::fetch::cache::CacheMeta;
 use crate::config::fetch::http::post_collect;
 use crate::config::fetch::request::{build_request_bytes, Conditional, ConfigRequest};
+use crate::config::Config;
 use crate::transport::{probe::tls_wrap, DirectTransport, Transport};
 
 /// Where to fetch from. Prod fronts via `df.iantem.io`; staging hits the API host directly.
@@ -146,6 +148,47 @@ async fn resolve(host: &str, port: u16) -> std::io::Result<std::net::SocketAddr>
         })
 }
 
+/// Bootstrap a [`Config`] for connect: prefer the on-disk cache (fast start), else do a blocking
+/// fetch. Returns the adapted Config + the meta to seed the refresh loop. Errors only when there is
+/// no cache AND the fetch fails (cold-start offline) — the caller surfaces "waiting for config".
+pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Config, CacheMeta)> {
+    let did = device_id(dir)?;
+    if let Some((raw, meta)) = cache::load(dir) {
+        if let Ok(cfg) = Config::from_config_str(&raw) {
+            return Ok((cfg, meta));
+        }
+        // Corrupt/empty cache: fall through to a fetch.
+    }
+    let cond = Conditional::default();
+    match fetch_once(env, &did, &cond).await? {
+        FetchOutcome::New { raw, etag } => {
+            let cfg = Config::from_config_str(&raw).map_err(std::io::Error::other)?;
+            // Persist the server's requested cadence too, so a cold start that immediately 304s in
+            // run_loop still sleeps the server interval (not the 600s default).
+            let meta = CacheMeta {
+                etag,
+                last_modified: None,
+                poll_interval_seconds: server_poll_seconds(&raw),
+            };
+            cache::store(dir, &raw, &meta)?;
+            Ok((cfg, meta))
+        }
+        FetchOutcome::NotModified => Err(std::io::Error::other(
+            "config-new returned 304 with no cached config",
+        )),
+    }
+}
+
+/// Extract the server-recommended `poll_interval_seconds` (a top-level `config_raw.json` body field)
+/// without modelling the whole response. `0` when absent/unparseable (→ `poll_after`'s 10-min default).
+/// Shared by `load_or_fetch` (to seed the cache meta) and `run_loop` (added in a later task).
+fn server_poll_seconds(raw: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("poll_interval_seconds").and_then(|n| n.as_u64()))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +220,32 @@ mod tests {
             FetchEnv::select(Some("staging")).host,
             "api.staging.iantem.io"
         );
+    }
+
+    #[test]
+    fn server_poll_seconds_reads_body_field() {
+        assert_eq!(server_poll_seconds(r#"{"poll_interval_seconds":45}"#), 45);
+        assert_eq!(server_poll_seconds(r#"{"x":1}"#), 0);
+        assert_eq!(server_poll_seconds("not json"), 0);
+    }
+
+    #[tokio::test]
+    async fn load_or_fetch_uses_cache_without_network() {
+        let dir = std::env::temp_dir().join(format!("spark-lof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let raw = r#"{ "options": { "outbounds": [
+            { "type": "samizdat", "tag": "s1", "server": "198.51.100.10", "server_port": 443,
+              "public_key": "ab", "short_id": "cd", "server_name": "x" }
+        ]}}"#;
+        cache::store(&dir, raw, &CacheMeta::default()).unwrap();
+        // A bogus env proves we never dial: cache hit short-circuits.
+        let env = FetchEnv {
+            host: "127.0.0.1".into(),
+            path: "/".into(),
+            port: 1,
+        };
+        let (cfg, _meta) = load_or_fetch(&dir, &env).await.unwrap();
+        assert_eq!(cfg.transport.servers.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
