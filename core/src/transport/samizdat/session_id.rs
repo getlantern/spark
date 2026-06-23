@@ -21,12 +21,14 @@ use super::auth::SESSION_ID_LEN;
 ///
 /// Delegates to the shared [`flint_tls::connector::inject_session_id`] implementation — the single
 /// source of truth for the unsafe BoringSSL `kID`-session FFI (riding flint-tls's `boring` feature,
-/// which spark's `samizdat` feature enables via `anytls`).
+/// which spark's `samizdat` feature enables via `anytls`). The delegated error is re-wrapped with a
+/// `samizdat:` prefix so field logs still point at this seam.
 pub fn inject_session_id(
     config: &mut ConnectConfiguration,
     session_id: &[u8; SESSION_ID_LEN],
 ) -> io::Result<()> {
     flint_tls::connector::inject_session_id(config, session_id)
+        .map_err(|e| io::Error::other(format!("samizdat: {e}")))
 }
 
 #[cfg(test)]

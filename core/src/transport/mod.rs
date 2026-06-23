@@ -1127,7 +1127,7 @@ mod anytls_gambit_realization_tests {
         };
         let wire = with_record_split(WirePlan::default(), &recs);
         assert!(
-            matches!(wire.record_fragment, flint_shaping::RecordFragment::Offsets(ref o) if o == &vec![6, 12]),
+            matches!(wire.record_fragment, flint_shaping::RecordFragment::Offsets(ref o) if *o == [6, 12]),
             "split_offsets must map to RecordFragment::Offsets"
         );
 
