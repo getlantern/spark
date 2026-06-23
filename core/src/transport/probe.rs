@@ -220,7 +220,10 @@ async fn resolve_callback_addr(host: &str, port: u16) -> io::Result<std::net::So
 /// `anytls` — the callback TLS rides inside the tunnel, so a plain connector (no Chrome
 /// mimicry) is fine.
 #[cfg(feature = "anytls")]
-async fn tls_wrap<S>(stream: S, host: &str) -> io::Result<impl AsyncRead + AsyncWrite + Unpin>
+pub(crate) async fn tls_wrap<S>(
+    stream: S,
+    host: &str,
+) -> io::Result<impl AsyncRead + AsyncWrite + Unpin>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -237,7 +240,7 @@ where
 }
 
 #[cfg(not(feature = "anytls"))]
-async fn tls_wrap<S>(_stream: S, _host: &str) -> io::Result<S>
+pub(crate) async fn tls_wrap<S>(_stream: S, _host: &str) -> io::Result<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {

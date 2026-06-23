@@ -43,6 +43,109 @@ pub fn poll_after(server_seconds: u64) -> Duration {
     }
 }
 
+use crate::config::fetch::http::post_collect;
+use crate::config::fetch::request::{build_request_bytes, Conditional, ConfigRequest};
+use crate::transport::{probe::tls_wrap, DirectTransport, Transport};
+
+/// Where to fetch from. Prod fronts via `df.iantem.io`; staging hits the API host directly.
+#[derive(Debug, Clone)]
+pub struct FetchEnv {
+    pub host: String,
+    pub path: String,
+    pub port: u16,
+}
+
+impl FetchEnv {
+    pub fn prod() -> Self {
+        FetchEnv {
+            host: "df.iantem.io".into(),
+            path: "/api/v1/config-new".into(),
+            port: 443,
+        }
+    }
+    pub fn staging() -> Self {
+        FetchEnv {
+            host: "api.staging.iantem.io".into(),
+            path: "/v1/config-new".into(),
+            port: 443,
+        }
+    }
+    /// Select via `SPARK_CONFIG_ENV=staging`, else prod.
+    pub fn from_env() -> Self {
+        Self::select(std::env::var("SPARK_CONFIG_ENV").ok().as_deref())
+    }
+    /// Pure selector behind [`from_env`](Self::from_env): `Some("staging")` → staging, else prod.
+    /// Split out so the choice is testable without mutating process-global env (parallel-test-safe).
+    fn select(env_value: Option<&str>) -> Self {
+        match env_value {
+            Some("staging") => Self::staging(),
+            _ => Self::prod(),
+        }
+    }
+}
+
+/// Result of one fetch attempt.
+#[derive(Debug)]
+pub enum FetchOutcome {
+    /// New config body + the response `ETag` (for the next conditional request).
+    New { raw: String, etag: Option<String> },
+    /// Server says nothing changed (304/204) — keep the cache.
+    NotModified,
+}
+
+/// Do one direct fetch: dial the API host directly, TLS-wrap, POST the request, collect the response.
+/// Errors on any network/TLS/HTTP failure (the loop turns errors into backoff-retries). The whole
+/// network sequence is bounded by `ATTEMPT_TIMEOUT` — `post_collect` reads to EOF with no internal
+/// timeout, so a hung/keep-alive server would otherwise stall the refresh loop forever instead of
+/// backing off. Timeout ⇒ error ⇒ backoff-retry, which is the offline-resilience contract.
+pub async fn fetch_once(
+    env: &FetchEnv,
+    device_id: &str,
+    cond: &Conditional,
+) -> std::io::Result<FetchOutcome> {
+    const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+    let req = ConfigRequest::new(device_id.to_string());
+    let bytes =
+        build_request_bytes(&env.host, &env.path, &req, cond).map_err(std::io::Error::other)?;
+    let resp = tokio::time::timeout(ATTEMPT_TIMEOUT, async {
+        let addr = resolve(&env.host, env.port).await?;
+        let stream = DirectTransport::new(None).dial(addr).await?;
+        let tls = tls_wrap(stream, &env.host).await?;
+        post_collect(tls, &bytes, 4 * 1024 * 1024).await
+    })
+    .await
+    .map_err(|_| std::io::Error::other("config-new fetch timed out"))??;
+    match resp.status {
+        200 | 206 => {
+            let raw = String::from_utf8(resp.body)
+                .map_err(|_| std::io::Error::other("config-new body not UTF-8"))?;
+            Ok(FetchOutcome::New {
+                raw,
+                etag: resp.etag,
+            })
+        }
+        304 | 204 => Ok(FetchOutcome::NotModified),
+        other => Err(std::io::Error::other(format!("config-new HTTP {other}"))),
+    }
+}
+
+/// Resolve a host:port to a socket address (IP literal fast-path, else system resolver). Deliberately
+/// a small local copy of `transport::probe::resolve_callback_addr` rather than a shared helper —
+/// it's 8 lines of trivial std/tokio DNS, and keeping it local avoids coupling `config::fetch` to a
+/// `probe` internal (the names also differ by intent: "config host" vs "callback host").
+async fn resolve(host: &str, port: u16) -> std::io::Result<std::net::SocketAddr> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(std::net::SocketAddr::new(ip, port));
+    }
+    tokio::net::lookup_host((host, port))
+        .await?
+        .next()
+        .ok_or_else(|| {
+            std::io::Error::other(format!("config host `{host}` resolved to no addresses"))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +166,16 @@ mod tests {
         assert_eq!(poll_after(0), Duration::from_secs(600)); // default
         assert_eq!(poll_after(5), Duration::from_secs(10)); // floor
         assert_eq!(poll_after(45), Duration::from_secs(45)); // server value
+    }
+
+    #[test]
+    fn fetch_env_selects_staging_only_for_staging_value() {
+        // Pure selector — no process-env mutation, so it's parallel-test-safe.
+        assert_eq!(FetchEnv::select(None).host, "df.iantem.io");
+        assert_eq!(FetchEnv::select(Some("prod")).host, "df.iantem.io");
+        assert_eq!(
+            FetchEnv::select(Some("staging")).host,
+            "api.staging.iantem.io"
+        );
     }
 }
