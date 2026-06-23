@@ -1047,73 +1047,236 @@ git commit -m "test(config-fetch): ignored live staging fetch"
 ## Task 10: Apple NE integration — `lantern-api` sentinel
 
 **Files:**
-- Modify: `platforms/apple/src/lib.rs` (`build_config`)
-- Modify: `platforms/apple/Cargo.toml` (enable `config-fetch` on spark-core) + the Swift shim passes a data dir
+- Modify: `core/src/fd_tunnel.rs` — extract the tunnel data path; add `run_fd_lantern_api`.
+- Modify: `platforms/apple/Cargo.toml` — add a `config-fetch = ["spark-core/config-fetch"]` feature.
+- Modify: `platforms/apple/build-xcframework.sh` — add `config-fetch` to the darwin slice's features.
+- Modify: `platforms/apple/src/lib.rs` — `spark_tunnel_run` gains a `data_dir` arg; `lantern-api` → `run_fd_lantern_api`.
+- Modify: `platforms/apple/include/spark.h` (+ the `SparkCore.xcframework/*/Headers/spark.h` copies) — new prototype.
+- Modify: `platforms/apple/Sources/SparkNE/PacketTunnelProvider.swift` — pass the app-group container path.
+- Modify: the app connect path (`SparkApp.swift` `Vpn.connect()`) — set `providerConfiguration["config"]="lantern-api"` to activate.
 
-> **This task is the integration capstone and the one place the plan cannot pre-bake exact code**:
-> the data-dir threading and the pool-rebuild wiring depend on signatures that live outside the new
-> module. Step 1 is therefore an explicit investigation — confirm those signatures against the live
-> source before writing the diff. Do not invent symbol names.
+> **Investigation result (Explore, recorded):** there is **no live pool-rebuild handle** — `PoolControl`
+> (`transport/mod.rs`) is snapshot+pin only, and `from_config_with_control` freezes the pool for the
+> tunnel's lifetime. So `on_config` is a **no-op in v1**: the loop already writes the cache, and a fetched
+> config takes effect on the next reconnect (matches design §4). And `build_config` runs **before**
+> `run_fd` builds its tokio runtime, so the async `load_or_fetch` can't run there — hence a new core entry
+> that fetches + spawns the loop *inside* the runtime. `stop()` signals a per-tunnel `tokio::sync::Notify`
+> registered in `fd_tunnel`. The Swift NE provider (`PacketTunnelProvider.swift`) currently calls
+> `spark_tunnel_run(fd, mtu, config)` and resolves no app-group path.
 
-- [ ] **Step 1: Confirm the integration surface (read, don't guess)**
+- [ ] **Step 1: Core — extract the tunnel data path (no behavior change)**
 
-Read and record the exact signatures of:
-- `spark_core::fd_tunnel::run_fd` and `select_server`, and how the pool is rebuilt at runtime — i.e.
-  whether there is a `PoolControl`/`from_config_with_control` handle the running tunnel can be handed
-  a new `Config`, or whether a rebuild requires a stop/restart. Grep: `rg -n "PoolControl|from_config_with_control|run_fd|select_server" core/src`.
-- the C ABI in `platforms/apple/include/spark.h` and the Swift call site in the NE provider that calls
-  `spark_tunnel_run` (so the new data-dir argument matches on both sides). Grep the Swift shim for
-  `spark_tunnel_run(`.
+In `core/src/fd_tunnel.rs`, extract the body of `run_with_handle`'s `runtime.block_on(async move { … })`
+into a reusable async fn (so the lantern-api entry can run the same data path):
 
-Write the confirmed signatures into this step's checkbox as a one-line note before proceeding — the
-remaining steps assume `on_config(Config)` can drive a live pool rebuild; if it can't, the fallback is
-`run_loop` that persists to cache only and the pool refreshes on the next reconnect (note which path
-the real API forces).
+```rust
+/// The tunnel data path shared by `run_with_handle` and the lantern-api entry: adopt `fd`, build the
+/// transport/netstack from `config`, register the pool control, and run until `waiter` is signalled or
+/// the accept loop exits.
+async fn run_tunnel_data_path(
+    fd: i32,
+    mtu: u16,
+    mut config: Config,
+    waiter: &Notify,
+) -> std::io::Result<()> {
+    crate::resolve_bootstrap(&mut config).await?;
+    // SAFETY: `fd` is the OS TUN fd handed to native for the tunnel's lifetime.
+    let tun = Arc::new(
+        unsafe { Tun::from_fd(fd, mtu) }.map_err(|e| std::io::Error::other(e.to_string()))?,
+    );
+    let (tcp_transport, udp_transport, control) = transport::from_config_with_control(&config)?;
+    set_pool(control);
+    let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
+    let idle = Duration::from_secs(config.udp.idle_timeout_secs);
+    if let Some((udp_inbound, udp_reply)) = udp_surface {
+        tokio::spawn(proxy::udp::run_udp(udp_inbound, udp_reply, udp_transport, idle));
+    }
+    info!(mtu, "spark tunnel up (fd mode)");
+    let metrics = Arc::new(crate::metrics::Metrics::default());
+    tokio::select! {
+        _ = proxy::tcp::run(stack, tcp_transport, metrics) => warn!("netstack accept loop exited"),
+        _ = waiter.notified() => info!("stop requested; tearing the tunnel down"),
+    }
+    drop(tun);
+    Ok(())
+}
+```
 
-- [ ] **Step 2: Enable the feature in the Apple build**
+Replace `run_with_handle`'s `block_on` body with `run_tunnel_data_path(fd, mtu, config, &waiter).await`.
+Verify no behavior change: `cargo test -p spark-core tcp_tunnel udp_tunnel` + the `fd_tunnel` unit tests pass.
 
-In `platforms/apple/Cargo.toml`, add `config-fetch` to the `spark-core` feature list used by the
-Darwin build (it already lists `multi-server`/`anytls`; the pool selection Task 7/9 produce needs
-`multi-server`, which is present). Confirm with `cargo build -p spark-apple --features config-fetch`.
+- [ ] **Step 2: Core — add `run_fd_lantern_api` (gated on `config-fetch`)**
 
-- [ ] **Step 3: Thread a data dir into the C ABI**
+Add, after `run_with_handle`:
 
-Add a `data_dir: *const c_char` parameter to `spark_tunnel_run` (preferred — keeps the fd + config +
-data-dir handoff atomic) OR a dedicated `spark_set_data_dir(*const c_char)` called before
-`spark_tunnel_run`. Mirror the chosen signature in `platforms/apple/include/spark.h` and update the
-Swift NE provider to pass the app-group container path (the extension can't compute it itself — design
-§4). The data dir is `None`/empty-safe: when absent, `lantern-api` mode returns `None` (connect fails
-cleanly) since there's nowhere to cache `device_id`/config.
+```rust
+/// Apple NE entry for `lantern-api` mode: fetch the boot config from the Lantern API (cache-first,
+/// retrying on cold-start offline until a config is obtained or stop is signalled), spawn the
+/// background refresh loop (warms the on-disk cache; no live pool swap in v1), then run the tunnel.
+/// Blocks until stop; `0` clean, `-1` on error. `data_dir` is the app-group container path.
+#[cfg(feature = "config-fetch")]
+pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i32 {
+    use crate::config::fetch::{self, FetchEnv};
 
-- [ ] **Step 4: Wire the sentinel into `build_config`**
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "lantern-api: runtime build failed");
+            return -1;
+        }
+    };
+    let stop = Arc::new(Notify::new());
+    register(&stop);
+    let waiter = Arc::clone(&stop);
+    let result: std::io::Result<()> = runtime.block_on(async move {
+        let env = FetchEnv::from_env();
+        // Cold-start resilience (design §6): keep retrying until a config is obtained (cache or fetch)
+        // or stop fires while we wait. `load_or_fetch` returns instantly on a warm cache.
+        let mut attempt = 0u32;
+        let (config, _meta) = loop {
+            match fetch::load_or_fetch(&data_dir, &env).await {
+                Ok(c) => break c,
+                Err(e) => {
+                    warn!(error = %e, "lantern-api: waiting for config (offline?)");
+                    attempt = attempt.saturating_add(1);
+                    let wait = Duration::from_secs(((attempt as u64) * 5).clamp(5, 30));
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = waiter.notified() => return Ok(()), // stopped before first config
+                    }
+                }
+            }
+        };
+        // Background refresh: warms the cache for the next connect; ends when stop fires.
+        let loop_dir = data_dir.clone();
+        let loop_stop = Arc::clone(&waiter);
+        tokio::spawn(async move {
+            let env = FetchEnv::from_env();
+            tokio::select! {
+                _ = fetch::run_loop(&loop_dir, &env, |_cfg| {}, || false) => {}
+                _ = loop_stop.notified() => {}
+            }
+        });
+        run_tunnel_data_path(fd, mtu, config, &waiter).await
+    });
+    deregister(&stop);
+    set_pool(None);
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            warn!(error = %e, "lantern-api tunnel exited with error");
+            -1
+        }
+    }
+}
+```
 
-In `build_config` (`platforms/apple/src/lib.rs:65`), before the `Config::from_config_str(s)` branch,
-add: if the trimmed string equals `"lantern-api"`, require the data dir, then block on
-`spark_core::config::fetch::load_or_fetch(Path::new(data_dir), &FetchEnv::from_env())` to obtain the
-boot `Config` (cache-first; cold-fetches if no cache). Return `Some(config)` on success, `None` on a
-cold-start error (the "waiting for config" UX is later Swift-side polish). Because `build_config` is
-sync and `load_or_fetch` is async, run it via the core's existing runtime entry (the same mechanism
-`fd_tunnel::run_fd` uses to enter tokio) — confirm that mechanism in Step 1 and use it here rather
-than spinning a second runtime.
+`cargo build -p spark-core --features config-fetch` + `cargo clippy -p spark-core --all-targets --features config-fetch -- -D warnings`.
 
-- [ ] **Step 5: Spawn the refresh loop**
+- [ ] **Step 3: Apple build — add the `config-fetch` feature (darwin slice)**
 
-When the tunnel starts in `lantern-api` mode, spawn `config::fetch::run_loop(data_dir, &env, on_config,
-should_stop)` on the core runtime: `on_config` drives the pool rebuild via the handle confirmed in
-Step 1 (or persists-to-cache-only if no live-rebuild handle exists), and `should_stop` is tied to the
-same stop flag `spark_tunnel_stop` sets (`fd_tunnel::stop`).
+`spark-apple` forwards features to `spark-core` (the existing `anytls`/`multi-server` features at
+`platforms/apple/Cargo.toml:21,25`). Mirror that pattern:
+- In `platforms/apple/Cargo.toml` `[features]`, add: `config-fetch = ["spark-core/config-fetch"]`.
+- In `platforms/apple/build-xcframework.sh:20`, add `config-fetch` to the **darwin-only** feature list:
+  `[[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server,config-fetch)`.
+Verify: `cargo build -p spark-apple --features config-fetch` (darwin-equivalent) and
+`cargo build -p spark-apple` (iOS-equivalent, no feature — the `lantern-api` branch compiles to `-1`).
 
-- [ ] **Step 6: Build + manual validation**
+- [ ] **Step 4: C ABI — `data_dir` arg + `lantern-api` dispatch**
 
-Run: `cargo build -p spark-apple --features config-fetch`, then the full `packaging/macos/build-tauri-dmg.sh`
-with `REUSE_SYSEXT` unset (fresh extension). Manually: set the app's config to `lantern-api`, connect,
-confirm a pool builds on cold start and a second launch boots instantly from the on-disk cache; pull
-the network mid-session and confirm the tunnel keeps running on last-good config.
+In `platforms/apple/src/lib.rs`, add a `data_dir: *const c_char` param to `spark_tunnel_run`, and before
+`build_config` branch on the sentinel. The branch is `#[cfg]`-gated on the spark-apple `config-fetch`
+feature (Step 3) — `config-fetch` pulls `anytls` (the BoringSSL C build), so like `anytls` it's the
+**darwin slice only**; the iOS slice has no `config-fetch` and returns -1 for `lantern-api`:
+
+```rust
+    pub unsafe extern "C" fn spark_tunnel_run(
+        fd: c_int,
+        mtu: c_int,
+        config: *const c_char,
+        data_dir: *const c_char,
+    ) -> c_int {
+        // `lantern-api` mode: self-fetch config from the Lantern API into `data_dir` (the app-group
+        // container path). Gated on `config-fetch` (darwin slice only — it pulls the BoringSSL build).
+        if !config.is_null() {
+            // SAFETY: caller contract — `config` is a valid NUL-terminated C string when non-null.
+            if let Ok("lantern-api") = unsafe { CStr::from_ptr(config) }.to_str().map(str::trim) {
+                #[cfg(feature = "config-fetch")]
+                {
+                    // SAFETY: caller contract — `data_dir` is null or a valid NUL-terminated C string.
+                    let dir = if data_dir.is_null() {
+                        None
+                    } else {
+                        unsafe { CStr::from_ptr(data_dir) }
+                            .to_str()
+                            .ok()
+                            .map(std::path::PathBuf::from)
+                    };
+                    return match dir {
+                        Some(d) => spark_core::fd_tunnel::run_fd_lantern_api(fd, mtu as u16, d),
+                        None => -1, // api mode needs a data dir to cache device_id + config
+                    };
+                }
+                #[cfg(not(feature = "config-fetch"))]
+                {
+                    let _ = data_dir; // unused without config-fetch (iOS slice)
+                    return -1; // `lantern-api` unsupported in this slice
+                }
+            }
+        }
+        // SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
+        let config = match unsafe { build_config(config) } {
+            Some(c) => c,
+            None => return -1,
+        };
+        spark_core::fd_tunnel::run_fd(fd, mtu as u16, config)
+    }
+```
+
+Update the doc comment + `# Safety` to cover `data_dir`. Mirror the prototype in
+`platforms/apple/include/spark.h` **and** the three `SparkCore.xcframework/*/Headers/spark.h` copies:
+```c
+int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char *data_dir);
+```
+
+- [ ] **Step 5: Swift — pass the app-group container path + activate**
+
+In `platforms/apple/Sources/SparkNE/PacketTunnelProvider.swift`, resolve the shared container and pass
+its path as the 4th arg (nil when unavailable), keeping the existing nil-config behavior:
+```swift
+let dataDir = FileManager.default
+    .containerURL(forSecurityApplicationGroupIdentifier: "group.org.getlantern.spark")?
+    .appendingPathComponent("config", isDirectory: true).path
+// inside the worker thread, replacing the two spark_tunnel_run calls:
+func runNative(_ cfg: UnsafePointer<CChar>?) -> Int32 {
+    if let dataDir {
+        return dataDir.withCString { spark_tunnel_run(fd, Int32(mtu), cfg, $0) }
+    }
+    return spark_tunnel_run(fd, Int32(mtu), cfg, nil)
+}
+if let config, !config.isEmpty {
+    rc = config.withCString { runNative($0) }
+} else {
+    rc = runNative(nil)
+}
+```
+To **activate** API mode set `providerConfiguration["config"] = "lantern-api"` in `SparkApp.swift`
+`Vpn.connect()` (behind a toggle; default-off is fine — the plumbing is inert unless the sentinel is set).
+
+- [ ] **Step 6: Build + on-device validation (owner)**
+
+`cargo build -p spark-apple --features config-fetch`, then `packaging/macos/build-tauri-dmg.sh` with
+`REUSE_SYSEXT` unset (fresh extension + xcframework rebuild so the new ABI lands). On device, app set to
+`lantern-api` (staging via `SPARK_CONFIG_ENV=staging`): connect → confirm a pool builds on cold start and
+a second launch boots instantly from cache; pull the network mid-session → tunnel keeps running on
+last-good config; confirm a fetched config change applies after a reconnect.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add platforms/apple/src/lib.rs platforms/apple/Cargo.toml platforms/apple/include/spark.h
+git add core/src/fd_tunnel.rs platforms/apple/src/lib.rs platforms/apple/Cargo.toml \
+        platforms/apple/include/spark.h platforms/apple/Sources/SparkNE/PacketTunnelProvider.swift
 git commit -m "feat(apple): self-fetch config via the lantern-api sentinel"
 ```
 
