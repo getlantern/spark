@@ -287,6 +287,7 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
     let stop = Arc::new(Notify::new());
     register(&stop);
     let waiter = Arc::clone(&stop);
+    info!(dir = %data_dir.display(), "lantern-api: starting (daemon self-fetch of boot config)");
     let result: std::io::Result<()> = runtime.block_on(async move {
         let env = FetchEnv::from_env();
         // Cold-start resilience (design §6): keep retrying until a config is obtained (cache or fetch)
@@ -319,6 +320,10 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
                 }
             }
         };
+        info!(
+            servers = config.transport.servers.len(),
+            "lantern-api: boot config ready, bringing tunnel up"
+        );
         // Background refresh: warms the cache for the next connect; ends when stop fires.
         let loop_dir = data_dir.clone();
         let loop_stop = Arc::clone(&waiter);

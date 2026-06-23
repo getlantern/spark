@@ -184,6 +184,11 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
                 poll_interval_seconds: server_poll_seconds(&raw),
             };
             cache::store(dir, &raw, &meta)?; // overwrite the old copy
+            tracing::info!(
+                servers = cfg.transport.servers.len(),
+                bytes = raw.len(),
+                "config-fetch: fetched fresh config, cache overwritten"
+            );
             Ok((cfg, meta))
         }
         // We send no conditional, so a 304 isn't expected; fall back to the cache defensively.

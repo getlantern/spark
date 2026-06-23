@@ -2,6 +2,28 @@ import NetworkExtension
 import SparkCore // the Rust core's C ABI (libspark_apple.a via SparkCore.xcframework)
 import os
 
+/// Unified-log sink for the Rust core's `tracing` events (subsystem `org.getlantern.spark`, category
+/// `core`), bridged in via `spark_set_log_callback`. Without it the core has no subscriber and the
+/// whole config-fetch path is invisible on device. File scope so the C callback below can reach it
+/// without capturing.
+private let sparkCoreLog = Logger(subsystem: "org.getlantern.spark", category: "core")
+
+/// C callback matching `spark_log_cb`: maps the core's severity (0=ERROR…4=TRACE) to an `os_log`
+/// level and logs the message. Captures nothing, so Swift bridges it to a C function pointer. The
+/// `msg` pointer is valid only for this call, so `String(cString:)` copies it synchronously. The core
+/// curates these lines (no secrets — pro_token is never logged), so `.public` keeps them readable in
+/// Console.app rather than redacted to `<private>`.
+private func sparkCoreLogBridge(_ level: UInt8, _ msg: UnsafePointer<CChar>?) {
+    guard let msg else { return }
+    let text = String(cString: msg)
+    switch level {
+    case 0: sparkCoreLog.error("\(text, privacy: .public)")
+    case 1: sparkCoreLog.warning("\(text, privacy: .public)")
+    case 2: sparkCoreLog.notice("\(text, privacy: .public)")
+    default: sparkCoreLog.debug("\(text, privacy: .public)")
+    }
+}
+
 /// The spark Packet Tunnel Provider — **one subclass for iOS and macOS** (the OS difference is
 /// confined to fd resolution). On `startTunnel` it configures a full-tunnel route, resolves the
 /// `utun` fd from `packetFlow`, and hands it to the Rust core (`spark_tunnel_run`), which owns the
@@ -46,6 +68,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         options _: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
+        // Bridge core tracing -> os_log before anything else, so cold-start fetch logs are captured.
+        // Idempotent (the core's tracing global default is set once); safe to call on every connect.
+        spark_set_log_callback(sparkCoreLogBridge)
         log.notice("startTunnel: configuring full-tunnel settings")
         startLock.lock()
         pendingStart = completionHandler
@@ -76,16 +101,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             // The controlling app passes the data-path config in `providerConfiguration["config"]`:
-            // a bare "host:port" (plain relay), or a full TOML config (AnyTLS + shaping + gambit).
-            // Absent/empty → forward directly. (Back-compat: the legacy `["server"]` host:port key is
-            // still honored if `["config"]` is unset.)
+            // a bare "host:port" (plain relay) or a full TOML config (AnyTLS + shaping + gambit) as an
+            // explicit override. Absent/empty → the daemon self-fetches from config-new (the default).
+            // (Back-compat: the legacy `["server"]` host:port key is still honored if `["config"]`
+            // is unset.)
             let provider = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
             let config = (provider?["config"] as? String) ?? (provider?["server"] as? String)
-            self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), config=\(config?.isEmpty == false ? "set" : "direct"))")
+            let mode = (config?.isEmpty == false && config != "lantern-api") ? "explicit-config" : "self-fetch"
+            self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), mode=\(mode, privacy: .public))")
 
             // The app-group container path the app + extension share; the Rust core caches the
-            // generated `device_id` and the fetched `config_raw.json` here. Used by `lantern-api`
-            // mode (`config == "lantern-api"`); for other configs it's passed through and ignored.
+            // generated `device_id` and the fetched `config_raw.json` here. Required by self-fetch
+            // mode (absent/empty config); for an explicit config it's passed through and ignored.
             let dataDir = FileManager.default
                 .containerURL(forSecurityApplicationGroupIdentifier: "group.org.getlantern.spark")?
                 .appendingPathComponent("config", isDirectory: true).path

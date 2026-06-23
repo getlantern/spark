@@ -122,6 +122,21 @@ mod ffi {
         spark_core::fd_tunnel::run_fd(fd, mtu as u16, config)
     }
 
+    /// Bridge the core's `tracing` events to a host logger (the Swift provider logs them via
+    /// `os_log`, so the fetch path shows up in Console.app). Without this, the NE has no `tracing`
+    /// subscriber and every core `info!`/`warn!` is dropped. Call once at startup, before
+    /// [`spark_tunnel_run`], so cold-start fetch logs are captured. `cb` is the sink (`level`,
+    /// NUL-terminated UTF-8 `msg` valid only for the call); a null `cb` is ignored. Idempotent — a
+    /// second call (the `tracing` global default is already set) is a no-op.
+    #[no_mangle]
+    pub extern "C" fn spark_set_log_callback(
+        cb: Option<extern "C" fn(level: u8, msg: *const c_char)>,
+    ) {
+        if let Some(cb) = cb {
+            spark_core::log_bridge::install(cb);
+        }
+    }
+
     /// Resolve the C `config` arg into a [`Config`]: null/empty → direct; a bare `host:port` → the
     /// plain relay (today's behavior); otherwise a full config — spark's native TOML or a Lantern
     /// `config_raw.json` payload (auto-detected). `None` signals a parse error (`-1` to the caller).
