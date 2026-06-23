@@ -203,7 +203,22 @@ fn build_member(
         country_code: entry.country_code.clone(),
         city: entry.city.clone(),
     };
-    Ok(Member::new(transport, udp, callback, meta))
+    Ok(Member::new(transport, udp, callback, meta).with_label(spec_label(&entry.spec)))
+}
+
+/// A diagnostic label for a pool member: `"{protocol} {server-addr}"` (e.g.
+/// `samizdat 161.33.223.26:31464`), so probe/selection logs name the protocol *and* the exact server.
+#[cfg(feature = "multi-server")]
+fn spec_label(spec: &crate::config::ServerSpec) -> String {
+    use crate::config::ServerSpec;
+    match spec {
+        ServerSpec::Anytls(c) => format!("anytls {}", c.server),
+        ServerSpec::Samizdat(c) => format!("samizdat {}", c.server),
+        ServerSpec::Shadowsocks(c) => format!("shadowsocks {}", c.server),
+        ServerSpec::Hysteria2(c) => format!("hysteria2 {}", c.server),
+        ServerSpec::Wasm(c) => format!("wasm {}", c.server),
+        ServerSpec::Tunnel(c) => format!("tunnel {}", c.server),
+    }
 }
 
 /// Build a `SelectingTransport` over `config.transport.servers`. Each entry's callback URL is its

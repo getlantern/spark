@@ -182,7 +182,7 @@ pub async fn probe(
     label: &str,
 ) -> ProbeOutcome {
     let started = Instant::now();
-    match tokio::time::timeout(deadline, probe_inner(transport, url)).await {
+    match tokio::time::timeout(deadline, probe_inner(transport, url, label)).await {
         Ok(Ok(true)) => ProbeOutcome {
             latency: started.elapsed(),
             healthy: true,
@@ -208,9 +208,23 @@ pub async fn probe(
     }
 }
 
-async fn probe_inner(transport: &Arc<dyn Transport>, url: &CallbackUrl) -> io::Result<bool> {
+async fn probe_inner(
+    transport: &Arc<dyn Transport>,
+    url: &CallbackUrl,
+    label: &str,
+) -> io::Result<bool> {
     let target = resolve_callback_addr(&url.host, url.port).await?;
+    let dialing = Instant::now();
     let stream = transport.dial(target).await?;
+    // This line is the diagnostic seam: if a probe times out and we saw "transport dialed" for that
+    // server, the handshake completed and the callback GET stalled; if we did NOT, the dial itself
+    // (the protocol handshake) hung — i.e. spark couldn't establish to that server. `dial_ms` times
+    // just the establish.
+    tracing::debug!(
+        server = label,
+        dial_ms = dialing.elapsed().as_millis() as u64,
+        "probe: transport dialed; running callback"
+    );
     if url.tls {
         let tls = tls_wrap(stream, &url.host).await?;
         http_get_ok(tls, url).await
