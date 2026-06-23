@@ -215,7 +215,14 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
                     let wait = Duration::from_secs(((attempt as u64) * 5).clamp(5, 30));
                     tokio::select! {
                         _ = tokio::time::sleep(wait) => {}
-                        _ = waiter.notified() => return Ok(()), // stopped before first config
+                        _ = waiter.notified() => {
+                            // Stopped before we adopted `fd` into the netstack. The NE transferred fd
+                            // ownership to native; on the normal path `Tun::from_fd`'s drop closes it,
+                            // but here it's never adopted — close it explicitly so we don't leak the utun.
+                            // SAFETY: nothing else owns `fd` on this pre-adoption path.
+                            unsafe { libc::close(fd) };
+                            return Ok(());
+                        }
                     }
                 }
             }

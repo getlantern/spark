@@ -1,9 +1,6 @@
 //! The `config-new` request: the JSON body (`ConfigRequest`) + the HTTP request bytes (request line,
 //! `X-Lantern-*` + conditional headers, body). Mirrors radiance `common.ConfigRequest` + headers.go.
 
-#![allow(dead_code)]
-// Used by sibling fetch modules added in later plan tasks.
-
 use serde::Serialize;
 
 /// Free-tier `config-new` request body. `user_id`/`pro_token`/`wg_public_key` are intentionally

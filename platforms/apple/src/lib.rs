@@ -64,9 +64,12 @@ mod ffi {
                     let dir = if data_dir.is_null() {
                         None
                     } else {
+                        // Trim and reject empty: an empty path would cache into the process cwd.
                         unsafe { CStr::from_ptr(data_dir) }
                             .to_str()
                             .ok()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
                             .map(std::path::PathBuf::from)
                     };
                     return match dir {

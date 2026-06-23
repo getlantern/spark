@@ -1,7 +1,7 @@
 # Config-new fetch (v1) — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended)
-> or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
+> **How to use:** implement task-by-task in order. Each task is TDD — write the failing test, make it
+> pass with the minimal change, verify, commit. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Spark's NE extension fetches its server pool from the Lantern `config-new` API (direct TLS,
 free-tier), caches it on disk, refreshes on a server-driven offline-resilient loop, and feeds the

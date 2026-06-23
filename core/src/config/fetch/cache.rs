@@ -2,9 +2,6 @@
 //! (`config_meta.json`: etag, last-modified, poll-interval). Each file is written atomically
 //! (temp + rename); the two files are not updated as a single atomic unit (see `store`).
 
-// Consumed by load_or_fetch / run_loop in later plan tasks.
-#![allow(dead_code)]
-
 use std::io;
 use std::path::{Path, PathBuf};
 

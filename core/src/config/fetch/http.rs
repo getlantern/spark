@@ -1,8 +1,6 @@
 //! Hand-rolled HTTP/1.1 response collection for the config fetch: write the request bytes, then read
 //! the full response and return (status, ETag, body). No `reqwest`/`hyper` (locked stack); works over
 //! any `AsyncRead + AsyncWrite` (a TLS stream in production, a duplex pipe in tests).
-// Consumed by fetch_once in a later plan task.
-#![allow(dead_code)]
 
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

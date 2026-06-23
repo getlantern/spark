@@ -49,7 +49,9 @@ Spark obtains its server pool from the Lantern `config-new` API instead of only 
 
 Reuses what `core` already has — `serde_json` (PR #19), the hand-rolled HTTP/1.1 client in
 `core::transport::probe` (extended GET→POST + request headers + status/ETag parsing — **no
-`reqwest`/`hyper`**, per the locked stack), and `rustls`/`flint-tls` for TLS.
+`reqwest`/`hyper`**, per the locked stack), and the `boring2`/`tokio-boring2` TLS that
+`probe::tls_wrap` already uses (pulled by the `anytls` feature) — not `rustls`, since the fetch dials
+through the same boring connector as the probes.
 
 - **`ConfigRequest`** (serde `Serialize`) — the body in §2.
 - **header builder** — the `X-Lantern-*` + conditional set in §2.
