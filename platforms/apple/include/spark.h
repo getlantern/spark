@@ -33,6 +33,17 @@ int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char
 /* Signal a running spark_tunnel_run() to stop. */
 void spark_tunnel_stop(void);
 
+/* Readiness gating, so the provider doesn't report the tunnel "up" before the data path is actually
+ * servicing the fd (notably `lantern-api` cold-start, which fetches config before adopting the fd —
+ * reporting up too early blackholes traffic). Usage in startTunnel:
+ *   1. call spark_tunnel_mark_connecting() SYNCHRONOUSLY, before spawning the spark_tunnel_run worker;
+ *   2. on a separate thread, call spark_tunnel_wait_ready(timeout_ms);
+ *   3. on 0 -> completionHandler(nil); on -1 -> spark_tunnel_stop() + fail the connection. */
+void spark_tunnel_mark_connecting(void);
+
+/* Block until the data path is up (0) or it doesn't come up within timeout_ms / stops first (-1). */
+int32_t spark_tunnel_wait_ready(int32_t timeout_ms);
+
 /* ---- Server selection (multi-server pool) ----
  * The controlling app drives these via the NE provider's handleAppMessage. They operate on the
  * pool of the currently-running tunnel; with no active pool (direct / single relay / AnyTLS) they

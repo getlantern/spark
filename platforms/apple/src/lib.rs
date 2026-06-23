@@ -74,12 +74,18 @@ mod ffi {
                     };
                     return match dir {
                         Some(d) => spark_core::fd_tunnel::run_fd_lantern_api(fd, mtu as u16, d),
-                        None => -1, // api mode needs a data dir to cache device_id + config
+                        None => {
+                            // api mode needs a data dir to cache device_id + config; fail the connect
+                            // (and unblock any `spark_tunnel_wait_ready` waiter — we never came up).
+                            spark_core::fd_tunnel::mark_stopped();
+                            -1
+                        }
                     };
                 }
                 #[cfg(not(feature = "config-fetch"))]
                 {
                     let _ = data_dir; // unused without config-fetch (iOS slice)
+                    spark_core::fd_tunnel::mark_stopped(); // unblock a waiter; this slice can't serve it
                     return -1; // `lantern-api` unsupported in this slice
                 }
             }
@@ -87,7 +93,11 @@ mod ffi {
         // SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
         let config = match unsafe { build_config(config) } {
             Some(c) => c,
-            None => return -1,
+            None => {
+                // Unparseable config: unblock any `wait_ready` waiter (we never came up) and fail.
+                spark_core::fd_tunnel::mark_stopped();
+                return -1;
+            }
         };
         // `run_fd` is the shared run + status-code convention; the core builds the transport from the
         // config (direct / plain relay / AnyTLS) and owns the netstack.
@@ -125,6 +135,24 @@ mod ffi {
     #[no_mangle]
     pub extern "C" fn spark_tunnel_stop() {
         spark_core::fd_tunnel::stop();
+    }
+
+    /// Mark the tunnel **connecting** before the data path is up. The provider calls this
+    /// **synchronously** in `startTunnel` *before* spawning the `spark_tunnel_run` worker, so a
+    /// later [`spark_tunnel_wait_ready`] can't observe a stale ready/down state from a prior connect.
+    #[no_mangle]
+    pub extern "C" fn spark_tunnel_mark_connecting() {
+        spark_core::fd_tunnel::mark_connecting();
+    }
+
+    /// Block until the running tunnel's data path is actually servicing the fd, returning `0`; or `-1`
+    /// if it doesn't come up within `timeout_ms` or it stops first. The provider gates
+    /// `completionHandler(nil)` on a `0` here so it never reports the tunnel up while `lantern-api`
+    /// cold-start is still fetching config (which would blackhole traffic); on `-1` it should
+    /// [`spark_tunnel_stop`] and fail the connection instead.
+    #[no_mangle]
+    pub extern "C" fn spark_tunnel_wait_ready(timeout_ms: c_int) -> c_int {
+        spark_core::fd_tunnel::wait_ready(timeout_ms.max(0) as u32)
     }
 
     /// The active server pool as the UI's JSON array (see `spark.h` / `fd_tunnel::servers_json`), or

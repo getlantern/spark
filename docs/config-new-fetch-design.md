@@ -113,6 +113,15 @@ no cache keeps retrying; connect surfaces a **"waiting for config (offline?)"** 
 moment the first fetch succeeds (cancellable; an optional long ceiling may give up with a clear
 message, but the default is keep-trying).
 
+**NE readiness gating.** Because the extension fetches config *before* it adopts the utun fd, reporting
+the tunnel "up" eagerly would blackhole traffic into an fd nothing is servicing yet. The core exposes a
+readiness signal (`fd_tunnel::{mark_connecting, wait_ready}`, C ABI `spark_tunnel_mark_connecting` /
+`spark_tunnel_wait_ready`): the provider marks *connecting* before starting the worker, then gates
+`completionHandler(nil)` on the data path actually coming up, with a bounded ceiling (30s) after which it
+fails the connection cleanly (no blackhole) rather than reporting a dead tunnel. Warm cache comes up in
+milliseconds; cold-start-online in a second or two; cold-start-offline fails at the ceiling and the user
+retries.
+
 ## 7. Error handling (summary)
 
 | Situation | Behavior |

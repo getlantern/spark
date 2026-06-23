@@ -17,11 +17,30 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let mtu = 1500
     private var worker: Thread?
 
+    // `startTunnel`'s completion, fired exactly once via `finishStart`. The readiness waiter and
+    // `stopTunnel` (if a connect is cancelled mid-startup) can both race to resolve the start; the
+    // lock + take-and-nil makes the NE see a single, well-ordered completion.
+    private let startLock = NSLock()
+    private var pendingStart: ((Error?) -> Void)?
+
+    /// Fire `startTunnel`'s completion handler exactly once (`nil` = connected, else the start failed).
+    /// Subsequent calls are no-ops, so the readiness waiter and `stopTunnel` can both call it safely.
+    private func finishStart(_ error: Error?) {
+        startLock.lock()
+        let handler = pendingStart
+        pendingStart = nil
+        startLock.unlock()
+        handler?(error)
+    }
+
     override func startTunnel(
         options _: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
         log.notice("startTunnel: configuring full-tunnel settings")
+        startLock.lock()
+        pendingStart = completionHandler
+        startLock.unlock()
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         let ipv4 = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4.includedRoutes = [NEIPv4Route.default()] // capture all IPv4
@@ -33,12 +52,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard let self else { return }
             if let error {
                 self.log.error("setTunnelNetworkSettings failed: \(error.localizedDescription)")
-                completionHandler(error)
+                self.finishStart(error)
                 return
             }
             guard let fd = FdResolver.resolve(packetFlow: self.packetFlow) else {
                 self.log.error("could not resolve the utun fd")
-                completionHandler(NEVPNError(.configurationInvalid))
+                self.finishStart(NEVPNError(.configurationInvalid))
                 return
             }
             // The controlling app passes the data-path config in `providerConfiguration["config"]`:
@@ -78,8 +97,29 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             worker.name = "spark-tunnel"
             worker.stackSize = 1 << 20
             self.worker = worker
+
+            // Mark connecting BEFORE starting the worker, so the readiness waiter below can't observe a
+            // stale ready/down state from a prior connect; then start the (blocking) tunnel worker.
+            spark_tunnel_mark_connecting()
             worker.start()
-            completionHandler(nil)
+
+            // Gate "connected" on the data path actually servicing the fd. In `lantern-api` mode the
+            // core fetches config *before* adopting the fd, so reporting up eagerly would blackhole
+            // traffic on a cold start (especially offline). Wait (bounded) for the ready signal on a
+            // separate thread, then complete — or fail the connection cleanly if it never comes up.
+            let readyWaiter = Thread { [weak self, log = self.log] in
+                let rc = spark_tunnel_wait_ready(30_000) // 30s ceiling
+                if rc == 0 {
+                    log.notice("tunnel data path ready; reporting connected")
+                    self?.finishStart(nil)
+                } else {
+                    log.error("tunnel did not become ready (config unavailable?); failing connection")
+                    spark_tunnel_stop()
+                    self?.finishStart(NEVPNError(.connectionFailed))
+                }
+            }
+            readyWaiter.name = "spark-ready"
+            readyWaiter.start()
         }
     }
 
@@ -89,6 +129,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         log.notice("stopTunnel (reason \(reason.rawValue))")
         spark_tunnel_stop()
+        // If a connect was cancelled mid-startup (the readiness waiter is still blocked), resolve the
+        // start as failed so it can't fire after this stop completes. No-op if already resolved.
+        finishStart(NEVPNError(.connectionFailed))
         worker = nil
         completionHandler()
     }

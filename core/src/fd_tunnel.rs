@@ -16,6 +16,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -62,6 +63,65 @@ fn set_pool(control: Option<Arc<dyn transport::PoolControl>>) {
 
 fn current_pool() -> Option<Arc<dyn transport::PoolControl>> {
     pool().lock().unwrap().clone()
+}
+
+/// Readiness of the current tunnel's data path, for the platform shim to gate "connected" on. The NE
+/// runs one tunnel per process, so a single global suffices. The shim calls [`mark_connecting`]
+/// **synchronously** before starting the worker thread (a race-free baseline so [`wait_ready`] on
+/// another thread can't observe a stale `Up`/`Down` from a previous run); the data path flips it to
+/// `Up` once it's actually servicing the fd; teardown / early-failure flips it to `Down`. This lets the
+/// shim avoid reporting the tunnel up while (e.g.) lantern-api cold-start is still fetching config and
+/// nothing is servicing the utun fd — which would blackhole traffic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    Pending,
+    Up,
+    Down,
+}
+
+fn readiness() -> &'static (Mutex<Readiness>, Condvar) {
+    static READINESS: OnceLock<(Mutex<Readiness>, Condvar)> = OnceLock::new();
+    READINESS.get_or_init(|| (Mutex::new(Readiness::Down), Condvar::new()))
+}
+
+fn set_ready(state: Readiness) {
+    let (lock, cvar) = readiness();
+    *lock.lock().unwrap() = state;
+    cvar.notify_all();
+}
+
+/// Mark the data path **connecting** (not yet up). The platform shim calls this **synchronously**
+/// before it starts the tunnel worker thread, so a [`wait_ready`] on another thread can't observe a
+/// stale `Up`/`Down` from a previous connect. Called across the platform FFI.
+pub fn mark_connecting() {
+    set_ready(Readiness::Pending);
+}
+
+/// Mark the data path **down**. Idempotent; the `run_fd*` paths already set this on teardown, so the
+/// shim only needs it on early-failure paths that never entered a `run_fd*` (e.g. a config parse
+/// error) to unblock a waiting [`wait_ready`] promptly. Called across the platform FFI.
+pub fn mark_stopped() {
+    set_ready(Readiness::Down);
+}
+
+/// Block until the current tunnel's data path is **up** (returns `0`), or `-1` if it doesn't come up
+/// within `timeout_ms` (e.g. lantern-api cold-start still offline) or it went down first. Lets the
+/// platform shim gate "connected" on a serviceable fd instead of blackholing traffic into an fd
+/// nothing is reading yet. Runs on the shim's sync, runtime-less thread, so it blocks on a condvar —
+/// not the async stop [`Notify`]. Called across the platform FFI.
+pub fn wait_ready(timeout_ms: u32) -> i32 {
+    let (lock, cvar) = readiness();
+    let guard = lock.lock().unwrap();
+    let (guard, res) = cvar
+        .wait_timeout_while(guard, Duration::from_millis(timeout_ms as u64), |s| {
+            *s == Readiness::Pending
+        })
+        .unwrap();
+    if res.timed_out() || *guard != Readiness::Up {
+        -1
+    } else {
+        0
+    }
 }
 
 /// The current pool's member snapshot as the server-selection UI's JSON array (`"[]"` when no pool
@@ -141,6 +201,7 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
     deregister(&stop);
     // Drop the pool control handle for this (now torn-down) tunnel so the FFI reports no active pool.
     set_pool(None);
+    set_ready(Readiness::Down);
     result
 }
 
@@ -171,6 +232,9 @@ async fn run_tunnel_data_path(
         ));
     }
     info!(mtu, "spark tunnel up (fd mode)");
+    // The fd is adopted and the netstack is about to accept — the data path is live. The platform
+    // shim's `wait_ready` gates "connected" on this (see [`Readiness`]).
+    set_ready(Readiness::Up);
     let metrics = Arc::new(crate::metrics::Metrics::default());
     tokio::select! {
         _ = proxy::tcp::run(stack, tcp_transport, metrics) => warn!("netstack accept loop exited"),
@@ -241,6 +305,7 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
     });
     deregister(&stop);
     set_pool(None);
+    set_ready(Readiness::Down);
     match result {
         Ok(()) => 0,
         Err(e) => {
@@ -299,6 +364,31 @@ pub fn spawn_tunnel(fd: i32, mtu: u16, config: Config) -> TunnelHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_ready_reflects_data_path_state() {
+        // No other test exercises the readiness global (the tunnel data path needs a real fd), so this
+        // single test can drive it through its sub-cases serially without inter-test races.
+
+        // Up after a short delay → ready (0).
+        mark_connecting();
+        let h = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            set_ready(Readiness::Up);
+        });
+        assert_eq!(wait_ready(5_000), 0);
+        h.join().unwrap();
+
+        // Down before/while waiting → not ready (-1).
+        mark_connecting();
+        mark_stopped();
+        assert_eq!(wait_ready(5_000), -1);
+
+        // Stays pending past the timeout (e.g. cold-start still offline) → not ready (-1).
+        mark_connecting();
+        assert_eq!(wait_ready(50), -1);
+        mark_stopped(); // leave the global in a clean terminal state
+    }
 
     #[test]
     fn fd_config_maps_primitives() {
