@@ -49,15 +49,29 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let config = (provider?["config"] as? String) ?? (provider?["server"] as? String)
             self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), config=\(config?.isEmpty == false ? "set" : "direct"))")
 
+            // The app-group container path the app + extension share; the Rust core caches the
+            // generated `device_id` and the fetched `config_raw.json` here. Used by `lantern-api`
+            // mode (`config == "lantern-api"`); for other configs it's passed through and ignored.
+            let dataDir = FileManager.default
+                .containerURL(forSecurityApplicationGroupIdentifier: "group.org.getlantern.spark")?
+                .appendingPathComponent("config", isDirectory: true).path
+
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
-            // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C string
+            // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C strings
             // alive for the whole blocking call (it returns only when the tunnel stops).
-            let worker = Thread { [mtu = self.mtu, log = self.log, config] in
+            let worker = Thread { [mtu = self.mtu, log = self.log, config, dataDir] in
+                // Thread the optional app-group data dir through as the 4th C-ABI arg (nil if absent).
+                func runNative(_ cfg: UnsafePointer<CChar>?) -> Int32 {
+                    if let dataDir {
+                        return dataDir.withCString { spark_tunnel_run(fd, Int32(mtu), cfg, $0) }
+                    }
+                    return spark_tunnel_run(fd, Int32(mtu), cfg, nil)
+                }
                 let rc: Int32
                 if let config, !config.isEmpty {
-                    rc = config.withCString { spark_tunnel_run(fd, Int32(mtu), $0) }
+                    rc = config.withCString { runNative($0) }
                 } else {
-                    rc = spark_tunnel_run(fd, Int32(mtu), nil)
+                    rc = runNative(nil)
                 }
                 log.notice("spark_tunnel_run returned \(rc)")
             }
