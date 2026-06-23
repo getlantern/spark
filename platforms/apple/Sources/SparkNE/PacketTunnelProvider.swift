@@ -78,4 +78,53 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         worker = nil
         completionHandler()
     }
+
+    /// Control channel for the server-selection UI. The controlling app sends a small JSON command
+    /// via `NETunnelProviderSession.sendProviderMessage(_:)`; we route it to the Rust core's pool
+    /// control and reply with JSON:
+    ///   `{"cmd":"servers"}`           → the pool array (see `spark_servers_json`), or `[]`.
+    ///   `{"cmd":"select","index":N}`  → pin member N (N < 0 = auto); replies `{"ok":true|false}`.
+    /// Unknown/malformed messages get a nil reply. (Packets still never cross the FFI — this is
+    /// control-only, like the existing run/stop calls.)
+    override func handleAppMessage(
+        _ messageData: Data,
+        completionHandler: ((Data?) -> Void)?
+    ) {
+        // Diagnostic: fires before any guard, so we can tell whether NE invokes the handler at all
+        // (and on which thread / with a completion handler). `.public` so values aren't redacted.
+        log.notice(
+            "handleAppMessage ENTER: \(messageData.count, privacy: .public)B hasCompletion=\(completionHandler != nil, privacy: .public) mainThread=\(Thread.isMainThread, privacy: .public)"
+        )
+        guard let completionHandler else { return }
+        guard
+            let obj = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],
+            let cmd = obj["cmd"] as? String
+        else {
+            log.error("handleAppMessage: unrecognized message")
+            completionHandler(nil)
+            return
+        }
+        switch cmd {
+        case "servers":
+            // Heap-allocated C string from Rust; copy into a Swift String, then free it.
+            guard let cstr = spark_servers_json() else {
+                completionHandler("[]".data(using: .utf8))
+                return
+            }
+            let json = String(cString: cstr)
+            spark_string_free(cstr)
+            completionHandler(json.data(using: .utf8))
+        case "select":
+            // Missing / non-integer / out-of-Int32-range index → -1 (auto). `Int32(exactly:)` is
+            // non-trapping, unlike `Int32.init`, which would crash the extension on a huge index from
+            // a malformed app message — this handler must tolerate untrusted input.
+            let index = (obj["index"] as? Int).flatMap { Int32(exactly: $0) } ?? -1
+            let rc = spark_select_server(index)
+            log.notice("handleAppMessage: select index=\(index) rc=\(rc)")
+            completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
+        default:
+            log.error("handleAppMessage: unknown cmd \(cmd)")
+            completionHandler(nil)
+        }
+    }
 }

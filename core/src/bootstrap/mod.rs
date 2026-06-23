@@ -454,6 +454,12 @@ mod tests {
                         sni: None,
                     }),
                     callback_url: None,
+                    name: None,
+                    country: None,
+                    country_code: None,
+                    city: None,
+                    latitude: None,
+                    longitude: None,
                 }],
                 callback_url: Some("http://127.0.0.1/ok".into()),
                 ..Default::default()
