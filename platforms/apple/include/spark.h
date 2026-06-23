@@ -22,9 +22,10 @@ extern "C" {
  *                              only); the iOS slice returns -1. `data_dir` must be non-NULL in this
  *                              mode — it caches device_id and the fetched config.
  *   - a "host:port" literal -> tunnel every flow through that plain spark relay.
- *   - any other string      -> a full TOML config (AnyTLS + handshake shaping + gambit, ...).
+ *   - any other string      -> a full Config: spark's native TOML or a Lantern config_raw.json
+ *                              payload, auto-detected (AnyTLS + handshake shaping + gambit, ...).
  * AnyTLS requires the staticlib built with the `anytls` feature (the macOS slice is). A string that
- * is neither "lantern-api", a host:port, nor valid TOML returns -1.
+ * is neither "lantern-api", a host:port, nor a valid TOML/config_raw.json config returns -1.
  *
  * `data_dir` must be NULL or a valid NUL-terminated C string for the duration of this call. */
 int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char *data_dir);

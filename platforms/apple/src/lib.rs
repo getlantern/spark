@@ -34,13 +34,13 @@ mod ffi {
     ///   the `config-fetch` feature (macOS/darwin slice only); the iOS slice returns -1. `data_dir`
     ///   must be non-null in this mode — it is used to cache `device_id` and the fetched config.
     /// - a bare `host:port` IP literal → tunnel every flow through that **plain spark relay**.
-    /// - any other string → a full **TOML [`Config`]** (AnyTLS + handshake shaping + gambit, …),
-    ///   parsed via [`Config::from_toml_str`]; the whole transport stack applies (ADR 0006). AnyTLS
-    ///   requires the staticlib to be built with the `anytls` feature (the macOS slice is), else the
-    ///   core returns -1.
+    /// - any other string → a full **[`Config`]** — spark's native TOML *or* a Lantern
+    ///   `config_raw.json` payload (auto-detected), parsed via [`Config::from_config_str`]; the whole
+    ///   transport stack applies (ADR 0006). AnyTLS requires the staticlib to be built with the
+    ///   `anytls` feature (the macOS slice is), else the core returns -1.
     ///
-    /// A non-null, non-empty `config` that is neither `"lantern-api"`, a `SocketAddr`, nor valid TOML
-    /// returns -1.
+    /// A non-null, non-empty `config` that is neither `"lantern-api"`, a `SocketAddr`, nor a valid
+    /// TOML / `config_raw.json` config returns -1.
     ///
     /// # Safety
     /// `config` must be null or a valid NUL-terminated C string for the duration of this call.
