@@ -137,46 +137,110 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
         .build()?;
     register(&stop);
     let waiter = Arc::clone(&stop);
-    let result = runtime.block_on(async move {
-        let mut config = config;
-        crate::resolve_bootstrap(&mut config).await?;
-        // SAFETY: `fd` is the TUN fd from the OS (Android `establish()`/`detachFd`, or the Apple
-        // NE utun fd); the host side transfers ownership to native for the tunnel's lifetime.
-        let tun = Arc::new(
-            unsafe { Tun::from_fd(fd, mtu) }.map_err(|e| std::io::Error::other(e.to_string()))?,
-        );
-
-        let (tcp_transport, udp_transport, control) =
-            transport::from_config_with_control(&config)?;
-        // Register the pool's control handle (if any) so the platform FFI can drive the
-        // server-selection UI while this tunnel is up; cleared on teardown below.
-        set_pool(control);
-        let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
-        let idle = Duration::from_secs(config.udp.idle_timeout_secs);
-        if let Some((udp_inbound, udp_reply)) = udp_surface {
-            tokio::spawn(proxy::udp::run_udp(
-                udp_inbound,
-                udp_reply,
-                udp_transport,
-                idle,
-            ));
-        }
-
-        info!(mtu, "spark tunnel up (fd mode)");
-        // Metrics aren't surfaced on the embedded fd path (no IPC here), but the forwarder requires
-        // a sink; a local counter is enough.
-        let metrics = Arc::new(crate::metrics::Metrics::default());
-        tokio::select! {
-            _ = proxy::tcp::run(stack, tcp_transport, metrics) => warn!("netstack accept loop exited"),
-            _ = waiter.notified() => info!("stop requested; tearing the tunnel down"),
-        }
-        drop(tun);
-        Ok(())
-    });
+    let result = runtime.block_on(run_tunnel_data_path(fd, mtu, config, &waiter));
     deregister(&stop);
     // Drop the pool control handle for this (now torn-down) tunnel so the FFI reports no active pool.
     set_pool(None);
     result
+}
+
+/// The tunnel data path shared by `run_with_handle` and the lantern-api entry: adopt `fd`, build the
+/// transport/netstack from `config`, register the pool control, and run until `waiter` is signalled or
+/// the accept loop exits.
+async fn run_tunnel_data_path(
+    fd: i32,
+    mtu: u16,
+    mut config: Config,
+    waiter: &Notify,
+) -> std::io::Result<()> {
+    crate::resolve_bootstrap(&mut config).await?;
+    // SAFETY: `fd` is the OS TUN fd handed to native for the tunnel's lifetime.
+    let tun = Arc::new(
+        unsafe { Tun::from_fd(fd, mtu) }.map_err(|e| std::io::Error::other(e.to_string()))?,
+    );
+    let (tcp_transport, udp_transport, control) = transport::from_config_with_control(&config)?;
+    set_pool(control);
+    let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
+    let idle = Duration::from_secs(config.udp.idle_timeout_secs);
+    if let Some((udp_inbound, udp_reply)) = udp_surface {
+        tokio::spawn(proxy::udp::run_udp(
+            udp_inbound,
+            udp_reply,
+            udp_transport,
+            idle,
+        ));
+    }
+    info!(mtu, "spark tunnel up (fd mode)");
+    let metrics = Arc::new(crate::metrics::Metrics::default());
+    tokio::select! {
+        _ = proxy::tcp::run(stack, tcp_transport, metrics) => warn!("netstack accept loop exited"),
+        _ = waiter.notified() => info!("stop requested; tearing the tunnel down"),
+    }
+    drop(tun);
+    Ok(())
+}
+
+/// Apple NE entry for `lantern-api` mode: fetch the boot config from the Lantern API (cache-first,
+/// retrying on cold-start offline until a config is obtained or stop is signalled), spawn the
+/// background refresh loop (warms the on-disk cache; no live pool swap in v1), then run the tunnel.
+/// Blocks until stop; `0` clean, `-1` on error. `data_dir` is the app-group container path.
+#[cfg(feature = "config-fetch")]
+pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i32 {
+    use crate::config::fetch::{self, FetchEnv};
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "lantern-api: runtime build failed");
+            return -1;
+        }
+    };
+    let stop = Arc::new(Notify::new());
+    register(&stop);
+    let waiter = Arc::clone(&stop);
+    let result: std::io::Result<()> = runtime.block_on(async move {
+        let env = FetchEnv::from_env();
+        // Cold-start resilience (design §6): keep retrying until a config is obtained (cache or fetch)
+        // or stop fires while we wait. `load_or_fetch` returns instantly on a warm cache.
+        let mut attempt = 0u32;
+        let (config, _meta) = loop {
+            match fetch::load_or_fetch(&data_dir, &env).await {
+                Ok(c) => break c,
+                Err(e) => {
+                    warn!(error = %e, "lantern-api: waiting for config (offline?)");
+                    attempt = attempt.saturating_add(1);
+                    let wait = Duration::from_secs(((attempt as u64) * 5).clamp(5, 30));
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = waiter.notified() => return Ok(()), // stopped before first config
+                    }
+                }
+            }
+        };
+        // Background refresh: warms the cache for the next connect; ends when stop fires.
+        let loop_dir = data_dir.clone();
+        let loop_stop = Arc::clone(&waiter);
+        tokio::spawn(async move {
+            let env = FetchEnv::from_env();
+            tokio::select! {
+                _ = fetch::run_loop(&loop_dir, &env, |_cfg| {}, || false) => {}
+                _ = loop_stop.notified() => {}
+            }
+        });
+        run_tunnel_data_path(fd, mtu, config, &waiter).await
+    });
+    deregister(&stop);
+    set_pool(None);
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            warn!(error = %e, "lantern-api tunnel exited with error");
+            -1
+        }
+    }
 }
 
 /// Signal **every** running tunnel ([`run_fd`] / [`run_tunnel_with_config`]) to stop — the no-arg
