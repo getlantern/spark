@@ -104,6 +104,17 @@ pub fn mark_stopped() {
     set_ready(Readiness::Down);
 }
 
+/// Abandon a tun `fd` on an early-failure / pre-adoption bail-out: close it (the platform transferred
+/// ownership to native, but no `Tun::from_fd` adopted it here, so its drop won't) and [`mark_stopped`]
+/// so a `wait_ready` waiter fails the connect instead of timing out. Use this on every path that
+/// returns without running the tunnel — otherwise each failed start leaks the utun fd. Called across
+/// the platform FFI.
+pub fn abandon_fd(fd: i32) {
+    // SAFETY: only called on paths where `fd` was never adopted by `Tun::from_fd`; nothing else owns it.
+    unsafe { libc::close(fd) };
+    mark_stopped();
+}
+
 /// Block until the current tunnel's data path is **up** (returns `0`), or `-1` if it doesn't come up
 /// within `timeout_ms` (e.g. lantern-api cold-start still offline) or it went down first. Lets the
 /// platform shim gate "connected" on a serviceable fd instead of blackholing traffic into an fd
@@ -198,11 +209,9 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
     {
         Ok(r) => r,
         Err(e) => {
-            // We never adopted `fd` (no `Tun::from_fd`) and never flipped readiness `Up`. Close the fd
-            // (the caller transferred ownership to native) and mark down so a `wait_ready` waiter fails
-            // the connect instead of timing out. SAFETY: nothing else owns `fd` on this path.
-            unsafe { libc::close(fd) };
-            set_ready(Readiness::Down);
+            // Never adopted `fd` and never flipped readiness `Up`; close it (ownership was transferred
+            // to native) and mark down so a `wait_ready` waiter fails the connect instead of timing out.
+            abandon_fd(fd);
             return Err(e);
         }
     };
@@ -270,10 +279,8 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "lantern-api: runtime build failed");
-            // `fd` was never adopted; close it (NE ownership transfer) and unblock a `wait_ready`
-            // waiter. SAFETY: nothing else owns `fd` on this pre-adoption path.
-            unsafe { libc::close(fd) };
-            set_ready(Readiness::Down);
+            // `fd` was never adopted; close it (NE ownership transfer) and unblock a `wait_ready` waiter.
+            abandon_fd(fd);
             return -1;
         }
     };
@@ -299,8 +306,7 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
                         tokio::select! {
                             _ = tokio::time::sleep(wait) => {}
                             _ = waiter.notified() => {
-                                // SAFETY: nothing else owns `fd` on this pre-adoption path.
-                                unsafe { libc::close(fd) };
+                                abandon_fd(fd);
                                 return Ok(());
                             }
                         }
@@ -308,8 +314,7 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
                 },
                 _ = waiter.notified() => {
                     // Stopped during an in-flight fetch — close the (still-unadopted) fd and bail.
-                    // SAFETY: nothing else owns `fd` on this pre-adoption path.
-                    unsafe { libc::close(fd) };
+                    abandon_fd(fd);
                     return Ok(());
                 }
             }

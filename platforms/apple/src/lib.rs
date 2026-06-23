@@ -75,9 +75,9 @@ mod ffi {
                     return match dir {
                         Some(d) => spark_core::fd_tunnel::run_fd_lantern_api(fd, mtu as u16, d),
                         None => {
-                            // api mode needs a data dir to cache device_id + config; fail the connect
-                            // (and unblock any `spark_tunnel_wait_ready` waiter — we never came up).
-                            spark_core::fd_tunnel::mark_stopped();
+                            // api mode needs a data dir to cache device_id + config; close the fd
+                            // (ownership was transferred) + unblock any waiter, then fail the connect.
+                            spark_core::fd_tunnel::abandon_fd(fd);
                             -1
                         }
                     };
@@ -85,7 +85,7 @@ mod ffi {
                 #[cfg(not(feature = "config-fetch"))]
                 {
                     let _ = data_dir; // unused without config-fetch (iOS slice)
-                    spark_core::fd_tunnel::mark_stopped(); // unblock a waiter; this slice can't serve it
+                    spark_core::fd_tunnel::abandon_fd(fd); // close fd + unblock waiter; can't serve it here
                     return -1; // `lantern-api` unsupported in this slice
                 }
             }
@@ -94,8 +94,8 @@ mod ffi {
         let config = match unsafe { build_config(config) } {
             Some(c) => c,
             None => {
-                // Unparseable config: unblock any `wait_ready` waiter (we never came up) and fail.
-                spark_core::fd_tunnel::mark_stopped();
+                // Unparseable config: close the (transferred) fd, unblock any waiter, and fail.
+                spark_core::fd_tunnel::abandon_fd(fd);
                 return -1;
             }
         };
