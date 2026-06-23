@@ -160,37 +160,55 @@ async fn resolve(host: &str, port: u16) -> std::io::Result<std::net::SocketAddr>
         })
 }
 
-/// Bootstrap a [`Config`] for connect: prefer the on-disk cache (fast start), else do a blocking
-/// fetch. Returns the adapted Config + the meta to seed the refresh loop. Errors only when there is
-/// no cache AND the fetch fails (cold-start offline) — the caller surfaces "waiting for config".
+/// Bootstrap a [`Config`] for connect: **always fetch fresh and overwrite the cache**, using the
+/// last-good cache only as an offline fallback (not as a way to skip the fetch). So a cached copy never
+/// suppresses the fetch — you get the latest pool on every connect, and the cache is the safety net
+/// when the network/API is unavailable. Errors only when the fetch fails AND there's no usable cache
+/// (cold start offline). Returns the adapted Config + meta.
 pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Config, CacheMeta)> {
     let did = device_id(dir)?;
-    if let Some((raw, meta)) = cache::load(dir) {
-        if let Ok(cfg) = Config::from_config_str(&raw) {
-            return Ok((cfg, meta));
-        }
-        // Corrupt/empty cache: fall through to a fetch.
-    }
-    // config-new requires account creds; mint them once via /user-create (persisted, reused).
-    let creds = user::ensure_user(dir, &env.pro_host, &env.pro_path).await?;
-    let cond = Conditional::default();
-    match fetch_once(env, &did, &creds, &cond).await? {
-        FetchOutcome::New { raw, etag } => {
+    let cached = cache::load(dir); // for the offline fallback below; does NOT short-circuit the fetch
+                                   // config-new requires account creds; mint them once via /user-create (persisted, reused). If we
+                                   // can't (first run offline) but have a usable cache, use it.
+    let creds = match user::ensure_user(dir, &env.pro_host, &env.pro_path).await {
+        Ok(c) => c,
+        Err(e) => return cached_or_err(cached, e),
+    };
+    // Unconditional fetch (no If-None-Match): every connect pulls the current config and overwrites.
+    match fetch_once(env, &did, &creds, &Conditional::default()).await {
+        Ok(FetchOutcome::New { raw, etag }) => {
             let cfg = Config::from_config_str(&raw).map_err(std::io::Error::other)?;
-            // Persist the server's requested cadence too, so a cold start that immediately 304s in
-            // run_loop still sleeps the server interval (not the 600s default).
             let meta = CacheMeta {
                 etag,
                 last_modified: None,
                 poll_interval_seconds: server_poll_seconds(&raw),
             };
-            cache::store(dir, &raw, &meta)?;
+            cache::store(dir, &raw, &meta)?; // overwrite the old copy
             Ok((cfg, meta))
         }
-        FetchOutcome::NotModified => Err(std::io::Error::other(
-            "config-new returned 304 with no cached config",
-        )),
+        // We send no conditional, so a 304 isn't expected; fall back to the cache defensively.
+        Ok(FetchOutcome::NotModified) => cached_or_err(
+            cached,
+            std::io::Error::other("config-new 304 with no cache"),
+        ),
+        Err(e) => cached_or_err(cached, e), // offline / API error → last-good cache
     }
+}
+
+/// Offline fallback for [`load_or_fetch`]: use the last-good cached config if it's present and still
+/// adapts, otherwise return `err` (the fetch failure). Keeps connect working through outages without
+/// letting a stale cache hide a reachable, changed config (the live fetch always runs first).
+fn cached_or_err(
+    cached: Option<(String, CacheMeta)>,
+    err: std::io::Error,
+) -> std::io::Result<(Config, CacheMeta)> {
+    if let Some((raw, meta)) = cached {
+        if let Ok(cfg) = Config::from_config_str(&raw) {
+            tracing::warn!(err = %err, "config-fetch: fetch unavailable, using cached config");
+            return Ok((cfg, meta));
+        }
+    }
+    Err(err)
 }
 
 /// Extract the server-recommended `poll_interval_seconds` (a top-level `config_raw.json` body field)
@@ -340,7 +358,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_or_fetch_uses_cache_without_network() {
+    async fn load_or_fetch_falls_back_to_cache_when_unreachable() {
+        // fetch-first: with an unreachable endpoint the fetch fails, and load_or_fetch falls back to
+        // the last-good cache (offline resilience) rather than failing the connect. (`.invalid` is a
+        // reserved TLD — DNS resolution fails fast and deterministically, so the test doesn't hang.)
         let dir = std::env::temp_dir().join(format!("spark-lof-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let raw = r#"{ "options": { "outbounds": [
@@ -348,16 +369,19 @@ mod tests {
               "public_key": "ab", "short_id": "cd", "server_name": "x" }
         ]}}"#;
         cache::store(&dir, raw, &CacheMeta::default()).unwrap();
-        // A bogus env proves we never dial (cache hit short-circuits before ensure_user/fetch).
         let env = FetchEnv {
-            host: "127.0.0.1".into(),
+            host: "config.invalid".into(),
             path: "/".into(),
-            port: 1,
-            pro_host: "127.0.0.1".into(),
-            pro_path: "/".into(),
+            port: 443,
+            pro_host: "pro.invalid".into(),
+            pro_path: "/user-create".into(),
         };
         let (cfg, _meta) = load_or_fetch(&dir, &env).await.unwrap();
-        assert_eq!(cfg.transport.servers.len(), 1);
+        assert_eq!(
+            cfg.transport.servers.len(),
+            1,
+            "should serve the cached pool"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

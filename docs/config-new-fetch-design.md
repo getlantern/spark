@@ -100,11 +100,13 @@ through the same boring connector as the probes.
 flowchart TD
     start([startTunnel]) --> hasCfg{App supplied an<br/>explicit config?}
     hasCfg -- yes --> useApp[use it: from_config_str<br/>today's behavior] --> up([bring tunnel up])
-    hasCfg -- no --> cache{cached<br/>config_raw.json?}
-    cache -- yes --> adaptCache[from_config_raw_json] --> up
+    hasCfg -- no --> fetch[ensure_user + fetch_once<br/>unconditional: always pull fresh]
+    fetch -- New --> adaptNew[from_config_raw_json<br/>overwrite cache] --> up([bring tunnel up])
+    fetch -- "offline / API error" --> cache{usable cached<br/>config_raw.json?}
+    cache -- yes --> adaptCache[from_config_raw_json<br/>last-good fallback] --> up
+    cache -- no --> cold[retry-with-backoff until success<br/>UI: 'waiting for config (offline?)']
+    cold --> fetch
     up --> loop[[run_loop: refresh + cache]]
-    cache -- no --> cold[blocking fetch_once<br/>retry-with-backoff until success<br/>UI: 'fetching config (offline?)']
-    cold -- New --> adaptNew[from_config_raw_json + cache] --> up
     loop -. server poll_interval / backoff .-> loop
 ```
 
@@ -112,19 +114,24 @@ Config resolution gains a source, selected by the config string the app already 
 (`providerConfiguration["config"]`): a reserved sentinel **`lantern-api`** selects API mode; an
 explicit config (TOML / host:port / config_raw) is used as today and takes precedence; an *empty*
 config still means "direct / no tunnel" (unchanged — so API mode is opt-in via the sentinel, not the
-default). In **API mode**, the cache boots the tunnel immediately and the loop refreshes in the
-background, or it cold-fetches if there's no cache. The Swift NE shim passes the app-group container
-path into `spark_tunnel_run` as the data dir (the extension can't compute it itself). Note the
-extension's own dials egress the real interface by design (loop avoidance), so the refresh is a
-**direct** dial in v1 — the *cache* is what makes warm start robust; the fronting milestone hardens
-the dial.
+default). In **API mode** the bootstrap is **fetch-first**: every connect runs `ensure_user` +
+an unconditional `fetch_once`, adapts the fresh body, and **overwrites** the cache — so a cached copy
+never suppresses the fetch and you always get the current server pool. The cache is a **fallback
+only**: if the fetch fails (offline / API error) and a usable last-good cache exists, the tunnel boots
+from it; with no cache, connect retries with backoff until the first fetch succeeds. The Swift NE shim
+passes the app-group container path into `spark_tunnel_run` as the data dir (the extension can't
+compute it itself). Note the extension's own dials egress the real interface by design (loop
+avoidance), so the fetch is a **direct** dial in v1 — the *cache* is what keeps connect working through
+outages; the fronting milestone hardens the dial.
 
 ## 5. Caching
 
 Atomic-write the raw body to `{data_dir}/config_raw.json` and meta to `{data_dir}/config_meta.json` on
-every `200`/`206`. `load_cached` reads both at startup. A `304`/`204`/error never overwrites the cache
+every `200`/`206`, **overwriting** the previous copy — the cache always holds the most recent
+successful fetch. The cache is a **fallback, not a fast-start short-circuit**: `load_or_fetch` reads it
+only to recover when the live fetch fails (see §4). A `304`/`204`/error never overwrites the cache
 (last-good is preserved). The adapter returning `NoSupportedOutbounds`/parse-error on a fetched body is
-treated as a failed fetch — not cached.
+treated as a failed fetch — not cached, and the prior last-good copy stays the fallback.
 
 ## 6. Cadence & offline resilience
 
@@ -138,7 +145,8 @@ tunnel and **never permanently giving up**:
   with no cache → quadratic backoff capped at **2 min** (`common.NewBackoff`), retried indefinitely
   until the network returns, then the server cadence resumes on the next success.
 
-**Offline is not terminal.** Warm start boots from cache and refreshes through outages. Cold start with
+**Offline is not terminal.** Every connect fetches fresh first; if the fetch fails and a last-good
+cache exists, the tunnel boots from it and the loop keeps retrying through the outage. Cold start with
 no cache keeps retrying; connect surfaces a **"waiting for config (offline?)"** state and proceeds the
 moment the first fetch succeeds (cancellable; an optional long ceiling may give up with a clear
 message, but the default is keep-trying).
