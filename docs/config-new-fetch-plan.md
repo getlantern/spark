@@ -783,7 +783,9 @@ git commit -m "feat(config-fetch): fetch_once (direct dial + TLS + POST) + env s
 In `core/src/config/fetch/mod.rs`:
 
 ```rust
-use crate::config::fetch::cache::{self, CacheMeta};
+// `cache` is already in scope via `mod cache;` — import only the type (a `{self, CacheMeta}` form
+// would re-bind `cache` and fail to compile, E0255). Reference `cache::load`/`cache::store` directly.
+use crate::config::fetch::cache::CacheMeta;
 use crate::config::Config;
 
 /// Bootstrap a [`Config`] for connect: prefer the on-disk cache (fast start), else do a blocking
@@ -801,7 +803,13 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
     match fetch_once(env, &did, &cond).await? {
         FetchOutcome::New { raw, etag } => {
             let cfg = Config::from_config_str(&raw).map_err(std::io::Error::other)?;
-            let meta = CacheMeta { etag, last_modified: None, poll_interval_seconds: 0 };
+            // Persist the server's requested cadence too, so a cold start that immediately 304s in
+            // run_loop still sleeps the server interval (not the 600s default). See `server_poll_seconds`.
+            let meta = CacheMeta {
+                etag,
+                last_modified: None,
+                poll_interval_seconds: server_poll_seconds(&raw),
+            };
             cache::store(dir, &raw, &meta)?;
             Ok((cfg, meta))
         }
@@ -809,6 +817,16 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
             Err(std::io::Error::other("config-new returned 304 with no cached config"))
         }
     }
+}
+
+/// Extract the server-recommended `poll_interval_seconds` (a top-level `config_raw.json` body field)
+/// without modelling the whole response. `0` when absent/unparseable (→ `poll_after`'s 10-min default).
+/// Shared by `load_or_fetch` (to seed the cache meta) and `run_loop` (each refresh).
+fn server_poll_seconds(raw: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("poll_interval_seconds").and_then(|n| n.as_u64()))
+        .unwrap_or(0)
 }
 ```
 
@@ -832,6 +850,13 @@ returns a pool without hitting the network:
         let (cfg, _meta) = load_or_fetch(&dir, &env).await.unwrap();
         assert_eq!(cfg.transport.servers.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn server_poll_seconds_reads_body_field() {
+        assert_eq!(server_poll_seconds(r#"{"poll_interval_seconds":45}"#), 45);
+        assert_eq!(server_poll_seconds(r#"{"x":1}"#), 0);
+        assert_eq!(server_poll_seconds("not json"), 0);
     }
 ```
 
@@ -872,27 +897,44 @@ where
         Ok(d) => d,
         Err(_) => return,
     };
-    let mut cond = cache::load(dir).map(|(_, m)| Conditional {
-        etag: m.etag,
-        last_modified: m.last_modified,
-    }).unwrap_or_default();
-    let mut last_interval = poll_after(0);
+    // Seed both the conditional state AND the initial sleep from the cached meta, so a warm start
+    // (or a cold start whose first request 304s) uses the server's last-known cadence, not the default.
+    let (mut cond, mut last_interval) = match cache::load(dir) {
+        Some((_, m)) => (
+            Conditional {
+                etag: m.etag,
+                last_modified: m.last_modified,
+            },
+            poll_after(m.poll_interval_seconds),
+        ),
+        None => (Conditional::default(), poll_after(0)),
+    };
     let mut fail = 0u32;
     while !should_stop() {
         match fetch_once(env, &did, &cond).await {
-            Ok(FetchOutcome::New { raw, etag }) => {
-                fail = 0;
-                if let Ok(cfg) = Config::from_config_str(&raw) {
+            Ok(FetchOutcome::New { raw, etag }) => match Config::from_config_str(&raw) {
+                Ok(cfg) => {
+                    fail = 0;
                     let secs = server_poll_seconds(&raw);
-                    let meta = CacheMeta { etag: etag.clone(), last_modified: None, poll_interval_seconds: secs };
+                    let meta = CacheMeta {
+                        etag: etag.clone(),
+                        last_modified: None,
+                        poll_interval_seconds: secs,
+                    };
                     let _ = cache::store(dir, &raw, &meta);
                     cond.etag = etag;
                     last_interval = poll_after(secs);
                     on_config(cfg);
+                    sleep_or_stop(last_interval, &should_stop).await;
                 }
-                // A body that fails the adapter is treated as a non-update: keep last-good, re-sleep.
-                sleep_or_stop(last_interval, &should_stop).await;
-            }
+                Err(_) => {
+                    // A 200 with an unusable body (parse error / NoSupportedOutbounds) is treated as a
+                    // failed fetch (design §7): don't cache, keep last-good, and back off — so a server
+                    // serving a broken config isn't re-polled at the fast steady-state cadence.
+                    fail = fail.saturating_add(1);
+                    sleep_or_stop(backoff(fail), &should_stop).await;
+                }
+            },
             Ok(FetchOutcome::NotModified) => {
                 fail = 0;
                 sleep_or_stop(last_interval, &should_stop).await;
@@ -911,13 +953,7 @@ fn backoff(n: u32) -> Duration {
     Duration::from_millis(ms.min(120_000))
 }
 
-/// Extract `poll_interval_seconds` from a raw config body without modelling the whole response.
-fn server_poll_seconds(raw: &str) -> u64 {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|v| v.get("poll_interval_seconds").and_then(|n| n.as_u64()))
-        .unwrap_or(0)
-}
+// `server_poll_seconds` is defined in Task 7 (shared by `load_or_fetch` and this loop) — do not redefine.
 
 /// Sleep `d`, but wake early (return) if `should_stop` flips. Poll the stop flag each second.
 async fn sleep_or_stop<Stop: Fn() -> bool>(d: Duration, should_stop: &Stop) {
@@ -931,6 +967,12 @@ async fn sleep_or_stop<Stop: Fn() -> bool>(d: Duration, should_stop: &Stop) {
 }
 ```
 
+> **Error visibility (CLAUDE.md compliance):** add fully-qualified `tracing` calls to `run_loop` — a
+> `tracing::warn!` on `device_id` failure (before the early `return`), and `tracing::debug!` on a
+> cache-write failure (`if let Err(e) = cache::store(...)`), on each backoff arm (network + unusable
+> body — bind `Err(e)`, not `Err(_)`), and once when the loop stops. No `use tracing` import (the
+> macros are fully qualified). `tracing` is already a core dependency. Don't silently drop these errors.
+
 - [ ] **Step 2: Test the pure helpers**
 
 ```rust
@@ -940,13 +982,7 @@ async fn sleep_or_stop<Stop: Fn() -> bool>(d: Duration, should_stop: &Stop) {
         assert_eq!(backoff(2), Duration::from_millis(40));
         assert_eq!(backoff(10_000), Duration::from_millis(120_000)); // capped 2min
     }
-
-    #[test]
-    fn server_poll_seconds_reads_body_field() {
-        assert_eq!(server_poll_seconds(r#"{"poll_interval_seconds":45}"#), 45);
-        assert_eq!(server_poll_seconds(r#"{"x":1}"#), 0);
-        assert_eq!(server_poll_seconds("not json"), 0);
-    }
+    // (`server_poll_seconds` is tested in Task 7, where the helper is defined.)
 ```
 
 - [ ] **Step 3: Run + commit**
