@@ -294,7 +294,7 @@ intended family:
 | **WebRTC** | the STUN binding + DTLS handshake — the shape of every video call | roadmap |
 | **HTTP** | the request line + headers, and CDN-fronting (a `Host`≠SNI / ECH-fronted opening — i.e. domain fronting / meek) | roadmap |
 | **STARTTLS-pattern** (RDP, SMTP/IMAP) | a cleartext line-protocol prelude on a fixed port before the inline TLS upgrade | roadmap |
-| **TURN/STUN** | the STUN magic-cookie framing on the media ports (3478 / 5349) | roadmap |
+| **TURN/STUN** | the STUN magic-cookie framing on the STUN/TURN ports (3478 / 5349) | roadmap |
 
 Each dialect inherits its protocol's **collateral-freedom** and takes the **port** it speaks on as
 part of the move — block the port and you block the real thing that lives there. The roadmap dialects
