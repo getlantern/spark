@@ -5,6 +5,7 @@
 mod cache;
 mod http;
 mod request;
+mod user;
 
 use std::path::Path;
 use std::time::Duration;
@@ -56,6 +57,9 @@ pub struct FetchEnv {
     pub host: String,
     pub path: String,
     pub port: u16,
+    /// Pro/account host for the `/user-create` pre-step (a *different* host than config-new). Port 443.
+    pub pro_host: String,
+    pub pro_path: String,
 }
 
 impl FetchEnv {
@@ -64,6 +68,8 @@ impl FetchEnv {
             host: "df.iantem.io".into(),
             path: "/api/v1/config-new".into(),
             port: 443,
+            pro_host: "api.getiantem.org".into(),
+            pro_path: "/user-create".into(),
         }
     }
     pub fn staging() -> Self {
@@ -71,6 +77,8 @@ impl FetchEnv {
             host: "api.staging.iantem.io".into(),
             path: "/v1/config-new".into(),
             port: 443,
+            pro_host: "api.staging.iantem.io".into(),
+            pro_path: "/pro-server/user-create".into(),
         }
     }
     /// Select via `SPARK_CONFIG_ENV=staging`, else prod.
@@ -101,14 +109,17 @@ pub enum FetchOutcome {
 /// network sequence is bounded by `ATTEMPT_TIMEOUT` — `post_collect` reads to EOF with no internal
 /// timeout, so a hung/keep-alive server would otherwise stall the refresh loop forever instead of
 /// backing off. Timeout ⇒ error ⇒ backoff-retry, which is the offline-resilience contract.
-pub async fn fetch_once(
+async fn fetch_once(
     env: &FetchEnv,
     device_id: &str,
+    creds: &user::Creds,
     cond: &Conditional,
 ) -> std::io::Result<FetchOutcome> {
     const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-    let req = ConfigRequest::new(device_id.to_string());
+    let mut req = ConfigRequest::new(device_id.to_string());
+    req.user_id = creds.user_id.clone();
+    req.pro_token = creds.pro_token.clone();
     let bytes =
         build_request_bytes(&env.host, &env.path, &req, cond).map_err(std::io::Error::other)?;
     let resp = tokio::time::timeout(ATTEMPT_TIMEOUT, async {
@@ -160,8 +171,10 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
         }
         // Corrupt/empty cache: fall through to a fetch.
     }
+    // config-new requires account creds; mint them once via /user-create (persisted, reused).
+    let creds = user::ensure_user(dir, &env.pro_host, &env.pro_path).await?;
     let cond = Conditional::default();
-    match fetch_once(env, &did, &cond).await? {
+    match fetch_once(env, &did, &creds, &cond).await? {
         FetchOutcome::New { raw, etag } => {
             let cfg = Config::from_config_str(&raw).map_err(std::io::Error::other)?;
             // Persist the server's requested cadence too, so a cold start that immediately 304s in
@@ -206,6 +219,14 @@ where
             return;
         }
     };
+    // Account creds for every fetch; persisted by load_or_fetch on connect, so this just reads them.
+    let creds = match user::ensure_user(dir, &env.pro_host, &env.pro_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(err = %e, "config-fetch: no account creds, refresh loop will not run");
+            return;
+        }
+    };
     // Seed both the conditional state AND the initial sleep from the cached meta, so a warm start
     // (or a cold start whose first request 304s) uses the server's last-known cadence, not the default.
     let (mut cond, mut last_interval) = match cache::load(dir) {
@@ -220,7 +241,7 @@ where
     };
     let mut fail = 0u32;
     while !should_stop() {
-        match fetch_once(env, &did, &cond).await {
+        match fetch_once(env, &did, &creds, &cond).await {
             Ok(FetchOutcome::New { raw, etag }) => match Config::from_config_str(&raw) {
                 Ok(cfg) => {
                     fail = 0;
@@ -327,11 +348,13 @@ mod tests {
               "public_key": "ab", "short_id": "cd", "server_name": "x" }
         ]}}"#;
         cache::store(&dir, raw, &CacheMeta::default()).unwrap();
-        // A bogus env proves we never dial: cache hit short-circuits.
+        // A bogus env proves we never dial (cache hit short-circuits before ensure_user/fetch).
         let env = FetchEnv {
             host: "127.0.0.1".into(),
             path: "/".into(),
             port: 1,
+            pro_host: "127.0.0.1".into(),
+            pro_path: "/".into(),
         };
         let (cfg, _meta) = load_or_fetch(&dir, &env).await.unwrap();
         assert_eq!(cfg.transport.servers.len(), 1);

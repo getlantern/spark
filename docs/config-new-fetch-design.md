@@ -11,8 +11,14 @@ Spark obtains its server pool from the Lantern `config-new` API instead of only 
 `config.toml` / `config_raw.json`. v1 is deliberately the smallest shippable slice:
 
 - **Direct fetch only** (real TLS, no domain-fronting). Censored cold-start is the *next* milestone.
-- **Free tier only**: a generated, persisted `device_id` — no `/user-create`, `user_id`, `pro_token`,
-  or WireGuard. Pro is a later milestone.
+- **Anonymous account (free)**: a generated, persisted `device_id` **plus** an anonymous `user_id` +
+  `pro_token` minted by `POST /user-create` on first use (persisted, reused). **This corrects the
+  original v1 assumption** — config-new is *not* anonymously fetchable: it rejects a request without a
+  token (`400 "pro_token is required"`) and one with too low a `version` (`400 "… version … too old"`).
+  "pro_token" is a misnomer — every client, free included, gets one from `/user-create`; paid features
+  (subscriptions, WireGuard) are layered on later and stay deferred. See §2a.
+- We present as a **Lantern client** (`app_name = "lantern"`, a recent `version`, e.g. `9.1.13`) so the
+  API accepts us and `/user-create` succeeds; a Spark-specific registered app identity is a later option.
 - **Core module; the NE extension self-fetches** on connect (vs today's app-supplied config).
 - **Disk-cached**, so startup is fast and offline is survivable.
 - The response **is** `config_raw.json` (radiance's `ConfigResponse`) → fed straight into
@@ -24,16 +30,21 @@ Spark obtains its server pool from the Lantern `config-new` API instead of only 
 - **Endpoint**: `POST https://df.iantem.io/api/v1/config-new` (prod), `POST
   https://api.staging.iantem.io/v1/config-new` (staging). Env-selectable; default prod.
   (`radiance/common/constants.go:28`, `radiance/config/fetcher.go:151`.)
-- **Request body** (JSON, `getlantern/common.ConfigRequest`, `common/types.go:100`): we send
-  `device_id`, `platform`, `app_name`, `backend:"sing-box"` (so the API returns the sing-box-options
-  shape our adapter reads), `singbox_version`, `version`, `locale`, and
+- **Request body** (JSON, `getlantern/common.ConfigRequest`, `common/types.go`): we send
+  `device_id`, `user_id` (decimal string from `/user-create`), `pro_token` (from `/user-create`),
+  `platform`, `app_name:"lantern"`, `backend:"sing-box"` (so the API returns the sing-box-options
+  shape our adapter reads), `singbox_version`, `version` (a recent Lantern version — the server
+  enforces a floor; `0.1.0` is rejected), `locale`, and
   `protocols:["samizdat","hysteria2","shadowsocks"]` — *only* the kinds our adapter maps, so the API
-  doesn't return outbounds we'd skip. `preferred_location` optional. `user_id`/`pro_token`/
-  `wg_public_key` omitted (free tier).
-- **Request headers** (`radiance/common/headers.go:50`): `X-Lantern-App`, `-App-Version`, `-Version`,
-  `-Platform`, `-Device-Id`, `-Time-Zone`, `-Rand` (0–300 random chars, packet padding) + `Content-Type:
-  application/json`, `Cache-Control: no-cache`, and conditional `If-Modified-Since` / `If-None-Match`
-  from the cache.
+  doesn't return outbounds we'd skip. `preferred_location` optional. `wg_public_key` omitted (Pro/WG,
+  deferred). **`user_id` + `pro_token` are required** (see §2a) — `user_id` is `strconv.ParseInt`-ed
+  server-side, so an absent value is a `400`.
+- **Request headers** (`radiance/common/headers.go:50`): `X-Lantern-App` (`lantern`), `-App-Version`,
+  `-Version`, `-Platform`, `-Device-Id`, `-User-Id`, `-Time-Zone` + `Content-Type: application/json`,
+  `Cache-Control: no-cache`, and conditional `If-Modified-Since` / `If-None-Match` from the cache.
+  (`pro_token` rides the **body** only — radiance sends no `X-Lantern-Pro-Token` header for config-new.)
+  `-Rand` (0–300 random padding chars) is still deferred to the fronting milestone (not required by the
+  server — confirmed: its absence didn't cause the 400s; the token + version did).
 - **Response**: JSON `ConfigResponse` (`common/types.go:73`) = the `config_raw.json` shape
   (`country`/`ip`/`servers`/`outbound_locations`/`options.outbounds`/`bandit_url_overrides`/
   `poll_interval_seconds`/…). We pass the raw body to the adapter; we do **not** re-model it.
@@ -44,6 +55,25 @@ Spark obtains its server pool from the Lantern `config-new` API instead of only 
 - **Sleep cadence**: there is **no sleep HTTP header**. The server-recommended inter-fetch interval is
   the response **body** field `poll_interval_seconds` (`ConfigResponse.PollIntervalSeconds`), handled
   per `radiance/config/config.go:302-336` (see §6).
+
+## 2a. Account pre-step: `/user-create` (`core::config::fetch::user`)
+
+config-new needs an account, so before the first fetch we mint one (radiance's `ensureUser` →
+`account.Client.NewUser`):
+
+- **Endpoint**: `POST https://api.getiantem.org/user-create` (prod), `POST
+  https://api.staging.iantem.io/pro-server/user-create` (staging) — a **different host** than config-new.
+- **Request**: no body; headers `X-Lantern-App:"lantern"`, `-Version`, `-Platform`, `-Device-Id` (no
+  token/user-id yet — that's what we're minting).
+- **Response** (200): `{"userId": <number>, "token": "<string>", …}`. We map `userId` (a JSON number)
+  → `user_id` decimal string and `token` → `pro_token`.
+- **Persistence**: stored in the data dir as `user.json` and reused; created once per device. A
+  persisted-but-unusable file (placeholder id / empty token) is treated as absent and re-created.
+- **Trust = TLS** (same as config-new). No signature.
+
+This is the one correction to the original design: the "free tier omits `/user-create`" assumption was
+wrong — verified live (config-new returns `400 "pro_token is required"` without it). It's a thin slice
+of the account surface; the rest (subscriptions, sign-up/login, WireGuard) stays deferred to Pro.
 
 ## 3. Components — new `core::config::fetch` module
 

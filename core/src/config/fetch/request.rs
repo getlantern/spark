@@ -11,6 +11,14 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigRequest {
     pub device_id: String,
+    /// Lantern account id (decimal string). config-new requires it — the server `ParseInt`s it, and an
+    /// absent value is a 400. `"0"` is the anonymous placeholder; the real id comes from `/user-create`
+    /// (see `super::user`). Always serialized.
+    pub user_id: String,
+    /// The universal token config-new requires (minted by `/user-create`; "pro" is a misnomer — free
+    /// clients get one too). Omitted from the body when empty (matches the server's `omitempty`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pro_token: String,
     pub platform: String,
     pub app_name: String,
     pub backend: String,
@@ -31,16 +39,35 @@ fn lantern_platform(os: &str) -> &str {
     }
 }
 
+/// The `X-Lantern-App` / `app_name` value. We identify as `lantern` (matching radiance) so the API
+/// accepts the request and `/user-create` mints a valid token — the server keys on a known app. If
+/// Spark ever registers its own app identity server-side, change this in one place.
+pub(crate) const APP_NAME: &str = "lantern";
+
+/// The client version reported to the API (`X-Lantern-{App-,}Version` + the body `version`). config-new
+/// enforces a minimum ("bad client factors: version … too old"), so this is a recent Lantern version,
+/// NOT spark-core's `CARGO_PKG_VERSION` (0.1.0, which the server rejects). Bump when the server raises
+/// its floor. (Spark presents as a Lantern client; see [`APP_NAME`].)
+pub(crate) const LANTERN_VERSION: &str = "9.1.13";
+
+/// This build's platform string in the Lantern convention (`darwin`/`linux`/…). Shared by the
+/// config-new request and the `/user-create` pre-step.
+pub(crate) fn platform() -> &'static str {
+    lantern_platform(std::env::consts::OS)
+}
+
 impl ConfigRequest {
     /// The free-tier default request for this build.
     pub fn new(device_id: String) -> Self {
         ConfigRequest {
             device_id,
-            platform: lantern_platform(std::env::consts::OS).to_string(),
-            app_name: "spark".to_string(),
+            user_id: "0".to_string(), // anonymous placeholder; real id set from /user-create
+            pro_token: String::new(), // set from /user-create before the fetch
+            platform: platform().to_string(),
+            app_name: APP_NAME.to_string(),
             backend: "sing-box".to_string(),
             singbox_version: "1.11.0".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: LANTERN_VERSION.to_string(),
             locale: "en-US".to_string(),
             protocols: vec![
                 "samizdat".to_string(),
@@ -106,7 +133,7 @@ pub fn build_request_bytes(
     let mut head = String::new();
     head.push_str(&format!("POST {path} HTTP/1.1\r\n"));
     head.push_str(&format!("Host: {host}\r\n"));
-    head.push_str("X-Lantern-App: spark\r\n");
+    head.push_str(&format!("X-Lantern-App: {APP_NAME}\r\n"));
     head.push_str(&format!("X-Lantern-App-Version: {}\r\n", req.version));
     head.push_str(&format!("X-Lantern-Version: {}\r\n", req.version));
     head.push_str(&format!("X-Lantern-Platform: {}\r\n", req.platform));
@@ -116,6 +143,12 @@ pub fn build_request_bytes(
     head.push_str(&format!(
         "X-Lantern-Device-Id: {}\r\n",
         header_safe(&req.device_id)
+    ));
+    // user_id is decimal-digits (or "0"); header-safe is belt-and-suspenders. (pro_token rides the
+    // body only — radiance sends no X-Lantern-Pro-Token header for config-new.)
+    head.push_str(&format!(
+        "X-Lantern-User-Id: {}\r\n",
+        header_safe(&req.user_id)
     ));
     head.push_str(&format!(
         "X-Lantern-Time-Zone: {}\r\n",
@@ -141,17 +174,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn body_has_free_tier_fields_and_no_pro() {
+    fn body_has_required_fields_and_anonymous_creds() {
         let req = ConfigRequest::new("dev-123".into());
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"device_id\":\"dev-123\""));
         assert!(json.contains("\"backend\":\"sing-box\""));
+        assert!(json.contains("\"app_name\":\"lantern\""));
         assert!(json.contains("samizdat") && json.contains("hysteria2"));
-        assert!(!json.contains("pro_token") && !json.contains("user_id"));
+        // config-new requires user_id (server ParseInts it); "0" is the anonymous placeholder.
+        assert!(json.contains("\"user_id\":\"0\""));
+        // An empty pro_token is omitted from the body (matches the server's omitempty).
+        assert!(
+            !json.contains("pro_token"),
+            "empty pro_token must be omitted"
+        );
         assert!(
             !json.contains("time_zone"),
             "time_zone is a header, not a body field"
         );
+    }
+
+    #[test]
+    fn body_includes_pro_token_when_set() {
+        let mut req = ConfigRequest::new("d".into());
+        req.user_id = "388687521".into();
+        req.pro_token = "tok-abc".into();
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"user_id\":\"388687521\""));
+        assert!(json.contains("\"pro_token\":\"tok-abc\""));
     }
 
     #[test]
@@ -172,7 +222,9 @@ mod tests {
         let s = String::from_utf8(bytes).unwrap();
         assert!(s.starts_with("POST /api/v1/config-new HTTP/1.1\r\n"));
         assert!(s.contains("Host: df.iantem.io\r\n"));
+        assert!(s.contains("X-Lantern-App: lantern\r\n"));
         assert!(s.contains("X-Lantern-Device-Id: dev-123\r\n"));
+        assert!(s.contains("X-Lantern-User-Id: 0\r\n")); // anonymous placeholder by default
         assert!(s.contains("X-Lantern-Time-Zone: America/New_York\r\n"));
         assert!(
             !s.contains("X-Lantern-Rand"),
