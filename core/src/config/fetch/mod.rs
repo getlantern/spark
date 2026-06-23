@@ -189,6 +189,94 @@ fn server_poll_seconds(raw: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Run the refresh loop until `should_stop()` returns true. On each successful `New` fetch it adapts +
+/// caches + calls `on_config`, then sleeps the server-recommended interval; a `New` body that fails the
+/// adapter, or any network failure, backs off (quadratic, ≤2min) and retries forever; `304`/NotModified
+/// re-sleeps on the prior interval. Never returns an error — config refresh must not crash the tunnel.
+pub async fn run_loop<F, Stop>(dir: &Path, env: &FetchEnv, mut on_config: F, should_stop: Stop)
+where
+    F: FnMut(Config),
+    Stop: Fn() -> bool,
+{
+    let did = match device_id(dir) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(err = %e, "config-fetch: device_id failed, refresh loop will not run");
+            return;
+        }
+    };
+    // Seed both the conditional state AND the initial sleep from the cached meta, so a warm start
+    // (or a cold start whose first request 304s) uses the server's last-known cadence, not the default.
+    let (mut cond, mut last_interval) = match cache::load(dir) {
+        Some((_, m)) => (
+            Conditional {
+                etag: m.etag,
+                last_modified: m.last_modified,
+            },
+            poll_after(m.poll_interval_seconds),
+        ),
+        None => (Conditional::default(), poll_after(0)),
+    };
+    let mut fail = 0u32;
+    while !should_stop() {
+        match fetch_once(env, &did, &cond).await {
+            Ok(FetchOutcome::New { raw, etag }) => match Config::from_config_str(&raw) {
+                Ok(cfg) => {
+                    fail = 0;
+                    let secs = server_poll_seconds(&raw);
+                    let meta = CacheMeta {
+                        etag: etag.clone(),
+                        last_modified: None,
+                        poll_interval_seconds: secs,
+                    };
+                    if let Err(e) = cache::store(dir, &raw, &meta) {
+                        tracing::debug!(err = %e, "config-fetch: cache write failed (non-fatal)");
+                    }
+                    cond.etag = etag;
+                    last_interval = poll_after(secs);
+                    on_config(cfg);
+                    sleep_or_stop(last_interval, &should_stop).await;
+                }
+                Err(e) => {
+                    tracing::debug!(err = %e, "config-fetch: unusable config body, backing off");
+                    // A 200 with an unusable body (parse error / NoSupportedOutbounds) is treated as a
+                    // failed fetch (design §7): don't cache, keep last-good, and back off — so a server
+                    // serving a broken config isn't re-polled at the fast steady-state cadence.
+                    fail = fail.saturating_add(1);
+                    sleep_or_stop(backoff(fail), &should_stop).await;
+                }
+            },
+            Ok(FetchOutcome::NotModified) => {
+                fail = 0;
+                sleep_or_stop(last_interval, &should_stop).await;
+            }
+            Err(e) => {
+                tracing::debug!(err = %e, "config-fetch: fetch failed, backing off");
+                fail = fail.saturating_add(1);
+                sleep_or_stop(backoff(fail), &should_stop).await;
+            }
+        }
+    }
+    tracing::debug!("config-fetch: refresh loop stopped");
+}
+
+/// Quadratic backoff (10ms·n²) capped at 2 minutes — matches radiance's `common.NewBackoff`.
+fn backoff(n: u32) -> Duration {
+    let ms = (10u64).saturating_mul((n as u64).saturating_mul(n as u64));
+    Duration::from_millis(ms.min(120_000))
+}
+
+/// Sleep `d`, but wake early (return) if `should_stop` flips. Polls the stop flag each second.
+async fn sleep_or_stop<Stop: Fn() -> bool>(d: Duration, should_stop: &Stop) {
+    let mut left = d;
+    let step = Duration::from_secs(1);
+    while left > Duration::ZERO && !should_stop() {
+        let s = left.min(step);
+        tokio::time::sleep(s).await;
+        left = left.saturating_sub(s);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +335,12 @@ mod tests {
         let (cfg, _meta) = load_or_fetch(&dir, &env).await.unwrap();
         assert_eq!(cfg.transport.servers.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backoff_is_quadratic_and_capped() {
+        assert_eq!(backoff(1), Duration::from_millis(10));
+        assert_eq!(backoff(2), Duration::from_millis(40));
+        assert_eq!(backoff(10_000), Duration::from_millis(120_000)); // capped 2min
     }
 }
