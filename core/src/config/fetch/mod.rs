@@ -343,4 +343,21 @@ mod tests {
         assert_eq!(backoff(2), Duration::from_millis(40));
         assert_eq!(backoff(10_000), Duration::from_millis(120_000)); // capped 2min
     }
+
+    /// Live: hits real staging. Run:
+    /// `SPARK_CONFIG_ENV=staging cargo test -p spark-core --features config-fetch -- --ignored live_fetch`
+    #[tokio::test]
+    #[ignore = "live: needs network"]
+    async fn live_fetch() {
+        let dir = std::env::temp_dir().join("spark-live-fetch");
+        let _ = std::fs::remove_dir_all(&dir);
+        let env = FetchEnv::staging();
+        let (cfg, _m) = load_or_fetch(&dir, &env)
+            .await
+            .expect("staging fetch + adapt");
+        assert!(
+            !cfg.transport.servers.is_empty(),
+            "staging should return a pool"
+        );
+    }
 }
