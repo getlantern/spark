@@ -1028,11 +1028,12 @@ cargo test -p spark-core --features config-fetch config::fetch
 ```
 Expected: all clean; unit tests pass. (Optionally run the live test against staging by hand.)
 
-> **CI note:** the entire `config::fetch` module is behind `#[cfg(feature = "config-fetch")]`, so a
-> plain `cargo test`/`cargo clippy` does **not** compile or run any of it — the tests silently show up
-> as "filtered out". Whatever CI job covers `spark-core` must pass `--features config-fetch` (or a
-> feature set that implies it) or this whole module goes ungated in CI. Confirm/patch the CI workflow
-> as part of this task.
+> **CI note (verified):** the entire `config::fetch` module is behind `#[cfg(feature = "config-fetch")]`,
+> so a plain `cargo test`/`cargo clippy` skips it. CI is already fine: `.github/workflows/ci.yml`
+> runs `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo test
+> --workspace --all-features`, and `--all-features` enables `config-fetch` — so the module's tests +
+> lints are covered with no workflow change. The ignored `live_fetch` test is skipped in CI (ignored
+> tests don't run without `--ignored`). No CI patch needed.
 
 - [ ] **Step 3: Commit**
 
