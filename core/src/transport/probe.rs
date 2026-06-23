@@ -140,12 +140,17 @@ where
     }
     // Status line: "HTTP/1.1 204 ...". Parse the 3-digit code.
     let line = String::from_utf8_lossy(&buf);
-    let code = line
+    let code = parse_status_code(&line)?;
+    Ok((200..300).contains(&code))
+}
+
+/// Parse the HTTP status code from a status line like `HTTP/1.1 204 No Content`.
+pub(crate) fn parse_status_code(status_line: &str) -> io::Result<u16> {
+    status_line
         .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse::<u16>().ok())
-        .ok_or_else(|| io::Error::other(format!("malformed HTTP status line: {line:?}")))?;
-    Ok((200..300).contains(&code))
+        .ok_or_else(|| io::Error::other(format!("malformed HTTP status line: {status_line:?}")))
 }
 
 /// Result of probing one server through its transport.
