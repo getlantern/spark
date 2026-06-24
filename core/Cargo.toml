@@ -106,7 +106,9 @@ multi-server = ["dep:flint-dial"]
 # always maps a `config_raw.json` response into a `transport.servers` pool — without `multi-server`
 # `from_config_with_control` errors at connect. `serde_json` (already a dep) parses the JSON. Hostname
 # pool members additionally need `bootstrap-dns` (a build-level add, like the config_raw file path).
-# Off by default; the Darwin/Apple build enables it.
+# Off by default; the Apple (iOS + iOS-sim + macOS) and Android shim builds enable it — BoringSSL
+# cross-compiles for all those targets (the fetch presents the same Chrome JA4 on every platform).
+# See docs/config-fetch-cross-platform-design.md.
 config-fetch = ["anytls", "multi-server"]
 # Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with
 # deployed shadowsocks-rust servers. `ring` provides the AEADs; `blake3` derives session subkeys and

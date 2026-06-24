@@ -1,11 +1,13 @@
 //! `spark-android` — the JNI library (`libspark_android.so`) the Android `VpnService` loads via
 //! `System.loadLibrary("spark_android")`.
 //!
-//! The bridge is deliberately primitive-only (fd + mtu as `jint`), so it needs no `jni` crate:
-//! the `VpnService` establishes the tunnel, configures routing, and excludes the app's own
-//! sockets (`addDisallowedApplication`), then hands the TUN fd here to run the data path. Stop
-//! is signalled from `onDestroy`. The run/config/stop logic lives in [`spark_core::fd_tunnel`],
-//! shared with the Apple C-ABI shim.
+//! The `VpnService` establishes the tunnel, configures routing, and excludes the app's own sockets
+//! (`addDisallowedApplication`), then hands the TUN fd here to run the data path; stop is signalled
+//! from `onDestroy`. The run/config/stop logic lives in [`spark_core::fd_tunnel`] — the shim calls the
+//! same shared [`run_fd_dispatch`](spark_core::fd_tunnel::run_fd_dispatch) as the Apple C-ABI shim, so
+//! the direct / relay / full-config / `lantern-api` self-fetch policy lives in core, once. The shim now
+//! carries a config string + data-dir path across JNI (not just `fd`/`mtu` ints), so it uses the `jni`
+//! crate for the string marshalling — Android-target-only, so desktop/Apple builds are unaffected.
 //!
 //! On non-Android targets these symbols are `cfg`-d out, so the crate builds as an empty cdylib
 //! and stays in the workspace's green-checked set without affecting desktop builds.
@@ -13,55 +15,87 @@
 // Kotlin side (package org.getlantern.spark):
 //   object SparkBridge {
 //       init { System.loadLibrary("spark_android") }
-//       // addr = the tun IPv4 packed big-endian into an Int (e.g. 10.0.0.1 -> 0x0A000001);
-//       // it must equal the address passed to VpnService.Builder.addAddress(addr, prefix), and
-//       // `prefix` must cover addr+1 (the system stack's synthetic gateway). systemStack: 1 = the
-//       // kernel-TCP "system" stack, 0 = the userspace (smoltcp) stack.
-//       external fun nativeRun(fd: Int, mtu: Int, addr: Int, prefix: Int, systemStack: Int): Int
+//       // addr = the tun IPv4 packed big-endian into an Int (e.g. 10.0.0.2 -> 0x0A000002); it must
+//       // equal VpnService.Builder.addAddress(addr, prefix), and `prefix` must cover addr+1 (the
+//       // system stack's synthetic gateway). systemStack: 1 = the kernel-TCP "system" stack, 0 = the
+//       // userspace (smoltcp) stack. config/dataDir carry the data-path choice: a null/empty config
+//       // (or "lantern-api") self-fetches the pool from the Lantern config-new API into dataDir (the
+//       // app files dir); a "host:port" is a plain relay; any other string is a full config.
+//       external fun nativeRun(fd: Int, mtu: Int, addr: Int, prefix: Int, systemStack: Int,
+//                              config: String?, dataDir: String?): Int
 //       external fun nativeStop()
 //   }
 #[cfg(target_os = "android")]
 mod jni {
-    use std::os::raw::c_void;
+    use std::path::PathBuf;
 
-    /// JNI `jint`.
-    type JInt = i32;
+    use jni::objects::{JClass, JString};
+    use jni::sys::jint;
+    use jni::JNIEnv;
 
-    /// `SparkBridge.nativeRun(fd, mtu, addr, prefix, systemStack)` — adopt the `VpnService` TUN `fd`
-    /// and run the tunnel with the chosen netstack, blocking the calling thread until [`nativeStop`]
-    /// (or the data path exits). Returns 0 on a clean stop, -1 on error.
+    /// `SparkBridge.nativeRun(fd, mtu, addr, prefix, systemStack, config, dataDir)` — adopt the
+    /// `VpnService` TUN `fd` (ownership transferred) and run the tunnel, blocking the calling thread
+    /// until [`nativeStop`] (or the data path exits). Returns 0 on a clean stop, -1 on error.
     ///
-    /// `addr` is the tun IPv4 address packed big-endian into a `jint`; the system stack binds its
-    /// kernel listener there and derives its gateway as `addr + 1` (so `prefix` must include it).
+    /// `addr` is the tun IPv4 packed big-endian into a `jint`; the system stack binds its kernel
+    /// listener there and derives its gateway as `addr + 1` (so `prefix` must include it). `config`
+    /// and `dataDir` carry the controlling app's data-path choice into the shared dispatch
+    /// ([`spark_core::fd_tunnel::run_fd_dispatch`], the same one the Apple shim calls): a null/empty
+    /// `config` — or the `"lantern-api"` sentinel — self-fetches the pool from the Lantern config-new
+    /// API, caching into `dataDir` (the app files dir); a `host:port` is a plain relay; any other
+    /// string is a full config. The platform `tun_base` (addr/prefix/system stack) always owns the
+    /// tun/stack — Android's `VpnService` already established the interface.
     #[no_mangle]
-    pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeRun(
-        _env: *mut c_void,
-        _class: *mut c_void,
-        fd: JInt,
-        mtu: JInt,
-        addr: JInt,
-        prefix: JInt,
-        system_stack: JInt,
-    ) -> JInt {
+    pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeRun<'local>(
+        mut env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        fd: jint,
+        mtu: jint,
+        addr: jint,
+        prefix: jint,
+        system_stack: jint,
+        config: JString<'local>,
+        data_dir: JString<'local>,
+    ) -> jint {
         crate::logcat::init();
-        // Direct forwarding (Android excludes the app's own UID from the tun, so upstream dials
-        // bypass it) with the tun address + chosen stack; the config/run/status-code logic is
-        // shared with the Apple shim in core.
-        let config = spark_core::fd_tunnel::fd_config(
+        let cfg = read_opt_string(&mut env, &config);
+        let dir = read_opt_string(&mut env, &data_dir)
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        // The platform owns the interface reality: the VpnService addr/prefix + Android's kernel
+        // (system) stack. The shared dispatch decides direct / relay / full-config / self-fetch.
+        let tun_base = spark_core::fd_tunnel::fd_config(
             std::net::Ipv4Addr::from(addr as u32),
             prefix as u8,
             system_stack != 0,
         );
-        spark_core::fd_tunnel::run_fd(fd, mtu as u16, config)
+        spark_core::fd_tunnel::run_fd_dispatch(
+            fd,
+            mtu as u16,
+            cfg.as_deref(),
+            dir.as_deref(),
+            tun_base,
+        )
     }
 
     /// `SparkBridge.nativeStop()` — signal the running tunnel to stop (from `onDestroy`).
     #[no_mangle]
-    pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeStop(
-        _env: *mut c_void,
-        _class: *mut c_void,
+    pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeStop<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
     ) {
         spark_core::fd_tunnel::stop();
+    }
+
+    /// Read an optional JNI string: a null reference (Kotlin `null`) → `None`; otherwise its UTF-8.
+    /// A conversion error is treated as `None`. The null guard is required because `get_string` does
+    /// not accept a null reference.
+    fn read_opt_string(env: &mut JNIEnv, s: &JString) -> Option<String> {
+        if s.as_raw().is_null() {
+            return None;
+        }
+        env.get_string(s).ok().map(Into::into)
     }
 }
 

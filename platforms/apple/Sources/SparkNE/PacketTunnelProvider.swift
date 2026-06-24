@@ -107,15 +107,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // is unset.)
             let provider = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
             let config = (provider?["config"] as? String) ?? (provider?["server"] as? String)
-            // With no explicit config the behavior differs by slice: macOS (config-fetch) self-fetches
-            // from config-new; iOS has no config-fetch, so an empty config goes direct (and an explicit
-            // "lantern-api" returns -1). Label the default accordingly so the log isn't misleading.
-            #if os(macOS)
-            let defaultMode = "self-fetch"
-            #else
-            let defaultMode = "direct"
-            #endif
-            let mode = (config?.isEmpty == false && config != "lantern-api") ? "explicit-config" : defaultMode
+            // No explicit config → the daemon self-fetches from config-new. Every Apple slice (iOS,
+            // iOS-sim, macOS) now carries `config-fetch`, so this is the default on all of them.
+            let mode = (config?.isEmpty == false && config != "lantern-api") ? "explicit-config" : "self-fetch"
             self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), mode=\(mode, privacy: .public))")
 
             // The app-group container path the app + extension share; the Rust core caches the

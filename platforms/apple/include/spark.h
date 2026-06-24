@@ -14,18 +14,18 @@ extern "C" {
  * spark_tunnel_stop() (or the data path exits). Returns 0 on a clean stop, -1 on error.
  * Ownership of `fd` is transferred to native; it is closed on stop.
  *
- * The daemon owns config acquisition: on the macOS `config-fetch` slice, the ABSENCE of an explicit
- * config is the signal to self-fetch (the fetch must bypass the tunnel, which only the extension can
- * guarantee). `config` selects the data path:
- *   - NULL/empty            -> macOS: SELF-FETCH config from the Lantern config-new API into
- *                              `data_dir` (the app-group container) and run from it, refreshing in the
- *                              background; `data_dir` must be non-NULL. iOS slice (no `config-fetch`):
- *                              forward each flow DIRECTLY (no tunnel).
- *   - "lantern-api"         -> explicit alias for the self-fetch above (macOS); iOS returns -1.
+ * The daemon owns config acquisition: the ABSENCE of an explicit config is the signal to self-fetch
+ * (the fetch must bypass the tunnel, which only the extension can guarantee). The Apple staticlib
+ * carries `config-fetch` on EVERY slice (iOS device, iOS simulator, macOS — BoringSSL cross-compiles
+ * for all), so self-fetch works identically across them. `config` selects the data path:
+ *   - NULL/empty            -> SELF-FETCH config from the Lantern config-new API into `data_dir` (the
+ *                              app-group container) and run from it, refreshing in the background;
+ *                              `data_dir` must be non-NULL (else the connect fails).
+ *   - "lantern-api"         -> explicit alias for the self-fetch above.
  *   - a "host:port" literal -> tunnel every flow through that plain spark relay (explicit override).
  *   - any other string      -> a full Config: spark's native TOML or a Lantern config_raw.json
  *                              payload, auto-detected (AnyTLS + handshake shaping + gambit, ...).
- * AnyTLS requires the staticlib built with the `anytls` feature (the macOS slice is). A non-empty
+ * The fetch + AnyTLS use the BoringSSL `anytls` backend, which every Apple slice carries. A non-empty
  * explicit string that is neither a host:port nor a valid TOML/config_raw.json config returns -1.
  *
  * `data_dir` must be NULL or a valid NUL-terminated C string for the duration of this call. */

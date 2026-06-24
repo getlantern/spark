@@ -19,10 +19,29 @@ spark-core = { path = "../../core" }
 
 # Android-only deps. `tracing`/`tracing-subscriber` route the core's events to logcat (otherwise they
 # vanish — an Android app's stdout isn't logcat); `__android_log_write` is in the NDK's liblog.
-# The `system-stack` feature is enabled here (Android-only): Android's VpnService hands us a Linux
-# tun fd, so the kernel-TCP redirect stack works there (sing-box ships `stack: system` on Android the
-# same way). Target-gated so non-Android workspace builds stay free of it.
+#
+# spark-core features (Android slice). `system-stack`: Android's VpnService hands us a Linux tun fd, so
+# the kernel-TCP redirect stack works there (sing-box ships `stack: system` on Android the same way).
+# `config-fetch` + the transports (`anytls`/`multi-server`/`bootstrap-dns`/`samizdat`/`shadowsocks`/
+# `hysteria2`): the daemon-owned `lantern-api` self-fetch + the transports a fetched config-new pool
+# uses — the SAME set the macOS/iOS slices carry (BoringSSL cross-compiles for android, verified
+# 2026-06-23). Baked in here rather than passed per-build, mirroring the Apple build-xcframework.sh
+# slice. Target-gated so non-Android workspace builds stay boring/cmake-free.
+#
+# `jni`: the shim now passes a config string + data-dir path across JNI (for `run_fd_dispatch`), which
+# needs JNI env calls — so the bridge is no longer primitive-only. Android-target-only, so it never
+# touches the desktop/Apple/core builds.
 [target.'cfg(target_os = "android")'.dependencies]
-spark-core = { path = "../../core", features = ["system-stack"] }
+spark-core = { path = "../../core", features = [
+    "system-stack",
+    "config-fetch",
+    "anytls",
+    "multi-server",
+    "bootstrap-dns",
+    "samizdat",
+    "shadowsocks",
+    "hysteria2",
+] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+jni = "0.21"
