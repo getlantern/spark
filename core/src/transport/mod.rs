@@ -1462,3 +1462,90 @@ mod anytls_gambit_realization_tests {
         );
     }
 }
+
+/// Manual **out-of-NE** diagnostic (ignored by default): dial each server from a real fetched
+/// `config_raw.json` **directly, with no tunnel**, optionally pinned to a physical interface — to
+/// isolate transport interop from the macOS NE's UDP egress. The in-app probe times hysteria2's QUIC
+/// handshake out at 10s with no response even when pinned to en1; this answers whether spark's
+/// hysteria2 reaches the *real* servers when there's no tunnel at all. Run with the **VPN off**:
+///   SPARK_REAL_CONFIG=$HOME/config_raw.json SPARK_PIN_IFACE=en1 \
+///     cargo test -p spark-core \
+///       --features config-fetch,samizdat,shadowsocks,hysteria2,bootstrap-dns \
+///       -- --ignored --nocapture dial_real_servers
+///
+/// `DIAL OK` for hysteria2 ⇒ the client + servers are fine and the NE is still interfering with the
+/// pinned UDP socket. `TIMED OUT` ⇒ the QUIC path to these servers fails regardless of the NE
+/// (network UDP filtering or the servers). It reads a local file with live secrets — never commit
+/// that file; this test holds no secrets.
+#[cfg(all(test, feature = "multi-server"))]
+mod real_server_probe {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    #[ignore = "manual: needs SPARK_REAL_CONFIG (a real config_raw.json) and the VPN off"]
+    async fn dial_real_servers() {
+        let Some(path) = std::env::var_os("SPARK_REAL_CONFIG") else {
+            eprintln!("SPARK_REAL_CONFIG unset — skipping (point it at a config_raw.json)");
+            return;
+        };
+        // Surface spark's own tracing (e.g. hysteria2's "QUIC connected" / "/auth ok" stages) to
+        // stderr via the log bridge, so a hang shows WHERE: QUIC handshake vs /auth.
+        extern "C" fn trace_to_stderr(level: u8, msg: *const std::os::raw::c_char) {
+            // SAFETY: the bridge passes a valid NUL-terminated string for the call's duration.
+            let s = unsafe { std::ffi::CStr::from_ptr(msg) }.to_string_lossy();
+            eprintln!("[L{level}] {s}");
+        }
+        crate::log_bridge::install(trace_to_stderr);
+
+        let raw = std::fs::read_to_string(&path).expect("read SPARK_REAL_CONFIG");
+        let cfg = crate::config::Config::from_config_str(&raw).expect("adapt config_raw.json");
+        // Pin like the lantern-api path (SPARK_PIN_IFACE=en1), so this matches on-device routing
+        // minus the tunnel itself.
+        let protector = std::env::var("SPARK_PIN_IFACE")
+            .ok()
+            .and_then(|i| crate::net::SocketProtector::for_interface(&i).ok());
+        eprintln!(
+            "dialing {} pool members directly (pin={:?})",
+            cfg.transport.servers.len(),
+            protector.as_ref().map(|p| p.interface())
+        );
+        let wire = wire_plan_from_config(&cfg.transport.shaping);
+        let global_cb = cfg.transport.callback_url.clone();
+        for entry in &cfg.transport.servers {
+            let label = spec_label(&entry.spec);
+            let (transport, _udp) = match build_one(&entry.spec, protector.as_ref(), &wire) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("{label}: build failed: {e}");
+                    continue;
+                }
+            };
+            // Run the real health probe (dial -> callback GET -> read) so the lazy TCPResponse path is
+            // exercised end-to-end, exactly like on device — not just whether dial returns.
+            let Some(cb_raw) = entry.callback_url.as_deref().or(global_cb.as_deref()) else {
+                eprintln!("{label}: no callback_url; skipping");
+                continue;
+            };
+            let callback = match crate::transport::probe::CallbackUrl::parse(cb_raw) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{label}: bad callback {cb_raw}: {e}");
+                    continue;
+                }
+            };
+            let outcome = crate::transport::probe::probe(
+                &transport,
+                &callback,
+                Duration::from_secs(10),
+                &label,
+            )
+            .await;
+            if outcome.healthy {
+                eprintln!("{label}: HEALTHY (probe ok, latency {:?})", outcome.latency);
+            } else {
+                eprintln!("{label}: UNHEALTHY (probe failed/timed out)");
+            }
+        }
+    }
+}
