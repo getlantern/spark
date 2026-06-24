@@ -59,11 +59,29 @@ class SparkVpnService : VpnService() {
         // The "lantern-api" sentinel is non-empty but still means self-fetch (like null/empty).
         val mode = if (config.isNullOrEmpty() || config == "lantern-api") "self-fetch" else "explicit-config"
         Log.i(TAG, "tunnel established; handing fd=$fd to native (mtu=$MTU, mode=$mode)")
+        // Mark connecting BEFORE starting the worker so the readiness waiter below can't observe a
+        // stale ready/down state from a prior connect.
+        SparkBridge.nativeMarkConnecting()
         worker = thread(name = "spark-tunnel") {
             // systemStack = 0 (userspace): the cross-platform default, with no kernel-redirect/gateway
             // setup; production Android may pass 1 to use the kernel "system" stack for throughput.
             val rc = SparkBridge.nativeRun(fd, MTU, addr, TUN_PREFIX, 0, config, dataDir)
             Log.i(TAG, "nativeRun returned $rc")
+        }
+        // Readiness gate (the Android analog of the Apple NE's). A VpnService has no completion
+        // handler — routes are live the moment establish() returns — and in self-fetch mode the core
+        // fetches config BEFORE servicing the fd, so a cold-start offline/slow fetch would blackhole
+        // device traffic indefinitely. Wait (bounded) for the data path to come up; if it never does,
+        // stop the VPN cleanly so traffic falls back to direct rather than a black hole.
+        thread(name = "spark-ready") {
+            val rc = SparkBridge.nativeWaitReady(READY_TIMEOUT_MS)
+            if (rc != 0) {
+                Log.e(TAG, "tunnel did not become ready (config unavailable?); stopping VPN")
+                SparkBridge.nativeStop()
+                stopSelf()
+            } else {
+                Log.i(TAG, "tunnel data path ready")
+            }
         }
     }
 
@@ -84,6 +102,7 @@ class SparkVpnService : VpnService() {
         private const val MTU = 1500
         private const val TUN_ADDR = "10.0.0.2" // the in-tunnel client address
         private const val TUN_PREFIX = 24
+        private const val READY_TIMEOUT_MS = 30_000 // ceiling for cold-start self-fetch before giving up
         const val ACTION_STOP = "org.getlantern.spark.STOP"
 
         /** Optional Intent string extra: an explicit config (IP:port / TOML / config_raw.json; the

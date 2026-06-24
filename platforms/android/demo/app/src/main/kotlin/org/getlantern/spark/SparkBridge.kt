@@ -37,4 +37,14 @@ object SparkBridge {
 
     /** Signal a running [nativeRun] to stop. */
     external fun nativeStop()
+
+    /** Mark the data path *connecting* before the [nativeRun] worker starts, so [nativeWaitReady]
+     *  can't observe a stale ready/down state from a prior connect. Call synchronously first. */
+    external fun nativeMarkConnecting()
+
+    /** Block until the data path is servicing the fd (0), or -1 if it doesn't come up within
+     *  [timeoutMs] (e.g. a cold-start self-fetch still offline) or it stops first. In self-fetch mode
+     *  the core fetches config before adopting the fd, so the service gates on this and stops the VPN
+     *  on -1 (falling back to direct) rather than blackholing traffic while the fetch is stuck. */
+    external fun nativeWaitReady(timeoutMs: Int): Int
 }

@@ -159,7 +159,12 @@ Each shim shrinks to marshalling:
   passes `null`/`"lantern-api"` for self-fetch + the app files dir. Passing strings across JNI needs
   JNI env calls, so the shim adds the **`jni` crate** (Android-target-only — zero impact on the Apple /
   desktop / core builds), superseding the former "primitive-only, no jni crate" note now that the shim
-  carries a path + config string, not just ints.
+  carries a path + config string, not just ints. **Readiness gate:** because self-fetch fetches config
+  *before* servicing the fd and a `VpnService`'s routes are live the moment `establish()` returns (no
+  completion handler), the shim also exposes `mark_connecting` + `wait_ready(timeout_ms)` over JNI
+  (mirroring the Apple NE, design `config-new-fetch-design.md` §6); the `VpnService` marks connecting
+  before the worker, waits bounded for the data path, and **stops the VPN on timeout** so a stuck
+  cold-start fetch falls back to direct instead of blackholing device traffic.
 - **Desktop service** — *deferred to its own milestone* (decided 2026-06-23). The service opens its own
   TUN (`CoreEngine`, not the fd-adopt path) and takes a fully-resolved `Config` per-connect, so it
   shares the lower-level `config::fetch` (`load_or_fetch` + `run_loop`), **not** `run_fd_lantern_api`.
