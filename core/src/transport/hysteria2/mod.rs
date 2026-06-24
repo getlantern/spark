@@ -416,6 +416,10 @@ struct ConnState {
     sessions: Arc<SessionMap>,
     /// The datagram receive pump; aborted when this state is dropped.
     pump: tokio::task::JoinHandle<()>,
+    /// The HTTP/3 client control stream (type 0x00 + SETTINGS). Held open for the connection's life
+    /// so the quic-go/sing-box server keeps the HTTP/3 connection established and services our proxy
+    /// streams; dropped (reset) only when the connection state is torn down.
+    _control: quinn::SendStream,
 }
 
 impl Drop for ConnState {
@@ -508,9 +512,27 @@ impl Hysteria2Transport {
             }
         }
 
-        // Slow path: build a new connection with NO guard held across these awaits.
+        // Slow path: build a new connection with NO guard held across these awaits. The two stage
+        // logs split a dial timeout into "QUIC handshake never completed" (no first line) vs
+        // "QUIC up but /auth stalled" (first line, no second) — the latter points at an app-layer
+        // protocol-version mismatch with the server.
         let c = connect(&self.cfg, self.server, self.protector.as_ref()).await?;
+        tracing::debug!(server = %self.server, "hysteria2: QUIC connected; opening HTTP/3 control stream");
+        // HTTP/3 masquerade: deployed servers run a real quic-go HTTP/3 server (sing-box/sing-quic),
+        // which only services proxy streams (the 0x401 stream-hijack path) once the client has
+        // established the HTTP/3 connection — i.e. opened its unidirectional control stream and sent a
+        // SETTINGS frame. A real h3 client does this implicitly; spark hand-rolls the wire, so we send
+        // it explicitly: control-stream type 0x00, then an empty SETTINGS frame (type 0x04, len 0). The
+        // stream is kept open for the connection's life (stored in `ConnState`). apernet/hysteria
+        // tolerates its absence — quic-go does not.
+        let mut control = c.open_uni().await.map_err(Hysteria2Error::Quic)?;
+        control
+            .write_all(&[0x00, 0x04, 0x00])
+            .await
+            .map_err(|e| Hysteria2Error::Io(e.into()))?;
+        tracing::debug!(server = %self.server, "hysteria2: control stream + SETTINGS sent; running /auth");
         let udp_ok = authenticate(&c, &self.cfg).await?;
+        tracing::debug!(server = %self.server, udp = udp_ok, "hysteria2: /auth ok");
         let sessions: Arc<SessionMap> = Arc::new(std::sync::Mutex::new(Default::default()));
         let pump = tokio::spawn(udp_receive_pump(c.clone(), sessions.clone()));
         let state = Arc::new(ConnState {
@@ -518,6 +540,7 @@ impl Hysteria2Transport {
             udp_ok,
             sessions,
             pump,
+            _control: control,
         });
 
         // Re-lock and re-check: prefer a live connection another task installed meanwhile (our
@@ -538,30 +561,89 @@ impl Transport for Hysteria2Transport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
         let state = self.connection().await.map_err(io::Error::other)?;
         let conn = state.conn.clone();
-        let (mut send, mut recv) = conn.open_bi().await.map_err(io::Error::other)?;
+        let (mut send, recv) = conn.open_bi().await.map_err(io::Error::other)?;
 
         // Send the TCPRequest. `write_all` here is quinn's inherent `SendStream::write_all`
         // (returning `WriteError`), shadowing tokio's extension method — map its error explicitly.
-        send.write_all(&tcp::encode_tcp_request(&target.to_string()))
-            .await
-            .map_err(io::Error::other)?;
+        let req = tcp::encode_tcp_request(&target.to_string());
+        send.write_all(&req).await.map_err(io::Error::other)?;
+        tracing::debug!(bytes = req.len(), %target, "hysteria2: TCPRequest sent (TCPResponse read lazily)");
 
-        // Read the TCPResponse: a status byte (0x00 = OK), then a varint-prefixed message and a
-        // varint-prefixed padding block, both discarded. All reads route through the generic
-        // helpers so tokio's `io::Error`-returning `read_exact` is used, not quinn's inherent one.
-        let mut status = [0u8; 1];
-        read_exact(&mut recv, &mut status).await?;
-        if status[0] != 0x00 {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionRefused,
-                "hysteria2 TCP error status",
-            ));
+        // Do NOT read the TCPResponse here. sing-box/sing-quic servers write it *lazily* — bundled
+        // with the first proxied data, or on handshake-success — so a client that blocks reading it
+        // before sending any data deadlocks on client-speaks-first targets (TLS/HTTP): the server
+        // waits for our first byte, we wait for its response. (apernet/hysteria writes it eagerly,
+        // which is why an eager read only failed against sing-box.) `LazyTcpResponse` consumes the
+        // status/message/padding on the first read instead — mirroring sing-quic's `clientConn::Read`.
+        Ok(Box::new(tokio::io::join(LazyTcpResponse::new(recv), send)))
+    }
+}
+
+/// Consume the Hysteria 2 `TCPResponse` (status byte `0x00`=OK, then a varint-prefixed message and a
+/// varint-prefixed padding block, both discarded) from `recv`, returning the stream positioned at the
+/// proxied data. Errors if the status is non-zero. Mirrors `protocol.ReadTCPResponse`.
+async fn consume_tcp_response(mut recv: quinn::RecvStream) -> io::Result<quinn::RecvStream> {
+    let mut status = [0u8; 1];
+    read_exact(&mut recv, &mut status).await?;
+    if status[0] != 0x00 {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "hysteria2 TCP error status",
+        ));
+    }
+    drain_varint_blob(&mut recv).await?; // message
+    drain_varint_blob(&mut recv).await?; // padding
+    Ok(recv)
+}
+
+/// Recv half that consumes the `TCPResponse` lazily, on the first read, then streams the proxied data.
+/// sing-box servers send the response bundled with the first downstream data (or on handshake
+/// success), so reading it eagerly in `dial` deadlocks client-speaks-first targets — see `dial`.
+enum LazyTcpResponse {
+    /// First read not yet attempted: drive this future to consume the response, then yield the recv.
+    Pending(
+        std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<quinn::RecvStream>> + Send>>,
+    ),
+    /// Response consumed; subsequent reads stream proxied data straight through.
+    Ready(quinn::RecvStream),
+    /// The response read failed; reads keep returning the (already-reported) failure.
+    Failed,
+}
+
+impl LazyTcpResponse {
+    fn new(recv: quinn::RecvStream) -> Self {
+        LazyTcpResponse::Pending(Box::pin(consume_tcp_response(recv)))
+    }
+}
+
+impl tokio::io::AsyncRead for LazyTcpResponse {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        loop {
+            match this {
+                LazyTcpResponse::Ready(recv) => {
+                    return std::pin::Pin::new(recv).poll_read(cx, buf);
+                }
+                LazyTcpResponse::Pending(fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(recv)) => *this = LazyTcpResponse::Ready(recv),
+                    Poll::Ready(Err(e)) => {
+                        *this = LazyTcpResponse::Failed;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                LazyTcpResponse::Failed => {
+                    return Poll::Ready(Err(io::Error::other(
+                        "hysteria2 TCPResponse read previously failed",
+                    )))
+                }
+            }
         }
-        drain_varint_blob(&mut recv).await?; // message
-        drain_varint_blob(&mut recv).await?; // padding
-
-        // Pair the recv (AsyncRead) and send (AsyncWrite) halves into one bidirectional stream.
-        Ok(Box::new(tokio::io::join(recv, send)))
     }
 }
 
