@@ -273,35 +273,36 @@ where
         .map_err(|e| io::Error::other(format!("probe tls handshake: {e}")))
 }
 
-/// The shared client connector, **built once and reused** — its `.configure()` mints a fresh
-/// per-connection config, so a single connector serves every call. Building it parses the full Mozilla
-/// root set (~150 certs) into the X509 store, so it must NOT be rebuilt per call: `tls_wrap` runs in
-/// the multi-server probe loop, where re-parsing the roots each probe would waste CPU/battery. See
-/// [`tls_wrap`] for why the roots are loaded (BoringSSL has no built-in store; Android/iOS don't
-/// resolve it via the default verify paths). A cert that fails to parse is skipped, not fatal.
+/// The shared client connector, **built exactly once and reused** — its `.configure()` mints a fresh
+/// per-connection config, so a single connector serves every call. The **entire** build (including
+/// DER-parsing the ~150-cert Mozilla root set into the X509 store) runs inside the `OnceLock`
+/// initializer, so concurrent first-callers can't each parse the roots — important because `tls_wrap`
+/// runs in the multi-server probe loop. See [`tls_wrap`] for why the roots are loaded (BoringSSL has
+/// no built-in store; Android/iOS don't resolve it via the default verify paths). A cert that fails to
+/// parse is skipped. The cached value is `None` only if the connector itself can't be allocated (an
+/// OOM-class failure); then every call errors, which is correct — nothing can dial without it.
 #[cfg(feature = "anytls")]
 fn fetch_connector() -> io::Result<&'static boring2::ssl::SslConnector> {
     use boring2::ssl::{SslConnector, SslMethod};
     use boring2::x509::X509;
     use std::sync::OnceLock;
 
-    static CONNECTOR: OnceLock<SslConnector> = OnceLock::new();
-    if let Some(c) = CONNECTOR.get() {
-        return Ok(c);
-    }
-    let mut builder = SslConnector::builder(SslMethod::tls_client())
-        .map_err(|e| io::Error::other(format!("probe tls: {e}")))?;
-    {
-        let store = builder.cert_store_mut();
-        for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-            if let Ok(cert) = X509::from_der(der.as_ref()) {
-                let _ = store.add_cert(cert);
+    static CONNECTOR: OnceLock<Option<SslConnector>> = OnceLock::new();
+    CONNECTOR
+        .get_or_init(|| {
+            let mut builder = SslConnector::builder(SslMethod::tls_client()).ok()?;
+            {
+                let store = builder.cert_store_mut();
+                for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+                    if let Ok(cert) = X509::from_der(der.as_ref()) {
+                        let _ = store.add_cert(cert);
+                    }
+                }
             }
-        }
-    }
-    // A concurrent caller may have initialized it between the `get` above and here; `get_or_init`
-    // keeps the first and drops our spare builder result.
-    Ok(CONNECTOR.get_or_init(|| builder.build()))
+            Some(builder.build())
+        })
+        .as_ref()
+        .ok_or_else(|| io::Error::other("probe tls: failed to build the TLS connector"))
 }
 
 #[cfg(not(feature = "anytls"))]
