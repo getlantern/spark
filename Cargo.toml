@@ -93,6 +93,11 @@ blake2 = { version = "0.10", default-features = false }
 # every platform (incl. Android/Apple), no OS trust-store integration. Tracks rustls-pki-types 1.x.
 # Off by default — only the `hysteria2` feature pulls it.
 webpki-roots = "1"
+# The full Mozilla CA *certificates* (self-signed DER), unlike webpki-roots' trust *anchors* — loaded
+# into the boring config-fetch connector's X509 store so cert verification works on Android/iOS, where
+# BoringSSL's default verify paths don't resolve the OS trust store (verified: a direct fetch fails
+# CERTIFICATE_VERIFY_FAILED on the Android emulator without it). Same release line as webpki-roots.
+webpki-root-certs = "1"
 # flutter_rust_bridge: generates the Dart<->Rust bridge for the desktop Flutter GUI (`gui/`). Used
 # ONLY by `spark-bridge`; never linked into core/cli/service. Pinned to EXACTLY match the codegen CLI
 # (`flutter_rust_bridge_codegen`) and the Dart `flutter_rust_bridge` package — all three must be the

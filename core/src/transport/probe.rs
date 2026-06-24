@@ -248,9 +248,15 @@ async fn resolve_callback_addr(host: &str, port: u16) -> io::Result<std::net::So
         .ok_or_else(|| io::Error::other(format!("callback host `{host}` resolved to no addresses")))
 }
 
-/// Wrap `stream` in client TLS for the callback host. Reuses the boring backend linked by
-/// `anytls` — the callback TLS rides inside the tunnel, so a plain connector (no Chrome
-/// mimicry) is fine.
+/// Wrap `stream` in **verifying** client TLS for `host`, using the boring backend linked by `anytls`.
+/// No Chrome mimicry (a plain connector) — the callback check rides inside the tunnel, and the
+/// config-fetch path that also uses this dials public hosts whose trust is plain public-CA TLS.
+///
+/// BoringSSL ships **no** built-in trust store, and its default verify paths only resolve the OS CA
+/// store on desktop (macOS/Linux/Windows); on Android/iOS they don't, so a direct fetch to a public
+/// host fails `CERTIFICATE_VERIFY_FAILED` (verified on the Android emulator). So we load the Mozilla
+/// root set (`webpki-root-certs`) into the connector's X509 store — verification then works
+/// identically on every platform (the desktop default paths remain in effect on top).
 #[cfg(feature = "anytls")]
 pub(crate) async fn tls_wrap<S>(
     stream: S,
@@ -260,10 +266,21 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     use boring2::ssl::{SslConnector, SslMethod};
-    let connector = SslConnector::builder(SslMethod::tls_client())
-        .map_err(|e| io::Error::other(format!("probe tls: {e}")))?
-        .build();
-    let config = connector
+    use boring2::x509::X509;
+    let mut builder = SslConnector::builder(SslMethod::tls_client())
+        .map_err(|e| io::Error::other(format!("probe tls: {e}")))?;
+    // Add the Mozilla roots so cert verification works where BoringSSL's default paths find no OS
+    // store (Android/iOS). A cert that fails to parse is skipped rather than failing the whole set.
+    {
+        let store = builder.cert_store_mut();
+        for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+            if let Ok(cert) = X509::from_der(der.as_ref()) {
+                let _ = store.add_cert(cert);
+            }
+        }
+    }
+    let config = builder
+        .build()
         .configure()
         .map_err(|e| io::Error::other(format!("probe tls: {e}")))?;
     tokio_boring2::connect(config, host, stream)

@@ -87,9 +87,17 @@ Two changes deliver "all platforms use the same code":
 
 ## 3. Part A — build BoringSSL for every target (keep the Chrome-mimic TLS)
 
-No source change to `core::config::fetch` and no change to the `config-fetch`/`anytls` feature graph.
 The work is making `boring2`/`boring-sys2` (the bundled BoringSSL + cmake build) cross-compile for the
 non-darwin targets, then turning `config-fetch` on for those slices.
+
+**CA trust roots (required for the fetch on mobile).** BoringSSL ships **no** built-in trust store and
+its default verify paths only resolve the OS CA store on desktop (macOS/Linux/Windows) — on Android/iOS
+they don't, so a direct fetch to a public host fails `CERTIFICATE_VERIFY_FAILED`. **Verified on the
+Android emulator** (2026-06-24): the fetch failed cert verification until the fix. So `tls_wrap`
+(`core/src/transport/probe.rs`, the connector the fetch + multi-server callback use) loads the Mozilla
+root set (`webpki-root-certs`, pulled by `anytls`) into the connector's X509 store — verification then
+works identically on every platform (the desktop default paths still apply on top). The fetch's trust
+model is "Trust = TLS", so this is load-bearing, not cosmetic.
 
 **Keystone (do first, before any wiring):** prove BoringSSL cross-compiles. If any target can't build
 it, that platform's plan changes and we report back before proceeding.

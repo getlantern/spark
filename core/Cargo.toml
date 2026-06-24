@@ -67,6 +67,9 @@ quinn = { workspace = true, optional = true }
 quinn-udp = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
+# Mozilla CA certs loaded into the boring `tls_wrap` connector (probe + config-fetch) so cert
+# verification works on Android/iOS; pulled by `anytls` (the feature that compiles `tls_wrap`).
+webpki-root-certs = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
@@ -75,7 +78,7 @@ wat.workspace = true
 [features]
 # AnyTLS-over-BoringSSL transport (ADR 0001). Off by default so the base build stays rustls/ring-only
 # and free of the C/cmake BoringSSL build.
-anytls = ["dep:boring2", "dep:tokio-boring2", "flint-tls/boring"]
+anytls = ["dep:boring2", "dep:tokio-boring2", "dep:webpki-root-certs", "flint-tls/boring"]
 # System (kernel-TCP) netstack — a second Netstack impl (NAT redirect gateway to a kernel listener).
 # Off by default; needs a Linux/macOS-style tun fd (Linux, macOS, Android via VpnService — not iOS).
 # See docs/system-stack-design.md.
