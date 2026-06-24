@@ -21,9 +21,11 @@ class SparkVpnService : VpnService() {
             stopTunnel()
             return START_NOT_STICKY
         }
-        // Optional explicit config (host:port / TOML / config_raw.json) from the launching Intent;
-        // absent → null → the daemon self-fetches the pool from the Lantern config-new API.
-        startTunnel(intent?.getStringExtra(EXTRA_CONFIG))
+        // Optional explicit config (IP:port / TOML / config_raw.json) from the launching Intent,
+        // trimmed and normalized to null when blank so the mode log + the value handed to native match
+        // the core (which trims and treats "" as "no config"). Absent/blank → null → self-fetch.
+        val raw = intent?.getStringExtra(EXTRA_CONFIG)?.trim()
+        startTunnel(if (raw.isNullOrEmpty()) null else raw)
         return START_STICKY
     }
 

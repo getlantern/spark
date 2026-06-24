@@ -106,7 +106,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // (Back-compat: the legacy `["server"]` host:port key is still honored if `["config"]`
             // is unset.)
             let provider = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
-            let config = (provider?["config"] as? String) ?? (provider?["server"] as? String)
+            // Trim to match the core's behavior (it trims and treats "" as "no config" → self-fetch);
+            // without trimming, a whitespace-only value would mislabel the mode and pass a non-null C
+            // string that the core then collapses to self-fetch anyway.
+            let config = ((provider?["config"] as? String) ?? (provider?["server"] as? String))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             // No explicit config → the daemon self-fetches from config-new. Every Apple slice (iOS,
             // iOS-sim, macOS) now carries `config-fetch`, so this is the default on all of them.
             let mode = (config?.isEmpty == false && config != "lantern-api") ? "explicit-config" : "self-fetch"

@@ -540,6 +540,24 @@ mod tests {
         // Stays pending past the timeout (e.g. cold-start still offline) → not ready (-1).
         mark_connecting();
         assert_eq!(wait_ready(50), -1);
+
+        // run_fd_dispatch fail-closed routing: on the config-fetch slice, lantern-api self-fetch needs
+        // a data dir; with none it must close the (transferred) fd and return -1 rather than run. This
+        // lives here (not a separate test) because abandon_fd touches the readiness global — keeping it
+        // in the readiness-owning test avoids an inter-test race. (The self-fetch-success / relay /
+        // full-config branches need a live TUN + runtime; the parse decision is covered by
+        // `explicit_config_maps_each_kind_onto_the_platform_tun`.)
+        #[cfg(feature = "config-fetch")]
+        {
+            let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+            assert!(fd >= 0, "open /dev/null for the dispatch fail-closed check");
+            assert_eq!(
+                run_fd_dispatch(fd, 1500, None, None, Config::default()),
+                -1,
+                "self-fetch with no data_dir must fail closed"
+            );
+        }
+
         mark_stopped(); // leave the global in a clean terminal state
     }
 
