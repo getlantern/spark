@@ -148,7 +148,10 @@ where
     let code = parse_status_code(&line)?;
     // Log the path without its query string: a bandit callback URL carries the probe token in
     // `?token=...`, which must not reach logs (this rides the os_log bridge on device).
-    let path = url.path.split('?').next().unwrap_or(&url.path);
+    let path = url
+        .path
+        .split_once('?')
+        .map_or(url.path.as_str(), |(p, _)| p);
     tracing::debug!(code, host = %url.host, tls = url.tls, %path, "probe: callback HTTP response");
     Ok(code)
 }

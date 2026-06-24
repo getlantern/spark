@@ -1530,7 +1530,7 @@ mod real_server_probe {
                 Ok(c) => c,
                 Err(e) => {
                     // Strip the query: a bandit callback carries its token in `?token=...`.
-                    let cb_safe = cb_raw.split('?').next().unwrap_or(cb_raw);
+                    let cb_safe = cb_raw.split_once('?').map_or(cb_raw, |(p, _)| p);
                     eprintln!("{label}: bad callback {cb_safe}: {e}");
                     continue;
                 }
