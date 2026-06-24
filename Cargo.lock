@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "flint-dial"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=d55358cfe26031b87b53f00851d3d59ce16b7417#d55358cfe26031b87b53f00851d3d59ce16b7417"
+source = "git+https://github.com/getlantern/flint?rev=ff951d688a6a61a7ee514bdb3a3bd438858530e2#ff951d688a6a61a7ee514bdb3a3bd438858530e2"
 dependencies = [
  "flint-shaping",
  "flint-tls",
@@ -910,7 +910,7 @@ dependencies = [
 [[package]]
 name = "flint-dns"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=d55358cfe26031b87b53f00851d3d59ce16b7417#d55358cfe26031b87b53f00851d3d59ce16b7417"
+source = "git+https://github.com/getlantern/flint?rev=ff951d688a6a61a7ee514bdb3a3bd438858530e2#ff951d688a6a61a7ee514bdb3a3bd438858530e2"
 dependencies = [
  "bytes",
  "flint-dial",
@@ -927,7 +927,7 @@ dependencies = [
 [[package]]
 name = "flint-shaping"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=d55358cfe26031b87b53f00851d3d59ce16b7417#d55358cfe26031b87b53f00851d3d59ce16b7417"
+source = "git+https://github.com/getlantern/flint?rev=ff951d688a6a61a7ee514bdb3a3bd438858530e2#ff951d688a6a61a7ee514bdb3a3bd438858530e2"
 dependencies = [
  "ring",
  "tokio",
@@ -936,7 +936,7 @@ dependencies = [
 [[package]]
 name = "flint-tls"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=d55358cfe26031b87b53f00851d3d59ce16b7417#d55358cfe26031b87b53f00851d3d59ce16b7417"
+source = "git+https://github.com/getlantern/flint?rev=ff951d688a6a61a7ee514bdb3a3bd438858530e2#ff951d688a6a61a7ee514bdb3a3bd438858530e2"
 dependencies = [
  "boring-sys2",
  "boring2",
@@ -954,7 +954,7 @@ dependencies = [
 [[package]]
 name = "flint-verify"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=d55358cfe26031b87b53f00851d3d59ce16b7417#d55358cfe26031b87b53f00851d3d59ce16b7417"
+source = "git+https://github.com/getlantern/flint?rev=ff951d688a6a61a7ee514bdb3a3bd438858530e2#ff951d688a6a61a7ee514bdb3a3bd438858530e2"
 dependencies = [
  "ring",
  "thiserror 2.0.18",
