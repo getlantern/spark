@@ -32,7 +32,7 @@
 mod jni {
     use std::path::PathBuf;
 
-    use jni::objects::{JClass, JString};
+    use jni::objects::{JObject, JString};
     use jni::sys::jint;
     use jni::JNIEnv;
 
@@ -52,7 +52,7 @@ mod jni {
     #[no_mangle]
     pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeRun<'local>(
         mut env: JNIEnv<'local>,
-        _class: JClass<'local>,
+        _obj: JObject<'local>,
         fd: jint,
         mtu: jint,
         addr: jint,
@@ -101,7 +101,7 @@ mod jni {
     #[no_mangle]
     pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeStop<'local>(
         _env: JNIEnv<'local>,
-        _class: JClass<'local>,
+        _obj: JObject<'local>,
     ) {
         spark_core::fd_tunnel::stop();
     }
@@ -112,7 +112,7 @@ mod jni {
     #[no_mangle]
     pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeMarkConnecting<'local>(
         _env: JNIEnv<'local>,
-        _class: JClass<'local>,
+        _obj: JObject<'local>,
     ) {
         spark_core::fd_tunnel::mark_connecting();
     }
@@ -126,7 +126,7 @@ mod jni {
     #[no_mangle]
     pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeWaitReady<'local>(
         _env: JNIEnv<'local>,
-        _class: JClass<'local>,
+        _obj: JObject<'local>,
         timeout_ms: jint,
     ) -> jint {
         spark_core::fd_tunnel::wait_ready(timeout_ms.max(0) as u32)
