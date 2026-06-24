@@ -546,8 +546,10 @@ mod tests {
         // lives here (not a separate test) because abandon_fd touches the readiness global — keeping it
         // in the readiness-owning test avoids an inter-test race. (The self-fetch-success / relay /
         // full-config branches need a live TUN + runtime; the parse decision is covered by
-        // `explicit_config_maps_each_kind_onto_the_platform_tun`.)
-        #[cfg(feature = "config-fetch")]
+        // `explicit_config_maps_each_kind_onto_the_platform_tun`.) Unix-gated: it uses `/dev/null` +
+        // `libc::open`/fd semantics, and the fd-shim platforms that reach this path (iOS/macOS/Android)
+        // are all Unix — there's no point running it on the Windows `--all-features` test job.
+        #[cfg(all(feature = "config-fetch", unix))]
         {
             let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
             assert!(fd >= 0, "open /dev/null for the dispatch fail-closed check");

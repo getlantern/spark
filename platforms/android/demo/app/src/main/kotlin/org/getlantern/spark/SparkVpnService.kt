@@ -86,8 +86,8 @@ class SparkVpnService : VpnService() {
         private const val TUN_PREFIX = 24
         const val ACTION_STOP = "org.getlantern.spark.STOP"
 
-        /** Optional Intent string extra: an explicit config (host:port / TOML / config_raw.json).
-         *  Absent → the daemon self-fetches from the Lantern config-new API. */
+        /** Optional Intent string extra: an explicit config (IP:port / TOML / config_raw.json; the
+         *  relay override is an IP literal, not a hostname). Absent → self-fetch from config-new. */
         const val EXTRA_CONFIG = "org.getlantern.spark.CONFIG"
     }
 }

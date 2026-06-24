@@ -101,10 +101,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             // The controlling app passes the data-path config in `providerConfiguration["config"]`:
-            // a bare "host:port" (plain relay) or a full TOML config (AnyTLS + shaping + gambit) as an
-            // explicit override. Absent/empty → the daemon self-fetches from config-new (the default).
-            // (Back-compat: the legacy `["server"]` host:port key is still honored if `["config"]`
-            // is unset.)
+            // a bare "IP:port" (plain relay — an IP literal, not a hostname; the core SocketAddr-parses
+            // it) or a full TOML config (AnyTLS + shaping + gambit) as an explicit override.
+            // Absent/empty → the daemon self-fetches from config-new (the default). (Back-compat: the
+            // legacy `["server"]` IP:port key is still honored if `["config"]` is unset.)
             let provider = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
             // Trim to match the core's behavior (it trims and treats "" as "no config" → self-fetch);
             // without trimming, a whitespace-only value would mislabel the mode and pass a non-null C
