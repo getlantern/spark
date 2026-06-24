@@ -261,9 +261,15 @@ async fn resolve_callback_addr(host: &str, port: u16) -> io::Result<std::net::So
         .ok_or_else(|| io::Error::other(format!("callback host `{host}` resolved to no addresses")))
 }
 
-/// Wrap `stream` in client TLS for the callback host. Reuses the boring backend linked by
-/// `anytls` — the callback TLS rides inside the tunnel, so a plain connector (no Chrome
-/// mimicry) is fine.
+/// Wrap `stream` in **verifying** client TLS for `host`, using the boring backend linked by `anytls`.
+/// No Chrome mimicry (a plain connector) — the callback check rides inside the tunnel, and the
+/// config-fetch path that also uses this dials public hosts whose trust is plain public-CA TLS.
+///
+/// BoringSSL ships **no** built-in trust store, and its default verify paths only resolve the OS CA
+/// store on desktop (macOS/Linux/Windows); on Android/iOS they don't, so a direct fetch to a public
+/// host fails `CERTIFICATE_VERIFY_FAILED` (verified on the Android emulator). So we load the Mozilla
+/// root set (`webpki-root-certs`) into the connector's X509 store — verification then works
+/// identically on every platform (the desktop default paths remain in effect on top).
 #[cfg(feature = "anytls")]
 pub(crate) async fn tls_wrap<S>(
     stream: S,
@@ -272,16 +278,44 @@ pub(crate) async fn tls_wrap<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    use boring2::ssl::{SslConnector, SslMethod};
-    let connector = SslConnector::builder(SslMethod::tls_client())
-        .map_err(|e| io::Error::other(format!("probe tls: {e}")))?
-        .build();
-    let config = connector
+    let config = fetch_connector()?
         .configure()
         .map_err(|e| io::Error::other(format!("probe tls: {e}")))?;
     tokio_boring2::connect(config, host, stream)
         .await
         .map_err(|e| io::Error::other(format!("probe tls handshake: {e}")))
+}
+
+/// The shared client connector, **built exactly once and reused** — its `.configure()` mints a fresh
+/// per-connection config, so a single connector serves every call. The **entire** build (including
+/// DER-parsing the ~150-cert Mozilla root set into the X509 store) runs inside the `OnceLock`
+/// initializer, so concurrent first-callers can't each parse the roots — important because `tls_wrap`
+/// runs in the multi-server probe loop. See [`tls_wrap`] for why the roots are loaded (BoringSSL has
+/// no built-in store; Android/iOS don't resolve it via the default verify paths). A cert that fails to
+/// parse is skipped. The cached value is `None` only if the connector itself can't be allocated (an
+/// OOM-class failure); then every call errors, which is correct — nothing can dial without it.
+#[cfg(feature = "anytls")]
+fn fetch_connector() -> io::Result<&'static boring2::ssl::SslConnector> {
+    use boring2::ssl::{SslConnector, SslMethod};
+    use boring2::x509::X509;
+    use std::sync::OnceLock;
+
+    static CONNECTOR: OnceLock<Option<SslConnector>> = OnceLock::new();
+    CONNECTOR
+        .get_or_init(|| {
+            let mut builder = SslConnector::builder(SslMethod::tls_client()).ok()?;
+            {
+                let store = builder.cert_store_mut();
+                for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+                    if let Ok(cert) = X509::from_der(der.as_ref()) {
+                        let _ = store.add_cert(cert);
+                    }
+                }
+            }
+            Some(builder.build())
+        })
+        .as_ref()
+        .ok_or_else(|| io::Error::other("probe tls: failed to build the TLS connector"))
 }
 
 #[cfg(not(feature = "anytls"))]

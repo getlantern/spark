@@ -13,17 +13,16 @@ OUT="platforms/apple/SparkCore.xcframework"
 echo "building staticlib for: ${TARGETS[*]}" >&2
 for t in "${TARGETS[@]}"; do
     rustup target add "$t" >/dev/null 2>&1 || true
-    # AnyTLS (BoringSSL) builds for the macOS host arch; BoringSSL-for-iOS is a separate concern, so
-    # only the macOS slice gets `anytls` — the iOS slices share the ABI but return -1 for AnyTLS.
-    # `multi-server` (latency pool) is boring-free; enabled on the macOS slice alongside anytls.
-    # `bootstrap-dns` resolves hostname pool members (config_raw file or `lantern-api` fetch) — without
-    # it a hostname server is a hard error at connect; `config-fetch` enables `lantern-api` self-fetch.
-    feat=()
-    [[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2)
-    # ${feat[@]+...} guards the empty-array expansion so `set -u` doesn't trip on
-    # macOS's stock bash 3.2 (where `env bash` resolves), which errors on
-    # "${empty[@]}" unlike bash >=4.4.
-    cargo build --release -p spark-apple --target "$t" ${feat[@]+"${feat[@]}"} >&2
+    # BoringSSL cross-compiles for every Apple target — iOS device, iOS simulator, and macOS (verified
+    # 2026-06-23) — so all slices get the SAME feature set rather than the former macOS-only set:
+    # `anytls`/`samizdat`/`shadowsocks`/`hysteria2` transports, the `multi-server` latency pool,
+    # `bootstrap-dns` for hostname pool members, and `config-fetch` for `lantern-api` self-fetch.
+    # Building BoringSSL on every slice means the cold-start config fetch uses one uniform
+    # (cert-verifying) BoringSSL handshake everywhere — no per-platform TLS-stack split. NB: v1's fetch
+    # is a *plain* boring connector (not yet Chrome-mimicked); Chrome-mimicry for the fetch is the
+    # deferred fronting milestone. See docs/config-fetch-cross-platform-design.md.
+    feat=(--features anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2)
+    cargo build --release -p spark-apple --target "$t" "${feat[@]}" >&2
 done
 
 rm -rf "$OUT"

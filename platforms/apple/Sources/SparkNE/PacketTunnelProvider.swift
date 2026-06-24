@@ -101,21 +101,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             // The controlling app passes the data-path config in `providerConfiguration["config"]`:
-            // a bare "host:port" (plain relay) or a full TOML config (AnyTLS + shaping + gambit) as an
-            // explicit override. Absent/empty → the daemon self-fetches from config-new (the default).
-            // (Back-compat: the legacy `["server"]` host:port key is still honored if `["config"]`
-            // is unset.)
+            // a bare "IP:port" (plain relay — an IP literal, not a hostname; the core SocketAddr-parses
+            // it) or a full TOML config (AnyTLS + shaping + gambit) as an explicit override.
+            // Absent/empty → the daemon self-fetches from config-new (the default). (Back-compat: the
+            // legacy `["server"]` IP:port key is still honored if `["config"]` is unset.)
             let provider = (self.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
-            let config = (provider?["config"] as? String) ?? (provider?["server"] as? String)
-            // With no explicit config the behavior differs by slice: macOS (config-fetch) self-fetches
-            // from config-new; iOS has no config-fetch, so an empty config goes direct (and an explicit
-            // "lantern-api" returns -1). Label the default accordingly so the log isn't misleading.
-            #if os(macOS)
-            let defaultMode = "self-fetch"
-            #else
-            let defaultMode = "direct"
-            #endif
-            let mode = (config?.isEmpty == false && config != "lantern-api") ? "explicit-config" : defaultMode
+            // Trim to match the core's behavior (it trims and treats "" as "no config" → self-fetch);
+            // without trimming, a whitespace-only value would mislabel the mode and pass a non-null C
+            // string that the core then collapses to self-fetch anyway.
+            let config = ((provider?["config"] as? String) ?? (provider?["server"] as? String))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // No explicit config → the daemon self-fetches from config-new. Every Apple slice (iOS,
+            // iOS-sim, macOS) now carries `config-fetch`, so this is the default on all of them.
+            let mode = (config?.isEmpty == false && config != "lantern-api") ? "explicit-config" : "self-fetch"
             self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), mode=\(mode, privacy: .public))")
 
             // The app-group container path the app + extension share; the Rust core caches the

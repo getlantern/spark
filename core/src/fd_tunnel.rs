@@ -14,7 +14,7 @@
 //! `addDisallowedApplication`; on Apple the NE process's own dials egress the real interface), so
 //! there's no per-socket protection here. Default config = direct forwarding.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
@@ -173,6 +173,98 @@ pub fn fd_config(addr: Ipv4Addr, prefix: u8, system_stack: bool) -> Config {
     config
 }
 
+/// The single home of the **config-acquisition policy** the fd-shims share — the Apple C-ABI and
+/// Android JNI shims call this today (the desktop service is a documented follow-up; it owns its own
+/// TUN and shares the lower-level `config::fetch`, not this entry). The decision tree lives here once,
+/// not duplicated per shim.
+/// `config` is the controlling app's explicit data-path string (`None`/`""` = no app config);
+/// `data_dir` is the per-platform cache dir (app-group container on Apple, app files dir on Android)
+/// the self-fetch path needs; `tun_base` carries the platform's tun primitives (built via
+/// [`fd_config`]) — the platform owns the interface/stack reality (Apple = userspace, Android =
+/// `VpnService` addr/prefix + system stack), the config string only ever supplies the transport.
+/// `fd` ownership is transferred; returns the C-style status (`0` clean / `-1` error).
+///
+/// The policy (identical to the former inline Apple dispatch):
+/// - `None`/empty or the `"lantern-api"` sentinel → on the `config-fetch` slice, **self-fetch** the
+///   pool from the Lantern config-new API ([`run_fd_lantern_api`]); needs a `data_dir` (else fail
+///   closed). Without `config-fetch`, empty falls through to **direct**, and the explicit
+///   `"lantern-api"` sentinel can't be served (`-1`).
+/// - a bare `IP:port` literal (an IP address, not a hostname — it is `SocketAddr`-parsed) → tunnel
+///   every flow through that **plain relay** (explicit override).
+/// - any other string → a full [`Config`] (native TOML or a Lantern `config_raw.json`, auto-detected
+///   by [`Config::from_config_str`]); an unparseable string fails closed.
+pub fn run_fd_dispatch(
+    fd: i32,
+    mtu: u16,
+    config: Option<&str>,
+    data_dir: Option<&std::path::Path>,
+    tun_base: Config,
+) -> i32 {
+    // A null/absent config string is "no explicit config"; trim so " " / "\n" count as empty too.
+    let cfg_str = config.map(str::trim).unwrap_or("");
+
+    // Daemon-owned self-fetch: the *absence* of an explicit config — or the explicit `lantern-api`
+    // sentinel — means "fetch the pool from the Lantern config-new API myself, run from it, and
+    // refresh in the background". Only on the `config-fetch` slice (which pulls the BoringSSL build
+    // the fetch's TLS uses); the fetch must bypass the tunnel, which only the daemon can guarantee.
+    #[cfg(feature = "config-fetch")]
+    if cfg_str.is_empty() || cfg_str == "lantern-api" {
+        return match data_dir {
+            Some(d) => run_fd_lantern_api(fd, mtu, d.to_path_buf(), tun_base),
+            None => {
+                // fetch mode needs a data dir to cache device_id + config; close the (transferred)
+                // fd, unblock any `wait_ready` waiter, and fail the connect.
+                abandon_fd(fd);
+                -1
+            }
+        };
+    }
+
+    // Without `config-fetch`, self-fetch is unsupported: an empty config falls through to direct
+    // below, but the explicit `"lantern-api"` sentinel can't be served here.
+    #[cfg(not(feature = "config-fetch"))]
+    if cfg_str == "lantern-api" {
+        let _ = data_dir; // unused without config-fetch
+        abandon_fd(fd); // close fd + unblock waiter; can't serve it here
+        return -1;
+    }
+
+    // An explicit config (or, without `config-fetch`, empty = direct). The platform's `tun_base`
+    // always supplies the tun/stack; the string supplies the transport.
+    match explicit_config(cfg_str, &tun_base) {
+        Some(config) => run_fd(fd, mtu, config),
+        None => {
+            // Unparseable config: close the (transferred) fd, unblock any waiter, and fail.
+            abandon_fd(fd);
+            -1
+        }
+    }
+}
+
+/// Resolve an explicit config `s` onto the platform's `tun_base`: empty → direct forwarding;
+/// a bare `IP:port` (IP literal only, not a hostname) → the plain relay; otherwise a full [`Config`]
+/// (TOML or `config_raw.json`,
+/// auto-detected). In every case the platform's `tun_base` owns `tun`/stack (the fd + interface are
+/// a platform reality); the string only sets the transport. `None` signals a parse error.
+fn explicit_config(s: &str, tun_base: &Config) -> Option<Config> {
+    if s.is_empty() {
+        return Some(tun_base.clone()); // direct forwarding on the platform tun
+    }
+    // Back-compat: a bare IP:port is the plain-relay server (the `SPARK_PROXY` path). `SocketAddr`
+    // parsing accepts only IP literals (or bracketed IPv6), not hostnames — a hostname falls through
+    // to the full-config branch below and fails closed.
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        let mut c = tun_base.clone();
+        c.transport.server = Some(addr);
+        return Some(c);
+    }
+    // Otherwise a full config — native TOML or a Lantern `config_raw.json`, auto-detected. The
+    // platform tun_base wins for tun/stack (the fd is already established by the OS / VpnService).
+    let mut c = Config::from_config_str(s).ok()?;
+    c.tun = tun_base.tun.clone();
+    Some(c)
+}
+
 /// Shared FFI entry for the platform shims: run the tunnel on `fd` (owned) with `mtu` and `config`,
 /// blocking until [`stop`], and return the C-style status both the JNI and C-ABI shims expose —
 /// `0` on a clean stop, `-1` on error. This is the single home of the `Result` → status-code
@@ -264,12 +356,20 @@ async fn run_tunnel_data_path(
     Ok(())
 }
 
-/// Apple NE entry for `lantern-api` mode: fetch the boot config from the Lantern API (cache-first,
-/// retrying on cold-start offline until a config is obtained or stop is signalled), spawn the
-/// background refresh loop (warms the on-disk cache; no live pool swap in v1), then run the tunnel.
-/// Blocks until stop; `0` clean, `-1` on error. `data_dir` is the app-group container path.
+/// `lantern-api` self-fetch entry (shared by every platform's [`run_fd_dispatch`]): fetch the boot
+/// config from the Lantern API (cache-first, retrying on cold-start offline until a config is obtained
+/// or stop is signalled), spawn the background refresh loop (warms the on-disk cache; no live pool
+/// swap in v1), then run the tunnel. Blocks until stop; `0` clean, `-1` on error. `data_dir` is the
+/// per-platform cache dir (Apple app-group container, Android app files dir). `tun_base` supplies the
+/// platform's `tun`/stack — the fetched `config_raw.json` is a server pool with no meaningful tun
+/// section, so the platform owns the interface reality (Apple = userspace, Android = system stack).
 #[cfg(feature = "config-fetch")]
-pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i32 {
+pub fn run_fd_lantern_api(
+    fd: i32,
+    mtu: u16,
+    data_dir: std::path::PathBuf,
+    tun_base: Config,
+) -> i32 {
     use crate::config::fetch::{self, FetchEnv};
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -320,6 +420,11 @@ pub fn run_fd_lantern_api(fd: i32, mtu: u16, data_dir: std::path::PathBuf) -> i3
                 }
             }
         };
+        // The fetched `config_raw.json` is a server pool; its `tun` section is defaults. The platform
+        // owns the interface reality (the fd is already established by the OS / VpnService), so take
+        // `tun`/stack from `tun_base` — userspace on Apple, the system stack + VpnService addr/prefix
+        // on Android. (No-op on Apple, where `tun_base` is the userspace default.)
+        config.tun = tun_base.tun.clone();
         // Pin the proxy's own sockets to the physical interface so they bypass our tunnel. The NE
         // does this automatically for TCP but NOT for UDP/QUIC, so without it hysteria2's QUIC
         // handshake loops back into the tunnel and hangs (samizdat/TCP is unaffected). A fetched
@@ -435,6 +540,26 @@ mod tests {
         // Stays pending past the timeout (e.g. cold-start still offline) → not ready (-1).
         mark_connecting();
         assert_eq!(wait_ready(50), -1);
+
+        // run_fd_dispatch fail-closed routing: on the config-fetch slice, lantern-api self-fetch needs
+        // a data dir; with none it must close the (transferred) fd and return -1 rather than run. This
+        // lives here (not a separate test) because abandon_fd touches the readiness global — keeping it
+        // in the readiness-owning test avoids an inter-test race. (The self-fetch-success / relay /
+        // full-config branches need a live TUN + runtime; the parse decision is covered by
+        // `explicit_config_maps_each_kind_onto_the_platform_tun`.) Unix-gated: it uses `/dev/null` +
+        // `libc::open`/fd semantics, and the fd-shim platforms that reach this path (iOS/macOS/Android)
+        // are all Unix — there's no point running it on the Windows `--all-features` test job.
+        #[cfg(all(feature = "config-fetch", unix))]
+        {
+            let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+            assert!(fd >= 0, "open /dev/null for the dispatch fail-closed check");
+            assert_eq!(
+                run_fd_dispatch(fd, 1500, None, None, Config::default()),
+                -1,
+                "self-fetch with no data_dir must fail closed"
+            );
+        }
+
         mark_stopped(); // leave the global in a clean terminal state
     }
 
@@ -450,6 +575,48 @@ mod tests {
             fd_config(Ipv4Addr::UNSPECIFIED, 24, true).tun.stack,
             StackKind::System
         );
+    }
+
+    #[test]
+    fn explicit_config_maps_each_kind_onto_the_platform_tun() {
+        // Android-shaped base: system stack + a VpnService addr/prefix that must survive every path.
+        let base = fd_config(Ipv4Addr::new(10, 1, 2, 3), 30, true);
+
+        // empty → direct forwarding (no server), platform tun preserved.
+        let direct = explicit_config("", &base).expect("empty is direct");
+        assert_eq!(direct.transport.server, None);
+        assert_eq!(direct.tun.addr, Ipv4Addr::new(10, 1, 2, 3));
+        assert_eq!(direct.tun.stack, StackKind::System);
+
+        // bare IP:port → plain relay, platform tun preserved.
+        let relay = explicit_config("192.0.2.7:9000", &base).expect("IP:port is a relay");
+        assert_eq!(
+            relay.transport.server,
+            Some("192.0.2.7:9000".parse().unwrap())
+        );
+        assert_eq!(relay.tun.stack, StackKind::System);
+        assert_eq!(relay.tun.prefix, 30);
+
+        // a full TOML config keeps its transport but the platform tun_base wins for tun/stack — even
+        // when the TOML names its own [tun] (the fd is already established by the OS / VpnService).
+        let full = explicit_config(
+            "[tun]\nstack = \"userspace\"\naddr = \"172.16.0.9\"\n\n[transport]\nserver = \"203.0.113.4:443\"\n",
+            &base,
+        )
+        .expect("a full TOML config");
+        assert_eq!(
+            full.transport.server,
+            Some("203.0.113.4:443".parse().unwrap())
+        );
+        assert_eq!(
+            full.tun.stack,
+            StackKind::System,
+            "platform tun_base wins over the config's [tun]"
+        );
+        assert_eq!(full.tun.addr, Ipv4Addr::new(10, 1, 2, 3));
+
+        // junk that is neither IP:port nor a valid config → None (the shim fails closed).
+        assert!(explicit_config("not-a-config !!", &base).is_none());
     }
 
     #[tokio::test]

@@ -67,6 +67,9 @@ quinn = { workspace = true, optional = true }
 quinn-udp = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
+# Mozilla CA certs loaded into the boring `tls_wrap` connector (probe + config-fetch) so cert
+# verification works on Android/iOS; pulled by `anytls` (the feature that compiles `tls_wrap`).
+webpki-root-certs = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
@@ -75,7 +78,7 @@ wat.workspace = true
 [features]
 # AnyTLS-over-BoringSSL transport (ADR 0001). Off by default so the base build stays rustls/ring-only
 # and free of the C/cmake BoringSSL build.
-anytls = ["dep:boring2", "dep:tokio-boring2", "flint-tls/boring"]
+anytls = ["dep:boring2", "dep:tokio-boring2", "dep:webpki-root-certs", "flint-tls/boring"]
 # System (kernel-TCP) netstack — a second Netstack impl (NAT redirect gateway to a kernel listener).
 # Off by default; needs a Linux/macOS-style tun fd (Linux, macOS, Android via VpnService — not iOS).
 # See docs/system-stack-design.md.
@@ -106,7 +109,11 @@ multi-server = ["dep:flint-dial"]
 # always maps a `config_raw.json` response into a `transport.servers` pool — without `multi-server`
 # `from_config_with_control` errors at connect. `serde_json` (already a dep) parses the JSON. Hostname
 # pool members additionally need `bootstrap-dns` (a build-level add, like the config_raw file path).
-# Off by default; the Darwin/Apple build enables it.
+# Off by default; the Apple (iOS + iOS-sim + macOS) and Android shim builds enable it — BoringSSL
+# cross-compiles for all those targets, so the fetch uses one uniform (cert-verifying) BoringSSL
+# handshake on every platform with no second TLS stack. NB: v1 uses a *plain* boring connector
+# (probe::tls_wrap), not the Chrome-mimicking flint connector — Chrome-mimicry for the fetch is the
+# deferred fronting milestone (config-new-fetch-design.md §9). See docs/config-fetch-cross-platform-design.md.
 config-fetch = ["anytls", "multi-server"]
 # Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with
 # deployed shadowsocks-rust servers. `ring` provides the AEADs; `blake3` derives session subkeys and
