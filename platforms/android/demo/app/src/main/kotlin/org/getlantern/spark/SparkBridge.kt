@@ -22,7 +22,8 @@ object SparkBridge {
      * [config]/[dataDir] select the data path (decided in the shared core dispatch): a null/empty
      * [config] — or the "lantern-api" sentinel — self-fetches the server pool from the Lantern
      * config-new API, caching device_id + the fetched config into [dataDir] (the app files dir);
-     * a "host:port" is a plain relay; any other string is a full config (TOML or config_raw.json).
+     * an "IP:port" (IP literal, not a hostname) is a plain relay; any other string is a full config
+     * (TOML or config_raw.json).
      */
     external fun nativeRun(
         fd: Int,

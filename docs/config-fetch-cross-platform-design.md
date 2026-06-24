@@ -51,7 +51,7 @@ targets too.
 ### 1b. Only the Apple shim invokes the self-fetch path
 
 The self-fetch *dispatch* is inline in the Apple C-ABI (`platforms/apple/src/lib.rs:54-130`):
-null/empty/`"lantern-api"` → `run_fd_lantern_api`; `host:port` → relay; else → `Config::from_config_str`.
+null/empty/`"lantern-api"` → `run_fd_lantern_api`; `IP:port` (IP literal) → relay; else → `Config::from_config_str`.
 
 - **Android** (`platforms/android/src/lib.rs:37-55`): `nativeRun(fd, mtu, addr, prefix, system_stack)`
   calls `fd_tunnel::run_fd` directly. **No config string, no data_dir, no self-fetch.**
@@ -74,7 +74,7 @@ flowchart LR
     D --> DISP
     DISP["fd_tunnel::run_fd_dispatch<br/>(fd, mtu, config, data_dir, tun_base)<br/>**the one policy home**"]
     DISP -->|empty / lantern-api| FETCH[run_fd_lantern_api<br/>self-fetch + cache + refresh]
-    DISP -->|host:port / TOML / config_raw| RUN[run_fd]
+    DISP -->|IP:port / TOML / config_raw| RUN[run_fd]
     FETCH --> TLS[config::fetch -> probe::tls_wrap<br/>**boring Chrome connector, every platform**]
 ```
 
@@ -136,7 +136,8 @@ Logic (lifted verbatim from `platforms/apple/src/lib.rs`, plus the tun-base merg
      `data_dir`; else `abandon_fd` + `-1`).
    - `#[cfg(not(...))]` → empty falls through to direct (`run_fd` with `tun_base`); explicit
      `"lantern-api"` → `abandon_fd` + `-1` (can't serve it).
-2. `host:port` literal → relay override: `tun_base` + `transport.server = addr` → `run_fd`.
+2. `IP:port` literal (IP only — `transport.server` is a `SocketAddr`, so hostnames don't apply here) →
+   relay override: `tun_base` + `transport.server = addr` → `run_fd`.
 3. else → `Config::from_config_str` merged onto `tun_base` → `run_fd`; parse failure → `abandon_fd` + `-1`.
 
 **The netstack merge (new):** `run_fd_lantern_api` currently builds its `Config` purely from the fetched
@@ -144,12 +145,13 @@ Logic (lifted verbatim from `platforms/apple/src/lib.rs`, plus the tun-base merg
 (needs `StackKind::System`). So `run_fd_lantern_api` gains a `tun_base: Config` param: the fetched
 `transport` (server pool) is merged **onto** the platform's `tun_base`, so the platform owns
 `tun.{addr,prefix,stack}` and the fetch owns `transport.servers`. Apple passes
-`fd_config(_, _, false)`; Android passes `fd_config(addr, prefix, system_stack)`.
+`Config::default()` (the userspace tun base — equivalent to `fd_config(default, default, false)`);
+Android passes `fd_config(addr, prefix, system_stack)`.
 
 Each shim shrinks to marshalling:
 
 - **Apple C-ABI** — `spark_tunnel_run` becomes: resolve `cfg_str`/`data_dir` C strings →
-  `run_fd_dispatch(fd, mtu, cfg, dir, fd_config(default, default, false))`. The `#[cfg]` blocks move
+  `run_fd_dispatch(fd, mtu, cfg, dir, Config::default())`. The `#[cfg]` blocks move
   into core. (No behavior change on macOS/iOS.)
 - **Android JNI** — extend the entry to carry the app's config + data_dir:
   `nativeRun(fd, mtu, addr, prefix, system_stack, config: JString, dataDir: JString)` →

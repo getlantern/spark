@@ -37,7 +37,8 @@ mod ffi {
     ///   Lantern config-new API into `data_dir` (the app-group container path) and run the tunnel from
     ///   it, refreshing in the background; `data_dir` must be non-null (it caches `device_id` and the
     ///   fetched config), else the connect fails.
-    /// - a bare `host:port` IP literal → tunnel every flow through that **plain spark relay**
+    /// - a bare `IP:port` literal (an IP address, not a hostname) → tunnel every flow through that
+    ///   **plain spark relay**
     ///   (explicit override, e.g. dev/testing).
     /// - any other string → a full **[`Config`]** — spark's native TOML *or* a Lantern
     ///   `config_raw.json` payload (auto-detected), parsed via [`Config::from_config_str`]; the whole

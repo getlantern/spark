@@ -20,7 +20,8 @@
 //       // system stack's synthetic gateway). systemStack: 1 = the kernel-TCP "system" stack, 0 = the
 //       // userspace (smoltcp) stack. config/dataDir carry the data-path choice: a null/empty config
 //       // (or "lantern-api") self-fetches the pool from the Lantern config-new API into dataDir (the
-//       // app files dir); a "host:port" is a plain relay; any other string is a full config.
+//       // app files dir); an "IP:port" (IP literal, not a hostname) is a plain relay; any other
+//       // string is a full config.
 //       external fun nativeRun(fd: Int, mtu: Int, addr: Int, prefix: Int, systemStack: Int,
 //                              config: String?, dataDir: String?): Int
 //       external fun nativeStop()
@@ -42,8 +43,9 @@ mod jni {
     /// and `dataDir` carry the controlling app's data-path choice into the shared dispatch
     /// ([`spark_core::fd_tunnel::run_fd_dispatch`], the same one the Apple shim calls): a null/empty
     /// `config` — or the `"lantern-api"` sentinel — self-fetches the pool from the Lantern config-new
-    /// API, caching into `dataDir` (the app files dir); a `host:port` is a plain relay; any other
-    /// string is a full config. The platform `tun_base` (addr/prefix/system stack) always owns the
+    /// API, caching into `dataDir` (the app files dir); an `IP:port` (IP literal only, not a hostname)
+    /// is a plain relay; any other string is a full config. The platform `tun_base` (addr/prefix/system
+    /// stack) always owns the
     /// tun/stack — Android's `VpnService` already established the interface.
     #[no_mangle]
     pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeRun<'local>(

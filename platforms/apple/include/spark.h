@@ -22,11 +22,12 @@ extern "C" {
  *                              app-group container) and run from it, refreshing in the background;
  *                              `data_dir` must be non-NULL (else the connect fails).
  *   - "lantern-api"         -> explicit alias for the self-fetch above.
- *   - a "host:port" literal -> tunnel every flow through that plain spark relay (explicit override).
+ *   - an "IP:port" literal -> tunnel every flow through that plain spark relay (IP only, not a
+ *                              hostname; SocketAddr-parsed). Explicit override, e.g. dev/testing.
  *   - any other string      -> a full Config: spark's native TOML or a Lantern config_raw.json
  *                              payload, auto-detected (AnyTLS + handshake shaping + gambit, ...).
  * The fetch + AnyTLS use the BoringSSL `anytls` backend, which every Apple slice carries. A non-empty
- * explicit string that is neither a host:port nor a valid TOML/config_raw.json config returns -1.
+ * explicit string that is neither an IP:port nor a valid TOML/config_raw.json config returns -1.
  *
  * `data_dir` must be NULL or a valid NUL-terminated C string for the duration of this call. */
 int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char *data_dir);

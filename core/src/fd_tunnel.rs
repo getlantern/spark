@@ -189,7 +189,8 @@ pub fn fd_config(addr: Ipv4Addr, prefix: u8, system_stack: bool) -> Config {
 ///   pool from the Lantern config-new API ([`run_fd_lantern_api`]); needs a `data_dir` (else fail
 ///   closed). Without `config-fetch`, empty falls through to **direct**, and the explicit
 ///   `"lantern-api"` sentinel can't be served (`-1`).
-/// - a bare `host:port` literal → tunnel every flow through that **plain relay** (explicit override).
+/// - a bare `IP:port` literal (an IP address, not a hostname — it is `SocketAddr`-parsed) → tunnel
+///   every flow through that **plain relay** (explicit override).
 /// - any other string → a full [`Config`] (native TOML or a Lantern `config_raw.json`, auto-detected
 ///   by [`Config::from_config_str`]); an unparseable string fails closed.
 pub fn run_fd_dispatch(
@@ -241,14 +242,17 @@ pub fn run_fd_dispatch(
 }
 
 /// Resolve an explicit config `s` onto the platform's `tun_base`: empty → direct forwarding;
-/// a bare `host:port` → the plain relay; otherwise a full [`Config`] (TOML or `config_raw.json`,
+/// a bare `IP:port` (IP literal only, not a hostname) → the plain relay; otherwise a full [`Config`]
+/// (TOML or `config_raw.json`,
 /// auto-detected). In every case the platform's `tun_base` owns `tun`/stack (the fd + interface are
 /// a platform reality); the string only sets the transport. `None` signals a parse error.
 fn explicit_config(s: &str, tun_base: &Config) -> Option<Config> {
     if s.is_empty() {
         return Some(tun_base.clone()); // direct forwarding on the platform tun
     }
-    // Back-compat: a bare host:port is the plain-relay server (the `SPARK_PROXY` path).
+    // Back-compat: a bare IP:port is the plain-relay server (the `SPARK_PROXY` path). `SocketAddr`
+    // parsing accepts only IP literals (or bracketed IPv6), not hostnames — a hostname falls through
+    // to the full-config branch below and fails closed.
     if let Ok(addr) = s.parse::<SocketAddr>() {
         let mut c = tun_base.clone();
         c.transport.server = Some(addr);
@@ -564,8 +568,8 @@ mod tests {
         assert_eq!(direct.tun.addr, Ipv4Addr::new(10, 1, 2, 3));
         assert_eq!(direct.tun.stack, StackKind::System);
 
-        // bare host:port → plain relay, platform tun preserved.
-        let relay = explicit_config("192.0.2.7:9000", &base).expect("host:port is a relay");
+        // bare IP:port → plain relay, platform tun preserved.
+        let relay = explicit_config("192.0.2.7:9000", &base).expect("IP:port is a relay");
         assert_eq!(
             relay.transport.server,
             Some("192.0.2.7:9000".parse().unwrap())
@@ -591,7 +595,7 @@ mod tests {
         );
         assert_eq!(full.tun.addr, Ipv4Addr::new(10, 1, 2, 3));
 
-        // junk that is neither host:port nor a valid config → None (the shim fails closed).
+        // junk that is neither IP:port nor a valid config → None (the shim fails closed).
         assert!(explicit_config("not-a-config !!", &base).is_none());
     }
 
