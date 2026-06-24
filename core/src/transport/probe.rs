@@ -101,9 +101,14 @@ fn parse_authority(authority: &str, default_port: u16) -> io::Result<(String, u1
     }
 }
 
-/// Send `GET {path}` over `stream`, read the status line, and return `true` iff the status is 2xx.
+/// Send `GET {path}` over `stream`, read the status line, and return the HTTP status code. Errs if
+/// the server sends no parseable status line (no response came back through the transport).
 /// `Connection: close` so the server ends the body; we only parse the status line.
-pub(crate) async fn http_get_ok<S>(mut stream: S, url: &CallbackUrl) -> io::Result<bool>
+///
+/// The status code is *returned, not judged*: the caller treats any complete response as a healthy
+/// transport, matching lantern-box's `runProbe`. Notably the bandit callback returns 404 once its
+/// probe token expires, but the transport that delivered the request still works.
+pub(crate) async fn read_http_status<S>(mut stream: S, url: &CallbackUrl) -> io::Result<u16>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -141,7 +146,8 @@ where
     // Status line: "HTTP/1.1 204 ...". Parse the 3-digit code.
     let line = String::from_utf8_lossy(&buf);
     let code = parse_status_code(&line)?;
-    Ok((200..300).contains(&code))
+    tracing::debug!(code, host = %url.host, tls = url.tls, path = %url.path, "probe: callback HTTP response");
+    Ok(code)
 }
 
 /// Parse the HTTP status code from a status line like `HTTP/1.1 204 No Content`.
@@ -159,7 +165,8 @@ pub struct ProbeOutcome {
     /// Time to establish the connection and complete the callback GET.
     /// Only meaningful when `healthy` is `true`; set to `Duration::MAX` on failure.
     pub latency: Duration,
-    /// `true` iff the callback returned 2xx within the deadline.
+    /// `true` iff the transport delivered the probe request and the origin returned any complete
+    /// HTTP response within the deadline. The status code is not inspected (see [`read_http_status`]).
     pub healthy: bool,
 }
 
@@ -183,22 +190,22 @@ pub async fn probe(
 ) -> ProbeOutcome {
     let started = Instant::now();
     match tokio::time::timeout(deadline, probe_inner(transport, url, label)).await {
-        Ok(Ok(true)) => ProbeOutcome {
-            latency: started.elapsed(),
-            healthy: true,
-        },
-        // Log *why* a member is unhealthy — otherwise the reason (a protocol handshake failure, a
-        // non-2xx callback, a timeout) is invisible and only the `healthy=N` count survives. `label`
-        // identifies the pool member so a mixed-protocol pool's failures are attributable.
-        Ok(Ok(false)) => {
-            tracing::debug!(
-                server = label,
-                "probe: callback returned non-2xx (unhealthy)"
-            );
-            ProbeOutcome::unhealthy()
+        // Any complete HTTP response means the transport carried the request and the origin replied
+        // — that is the health signal. The code is logged (a 404 = expired bandit token on a working
+        // transport) but not used to gate health.
+        Ok(Ok(code)) => {
+            let latency = started.elapsed();
+            tracing::debug!(server = label, code, ?latency, "probe: healthy");
+            ProbeOutcome {
+                latency,
+                healthy: true,
+            }
         }
+        // Log *why* a member is unhealthy — otherwise the reason (a protocol handshake failure, no
+        // response, a timeout) is invisible and only the `healthy=N` count survives. `label`
+        // identifies the pool member so a mixed-protocol pool's failures are attributable.
         Ok(Err(e)) => {
-            tracing::debug!(server = label, error = %e, "probe: dial/handshake failed (unhealthy)");
+            tracing::debug!(server = label, error = %e, "probe: dial/handshake/no-response (unhealthy)");
             ProbeOutcome::unhealthy()
         }
         Err(_) => {
@@ -212,7 +219,7 @@ async fn probe_inner(
     transport: &Arc<dyn Transport>,
     url: &CallbackUrl,
     label: &str,
-) -> io::Result<bool> {
+) -> io::Result<u16> {
     let target = resolve_callback_addr(&url.host, url.port).await?;
     let dialing = Instant::now();
     let stream = transport.dial(target).await?;
@@ -227,9 +234,9 @@ async fn probe_inner(
     );
     if url.tls {
         let tls = tls_wrap(stream, &url.host).await?;
-        http_get_ok(tls, url).await
+        read_http_status(tls, url).await
     } else {
-        http_get_ok(stream, url).await
+        read_http_status(stream, url).await
     }
 }
 
@@ -325,11 +332,52 @@ mod tests {
         assert!(out.healthy);
     }
 
+    // Any complete HTTP response means the transport carried the request and the origin replied —
+    // that is the health signal, matching lantern-box's `runProbe` (which never inspects the status
+    // code). The bandit callback returns 404 once its probe token expires (probe TTL =
+    // poll_interval + 30s), so a working transport on a slightly-stale cached config returns 404;
+    // gating health on 2xx would wrongly disqualify every server. 4xx/5xx are all healthy.
     #[tokio::test]
-    async fn probe_unhealthy_on_non_2xx() {
+    async fn probe_healthy_on_404_expired_token() {
+        let t: Arc<dyn Transport> = Arc::new(FakeTransport {
+            status: b"HTTP/1.1 404 Not Found\r\n\r\n",
+        });
+        let url = CallbackUrl {
+            tls: false,
+            host: "127.0.0.1".into(),
+            port: 80,
+            path: "/v1/bandit/callback".into(),
+        };
+        assert!(
+            probe(&t, &url, Duration::from_secs(5), "test")
+                .await
+                .healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_healthy_on_5xx_response() {
         let t: Arc<dyn Transport> = Arc::new(FakeTransport {
             status: b"HTTP/1.1 500 Err\r\n\r\n",
         });
+        let url = CallbackUrl {
+            tls: false,
+            host: "127.0.0.1".into(),
+            port: 80,
+            path: "/".into(),
+        };
+        assert!(
+            probe(&t, &url, Duration::from_secs(5), "test")
+                .await
+                .healthy
+        );
+    }
+
+    // Unhealthy now means the transport never delivered a response: the dial succeeds but the server
+    // closes without sending a status line, so no HTTP response comes back.
+    #[tokio::test]
+    async fn probe_unhealthy_on_no_response() {
+        let t: Arc<dyn Transport> = Arc::new(FakeTransport { status: b"" });
         let url = CallbackUrl {
             tls: false,
             host: "127.0.0.1".into(),
@@ -344,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_get_reads_2xx_and_sends_request() {
+    async fn read_http_status_reads_code_and_sends_request() {
         let (client, mut server) = tokio::io::duplex(4096);
         let url = CallbackUrl {
             tls: false,
@@ -362,15 +410,16 @@ mod tests {
                 .unwrap();
             req
         });
-        let ok = http_get_ok(client, &url).await.unwrap();
-        assert!(ok);
+        let code = read_http_status(client, &url).await.unwrap();
+        assert_eq!(code, 204);
         let req = server_task.await.unwrap();
         assert!(req.starts_with("GET /ok HTTP/1.1\r\n"), "req was: {req}");
         assert!(req.contains("Host: h.example\r\n"));
     }
 
+    // A 4xx is still a complete response, so it parses to its code; the caller treats it as healthy.
     #[tokio::test]
-    async fn http_get_rejects_non_2xx() {
+    async fn read_http_status_returns_4xx_code() {
         let (client, mut server) = tokio::io::duplex(4096);
         let url = CallbackUrl {
             tls: false,
@@ -386,7 +435,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        assert!(!http_get_ok(client, &url).await.unwrap());
+        assert_eq!(read_http_status(client, &url).await.unwrap(), 403);
     }
 
     #[test]
@@ -483,7 +532,7 @@ mod tests {
                 .unwrap();
             String::from_utf8_lossy(&buf[..n]).to_string()
         });
-        let _ = http_get_ok(client, &url).await.unwrap();
+        let _ = read_http_status(client, &url).await.unwrap();
         let req = server_task.await.unwrap();
         assert!(req.contains("Host: h.example:8080\r\n"), "req was: {req}");
     }
