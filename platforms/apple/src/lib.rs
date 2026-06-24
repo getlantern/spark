@@ -57,15 +57,22 @@ mod ffi {
         config: *const c_char,
         data_dir: *const c_char,
     ) -> c_int {
-        // Resolve the config string once (null and empty both mean "no explicit config").
+        // Resolve the config string once (a null pointer means "no explicit config"). A *non-null*
+        // pointer that isn't valid UTF-8 is a caller error — an explicit config was provided but is
+        // garbage — so fail closed (close the transferred fd, return -1) rather than silently
+        // collapsing it to "" (which would wrongly self-fetch on the config-fetch slice, or go
+        // direct on the iOS slice).
         // SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
         let cfg_str = if config.is_null() {
             ""
         } else {
-            unsafe { CStr::from_ptr(config) }
-                .to_str()
-                .unwrap_or("")
-                .trim()
+            match unsafe { CStr::from_ptr(config) }.to_str() {
+                Ok(s) => s.trim(),
+                Err(_) => {
+                    spark_core::fd_tunnel::abandon_fd(fd);
+                    return -1;
+                }
+            }
         };
 
         // Daemon-owned config fetch: on the `config-fetch` slice (darwin only — it pulls the BoringSSL

@@ -37,9 +37,11 @@ void spark_tunnel_stop(void);
 /* Bridge the Rust core's tracing events to a host logger. Without this the NE has no tracing
  * subscriber and every core info!/warn! (the whole config-fetch path) is dropped, leaving on-device
  * debugging blind. Call ONCE at startup, BEFORE spark_tunnel_run(), so cold-start fetch logs are
- * captured. `cb` receives (level, msg): level is 0=ERROR,1=WARN,2=INFO,3=DEBUG,4=TRACE (INFO and more
- * severe are forwarded); `msg` is a NUL-terminated UTF-8 string valid ONLY for the duration of the
- * call — copy it synchronously (e.g. String(cString:)). A NULL `cb` is ignored; idempotent. */
+ * captured. `cb` receives (level, msg): level is 0=ERROR,1=WARN,2=INFO,3=DEBUG,4=TRACE. By default
+ * DEBUG and more severe are forwarded (for spark's own targets only, so TRACE is dropped and
+ * dependency-internal noise is filtered out); `msg` is a NUL-terminated UTF-8 string valid ONLY for
+ * the duration of the call — copy it synchronously (e.g. String(cString:)). A NULL `cb` is ignored;
+ * idempotent. */
 typedef void (*spark_log_cb)(uint8_t level, const char *msg);
 void spark_set_log_callback(spark_log_cb cb);
 

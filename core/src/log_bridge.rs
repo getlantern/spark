@@ -8,8 +8,10 @@
 //! `tracing-subscriber` — keeping the locked dependency set intact.
 //!
 //! Spans are not surfaced (the bridge is event-only); span bookkeeping is the minimum the
-//! `Subscriber` contract requires. Default level is INFO and more severe, which covers the fetch
-//! instrumentation without dragging in dependency-internal `DEBUG`/`TRACE` noise.
+//! `Subscriber` contract requires. Default level is **DEBUG** and more severe ([`DEFAULT_MAX`]), but
+//! only for spark's own targets ([`is_spark_target`]) — so on-device diagnostics (per-member probe
+//! failures, pool re-probes, dial failovers) are visible without dragging in dependency-internal
+//! `DEBUG`/`TRACE` noise. `TRACE` is dropped.
 
 use std::ffi::{c_char, CString};
 use std::fmt::{self, Write as _};
