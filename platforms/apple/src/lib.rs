@@ -88,9 +88,10 @@ mod ffi {
                 .map(std::path::PathBuf::from)
         };
 
-        // The shared, cross-platform policy home (Apple/Android/desktop all call it): direct / plain
-        // relay / full config / daemon self-fetch, decided in core. The NE always owns a *userspace*
-        // utun (the kernel `system` stack is Android-only), so the tun base is the userspace default.
+        // The shared, cross-platform policy home (the Apple C-ABI + Android JNI call it today; the
+        // desktop service is a documented follow-up): direct / plain relay / full config / daemon
+        // self-fetch, decided in core. The NE always owns a *userspace* utun (the kernel `system`
+        // stack is Android-only), so the tun base is the userspace default.
         spark_core::fd_tunnel::run_fd_dispatch(
             fd,
             mtu as u16,

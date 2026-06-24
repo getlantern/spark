@@ -173,8 +173,10 @@ pub fn fd_config(addr: Ipv4Addr, prefix: u8, system_stack: bool) -> Config {
     config
 }
 
-/// The single home of the **config-acquisition policy** every platform shim shares (Apple C-ABI,
-/// Android JNI, desktop service) — so the decision tree lives here once, not duplicated per shim.
+/// The single home of the **config-acquisition policy** the fd-shims share — the Apple C-ABI and
+/// Android JNI shims call this today (the desktop service is a documented follow-up; it owns its own
+/// TUN and shares the lower-level `config::fetch`, not this entry). The decision tree lives here once,
+/// not duplicated per shim.
 /// `config` is the controlling app's explicit data-path string (`None`/`""` = no app config);
 /// `data_dir` is the per-platform cache dir (app-group container on Apple, app files dir on Android)
 /// the self-fetch path needs; `tun_base` carries the platform's tun primitives (built via

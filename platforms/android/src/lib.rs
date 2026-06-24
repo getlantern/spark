@@ -58,8 +58,22 @@ mod jni {
         data_dir: JString<'local>,
     ) -> jint {
         crate::logcat::init();
-        let cfg = read_opt_string(&mut env, &config);
-        let dir = read_opt_string(&mut env, &data_dir)
+        // `config` is fail-closed: a non-null string that won't decode is a caller error (an explicit
+        // config was provided but is garbage), so close the transferred fd and bail rather than
+        // silently collapsing it to "no config" — which would wrongly self-fetch. Mirrors the Apple
+        // shim's invalid-UTF-8 handling. A null reference (Kotlin `null`) is a legitimate "no config".
+        let cfg = match read_jstring(&mut env, &config) {
+            Ok(c) => c,
+            Err(()) => {
+                spark_core::fd_tunnel::abandon_fd(fd);
+                return -1;
+            }
+        };
+        // `data_dir` is lenient: a null/undecodable path → None (self-fetch then fails closed in the
+        // dispatch for want of a cache dir). Reject empty (an empty path would cache into the cwd).
+        let dir = read_jstring(&mut env, &data_dir)
+            .ok()
+            .flatten()
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
@@ -88,14 +102,23 @@ mod jni {
         spark_core::fd_tunnel::stop();
     }
 
-    /// Read an optional JNI string: a null reference (Kotlin `null`) → `None`; otherwise its UTF-8.
-    /// A conversion error is treated as `None`. The null guard is required because `get_string` does
-    /// not accept a null reference.
-    fn read_opt_string(env: &mut JNIEnv, s: &JString) -> Option<String> {
+    /// Read a JNI string into three outcomes: a null reference (Kotlin `null`) → `Ok(None)`; a
+    /// readable string → `Ok(Some(s))`; a present-but-undecodable string → `Err(())`. The null guard
+    /// is required because `get_string` does not accept a null reference. On a decode failure any
+    /// pending Java exception is cleared first — returning into Java (or making further JNI calls)
+    /// with an exception pending is undefined. The caller decides whether `Err` is fatal (`config`,
+    /// fail-closed) or tolerable (`data_dir`, → `None`).
+    fn read_jstring(env: &mut JNIEnv, s: &JString) -> Result<Option<String>, ()> {
         if s.as_raw().is_null() {
-            return None;
+            return Ok(None);
         }
-        env.get_string(s).ok().map(Into::into)
+        match env.get_string(s) {
+            Ok(js) => Ok(Some(js.into())),
+            Err(_) => {
+                let _ = env.exception_clear();
+                Err(())
+            }
+        }
     }
 }
 

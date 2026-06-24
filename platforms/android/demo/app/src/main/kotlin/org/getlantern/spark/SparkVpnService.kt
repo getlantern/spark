@@ -54,7 +54,8 @@ class SparkVpnService : VpnService() {
         val addr = TUN_ADDR.split(".").fold(0) { acc, oct -> (acc shl 8) or oct.toInt() }
         // The app files dir is the self-fetch cache (device_id + the fetched config_raw.json).
         val dataDir = filesDir.absolutePath
-        val mode = if (config.isNullOrEmpty()) "self-fetch" else "explicit-config"
+        // The "lantern-api" sentinel is non-empty but still means self-fetch (like null/empty).
+        val mode = if (config.isNullOrEmpty() || config == "lantern-api") "self-fetch" else "explicit-config"
         Log.i(TAG, "tunnel established; handing fd=$fd to native (mtu=$MTU, mode=$mode)")
         worker = thread(name = "spark-tunnel") {
             // systemStack = 0 (userspace): the cross-platform default, with no kernel-redirect/gateway
