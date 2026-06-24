@@ -17,9 +17,10 @@ for t in "${TARGETS[@]}"; do
     # 2026-06-23) — so all slices get the SAME feature set rather than the former macOS-only set:
     # `anytls`/`samizdat`/`shadowsocks`/`hysteria2` transports, the `multi-server` latency pool,
     # `bootstrap-dns` for hostname pool members, and `config-fetch` for `lantern-api` self-fetch.
-    # Keeping the fetch on the BoringSSL Chrome connector on every platform means the cold-start config
-    # fetch presents the same Chrome JA4 fingerprint everywhere — a censor can't tell iOS Lantern's
-    # fetch from macOS's. See docs/config-fetch-cross-platform-design.md.
+    # Building BoringSSL on every slice means the cold-start config fetch uses one uniform
+    # (cert-verifying) BoringSSL handshake everywhere — no per-platform TLS-stack split. NB: v1's fetch
+    # is a *plain* boring connector (not yet Chrome-mimicked); Chrome-mimicry for the fetch is the
+    # deferred fronting milestone. See docs/config-fetch-cross-platform-design.md.
     feat=(--features anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2)
     cargo build --release -p spark-apple --target "$t" "${feat[@]}" >&2
 done

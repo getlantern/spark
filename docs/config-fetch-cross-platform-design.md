@@ -14,11 +14,15 @@
 > `-ios-sim`, and `aarch64-linux-android` (verified). All builds + clippy + the `explicit_config`
 > dispatch test green.
 >
-> **Decided (2026-06-23):** keep BoringSSL/Chrome-mimic TLS for the fetch on **every** platform,
-> including iOS — see §3. Rationale: the cold-start bootstrap fetch is the most censorship-sensitive
-> moment; presenting the same full Chrome JA4 fingerprint on every platform means a censor can't
-> fingerprint "iOS Lantern is fetching its config" differently from macOS. The cost is a BoringSSL
-> cross-compile for the iOS/Android targets — paid once in the build scripts, not in the fetch code.
+> **Decided (2026-06-23):** keep the fetch on **BoringSSL** on **every** platform, including iOS —
+> see §3. Rationale: one uniform TLS stack for the fetch (no rustls-on-iOS / boring-on-macOS split,
+> same handshake everywhere), and — crucially — it positions the deferred fronting milestone to switch
+> the fetch to flint's **Chrome-mimicking** connector (boring is already linked) so the cold-start
+> fetch can present a Chrome JA4 fingerprint. **NB:** v1's fetch uses a *plain* (cert-verifying) boring
+> connector (`probe::tls_wrap`), **not** the Chrome connector — it does not Chrome-mimic yet; that is
+> the deferred fronting milestone (`config-new-fetch-design.md` §9), which needs a *verifying* variant
+> of flint's connector (flint's is `set_verify(NONE)` today). The cost of boring-everywhere is the
+> BoringSSL cross-compile for iOS/Android, paid once in the build scripts.
 
 ## 1. Why it was darwin-only (the starting point)
 
@@ -77,7 +81,7 @@ flowchart LR
     DISP["fd_tunnel::run_fd_dispatch<br/>(fd, mtu, config, data_dir, tun_base)<br/>**the one policy home**"]
     DISP -->|empty / lantern-api| FETCH[run_fd_lantern_api<br/>self-fetch + cache + refresh]
     DISP -->|IP:port / TOML / config_raw| RUN[run_fd]
-    FETCH --> TLS[config::fetch -> probe::tls_wrap<br/>**boring Chrome connector, every platform**]
+    FETCH --> TLS[config::fetch -> probe::tls_wrap<br/>**plain boring + CA roots, every platform**]
 ```
 
 Two changes deliver "all platforms use the same code":
@@ -87,7 +91,7 @@ Two changes deliver "all platforms use the same code":
   `tokio-rustls`.
 - **(B) One shared dispatch** in `fd_tunnel` that every shim calls — the apple decision tree, hoisted.
 
-## 3. Part A — build BoringSSL for every target (keep the Chrome-mimic TLS)
+## 3. Part A — build BoringSSL for every target (one TLS stack for the fetch)
 
 The work is making `boring2`/`boring-sys2` (the bundled BoringSSL + cmake build) cross-compile for the
 non-darwin targets, then turning `config-fetch` on for those slices.
@@ -217,12 +221,19 @@ Each shim shrinks to marshalling:
 
 ## 8. Decision record
 
-**Fetch TLS backend: BoringSSL/Chrome-mimic on every platform, including iOS (decided 2026-06-23).**
+**Fetch TLS backend: BoringSSL on every platform, including iOS (decided 2026-06-23).**
 Considered: (a) rustls-default + boring-when-anytls, (b) rustls-everywhere, (c) **boring-everywhere
-(chosen)**. (a)/(b) build smaller and avoid the iOS BoringSSL cross-compile, but make the iOS cold-start
-fetch present a distinguishable vanilla-rustls fingerprint while macOS presents Chrome — a censor-visible
-inconsistency at the most sensitive moment. (c) keeps the fingerprint uniform; the cost is the
-cross-compile, paid once in the build scripts. An ADR may formalize this.
+(chosen)**. (a)/(b) build smaller and avoid the iOS BoringSSL cross-compile, but they'd split the
+fetch's TLS across stacks (rustls on some targets, boring on others) or add a second TLS stack. (c)
+keeps **one** stack — the fetch uses the same (cert-verifying) boring handshake on every platform — and,
+because boring is already linked, **positions the deferred fronting milestone** to switch the fetch to
+flint's Chrome-mimicking connector (rustls can't mimic Chrome) without re-plumbing TLS. The cost is the
+BoringSSL cross-compile, paid once in the build scripts.
+
+**Not in v1:** the fetch is *not* Chrome-mimicked today — `probe::tls_wrap` is a plain boring connector
+(with Mozilla CA roots loaded for verification; see §3). A Chrome-JA4 fetch is the fronting milestone
+(`config-new-fetch-design.md` §9), which needs a *verifying* variant of flint's connector (flint's is
+`set_verify(NONE)`, for proxy-PSK trust — unusable for the "Trust = TLS" fetch). An ADR may formalize this.
 
 ## 9. References
 
