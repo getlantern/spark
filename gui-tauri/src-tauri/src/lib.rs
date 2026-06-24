@@ -361,12 +361,6 @@ pub mod ne_spike {
                         }
                         let r = unsafe { mgr_start.connection().startVPNTunnelAndReturnError() }
                             .map_err(|e| format!("start failed: {e}"));
-                        // Retain the started manager so the control channel reuses this exact session
-                        // instance for sendProviderMessage (hypothesis #1).
-                        if r.is_ok() {
-                            store_started_manager(&mgr_start);
-                            ne_debug("[connect] retained started manager for messaging");
-                        }
                         let _ = tx_load.send(r);
                     });
                     unsafe { mgr_save.loadFromPreferencesWithCompletionHandler(&load_block) };
@@ -411,38 +405,6 @@ pub mod ne_spike {
             .map_err(|_| "disconnect timed out".to_owned())?
     }
 
-    /// The `NETunnelProviderManager` that started the running tunnel, retained so the control channel
-    /// messages the SAME session instance instead of a freshly `loadAll`-ed one (hypothesis #1: the
-    /// messaging channel is bound to the started manager). Only ever *used* on the main dispatch
-    /// queue; the `Send` impl is sound because moving it across threads only transfers an
-    /// atomically-refcounted handle, and the object's methods are called solely in main-queue work.
-    struct MainManager(Retained<NETunnelProviderManager>);
-    // SAFETY: see the doc above — used only on the main queue; cross-thread moves transfer a handle.
-    unsafe impl Send for MainManager {}
-
-    fn started_manager() -> &'static std::sync::Mutex<Option<MainManager>> {
-        static M: std::sync::OnceLock<std::sync::Mutex<Option<MainManager>>> =
-            std::sync::OnceLock::new();
-        M.get_or_init(|| std::sync::Mutex::new(None))
-    }
-
-    /// Retain the manager that just started the tunnel (called from `connect` on the main queue).
-    fn store_started_manager(mgr: &Retained<NETunnelProviderManager>) {
-        *started_manager().lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(MainManager(mgr.clone()));
-    }
-
-    /// A cloned `Send` handle to the started manager for use in a main-queue closure, or `None` if
-    /// the tunnel wasn't started in this app session. Clones (retains) the stored handle and leaves it
-    /// in place — it does NOT `take` it out of the slot (the slot is cleared on disconnect).
-    fn clone_started_manager() -> Option<MainManager> {
-        started_manager()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|m| MainManager(m.0.clone()))
-    }
-
     /// Diagnostic trace to `~/spark-ne-debug.log` — the unified log isn't readable from the headless
     /// tooling context, so this gives a file the host can read while debugging the NE channel.
     /// Off by default (no file written); set `SPARK_NE_DEBUG=1` to enable. Best-effort, append-only.
@@ -467,11 +429,15 @@ pub mod ne_spike {
 
     /// Send a control message to the running tunnel provider via `sendProviderMessage` and return its
     /// reply (a UTF-8 JSON string). The provider's `handleAppMessage` (spark-apple) understands
-    /// `{"cmd":"servers"}` and `{"cmd":"select","index":N}`. Reuses the manager retained at
-    /// `connect` (so messaging targets the started session, not a fresh `loadAll` one) and dispatches
-    /// the send onto a fresh MAIN-queue turn; this (worker) thread then waits on a channel. MUST be
-    /// called off the main thread (the Tauri commands are `command(async)`). Returns an error if the
-    /// tunnel wasn't started in this app session (no retained manager).
+    /// `{"cmd":"servers"}` and `{"cmd":"select","index":N}`. Loads the manager and resolves its
+    /// `NETunnelProviderSession` **entirely on the main queue, per call** — that connection IS the
+    /// running tunnel's session (there is a single tunnel configuration), so nothing has to be
+    /// retained across threads. The dispatched closure captures only `message` (`String`) and the
+    /// channel `Sender` (both `Send`), so the `NETunnelProviderManager`/session `Retained`s are
+    /// created, used, and dropped solely on the main thread — no cross-thread `Retained`, no
+    /// `unsafe impl Send`. MUST be called off the main thread (the Tauri commands are
+    /// `command(async)`): the load/response handlers fire on the main queue while this worker thread
+    /// waits on the channel.
     pub fn send_provider_message(message: String) -> Result<String, String> {
         // `Retained`, `RcBlock`, `NSArray`, `NSError`, `Duration`, `err_str` are in scope from the
         // module-level imports; `NSData`/`NETunnelProviderSession` are specific to this call.
@@ -479,76 +445,88 @@ pub mod ne_spike {
         use objc2_network_extension::NETunnelProviderSession;
 
         ne_debug(&format!("[send] start msg={message}"));
-        // Hypothesis #1: reuse the manager that *started* the tunnel rather than a fresh `loadAll`
-        // instance — the messaging channel appears bound to the started session.
-        let Some(mgr) = clone_started_manager() else {
-            ne_debug("[send] no retained manager (connect this app session first)");
-            return Err("no active tunnel manager — connect first".to_owned());
-        };
         let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
-        // Hypothesis #2: run the send on a fresh MAIN-queue turn, not synchronously inside a
-        // `loadAll` completion. `MainManager` (`Send`) is only ever touched here, on the main queue.
+        // All ObjC work happens on the main queue; the closure captures only `Send` values. The
+        // session is resolved fresh from `loadAllFromPreferences` here rather than reused from a
+        // stored handle — which is safe now that the real fix was the `application-identifier`
+        // entitlement (the earlier "reuse the started manager" workaround is no longer needed).
         DispatchQueue::main().exec_async(move || {
-            // Capture the whole `MainManager` (which is `Send`), not just its inner `Retained` field
-            // — edition-2021 disjoint closure captures would otherwise grab the non-`Send` field and
-            // fail the `exec_async` `Send` bound.
-            let mgr = mgr;
-            let connection = unsafe { mgr.0.connection() };
-            let status = unsafe { connection.status() }.0;
-            ne_debug(&format!("[send] (main) connection status={status}"));
-            let session = match connection.downcast::<NETunnelProviderSession>() {
-                Ok(s) => {
-                    ne_debug("[send] (main) downcast NETunnelProviderSession ok");
-                    s
-                }
-                Err(_) => {
-                    ne_debug("[send] (main) downcast FAILED");
-                    let _ = tx.send(Err("tunnel connection is not a provider session".to_owned()));
-                    return;
-                }
+            let load_block = RcBlock::new(
+                move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
+                    if !e.is_null() {
+                        let _ =
+                            tx.send(Err(format!("loadAllFromPreferences failed: {}", err_str(e))));
+                        return;
+                    }
+                    let mgr = unsafe {
+                        if !arr.is_null() && (*arr).count() > 0 {
+                            (*arr).objectAtIndex(0)
+                        } else {
+                            let _ =
+                                tx.send(Err("no active tunnel manager — connect first".to_owned()));
+                            return;
+                        }
+                    };
+                    let connection = unsafe { mgr.connection() };
+                    ne_debug(&format!(
+                        "[send] (main) connection status={}",
+                        unsafe { connection.status() }.0
+                    ));
+                    let session = match connection.downcast::<NETunnelProviderSession>() {
+                        Ok(s) => s,
+                        Err(_) => {
+                            ne_debug("[send] (main) downcast FAILED");
+                            let _ = tx
+                                .send(Err("tunnel connection is not a provider session".to_owned()));
+                            return;
+                        }
+                    };
+                    let data = NSData::with_bytes(message.as_bytes());
+                    let tx_resp = tx.clone();
+                    let handler = RcBlock::new(move |resp: *mut NSData| {
+                        // A null reply means the provider sent no response — an unrecognized command,
+                        // or a control channel that isn't actually delivering. Surface it as an error
+                        // rather than a silent empty-string success, so callers don't parse "" as JSON
+                        // or mask a dead channel. SAFETY: `resp` is the framework reply NSData (or null).
+                        if resp.is_null() {
+                            let _ = tx_resp.send(Err("provider sent no response".to_owned()));
+                            return;
+                        }
+                        let bytes = unsafe { &*resp }.to_vec();
+                        let s = String::from_utf8_lossy(&bytes).into_owned();
+                        let _ = tx_resp.send(Ok(s));
+                    });
+                    let mut err: Option<Retained<NSError>> = None;
+                    // SAFETY: standard NE control API; NE copies the escaping response block.
+                    let ok = unsafe {
+                        session.sendProviderMessage_returnError_responseHandler(
+                            &data,
+                            Some(&mut err),
+                            Some(&handler),
+                        )
+                    };
+                    let errstr = err
+                        .as_ref()
+                        .map(|e| e.localizedDescription().to_string())
+                        .unwrap_or_default();
+                    ne_debug(&format!(
+                        "[send] (main) sendProviderMessage ok={ok} err='{errstr}'"
+                    ));
+                    if !ok {
+                        let msg = if errstr.is_empty() {
+                            "sendProviderMessage failed".to_owned()
+                        } else {
+                            errstr
+                        };
+                        let _ = tx.send(Err(msg));
+                    }
+                    // On success, the response handler sends the reply.
+                },
+            );
+            // SAFETY: NE copies the escaping completion block, so it outlives this main-queue turn.
+            unsafe {
+                NETunnelProviderManager::loadAllFromPreferencesWithCompletionHandler(&load_block)
             };
-            let data = NSData::with_bytes(message.as_bytes());
-            let tx_resp = tx.clone();
-            let handler = RcBlock::new(move |resp: *mut NSData| {
-                // A null reply means the provider sent no response — an unrecognized command, or a
-                // control channel that isn't actually delivering (the exact failure mode this PR
-                // fixed: entitlement rejection surfaced as responseHandler(nil) while ok=true).
-                // Surface it as an error rather than a silent empty-string success, so callers don't
-                // parse "" as JSON or mask a dead channel.
-                // SAFETY: `resp` is the framework-provided reply NSData (or null = no reply).
-                if resp.is_null() {
-                    let _ = tx_resp.send(Err("provider sent no response".to_owned()));
-                    return;
-                }
-                let bytes = unsafe { &*resp }.to_vec();
-                let s = String::from_utf8_lossy(&bytes).into_owned();
-                let _ = tx_resp.send(Ok(s));
-            });
-            let mut err: Option<Retained<NSError>> = None;
-            // SAFETY: standard NE control API; NE copies the escaping response block.
-            let ok = unsafe {
-                session.sendProviderMessage_returnError_responseHandler(
-                    &data,
-                    Some(&mut err),
-                    Some(&handler),
-                )
-            };
-            let errstr = err
-                .as_ref()
-                .map(|e| e.localizedDescription().to_string())
-                .unwrap_or_default();
-            ne_debug(&format!(
-                "[send] (main) sendProviderMessage ok={ok} err='{errstr}'"
-            ));
-            if !ok {
-                let msg = if errstr.is_empty() {
-                    "sendProviderMessage failed".to_owned()
-                } else {
-                    errstr
-                };
-                let _ = tx.send(Err(msg));
-            }
-            // On success, the response handler sends the reply.
         });
         let result = rx
             .recv_timeout(Duration::from_secs(5))
