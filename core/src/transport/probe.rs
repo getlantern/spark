@@ -146,7 +146,10 @@ where
     // Status line: "HTTP/1.1 204 ...". Parse the 3-digit code.
     let line = String::from_utf8_lossy(&buf);
     let code = parse_status_code(&line)?;
-    tracing::debug!(code, host = %url.host, tls = url.tls, path = %url.path, "probe: callback HTTP response");
+    // Log the path without its query string: a bandit callback URL carries the probe token in
+    // `?token=...`, which must not reach logs (this rides the os_log bridge on device).
+    let path = url.path.split('?').next().unwrap_or(&url.path);
+    tracing::debug!(code, host = %url.host, tls = url.tls, %path, "probe: callback HTTP response");
     Ok(code)
 }
 

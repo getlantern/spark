@@ -1465,18 +1465,17 @@ mod anytls_gambit_realization_tests {
 
 /// Manual **out-of-NE** diagnostic (ignored by default): dial each server from a real fetched
 /// `config_raw.json` **directly, with no tunnel**, optionally pinned to a physical interface — to
-/// isolate transport interop from the macOS NE's UDP egress. The in-app probe times hysteria2's QUIC
-/// handshake out at 10s with no response even when pinned to en1; this answers whether spark's
-/// hysteria2 reaches the *real* servers when there's no tunnel at all. Run with the **VPN off**:
+/// isolate transport interop from the macOS NE's UDP egress. It runs the real health probe (dial →
+/// callback GET → read) against each pool member, so it answers whether spark reaches the *real*
+/// servers when there's no tunnel at all. Run with the **VPN off**:
 ///   SPARK_REAL_CONFIG=$HOME/config_raw.json SPARK_PIN_IFACE=en1 \
 ///     cargo test -p spark-core \
 ///       --features config-fetch,samizdat,shadowsocks,hysteria2,bootstrap-dns \
 ///       -- --ignored --nocapture dial_real_servers
 ///
-/// `DIAL OK` for hysteria2 ⇒ the client + servers are fine and the NE is still interfering with the
-/// pinned UDP socket. `TIMED OUT` ⇒ the QUIC path to these servers fails regardless of the NE
-/// (network UDP filtering or the servers). It reads a local file with live secrets — never commit
-/// that file; this test holds no secrets.
+/// `HEALTHY` ⇒ the transport dialed and the origin replied (protocol + servers + network are fine).
+/// `UNHEALTHY` ⇒ the dial/handshake failed or timed out for that member. It reads a local file with
+/// live secrets — never commit that file; this test logs none of them.
 #[cfg(all(test, feature = "multi-server"))]
 mod real_server_probe {
     use super::*;
@@ -1530,7 +1529,9 @@ mod real_server_probe {
             let callback = match crate::transport::probe::CallbackUrl::parse(cb_raw) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("{label}: bad callback {cb_raw}: {e}");
+                    // Strip the query: a bandit callback carries its token in `?token=...`.
+                    let cb_safe = cb_raw.split('?').next().unwrap_or(cb_raw);
+                    eprintln!("{label}: bad callback {cb_safe}: {e}");
                     continue;
                 }
             };
