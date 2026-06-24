@@ -1529,9 +1529,13 @@ mod real_server_probe {
             let callback = match crate::transport::probe::CallbackUrl::parse(cb_raw) {
                 Ok(c) => c,
                 Err(e) => {
-                    // Strip the query: a bandit callback carries its token in `?token=...`.
+                    // Both the URL and the parse error embed the token (errors like
+                    // "missing scheme: <full url>"), so strip everything from the first `?` —
+                    // the bandit callback's token lives in `?token=...`.
                     let cb_safe = cb_raw.split_once('?').map_or(cb_raw, |(p, _)| p);
-                    eprintln!("{label}: bad callback {cb_safe}: {e}");
+                    let err = e.to_string();
+                    let err_safe = err.split_once('?').map_or(err.as_str(), |(p, _)| p);
+                    eprintln!("{label}: bad callback {cb_safe}: {err_safe}");
                     continue;
                 }
             };
