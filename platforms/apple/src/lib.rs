@@ -44,8 +44,9 @@ mod ffi {
     ///   `config_raw.json` payload (auto-detected), parsed via [`Config::from_config_str`]; the whole
     ///   transport stack applies (ADR 0006), all on the BoringSSL/`anytls` backend every slice carries.
     ///
-    /// A non-null, non-empty explicit `config` that is neither a `SocketAddr` nor a valid
-    /// TOML / `config_raw.json` config returns -1.
+    /// A non-null, non-empty explicit `config` — other than the reserved `"lantern-api"` sentinel
+    /// (handled above) — that is neither a `SocketAddr` nor a valid TOML / `config_raw.json` config
+    /// returns -1.
     ///
     /// # Safety
     /// `config` must be null or a valid NUL-terminated C string for the duration of this call.

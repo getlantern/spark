@@ -27,7 +27,8 @@ extern "C" {
  *   - any other string      -> a full Config: spark's native TOML or a Lantern config_raw.json
  *                              payload, auto-detected (AnyTLS + handshake shaping + gambit, ...).
  * The fetch + AnyTLS use the BoringSSL `anytls` backend, which every Apple slice carries. A non-empty
- * explicit string that is neither an IP:port nor a valid TOML/config_raw.json config returns -1.
+ * explicit string -- other than the reserved "lantern-api" sentinel above -- that is neither an
+ * IP:port nor a valid TOML/config_raw.json config returns -1.
  *
  * `data_dir` must be NULL or a valid NUL-terminated C string for the duration of this call. */
 int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char *data_dir);
