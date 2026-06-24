@@ -94,6 +94,12 @@ final class Vpn {
     private let log = Logger(subsystem: "org.getlantern.spark", category: "app")
     private let providerBundleId = "org.getlantern.spark.tunnel"
 
+    /// Run the tunnel in `lantern-api` mode — the NE extension self-fetches its server pool from the
+    /// Lantern config-new API and caches it in the app-group container. Default-off so existing
+    /// direct/relay behavior is unchanged; flip to `true` to validate the fetch path on device
+    /// (pair with `SPARK_CONFIG_ENV=staging` in the extension's environment to hit staging).
+    private let useLanternApi = false
+
     func connect() {
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in
             guard let self else { return }
@@ -105,6 +111,10 @@ final class Vpn {
             let proto = NETunnelProviderProtocol()
             proto.providerBundleIdentifier = self.providerBundleId
             proto.serverAddress = "spark"
+            if self.useLanternApi {
+                // The NE provider reads this and runs `lantern-api` mode (self-fetch via the API).
+                proto.providerConfiguration = ["config": "lantern-api"]
+            }
             manager.protocolConfiguration = proto
             manager.localizedDescription = "Spark"
             manager.isEnabled = true

@@ -16,8 +16,10 @@ for t in "${TARGETS[@]}"; do
     # AnyTLS (BoringSSL) builds for the macOS host arch; BoringSSL-for-iOS is a separate concern, so
     # only the macOS slice gets `anytls` — the iOS slices share the ABI but return -1 for AnyTLS.
     # `multi-server` (latency pool) is boring-free; enabled on the macOS slice alongside anytls.
+    # `bootstrap-dns` resolves hostname pool members (config_raw file or `lantern-api` fetch) — without
+    # it a hostname server is a hard error at connect; `config-fetch` enables `lantern-api` self-fetch.
     feat=()
-    [[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server)
+    [[ "$t" == *darwin* ]] && feat=(--features anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2)
     # ${feat[@]+...} guards the empty-array expansion so `set -u` doesn't trip on
     # macOS's stock bash 3.2 (where `env bash` resolves), which errors on
     # "${empty[@]}" unlike bash >=4.4.

@@ -1,13 +1,16 @@
-//! Data-path config resolution, mirroring the Flutter NEBackend precedence
-//! (newest wins): a runtime `config.toml` in the app-support dir → the baked
-//! `SPARK_CONFIG` (base64 TOML) → `SPARK_PROXY` (host:port) → None (direct).
+//! Data-path config resolution for the controlling app.
 //!
-//! The resolved string is handed to the system extension via
-//! `providerConfiguration["config"]`; the extension's C ABI (`spark_tunnel_run`)
-//! decodes it (TOML, base64-TOML, or a bare host:port) exactly as it does for
-//! the Flutter app, so this layer stays a passthrough.
-
-use std::path::PathBuf;
+//! **The daemon (the NE system extension) owns config acquisition.** When the app supplies no
+//! explicit config, the extension self-fetches its server pool from the Lantern config-new API
+//! (`spark_tunnel_run`'s default on the `config-fetch` slice) — the fetch must bypass the tunnel and
+//! only the extension can guarantee that, so the decision lives there, not here. This resolver is
+//! therefore a thin passthrough that carries only **deliberate dev overrides**: the baked
+//! `SPARK_CONFIG` (base64 TOML) → `SPARK_PROXY` (host:port) → `None`. `None` is the normal path: it
+//! hands the extension no `providerConfiguration["config"]`, which it reads as "fetch it yourself".
+//!
+//! Note there is intentionally no persistent on-disk config file here anymore: a stale local file
+//! would shadow the fetch (every connect must pull the current pool), so the only on-disk config is
+//! the extension's own last-good fetch cache, used solely as an offline fallback.
 
 use serde::{Deserialize, Serialize};
 
@@ -40,10 +43,11 @@ pub struct ServerInfo {
     pub is_current: bool,
 }
 
-/// The pool's servers parsed from the resolved `config.toml` — the static list (metadata only, no
-/// latency), available without a running tunnel. Empty when the config is absent, a bare `host:port`,
-/// base64 (the NE decodes that form, not us), or has no `[[transport.servers]]`. Order matches the
-/// core's pool index, so a live snapshot overlays by `index`.
+/// The static pool list parsed from an explicit TOML dev override (`resolve()`), metadata only (no
+/// latency), available without a running tunnel. Empty in the normal (daemon-fetch) path — the pool
+/// is only known after the extension fetches it, so the live snapshot fills the UI on connect — and
+/// also empty for a bare `host:port`, base64 `SPARK_CONFIG` (the NE decodes that form, not us), or a
+/// config with no `[[transport.servers]]`. Order matches the core's pool index for the overlay.
 pub fn servers_from_config() -> Vec<ServerInfo> {
     let Some(text) = resolve() else {
         return Vec::new();
@@ -86,29 +90,20 @@ pub fn servers_from_config() -> Vec<ServerInfo> {
         .collect()
 }
 
-/// macOS app-support config path: `~/Library/Application Support/org.getlantern.spark/config.toml`.
-pub fn config_file_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/org.getlantern.spark/config.toml"))
-}
-
-/// Resolve the data-path config string, or None for a direct (untunneled) run.
+/// Resolve a deliberate dev override config string, or `None` for the normal **daemon-fetch** path.
+/// `None` is handed to the extension as no `providerConfiguration["config"]`, which it reads as
+/// "self-fetch the pool" (see the module docs). Only explicit env overrides bypass the fetch.
 pub fn resolve() -> Option<String> {
     resolve_with(
-        config_file_path().and_then(|p| std::fs::read_to_string(p).ok()),
         std::env::var("SPARK_CONFIG").ok(),
         std::env::var("SPARK_PROXY").ok(),
     )
 }
 
-/// Pure precedence logic, split out so it's unit-testable without touching the
-/// filesystem or environment. First non-empty wins, in NEBackend order.
-fn resolve_with(
-    file: Option<String>,
-    baked: Option<String>,
-    proxy: Option<String>,
-) -> Option<String> {
-    [file, baked, proxy]
+/// Pure precedence logic, split out so it's unit-testable without touching the environment. First
+/// non-empty wins (`SPARK_CONFIG` over `SPARK_PROXY`); all-empty → `None` (daemon self-fetches).
+fn resolve_with(baked: Option<String>, proxy: Option<String>) -> Option<String> {
+    [baked, proxy]
         .into_iter()
         .flatten()
         .map(|s| s.trim().to_owned())
@@ -120,37 +115,28 @@ mod tests {
     use super::resolve_with;
 
     #[test]
-    fn file_wins_over_everything() {
-        let r = resolve_with(
-            Some("  toml-from-file  ".into()),
-            Some("baked".into()),
-            Some("1.2.3.4:443".into()),
-        );
-        assert_eq!(r.as_deref(), Some("toml-from-file"));
-    }
-
-    #[test]
-    fn baked_wins_when_no_file() {
-        let r = resolve_with(None, Some("baked".into()), Some("1.2.3.4:443".into()));
+    fn baked_wins_over_proxy() {
+        let r = resolve_with(Some("baked".into()), Some("1.2.3.4:443".into()));
         assert_eq!(r.as_deref(), Some("baked"));
     }
 
     #[test]
     fn proxy_is_last_resort() {
-        let r = resolve_with(None, None, Some("1.2.3.4:443".into()));
+        let r = resolve_with(None, Some("1.2.3.4:443".into()));
         assert_eq!(r.as_deref(), Some("1.2.3.4:443"));
     }
 
     #[test]
     fn empty_and_whitespace_are_skipped() {
-        // an empty/whitespace file falls through to the baked config
-        let r = resolve_with(Some("   ".into()), Some("baked".into()), None);
-        assert_eq!(r.as_deref(), Some("baked"));
+        // an empty/whitespace baked override falls through to the proxy
+        let r = resolve_with(Some("   ".into()), Some("1.2.3.4:443".into()));
+        assert_eq!(r.as_deref(), Some("1.2.3.4:443"));
     }
 
     #[test]
-    fn none_means_direct() {
-        assert_eq!(resolve_with(None, None, None), None);
-        assert_eq!(resolve_with(Some(String::new()), None, None), None);
+    fn none_means_daemon_fetch() {
+        // No explicit override → None → the extension self-fetches its config.
+        assert_eq!(resolve_with(None, None), None);
+        assert_eq!(resolve_with(Some(String::new()), None), None);
     }
 }

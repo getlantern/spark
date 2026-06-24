@@ -580,9 +580,10 @@ fn spark_status() -> SparkStatus {
     }
 }
 
-// connect/disconnect (U1b-2b): the data-path config resolves here (config.toml →
-// baked → proxy → direct) and is handed to the system extension via the
-// NETunnelProviderManager save/start chain. Assumes the extension is activated
+// connect/disconnect (U1b-2b): config acquisition is the daemon's job — by default the app passes no
+// config (config::resolve() → None) and the system extension self-fetches its pool from config-new
+// (bypassing the tunnel). Only a deliberate dev override (SPARK_CONFIG/SPARK_PROXY) is handed down.
+// Routed via the NETunnelProviderManager save/start chain. Assumes the extension is activated
 // (OSSystemExtensionRequest activation for fresh installs is U1b-2b-ii).
 #[cfg(target_os = "macos")]
 #[tauri::command(async)]

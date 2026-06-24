@@ -47,6 +47,68 @@ impl SocketProtector {
     }
 }
 
+/// Best-effort discovery of the host's physical egress interface (e.g. `en0`), for pinning the
+/// proxy's own sockets so they bypass our tunnel.
+///
+/// On macOS the NetworkExtension auto-bypasses the provider's **TCP** but **not** its **UDP/QUIC**
+/// (confirmed on device: hysteria2's QUIC handshake hung while samizdat's TCP worked because the QUIC
+/// socket wasn't pinned). So the lantern-api path must pin sockets to the physical interface
+/// explicitly. Picks the first running, non-loopback, non-tunnel interface with an IPv4 address,
+/// preferring `en*` (Wi-Fi/Ethernet). `None` → caller leaves sockets unpinned (prior behavior).
+#[cfg(target_os = "macos")]
+pub fn default_physical_interface() -> Option<String> {
+    use std::ffi::CStr;
+    let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` allocates the list; we read fields only while it's alive, copy the chosen
+    // name out (owned `String`), and `freeifaddrs` before returning on every path.
+    unsafe {
+        if libc::getifaddrs(&mut ifap) != 0 || ifap.is_null() {
+            return None;
+        }
+        let up_running = libc::IFF_UP as u32 | libc::IFF_RUNNING as u32;
+        let mut fallback: Option<String> = None;
+        let mut cur = ifap;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() || ifa.ifa_name.is_null() {
+                continue;
+            }
+            // One entry per address family; key off the IPv4 one (pinning by name covers v6 too).
+            if i32::from((*ifa.ifa_addr).sa_family) != libc::AF_INET {
+                continue;
+            }
+            let flags = ifa.ifa_flags;
+            if flags & up_running != up_running || flags & libc::IFF_LOOPBACK as u32 != 0 {
+                continue;
+            }
+            let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned();
+            // Skip our own tunnel + other virtual interfaces.
+            if ["utun", "tun", "tap", "ppp", "ipsec", "lo"]
+                .iter()
+                .any(|p| name.starts_with(p))
+            {
+                continue;
+            }
+            // Prefer a real Wi-Fi/Ethernet interface; take the first one found.
+            if name.starts_with("en") {
+                libc::freeifaddrs(ifap);
+                return Some(name);
+            }
+            fallback.get_or_insert(name);
+        }
+        libc::freeifaddrs(ifap);
+        fallback
+    }
+}
+
+/// Non-macOS: no discovery (the daemon/`spark run` paths configure `protect_interface` explicitly,
+/// and Android's `VpnService.protect` handles bypass).
+#[cfg(not(target_os = "macos"))]
+pub fn default_physical_interface() -> Option<String> {
+    None
+}
+
 /// Resolve an interface name to its index via `if_nametoindex`.
 #[cfg(unix)]
 fn interface_index(interface: &str) -> io::Result<NonZeroU32> {
@@ -132,6 +194,20 @@ mod tests {
     #[test]
     fn loopback_interface_resolves() {
         assert!(!loopback_protector().interface().is_empty());
+    }
+
+    // Best-effort discovery never returns a loopback/tunnel interface, and what it returns must
+    // resolve to a real index. (May be `None` on a headless CI host with no `en*` up — that's fine.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn physical_interface_is_real_and_not_virtual() {
+        if let Some(name) = super::default_physical_interface() {
+            assert!(!name.is_empty());
+            for p in ["lo", "utun", "tun", "ppp", "ipsec"] {
+                assert!(!name.starts_with(p), "picked a virtual interface: {name}");
+            }
+            SocketProtector::for_interface(&name).expect("discovered interface should resolve");
+        }
     }
 
     // Confirms the IP_BOUND_IF / IP_UNICAST_IF setsockopt actually applies on this host

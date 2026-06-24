@@ -23,6 +23,9 @@ pub(crate) struct Member {
     pub(crate) udp: Arc<dyn UdpTransport>,
     pub(crate) callback: CallbackUrl,
     pub(crate) meta: ServerMeta,
+    /// Human label for probe/diagnostic logs: `"{protocol} {server-addr}"` (e.g.
+    /// `samizdat 161.33.223.26:31464`). Set by the builder; empty for the bare `new` used in tests.
+    pub(crate) label: String,
 }
 
 impl Member {
@@ -37,7 +40,14 @@ impl Member {
             udp,
             callback,
             meta,
+            label: String::new(),
         }
+    }
+
+    /// Set the diagnostic label (builder-style), used by `build_member`.
+    pub(crate) fn with_label(mut self, label: String) -> Self {
+        self.label = label;
+        self
     }
 }
 
@@ -292,7 +302,15 @@ async fn prober_loop(
             // Clone the (cheap) Arc + CallbackUrl into the future so it borrows nothing from `members`.
             let transport = Arc::clone(&members[i].transport);
             let callback = members[i].callback.clone();
-            async move { probe(&transport, &callback, per_probe).await }
+            // Identify the member in probe logs by protocol + server addr (e.g.
+            // `samizdat 161.33.223.26:31464`), falling back to the index, so a mixed-protocol pool's
+            // failures are attributable to a specific server.
+            let label = if members[i].label.is_empty() {
+                format!("#{i}")
+            } else {
+                members[i].label.clone()
+            };
+            async move { probe(&transport, &callback, per_probe, &label).await }
         })
         .await;
         {
@@ -404,6 +422,7 @@ mod tests {
                 path: "/".into(),
             },
             meta: ServerMeta::default(),
+            label: String::new(),
         }
     }
 
@@ -510,6 +529,7 @@ mod tests {
                 path: "/".into(),
             },
             meta,
+            label: String::new(),
         }
     }
     fn meta(name: &str, cc: &str) -> ServerMeta {

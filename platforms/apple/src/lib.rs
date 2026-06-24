@@ -3,7 +3,7 @@
 //!
 //! The Swift provider resolves the `utun` file descriptor (KVC `socket.fileDescriptor` → a
 //! public-symbol fd-scan fallback — the WireGuard/sing-box/Mullvad/Proton/lantern technique) and
-//! calls `spark_tunnel_run(fd, mtu)`; `spark_tunnel_stop()` on teardown. Packets never cross the
+//! calls `spark_tunnel_run(fd, mtu, config, data_dir)`; `spark_tunnel_stop()` on teardown. Packets never cross the
 //! FFI — Rust owns the fd and runs the whole netstack ([`spark_core::fd_tunnel`]), so the C ABI
 //! is control-only (mirroring the Android JNI). One core surface, two thin platform adapters.
 //!
@@ -27,32 +27,121 @@ mod ffi {
     /// The caller (the Swift NE provider) hands ownership of `fd` to native for the tunnel's
     /// lifetime; the core closes it on stop.
     ///
-    /// `config` selects the data path (dual-mode for back-compat):
-    /// - null/empty → forward each flow **directly** (no tunnel).
-    /// - a bare `host:port` IP literal → tunnel every flow through that **plain spark relay**.
-    /// - any other string → a full **TOML [`Config`]** (AnyTLS + handshake shaping + gambit, …),
-    ///   parsed via [`Config::from_toml_str`]; the whole transport stack applies (ADR 0006). AnyTLS
-    ///   requires the staticlib to be built with the `anytls` feature (the macOS slice is), else the
-    ///   core returns -1.
+    /// `config` selects the data path. The daemon owns config acquisition: on the `config-fetch`
+    /// slice (macOS/darwin), the **absence** of an explicit config is the signal to self-fetch — the
+    /// fetch must bypass the tunnel, and only the extension can guarantee that (its own dials egress
+    /// the real interface by design), so the decision lives here, not in the controlling app.
+    /// - null/empty (or the explicit `"lantern-api"` sentinel) → **self-fetch** config from the
+    ///   Lantern config-new API into `data_dir` (the app-group container path) and run the tunnel
+    ///   from it, refreshing in the background. This is the default on the `config-fetch` slice;
+    ///   `data_dir` must be non-null (it caches `device_id` and the fetched config). On the iOS slice
+    ///   (no `config-fetch`), null/empty falls back to **direct** and an explicit `"lantern-api"`
+    ///   returns -1 (self-fetch unsupported there).
+    /// - a bare `host:port` IP literal → tunnel every flow through that **plain spark relay**
+    ///   (explicit override, e.g. dev/testing).
+    /// - any other string → a full **[`Config`]** — spark's native TOML *or* a Lantern
+    ///   `config_raw.json` payload (auto-detected), parsed via [`Config::from_config_str`]; the whole
+    ///   transport stack applies (ADR 0006). AnyTLS requires the staticlib to be built with the
+    ///   `anytls` feature (the macOS slice is), else the core returns -1.
     ///
-    /// A non-null, non-empty `config` that is neither a `SocketAddr` nor valid TOML returns -1.
+    /// A non-null, non-empty explicit `config` that is neither a `SocketAddr` nor a valid
+    /// TOML / `config_raw.json` config returns -1.
     ///
     /// # Safety
     /// `config` must be null or a valid NUL-terminated C string for the duration of this call.
+    /// `data_dir` must be null or a valid NUL-terminated C string for the duration of this call.
     #[no_mangle]
     pub unsafe extern "C" fn spark_tunnel_run(
         fd: c_int,
         mtu: c_int,
         config: *const c_char,
+        data_dir: *const c_char,
     ) -> c_int {
+        // Resolve the config string once (a null pointer means "no explicit config"). A *non-null*
+        // pointer that isn't valid UTF-8 is a caller error — an explicit config was provided but is
+        // garbage — so fail closed (close the transferred fd, return -1) rather than silently
+        // collapsing it to "" (which would wrongly self-fetch on the config-fetch slice, or go
+        // direct on the iOS slice).
         // SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
+        let cfg_str = if config.is_null() {
+            ""
+        } else {
+            match unsafe { CStr::from_ptr(config) }.to_str() {
+                Ok(s) => s.trim(),
+                Err(_) => {
+                    spark_core::fd_tunnel::abandon_fd(fd);
+                    return -1;
+                }
+            }
+        };
+
+        // Daemon-owned config fetch: on the `config-fetch` slice (darwin only — it pulls the BoringSSL
+        // build), the *absence* of an explicit config — or the explicit `"lantern-api"` sentinel —
+        // means "fetch the pool from the Lantern config-new API myself, then run from it and refresh
+        // in the background". The controlling app no longer decides this; the daemon does, because the
+        // fetch must bypass the tunnel and only the extension can guarantee that.
+        #[cfg(feature = "config-fetch")]
+        if cfg_str.is_empty() || cfg_str == "lantern-api" {
+            // SAFETY: caller contract — `data_dir` is null or a valid NUL-terminated C string.
+            let dir = if data_dir.is_null() {
+                None
+            } else {
+                // Trim and reject empty: an empty path would cache into the process cwd.
+                unsafe { CStr::from_ptr(data_dir) }
+                    .to_str()
+                    .ok()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from)
+            };
+            return match dir {
+                Some(d) => spark_core::fd_tunnel::run_fd_lantern_api(fd, mtu as u16, d),
+                None => {
+                    // fetch mode needs a data dir to cache device_id + config; close the fd
+                    // (ownership was transferred) + unblock any waiter, then fail the connect.
+                    spark_core::fd_tunnel::abandon_fd(fd);
+                    -1
+                }
+            };
+        }
+
+        // iOS slice (no `config-fetch`): self-fetch is unsupported. An empty config falls through to
+        // `build_config` (→ direct), but the explicit `"lantern-api"` sentinel can't be served here.
+        #[cfg(not(feature = "config-fetch"))]
+        if cfg_str == "lantern-api" {
+            let _ = data_dir; // unused without config-fetch
+            spark_core::fd_tunnel::abandon_fd(fd); // close fd + unblock waiter; can't serve it here
+            return -1;
+        }
+
+        // An explicit config (host:port / TOML / config_raw.json), or — on the iOS slice — empty =
+        // direct. SAFETY: caller contract — `config` is null or a valid NUL-terminated C string.
         let config = match unsafe { build_config(config) } {
             Some(c) => c,
-            None => return -1,
+            None => {
+                // Unparseable config: close the (transferred) fd, unblock any waiter, and fail.
+                spark_core::fd_tunnel::abandon_fd(fd);
+                return -1;
+            }
         };
         // `run_fd` is the shared run + status-code convention; the core builds the transport from the
         // config (direct / plain relay / AnyTLS) and owns the netstack.
         spark_core::fd_tunnel::run_fd(fd, mtu as u16, config)
+    }
+
+    /// Bridge the core's `tracing` events to a host logger (the Swift provider logs them via
+    /// `os_log`, so the fetch path shows up in Console.app). Without this, the NE has no `tracing`
+    /// subscriber and every core `info!`/`warn!` is dropped. Call once at startup, before
+    /// [`spark_tunnel_run`], so cold-start fetch logs are captured. `cb` is the sink (`level`,
+    /// NUL-terminated UTF-8 `msg` valid only for the call); a null `cb` is ignored. Idempotent — a
+    /// second call (the `tracing` global default is already set) is a no-op.
+    #[no_mangle]
+    pub extern "C" fn spark_set_log_callback(
+        cb: Option<extern "C" fn(level: u8, msg: *const c_char)>,
+    ) {
+        if let Some(cb) = cb {
+            spark_core::log_bridge::install(cb);
+        }
     }
 
     /// Resolve the C `config` arg into a [`Config`]: null/empty → direct; a bare `host:port` → the
@@ -86,6 +175,24 @@ mod ffi {
     #[no_mangle]
     pub extern "C" fn spark_tunnel_stop() {
         spark_core::fd_tunnel::stop();
+    }
+
+    /// Mark the tunnel **connecting** before the data path is up. The provider calls this
+    /// **synchronously** in `startTunnel` *before* spawning the `spark_tunnel_run` worker, so a
+    /// later [`spark_tunnel_wait_ready`] can't observe a stale ready/down state from a prior connect.
+    #[no_mangle]
+    pub extern "C" fn spark_tunnel_mark_connecting() {
+        spark_core::fd_tunnel::mark_connecting();
+    }
+
+    /// Block until the running tunnel's data path is actually servicing the fd, returning `0`; or `-1`
+    /// if it doesn't come up within `timeout_ms` or it stops first. The provider gates
+    /// `completionHandler(nil)` on a `0` here so it never reports the tunnel up while `lantern-api`
+    /// cold-start is still fetching config (which would blackhole traffic); on `-1` it should
+    /// [`spark_tunnel_stop`] and fail the connection instead.
+    #[no_mangle]
+    pub extern "C" fn spark_tunnel_wait_ready(timeout_ms: c_int) -> c_int {
+        spark_core::fd_tunnel::wait_ready(timeout_ms.max(0) as u32)
     }
 
     /// The active server pool as the UI's JSON array (see `spark.h` / `fd_tunnel::servers_json`), or

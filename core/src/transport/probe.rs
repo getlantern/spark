@@ -140,12 +140,17 @@ where
     }
     // Status line: "HTTP/1.1 204 ...". Parse the 3-digit code.
     let line = String::from_utf8_lossy(&buf);
-    let code = line
+    let code = parse_status_code(&line)?;
+    Ok((200..300).contains(&code))
+}
+
+/// Parse the HTTP status code from a status line like `HTTP/1.1 204 No Content`.
+pub(crate) fn parse_status_code(status_line: &str) -> io::Result<u16> {
+    status_line
         .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse::<u16>().ok())
-        .ok_or_else(|| io::Error::other(format!("malformed HTTP status line: {line:?}")))?;
-    Ok((200..300).contains(&code))
+        .ok_or_else(|| io::Error::other(format!("malformed HTTP status line: {status_line:?}")))
 }
 
 /// Result of probing one server through its transport.
@@ -174,20 +179,52 @@ pub async fn probe(
     transport: &Arc<dyn Transport>,
     url: &CallbackUrl,
     deadline: Duration,
+    label: &str,
 ) -> ProbeOutcome {
     let started = Instant::now();
-    match tokio::time::timeout(deadline, probe_inner(transport, url)).await {
+    match tokio::time::timeout(deadline, probe_inner(transport, url, label)).await {
         Ok(Ok(true)) => ProbeOutcome {
             latency: started.elapsed(),
             healthy: true,
         },
-        _ => ProbeOutcome::unhealthy(),
+        // Log *why* a member is unhealthy — otherwise the reason (a protocol handshake failure, a
+        // non-2xx callback, a timeout) is invisible and only the `healthy=N` count survives. `label`
+        // identifies the pool member so a mixed-protocol pool's failures are attributable.
+        Ok(Ok(false)) => {
+            tracing::debug!(
+                server = label,
+                "probe: callback returned non-2xx (unhealthy)"
+            );
+            ProbeOutcome::unhealthy()
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(server = label, error = %e, "probe: dial/handshake failed (unhealthy)");
+            ProbeOutcome::unhealthy()
+        }
+        Err(_) => {
+            tracing::debug!(server = label, ?deadline, "probe: timed out (unhealthy)");
+            ProbeOutcome::unhealthy()
+        }
     }
 }
 
-async fn probe_inner(transport: &Arc<dyn Transport>, url: &CallbackUrl) -> io::Result<bool> {
+async fn probe_inner(
+    transport: &Arc<dyn Transport>,
+    url: &CallbackUrl,
+    label: &str,
+) -> io::Result<bool> {
     let target = resolve_callback_addr(&url.host, url.port).await?;
+    let dialing = Instant::now();
     let stream = transport.dial(target).await?;
+    // This line is the diagnostic seam: if a probe times out and we saw "transport dialed" for that
+    // server, the handshake completed and the callback GET stalled; if we did NOT, the dial itself
+    // (the protocol handshake) hung — i.e. spark couldn't establish to that server. `dial_ms` times
+    // just the establish.
+    tracing::debug!(
+        server = label,
+        dial_ms = dialing.elapsed().as_millis() as u64,
+        "probe: transport dialed; running callback"
+    );
     if url.tls {
         let tls = tls_wrap(stream, &url.host).await?;
         http_get_ok(tls, url).await
@@ -215,7 +252,10 @@ async fn resolve_callback_addr(host: &str, port: u16) -> io::Result<std::net::So
 /// `anytls` — the callback TLS rides inside the tunnel, so a plain connector (no Chrome
 /// mimicry) is fine.
 #[cfg(feature = "anytls")]
-async fn tls_wrap<S>(stream: S, host: &str) -> io::Result<impl AsyncRead + AsyncWrite + Unpin>
+pub(crate) async fn tls_wrap<S>(
+    stream: S,
+    host: &str,
+) -> io::Result<impl AsyncRead + AsyncWrite + Unpin>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -232,7 +272,7 @@ where
 }
 
 #[cfg(not(feature = "anytls"))]
-async fn tls_wrap<S>(_stream: S, _host: &str) -> io::Result<S>
+pub(crate) async fn tls_wrap<S>(_stream: S, _host: &str) -> io::Result<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -281,7 +321,7 @@ mod tests {
             port: 80,
             path: "/".into(),
         };
-        let out = probe(&t, &url, Duration::from_secs(5)).await;
+        let out = probe(&t, &url, Duration::from_secs(5), "test").await;
         assert!(out.healthy);
     }
 
@@ -296,7 +336,11 @@ mod tests {
             port: 80,
             path: "/".into(),
         };
-        assert!(!probe(&t, &url, Duration::from_secs(5)).await.healthy);
+        assert!(
+            !probe(&t, &url, Duration::from_secs(5), "test")
+                .await
+                .healthy
+        );
     }
 
     #[tokio::test]
@@ -457,7 +501,7 @@ mod tests {
         let url = CallbackUrl::parse(&raw).expect("valid SPARK_LIVE_CALLBACK");
         let direct: std::sync::Arc<dyn crate::transport::Transport> =
             std::sync::Arc::new(crate::transport::DirectTransport::new(None));
-        let out = probe(&direct, &url, std::time::Duration::from_secs(8)).await;
+        let out = probe(&direct, &url, std::time::Duration::from_secs(8), "live").await;
         assert!(out.healthy, "live callback {raw} should be healthy");
     }
 }

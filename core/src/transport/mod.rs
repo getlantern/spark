@@ -87,6 +87,10 @@ pub mod select;
 #[cfg(feature = "shadowsocks")]
 pub mod shadowsocks;
 pub mod tcp_tunnel;
+/// UDP-over-TCP v2 (sing-box UoT) framing, shared by the stream transports that tunnel UDP over a
+/// reliable stream (AnyTLS, Samizdat). Gated on those transports so the base build pulls no UoT code.
+#[cfg(any(feature = "anytls", feature = "samizdat"))]
+pub(crate) mod uot;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.
 #[cfg(feature = "wasm-transport")]
@@ -168,8 +172,59 @@ pub(crate) fn build_one(
     }
 }
 
+/// Build one pool [`Member`] (callback + transport) from a [`ServerEntry`], or an error describing why
+/// it can't be built: a missing callback, an https callback without the `anytls` TLS backend, or a
+/// transport whose feature isn't compiled in. `build_selecting` skips members that error so one
+/// un-buildable entry doesn't sink the whole pool.
+#[cfg(feature = "multi-server")]
+fn build_member(
+    entry: &crate::config::ServerEntry,
+    config: &Config,
+    protector: Option<&SocketProtector>,
+    wire: &WirePlan,
+) -> io::Result<crate::transport::select::Member> {
+    use crate::transport::probe::CallbackUrl;
+    use crate::transport::select::Member;
+    let raw = entry
+        .callback_url
+        .as_deref()
+        .or(config.transport.callback_url.as_deref())
+        .ok_or_else(|| io::Error::other("requires a callback_url (global or per-entry)"))?;
+    let callback = CallbackUrl::parse(raw)?;
+    if callback.tls && !cfg!(feature = "anytls") {
+        return Err(io::Error::other(format!(
+            "https callback `{raw}` requires the `anytls` feature (TLS backend); use an http:// callback or build with anytls"
+        )));
+    }
+    let (transport, udp) = build_one(&entry.spec, protector, wire)?;
+    let meta = ServerMeta {
+        name: entry.name.clone(),
+        country: entry.country.clone(),
+        country_code: entry.country_code.clone(),
+        city: entry.city.clone(),
+    };
+    Ok(Member::new(transport, udp, callback, meta).with_label(spec_label(&entry.spec)))
+}
+
+/// A diagnostic label for a pool member: `"{protocol} {server-addr}"` (e.g.
+/// `samizdat 161.33.223.26:31464`), so probe/selection logs name the protocol *and* the exact server.
+#[cfg(feature = "multi-server")]
+fn spec_label(spec: &crate::config::ServerSpec) -> String {
+    use crate::config::ServerSpec;
+    match spec {
+        ServerSpec::Anytls(c) => format!("anytls {}", c.server),
+        ServerSpec::Samizdat(c) => format!("samizdat {}", c.server),
+        ServerSpec::Shadowsocks(c) => format!("shadowsocks {}", c.server),
+        ServerSpec::Hysteria2(c) => format!("hysteria2 {}", c.server),
+        ServerSpec::Wasm(c) => format!("wasm {}", c.server),
+        ServerSpec::Tunnel(c) => format!("tunnel {}", c.server),
+    }
+}
+
 /// Build a `SelectingTransport` over `config.transport.servers`. Each entry's callback URL is its
-/// per-entry override or the global `transport.callback_url`; the pool needs at least one callback.
+/// per-entry override or the global `transport.callback_url`. Members that can't be built (notably a
+/// transport whose feature isn't compiled in) are **skipped** — a partial pool still connects, and a
+/// future protocol in a fetched config can't brick the tunnel; the pool must end up non-empty.
 #[cfg(feature = "multi-server")]
 #[allow(clippy::type_complexity)]
 fn build_selecting(
@@ -180,32 +235,28 @@ fn build_selecting(
     Arc<dyn UdpTransport>,
     Option<Arc<dyn PoolControl>>,
 )> {
-    use crate::transport::probe::CallbackUrl;
-    use crate::transport::select::{Member, SelectingTransport};
+    use crate::transport::select::SelectingTransport;
     let wire = wire_plan_from_config(&config.transport.shaping);
     let mut members = Vec::with_capacity(config.transport.servers.len());
+    let mut skipped: Vec<String> = Vec::new();
     for entry in &config.transport.servers {
-        let raw = entry
-            .callback_url
-            .as_deref()
-            .or(config.transport.callback_url.as_deref())
-            .ok_or_else(|| {
-                io::Error::other("transport.servers requires a callback_url (global or per-entry)")
-            })?;
-        let callback = CallbackUrl::parse(raw)?;
-        if callback.tls && !cfg!(feature = "anytls") {
-            return Err(io::Error::other(format!(
-                "https callback `{raw}` requires the `anytls` feature (TLS backend); use an http:// callback or build with anytls"
-            )));
+        // Skip (don't propagate) a member we can't build, mirroring the config_raw adapter skipping
+        // outbounds it can't represent. The reason is logged and aggregated into the empty-pool error.
+        match build_member(entry, config, protector.as_ref(), &wire) {
+            Ok(m) => members.push(m),
+            Err(e) => {
+                let who = entry.name.as_deref().unwrap_or("<unnamed>");
+                tracing::warn!(server = who, error = %e, "transport.servers: skipping un-buildable pool member");
+                skipped.push(format!("{who}: {e}"));
+            }
         }
-        let (transport, udp) = build_one(&entry.spec, protector.as_ref(), &wire)?;
-        let meta = ServerMeta {
-            name: entry.name.clone(),
-            country: entry.country.clone(),
-            country_code: entry.country_code.clone(),
-            city: entry.city.clone(),
-        };
-        members.push(Member::new(transport, udp, callback, meta));
+    }
+    if members.is_empty() {
+        return Err(io::Error::other(format!(
+            "transport.servers: no buildable pool members ({} skipped — {})",
+            skipped.len(),
+            skipped.join("; ")
+        )));
     }
     // Fail-open fallback (issue #11): when the whole pool is unhealthy the selecting transport dials
     // directly instead of blackholing. Built with the same protector as the members, so the direct
@@ -1130,6 +1181,41 @@ mod pool_config_tests {
             .err()
             .expect("https callback without anytls must error");
         assert!(err.to_string().contains("anytls"), "error was: {err}");
+    }
+
+    #[cfg(not(feature = "anytls"))]
+    #[tokio::test]
+    async fn pool_skips_unbuildable_member_and_keeps_the_buildable_one() {
+        // Member A has an https callback (un-buildable without anytls — stands in for any member whose
+        // transport feature isn't compiled in); member B uses the global http callback (buildable).
+        // The pool must drop A and build with B rather than failing entirely (the old behavior).
+        let mk = |name: &str, cb: Option<&str>| ServerEntry {
+            spec: ServerSpec::Tunnel(TunnelConfig {
+                server: "1.2.3.4:443".parse().unwrap(),
+                sni: None,
+            }),
+            callback_url: cb.map(str::to_owned),
+            name: Some(name.to_owned()),
+            country: None,
+            country_code: None,
+            city: None,
+            latitude: None,
+            longitude: None,
+        };
+        let cfg = Config {
+            transport: TransportConfig {
+                servers: vec![
+                    mk("A-https", Some("https://bad.example/x")),
+                    mk("B-http", None),
+                ],
+                callback_url: Some("http://127.0.0.1:80/ok".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        from_config(&cfg).expect(
+            "pool should build from the buildable member after skipping the un-buildable one",
+        );
     }
 
     #[tokio::test]

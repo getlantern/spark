@@ -23,6 +23,21 @@ anytls = ["spark-core/anytls"]
 # `multi-server` so the NE provider can run a `[[transport.servers]]` pool (probe + rank + failover).
 # boring-free (flint-dial happy-eyeballs), enabled on the macOS slice alongside anytls.
 multi-server = ["spark-core/multi-server"]
+# Self-fetch config from the Lantern config-new API (docs/config-new-fetch-design.md): enable
+# spark-core's `config-fetch` so the NE provider can run `lantern-api` mode. Pulls `anytls` (BoringSSL)
+# + `multi-server`, so it's the macOS/darwin slice only — like `anytls`.
+config-fetch = ["spark-core/config-fetch"]
+# Un-poisoned bootstrap DNS so hostname proxy servers in a fetched (or file) `config_raw.json` pool
+# resolve before dialing; without it a hostname member is a hard error at connect. Darwin slice only
+# (it pulls the boring connector). Benefits both `lantern-api` mode and the config_raw file path.
+bootstrap-dns = ["spark-core/bootstrap-dns"]
+# Transports the Lantern free-tier config-new pool actually uses. The config_raw adapter always maps
+# these outbounds into the pool, so without the matching transport feature the tunnel hard-fails at
+# build time ("transport.X is configured but spark was built without the `X` feature") on the first
+# such server. Enabled on the darwin slice alongside `config-fetch` so a fetched prod pool runs.
+samizdat = ["spark-core/samizdat"]
+shadowsocks = ["spark-core/shadowsocks"]
+hysteria2 = ["spark-core/hysteria2"]
 
 [dependencies]
 spark-core = { path = "../../core" }
