@@ -265,12 +265,32 @@ pub(crate) async fn tls_wrap<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let config = fetch_connector()?
+        .configure()
+        .map_err(|e| io::Error::other(format!("probe tls: {e}")))?;
+    tokio_boring2::connect(config, host, stream)
+        .await
+        .map_err(|e| io::Error::other(format!("probe tls handshake: {e}")))
+}
+
+/// The shared client connector, **built once and reused** — its `.configure()` mints a fresh
+/// per-connection config, so a single connector serves every call. Building it parses the full Mozilla
+/// root set (~150 certs) into the X509 store, so it must NOT be rebuilt per call: `tls_wrap` runs in
+/// the multi-server probe loop, where re-parsing the roots each probe would waste CPU/battery. See
+/// [`tls_wrap`] for why the roots are loaded (BoringSSL has no built-in store; Android/iOS don't
+/// resolve it via the default verify paths). A cert that fails to parse is skipped, not fatal.
+#[cfg(feature = "anytls")]
+fn fetch_connector() -> io::Result<&'static boring2::ssl::SslConnector> {
     use boring2::ssl::{SslConnector, SslMethod};
     use boring2::x509::X509;
+    use std::sync::OnceLock;
+
+    static CONNECTOR: OnceLock<SslConnector> = OnceLock::new();
+    if let Some(c) = CONNECTOR.get() {
+        return Ok(c);
+    }
     let mut builder = SslConnector::builder(SslMethod::tls_client())
         .map_err(|e| io::Error::other(format!("probe tls: {e}")))?;
-    // Add the Mozilla roots so cert verification works where BoringSSL's default paths find no OS
-    // store (Android/iOS). A cert that fails to parse is skipped rather than failing the whole set.
     {
         let store = builder.cert_store_mut();
         for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
@@ -279,13 +299,9 @@ where
             }
         }
     }
-    let config = builder
-        .build()
-        .configure()
-        .map_err(|e| io::Error::other(format!("probe tls: {e}")))?;
-    tokio_boring2::connect(config, host, stream)
-        .await
-        .map_err(|e| io::Error::other(format!("probe tls handshake: {e}")))
+    // A concurrent caller may have initialized it between the `get` above and here; `get_or_init`
+    // keeps the first and drops our spare builder result.
+    Ok(CONNECTOR.get_or_init(|| builder.build()))
 }
 
 #[cfg(not(feature = "anytls"))]

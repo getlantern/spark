@@ -20,11 +20,12 @@
 > fingerprint "iOS Lantern is fetching its config" differently from macOS. The cost is a BoringSSL
 > cross-compile for the iOS/Android targets — paid once in the build scripts, not in the fetch code.
 
-## 1. Why it's darwin-only today
+## 1. Why it was darwin-only (the starting point)
 
-Two independent reasons. The first is a build constraint; the second is just missing wiring.
+> This section describes the state **before this PR**; §2 onward is what the PR changed. Two
+> independent reasons held it to darwin: the first a build constraint, the second just missing wiring.
 
-### 1a. The fetch's TLS is BoringSSL-bound, and BoringSSL is only built for the macOS slice
+### 1a. The fetch's TLS is BoringSSL-bound, and BoringSSL was only built for the macOS slice
 
 `core::config::fetch` is **100 % portable Rust** — `mod.rs`/`user.rs`/`http.rs`/`request.rs`/`cache.rs`
 have zero OS deps. The one byte-level dependency is the HTTPS handshake; both POST sites call
@@ -42,23 +43,24 @@ config-fetch  →  anytls  →  boring2 + tokio-boring2 + flint-tls/boring   (Bo
               →  multi-server  →  flint-dial            (no boring of its own)
 ```
 
-`core/Cargo.toml:110`: `config-fetch = ["anytls", "multi-server"]`. The build scripts only compile
-BoringSSL for the **darwin** slice (`platforms/apple/build-xcframework.sh:22` enables `anytls` for
-`*darwin*` only; `platforms/android` enables only `system-stack`), so `config-fetch` is off for iOS,
-Android, and desktop. **We keep this TLS** (decision above) and simply build BoringSSL for the other
-targets too.
+`core/Cargo.toml:110`: `config-fetch = ["anytls", "multi-server"]`. **Before this PR** the build
+scripts only compiled BoringSSL for the **darwin** slice (`build-xcframework.sh` enabled `anytls` for
+`*darwin*` only; `platforms/android` enabled only `system-stack`), so `config-fetch` was off for iOS,
+Android, and desktop. **We keep this TLS** (decision above) and now build BoringSSL for the other
+targets too (§3).
 
-### 1b. Only the Apple shim invokes the self-fetch path
+### 1b. Only the Apple shim invoked the self-fetch path
 
-The self-fetch *dispatch* is inline in the Apple C-ABI (`platforms/apple/src/lib.rs:54-130`):
-null/empty/`"lantern-api"` → `run_fd_lantern_api`; `IP:port` (IP literal) → relay; else → `Config::from_config_str`.
+The self-fetch *dispatch* was inline in the Apple C-ABI: null/empty/`"lantern-api"` →
+`run_fd_lantern_api`; `IP:port` (IP literal) → relay; else → `Config::from_config_str`.
 
-- **Android** (`platforms/android/src/lib.rs:37-55`): `nativeRun(fd, mtu, addr, prefix, system_stack)`
-  calls `fd_tunnel::run_fd` directly. **No config string, no data_dir, no self-fetch.**
+- **Android**: `nativeRun(fd, mtu, addr, prefix, system_stack)` called `fd_tunnel::run_fd` directly.
+  **No config string, no data_dir, no self-fetch.**
 - **Desktop service/CLI** (`service/`, `cli/`): no `config-fetch` / `lantern-api` reference; config
-  comes from a TOML file via the IPC control plane.
+  came from a TOML file via the IPC control plane.
 
-So even once BoringSSL builds everywhere, three of four shims still wouldn't *call* the fetch.
+So even once BoringSSL built everywhere, three of four shims still wouldn't have *called* the fetch —
+hence Part B (§4).
 
 ## 2. Goal & shape
 
