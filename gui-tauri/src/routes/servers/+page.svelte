@@ -4,7 +4,7 @@
   import { MockBackend, type SparkBackend, type ServerInfo } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { selectedIndex } from "$lib/selection";
-  import { flagEmoji, serverLabel, latencyClass } from "$lib/format";
+  import { flagEmoji, serverLabel, latencyClass, protocolLabel } from "$lib/format";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -103,7 +103,10 @@
       <button class="row" class:sel={$selectedIndex === null} onclick={() => choose(null)}>
         {#if current}
           <span class="flag">{flagEmoji(current.countryCode)}</span>
-          <div class="meta"><div class="name">{serverLabel(current)}</div></div>
+          <div class="meta">
+            <div class="name">{serverLabel(current)}</div>
+            {#if current.protocol}<div class="sub">{protocolLabel(current.protocol)}</div>{/if}
+          </div>
           {#if current.latencyMs != null}
             <span class="pill {latencyClass(current.latencyMs)}">{current.latencyMs} ms</span>
           {/if}
@@ -127,7 +130,10 @@
             {@const s = g.members[0]}
             <button class="row" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index)}>
               <span class="flag">{flagEmoji(s.countryCode)}</span>
-              <div class="meta"><div class="name">{serverLabel(s)}</div></div>
+              <div class="meta">
+                <div class="name">{serverLabel(s)}</div>
+                {#if s.protocol}<div class="sub">{protocolLabel(s.protocol)}</div>{/if}
+              </div>
               {#if s.latencyMs != null}
                 <span class="pill {latencyClass(s.latencyMs)}">{s.latencyMs} ms</span>
               {/if}
@@ -146,7 +152,10 @@
             {#if expanded.has(g.country)}
               {#each g.members as s (s.index)}
                 <button class="row city" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index)}>
-                  <div class="meta"><div class="name">{s.city || serverLabel(s)}</div></div>
+                  <div class="meta">
+                    <div class="name">{s.city || serverLabel(s)}</div>
+                    {#if s.protocol}<div class="sub">{protocolLabel(s.protocol)}</div>{/if}
+                  </div>
                   {#if s.latencyMs != null}
                     <span class="pill {latencyClass(s.latencyMs)}">{s.latencyMs} ms</span>
                   {/if}
@@ -205,6 +214,10 @@
   .name {
     font-size: 15px; font-weight: 600; color: var(--text-primary);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sub {
+    margin-top: 2px; font-size: 12px; font-weight: 500; color: var(--text-tertiary);
+    letter-spacing: 0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .flag { font-size: 21px; line-height: 1; }
 

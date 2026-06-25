@@ -26,6 +26,9 @@ pub(crate) struct Member {
     /// Human label for probe/diagnostic logs: `"{protocol} {server-addr}"` (e.g.
     /// `samizdat 161.33.223.26:31464`). Set by the builder; empty for the bare `new` used in tests.
     pub(crate) label: String,
+    /// Transport protocol kind for the UI (e.g. `"hysteria2"`). Set by the builder; empty for the
+    /// bare `new` used in tests.
+    pub(crate) protocol: String,
 }
 
 impl Member {
@@ -41,12 +44,19 @@ impl Member {
             callback,
             meta,
             label: String::new(),
+            protocol: String::new(),
         }
     }
 
     /// Set the diagnostic label (builder-style), used by `build_member`.
     pub(crate) fn with_label(mut self, label: String) -> Self {
         self.label = label;
+        self
+    }
+
+    /// Set the UI protocol kind (builder-style), used by `build_member`.
+    pub(crate) fn with_protocol(mut self, protocol: String) -> Self {
+        self.protocol = protocol;
         self
     }
 }
@@ -174,6 +184,7 @@ impl SelectingTransport {
                 MemberStatus {
                     index: i,
                     meta: self.members[i].meta.clone(),
+                    protocol: self.members[i].protocol.clone(),
                     // Latency is only meaningful for a healthy probe (`latency` is `Duration::MAX`
                     // on failure), so report `None` unless healthy.
                     latency_ms: outcome
@@ -423,6 +434,7 @@ mod tests {
             },
             meta: ServerMeta::default(),
             label: String::new(),
+            protocol: String::new(),
         }
     }
 
@@ -530,6 +542,7 @@ mod tests {
             },
             meta,
             label: String::new(),
+            protocol: String::new(),
         }
     }
     fn meta(name: &str, cc: &str) -> ServerMeta {

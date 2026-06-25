@@ -20,6 +20,21 @@ export function serverLabel(s: ServerInfo): string {
   return s.name || "Server";
 }
 
+/// Canonical display name for a transport protocol kind (e.g. "hysteria2" → "Hysteria2",
+/// "anytls" → "AnyTLS"). Unknown kinds pass through unchanged; null/empty → "".
+export function protocolLabel(protocol?: string | null): string {
+  if (!protocol) return "";
+  const known: Record<string, string> = {
+    anytls: "AnyTLS",
+    samizdat: "Samizdat",
+    shadowsocks: "Shadowsocks",
+    hysteria2: "Hysteria2",
+    wasm: "WASM",
+    tunnel: "Tunnel",
+  };
+  return known[protocol.toLowerCase()] ?? protocol;
+}
+
 /// Latency band for the pill color. `null`/unhealthy → "slow" (worst, so it never looks fast).
 export function latencyClass(latencyMs?: number | null): "good" | "amber" | "slow" {
   if (latencyMs == null) return "slow";

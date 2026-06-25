@@ -25,6 +25,8 @@ export interface ServerInfo {
   country?: string | null;
   countryCode?: string | null;
   city?: string | null;
+  /** Transport protocol kind, e.g. "hysteria2"; shown beneath the location. */
+  protocol?: string | null;
   /** Last measured probe latency in ms; null if never measured / unhealthy. */
   latencyMs?: number | null;
   healthy: boolean;
@@ -52,12 +54,12 @@ export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
   // fully usable at `npm run dev`; the TauriBackend reads the real pool over the NE channel.
   private readonly pool: ServerInfo[] = [
-    { index: 0, name: "sfo3", country: "United States", countryCode: "US", city: "San Francisco", latencyMs: 19, healthy: true, isCurrent: false },
-    { index: 1, name: "nyc3", country: "United States", countryCode: "US", city: "New York", latencyMs: 71, healthy: true, isCurrent: false },
-    { index: 2, name: "lon1", country: "United Kingdom", countryCode: "GB", city: "London", latencyMs: 138, healthy: true, isCurrent: false },
-    { index: 3, name: "fra1", country: "Germany", countryCode: "DE", city: "Frankfurt", latencyMs: 149, healthy: true, isCurrent: false },
-    { index: 4, name: "sgp1", country: "Singapore", countryCode: "SG", city: "Singapore", latencyMs: 189, healthy: true, isCurrent: false },
-    { index: 5, name: "blr1", country: "India", countryCode: "IN", city: "Bangalore", latencyMs: 212, healthy: true, isCurrent: false },
+    { index: 0, name: "sfo3", country: "United States", countryCode: "US", city: "San Francisco", protocol: "hysteria2", latencyMs: 19, healthy: true, isCurrent: false },
+    { index: 1, name: "nyc3", country: "United States", countryCode: "US", city: "New York", protocol: "samizdat", latencyMs: 71, healthy: true, isCurrent: false },
+    { index: 2, name: "lon1", country: "United Kingdom", countryCode: "GB", city: "London", protocol: "shadowsocks", latencyMs: 138, healthy: true, isCurrent: false },
+    { index: 3, name: "fra1", country: "Germany", countryCode: "DE", city: "Frankfurt", protocol: "hysteria2", latencyMs: 149, healthy: true, isCurrent: false },
+    { index: 4, name: "sgp1", country: "Singapore", countryCode: "SG", city: "Singapore", protocol: "samizdat", latencyMs: 189, healthy: true, isCurrent: false },
+    { index: 5, name: "blr1", country: "India", countryCode: "IN", city: "Bangalore", protocol: "anytls", latencyMs: 212, healthy: true, isCurrent: false },
   ];
   // Manual pin; null = auto (fastest healthy member is current).
   private pinned: number | null = null;
