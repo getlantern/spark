@@ -106,7 +106,11 @@ impl FrontedMeekTransport {
     async fn open_tunnel(&self) -> io::Result<MeekPollConn> {
         // Get a fronted connection: the last-known-good front first (single dial,
         // no race), else race the full candidate pool and cache the winner.
-        let cached = self.cached.lock().unwrap().clone();
+        let cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let conn = 'conn: {
             if let Some(front) = cached {
                 if let Ok(c) = dial_fronts_alpn(
@@ -124,7 +128,7 @@ impl FrontedMeekTransport {
                 .await
                 .map_err(io::Error::other)?;
             if let Some(win) = fronts.get(c.candidate_index) {
-                *self.cached.lock().unwrap() = Some(win.clone());
+                *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(win.clone());
             }
             c
         };

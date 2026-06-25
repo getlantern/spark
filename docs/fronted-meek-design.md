@@ -87,8 +87,7 @@ h2 — without configuration. `http_version = "h1"`/`"h2"` forces it when needed
 # Or explicit:
 [transport.fronted_meek]
 meek_host = "meek.dsa.akamai.getiantem.org"
-country_code = "ir"     # SNI selection
-http_version = "h1"     # or "h2"
+http_version = "h1"     # or "h2"; omit to auto-select from the negotiated ALPN
 ```
 
 ## Validation

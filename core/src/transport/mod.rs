@@ -243,10 +243,11 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         ServerSpec::Hysteria2(c) => format!("hysteria2 {}", c.server),
         ServerSpec::FrontedMeek(c) => format!(
             "fronted-meek {}",
-            if c.meek_host.is_empty() {
+            // Match FrontedMeekTransport::new, which treats whitespace-only as unset.
+            if c.meek_host.trim().is_empty() {
                 "meek.dsa.akamai.getiantem.org"
             } else {
-                &c.meek_host
+                c.meek_host.trim()
             }
         ),
         ServerSpec::Wasm(c) => format!("wasm {}", c.server),
