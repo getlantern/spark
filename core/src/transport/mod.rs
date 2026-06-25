@@ -203,7 +203,24 @@ fn build_member(
         country_code: entry.country_code.clone(),
         city: entry.city.clone(),
     };
-    Ok(Member::new(transport, udp, callback, meta).with_label(spec_label(&entry.spec)))
+    Ok(Member::new(transport, udp, callback, meta)
+        .with_label(spec_label(&entry.spec))
+        .with_protocol(spec_kind(&entry.spec).to_string()))
+}
+
+/// The bare protocol kind for a spec, e.g. `"hysteria2"` — surfaced to the UI as a per-member
+/// subtitle. (`spec_label` is the same kind plus the server address, for diagnostic logs.)
+#[cfg(feature = "multi-server")]
+fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
+    use crate::config::ServerSpec;
+    match spec {
+        ServerSpec::Anytls(_) => "anytls",
+        ServerSpec::Samizdat(_) => "samizdat",
+        ServerSpec::Shadowsocks(_) => "shadowsocks",
+        ServerSpec::Hysteria2(_) => "hysteria2",
+        ServerSpec::Wasm(_) => "wasm",
+        ServerSpec::Tunnel(_) => "tunnel",
+    }
 }
 
 /// A diagnostic label for a pool member: `"{protocol} {server-addr}"` (e.g.
@@ -725,6 +742,8 @@ pub struct MemberStatus {
     pub index: usize,
     /// Display metadata (country/city/flag/name).
     pub meta: ServerMeta,
+    /// Transport protocol kind, e.g. `"hysteria2"` — shown beneath the location in the UI.
+    pub protocol: String,
     /// Last measured probe latency in whole milliseconds; `None` if never measured or unhealthy.
     pub latency_ms: Option<u64>,
     /// Whether the last probe found this member healthy.
@@ -782,12 +801,13 @@ pub fn snapshot_to_json(members: &[MemberStatus]) -> String {
         .iter()
         .map(|m| {
             format!(
-                "{{\"index\":{},\"name\":{},\"country\":{},\"countryCode\":{},\"city\":{},\"latencyMs\":{},\"healthy\":{},\"isCurrent\":{}}}",
+                "{{\"index\":{},\"name\":{},\"country\":{},\"countryCode\":{},\"city\":{},\"protocol\":\"{}\",\"latencyMs\":{},\"healthy\":{},\"isCurrent\":{}}}",
                 m.index,
                 json_opt_str(&m.meta.name),
                 json_opt_str(&m.meta.country),
                 json_opt_str(&m.meta.country_code),
                 json_opt_str(&m.meta.city),
+                json_escape(&m.protocol),
                 m.latency_ms
                     .map(|l| l.to_string())
                     .unwrap_or_else(|| "null".to_string()),
@@ -925,6 +945,7 @@ mod snapshot_json_tests {
                     country_code: Some("US".into()),
                     city: Some("San Francisco".into()),
                 },
+                protocol: "hysteria2".into(),
                 latency_ms: Some(19),
                 healthy: true,
                 is_current: true,
@@ -932,6 +953,7 @@ mod snapshot_json_tests {
             MemberStatus {
                 index: 1,
                 meta: ServerMeta::default(),
+                protocol: "samizdat".into(),
                 latency_ms: None,
                 healthy: false,
                 is_current: false,
@@ -939,8 +961,8 @@ mod snapshot_json_tests {
         ];
         assert_eq!(
             snapshot_to_json(&members),
-            "[{\"index\":0,\"name\":\"sfo3\",\"country\":\"United States\",\"countryCode\":\"US\",\"city\":\"San Francisco\",\"latencyMs\":19,\"healthy\":true,\"isCurrent\":true},\
-             {\"index\":1,\"name\":null,\"country\":null,\"countryCode\":null,\"city\":null,\"latencyMs\":null,\"healthy\":false,\"isCurrent\":false}]"
+            "[{\"index\":0,\"name\":\"sfo3\",\"country\":\"United States\",\"countryCode\":\"US\",\"city\":\"San Francisco\",\"protocol\":\"hysteria2\",\"latencyMs\":19,\"healthy\":true,\"isCurrent\":true},\
+             {\"index\":1,\"name\":null,\"country\":null,\"countryCode\":null,\"city\":null,\"protocol\":\"samizdat\",\"latencyMs\":null,\"healthy\":false,\"isCurrent\":false}]"
         );
     }
 
@@ -952,6 +974,7 @@ mod snapshot_json_tests {
                 city: Some("a\"b\\c".into()),
                 ..Default::default()
             },
+            protocol: "samizdat".into(),
             latency_ms: None,
             healthy: false,
             is_current: false,
