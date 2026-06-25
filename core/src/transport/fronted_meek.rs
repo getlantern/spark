@@ -74,9 +74,9 @@ impl FrontedMeekTransport {
                 .bytes()
                 .any(|b| b <= 0x20 || b >= 0x7f || matches!(b, b'/' | b'?' | b'#' | b'@' | b'\\'))
             {
-                return Err(io::Error::other(
-                    "transport.fronted_meek.meek_host contains invalid characters",
-                ));
+                return Err(io::Error::other(format!(
+                    "transport.fronted_meek.meek_host {trimmed:?} contains invalid characters"
+                )));
             }
             trimmed.to_owned()
         };
