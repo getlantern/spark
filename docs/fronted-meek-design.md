@@ -56,14 +56,14 @@ request/response is safe to retry without gap or duplication. A 256 KB body cap 
 negotiated via `X-Meek-Max-Body`.
 
 Both transports are implemented: **h2** (a fresh multiplexed stream per poll) and
-**h1** (one keep-alive connection, sequential POSTs). The deployed Akamai path
-negotiates **HTTP/1.1**, so that is the default; `http_version = "h2"` selects h2
-for endpoints whose CDN re-originates h2.
+**h1** (one keep-alive connection, sequential POSTs).
 
-**Follow-up:** `flint_dial::TlsStream` doesn't surface the negotiated ALPN (it's a
-blanket-impl trait), so the client can't yet auto-select h1/h2 per connection.
-Threading the selected ALPN out of the boring stream would let each front use its
-negotiated protocol; until then the protocol is chosen by config (default h1).
+**The protocol is auto-selected per connection from the negotiated ALPN.** The
+boring Chrome dial offers `h2,http/1.1`; flint surfaces which the edge picked
+(`flint_dial::AlpnStream` / `dial_alpn`), and `open_meek_poll_auto` sets the meek
+HTTP version to h2 iff the edge negotiated h2, else h1. So the deployed Akamai
+endpoint (which negotiates HTTP/1.1) gets h1 and a CDN that re-originates h2 gets
+h2 — without configuration. `http_version = "h1"`/`"h2"` forces it when needed.
 
 ## Where it lives
 
@@ -103,13 +103,11 @@ http_version = "h1"     # or "h2"
 
 ## Known limitations / follow-ups
 
-1. **ALPN auto-select** (above) — pick h1/h2 per connection from the negotiated
-   protocol instead of from config.
-2. **Socket protection:** the front TLS dial happens inside `flint`, which doesn't
+1. **Socket protection:** the front TLS dial happens inside `flint`, which doesn't
    take spark's `SocketProtector`, so meek's own dials aren't pinned to the
    physical interface yet (a routing-loop risk on macOS forwarding).
-3. **Cache persistence:** the winning front is cached in-memory per process;
+2. **Cache persistence:** the winning front is cached in-memory per process;
    persisting it (and a working-front list) across restarts would cut cold-start
    latency, mirroring radiance's on-disk scanner cache.
-4. **Build patch:** spark's workspace `Cargo.toml` currently `[patch]`es flint to a
-   local checkout. Replace with a flint rev bump once the flint branch merges.
+3. **flint dep:** spark pins flint to a `fisk/fronted-meek` commit; bump to a
+   `main` rev once flint#10 merges.

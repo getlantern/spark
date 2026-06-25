@@ -27,8 +27,8 @@ use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
 use flint_fronted::{
-    dial_fronts, open_meek_poll, scanner, socks5, DialOptions, MaterializedFront, MeekHttpVersion,
-    MeekPollConfig, MeekPollConn, SystemResolver,
+    dial_fronts_alpn, open_meek_poll, open_meek_poll_auto, scanner, socks5, DialOptions,
+    MaterializedFront, MeekHttpVersion, MeekPollConfig, MeekPollConn, SystemResolver,
 };
 
 use super::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
@@ -39,7 +39,9 @@ const DEFAULT_MEEK_HOST: &str = "meek.dsa.akamai.getiantem.org";
 
 pub struct FrontedMeekTransport {
     meek_host: String,
-    http_version: MeekHttpVersion,
+    /// `None` = auto-select per connection from the negotiated ALPN; `Some` =
+    /// forced by config.
+    http_version: Option<MeekHttpVersion>,
     seed: u64,
     /// Scanned-once candidate fronts (Akamai/CloudFront/Aliyun), built lazily.
     fronts: OnceCell<Vec<MaterializedFront>>,
@@ -49,13 +51,14 @@ pub struct FrontedMeekTransport {
 
 impl FrontedMeekTransport {
     pub fn new(cfg: &FrontedMeekConfig) -> io::Result<Self> {
-        // Default h1: the deployed meek endpoint (Akamai DSA → Caddy) negotiates
-        // HTTP/1.1 with a Chrome ALPN. h2 is selectable for endpoints behind a CDN
-        // that re-originates h2. (Proper per-connection ALPN auto-select needs a
-        // flint-dial change to surface the negotiated protocol — a follow-up.)
+        // Unset → auto-select per connection from the ALPN the edge negotiates
+        // (the boring Chrome dial offers h2,http/1.1). The deployed Akamai endpoint
+        // negotiates h1; a CDN that re-originates h2 gets h2 — automatically.
+        // "h1"/"h2" force it.
         let http_version = match cfg.http_version.as_deref() {
-            None | Some("h1") => MeekHttpVersion::H1,
-            Some("h2") => MeekHttpVersion::H2,
+            None => None,
+            Some("h1") => Some(MeekHttpVersion::H1),
+            Some("h2") => Some(MeekHttpVersion::H2),
             Some(other) => {
                 return Err(io::Error::other(format!(
                     "transport.fronted_meek.http_version {other:?} invalid (want \"h1\" or \"h2\")"
@@ -77,9 +80,8 @@ impl FrontedMeekTransport {
     }
 
     fn meek_cfg(&self) -> MeekPollConfig {
-        let mut m = MeekPollConfig::new(self.meek_host.clone());
-        m.http_version = self.http_version;
-        m
+        // http_version is set per-connection in open_tunnel (forced or auto from ALPN).
+        MeekPollConfig::new(self.meek_host.clone())
     }
 
     /// Lazily scan once: Akamai local-DNS + CloudFront/Aliyun prefix sampling →
@@ -102,28 +104,40 @@ impl FrontedMeekTransport {
     }
 
     async fn open_tunnel(&self) -> io::Result<MeekPollConn> {
-        // Last-known-good front first: a single dial, no race.
+        // Get a fronted connection: the last-known-good front first (single dial,
+        // no race), else race the full candidate pool and cache the winner.
         let cached = self.cached.lock().unwrap().clone();
-        if let Some(front) = cached {
-            if let Ok(conn) = dial_fronts(
-                &self.meek_host,
-                std::slice::from_ref(&front),
-                DialOptions::default(),
-            )
-            .await
-            {
-                return open_meek_poll(conn, self.meek_cfg());
+        let conn = 'conn: {
+            if let Some(front) = cached {
+                if let Ok(c) = dial_fronts_alpn(
+                    &self.meek_host,
+                    std::slice::from_ref(&front),
+                    DialOptions::default(),
+                )
+                .await
+                {
+                    break 'conn c;
+                }
             }
+            let fronts = self.candidate_fronts().await;
+            let c = dial_fronts_alpn(&self.meek_host, fronts, DialOptions::default())
+                .await
+                .map_err(io::Error::other)?;
+            if let Some(win) = fronts.get(c.candidate_index) {
+                *self.cached.lock().unwrap() = Some(win.clone());
+            }
+            c
+        };
+        // Open meek, picking the HTTP version: forced by config, or auto-detected
+        // from the ALPN the winning edge negotiated.
+        match self.http_version {
+            Some(v) => {
+                let mut m = self.meek_cfg();
+                m.http_version = v;
+                open_meek_poll(conn, m)
+            }
+            None => open_meek_poll_auto(conn, self.meek_cfg()),
         }
-        // Race the full candidate pool; cache the winner.
-        let fronts = self.candidate_fronts().await;
-        let conn = dial_fronts(&self.meek_host, fronts, DialOptions::default())
-            .await
-            .map_err(io::Error::other)?;
-        if let Some(win) = fronts.get(conn.candidate_index) {
-            *self.cached.lock().unwrap() = Some(win.clone());
-        }
-        open_meek_poll(conn, self.meek_cfg())
     }
 }
 
