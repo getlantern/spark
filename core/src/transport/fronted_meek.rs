@@ -171,3 +171,60 @@ fn seed_now() -> u64 {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x9E37_79B9_7F4A_7C15)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(http_version: Option<&str>) -> FrontedMeekConfig {
+        FrontedMeekConfig {
+            http_version: http_version.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_host_defaults_and_unset_version_is_auto() {
+        let t = FrontedMeekTransport::new(&cfg(None)).expect("new");
+        assert_eq!(t.meek_host, DEFAULT_MEEK_HOST);
+        assert_eq!(t.http_version, None); // auto-select from ALPN
+    }
+
+    #[test]
+    fn http_version_is_parsed_or_rejected() {
+        assert_eq!(
+            FrontedMeekTransport::new(&cfg(Some("h1")))
+                .unwrap()
+                .http_version,
+            Some(MeekHttpVersion::H1)
+        );
+        assert_eq!(
+            FrontedMeekTransport::new(&cfg(Some("h2")))
+                .unwrap()
+                .http_version,
+            Some(MeekHttpVersion::H2)
+        );
+        assert!(FrontedMeekTransport::new(&cfg(Some("h3"))).is_err());
+    }
+
+    #[test]
+    fn explicit_host_is_kept() {
+        let t = FrontedMeekTransport::new(&FrontedMeekConfig {
+            meek_host: "meek.example.org".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(t.meek_host, "meek.example.org");
+    }
+
+    #[tokio::test]
+    async fn udp_is_unsupported() {
+        let t = FrontedMeekTransport::new(&cfg(None)).unwrap();
+        // The Ok variant (BoxedPacketSink, BoxedPacketSource) isn't Debug, so match
+        // rather than expect_err.
+        match t.dial_udp("1.2.3.4:53".parse().unwrap()).await {
+            Ok(_) => panic!("UDP must be unsupported"),
+            Err(e) => assert!(e.to_string().contains("UDP")),
+        }
+    }
+}

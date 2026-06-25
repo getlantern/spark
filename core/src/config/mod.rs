@@ -355,10 +355,8 @@ pub struct FrontedMeekConfig {
     /// (`meek.dsa.akamai.getiantem.org`).
     #[serde(default)]
     pub meek_host: String,
-    /// Country code for SNI selection in the fronted config (empty → "default").
-    #[serde(default)]
-    pub country_code: String,
-    /// `"h2"` (default) or `"h1"` over the fronted TLS connection.
+    /// HTTP version over the fronted TLS connection. Unset → auto-select from the
+    /// ALPN the edge negotiates (recommended). `"h1"` or `"h2"` force it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version: Option<String>,
 }
@@ -782,6 +780,7 @@ mod tests {
                     samizdat: None,
                     shadowsocks: None,
                     hysteria2: None,
+                    fronted_meek: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),

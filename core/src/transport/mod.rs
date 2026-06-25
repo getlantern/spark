@@ -67,12 +67,15 @@ pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
+/// Domain-fronted meek polling transport (Shir-o-Khorshid CDN-fronting, no MITM).
+/// Behind the `fronted-meek` feature so the base build pulls neither flint-fronted
+/// nor its boring dial path. See docs/fronted-meek-design.md.
+#[cfg(feature = "fronted-meek")]
+pub mod fronted_meek;
 /// Hysteria 2 transport (ADR 0010): a QUIC client (quinn/rustls-ring) interoperable with deployed
 /// apernet/hysteria servers, with Salamander+Gecko obfuscation. Behind the `hysteria2` feature so the
 /// base build pulls no QUIC stack.
 #[cfg(feature = "hysteria2")]
-#[cfg(feature = "fronted-meek")]
-pub mod fronted_meek;
 pub mod hysteria2;
 pub mod probe;
 /// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
@@ -238,7 +241,14 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         ServerSpec::Samizdat(c) => format!("samizdat {}", c.server),
         ServerSpec::Shadowsocks(c) => format!("shadowsocks {}", c.server),
         ServerSpec::Hysteria2(c) => format!("hysteria2 {}", c.server),
-        ServerSpec::FrontedMeek(c) => format!("fronted-meek {}", c.meek_host),
+        ServerSpec::FrontedMeek(c) => format!(
+            "fronted-meek {}",
+            if c.meek_host.is_empty() {
+                "meek.dsa.akamai.getiantem.org"
+            } else {
+                &c.meek_host
+            }
+        ),
         ServerSpec::Wasm(c) => format!("wasm {}", c.server),
         ServerSpec::Tunnel(c) => format!("tunnel {}", c.server),
     }
