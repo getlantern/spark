@@ -67,7 +67,17 @@ impl FrontedMeekTransport {
         let meek_host = if trimmed.is_empty() {
             DEFAULT_FRONTED_MEEK_HOST.to_owned()
         } else {
-            // Use the trimmed host — leading/trailing whitespace would break DNS/HTTP.
+            // A bare authority (host[:port]); reject embedded whitespace/control or
+            // authority-breaking chars that would corrupt the DNS name / Host header
+            // (fail fast here rather than at dial time). Mirrors flint's check.
+            if trimmed
+                .bytes()
+                .any(|b| b <= 0x20 || b >= 0x7f || matches!(b, b'/' | b'?' | b'#' | b'@' | b'\\'))
+            {
+                return Err(io::Error::other(
+                    "transport.fronted_meek.meek_host contains invalid characters",
+                ));
+            }
             trimmed.to_owned()
         };
         Ok(Self {
