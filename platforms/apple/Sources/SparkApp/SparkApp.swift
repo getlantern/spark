@@ -95,10 +95,11 @@ final class Vpn {
     private let providerBundleId = "org.getlantern.spark.tunnel"
 
     /// Run the tunnel in `lantern-api` mode — the NE extension self-fetches its server pool from the
-    /// Lantern config-new API and caches it in the app-group container. Default-off so existing
-    /// direct/relay behavior is unchanged; flip to `true` to validate the fetch path on device
-    /// (pair with `SPARK_CONFIG_ENV=staging` in the extension's environment to hit staging).
-    private let useLanternApi = false
+    /// Lantern config-new API and caches it in the app-group container. Default-on: validated on
+    /// device (the fetched pool probes, ranks, and carries traffic across samizdat + hysteria2). Set
+    /// `false` to fall back to the legacy direct/relay config. Pair with `SPARK_CONFIG_ENV=staging`
+    /// in the extension's environment to hit staging instead of prod.
+    private let useLanternApi = true
 
     func connect() {
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in
