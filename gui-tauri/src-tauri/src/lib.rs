@@ -633,6 +633,12 @@ fn spark_servers() -> Result<Vec<config::ServerInfo>, String> {
                 } else {
                     for l in &live {
                         if let Some(s) = list.get_mut(l.index) {
+                            // Protocol is identity metadata, not a live measurement: only fill it
+                            // when the snapshot knows it, so a partial snapshot can't blank an
+                            // already-known subtitle.
+                            if let Some(p) = &l.protocol {
+                                s.protocol = Some(p.clone());
+                            }
                             s.latency_ms = l.latency_ms;
                             s.healthy = l.healthy;
                             s.is_current = l.is_current;
