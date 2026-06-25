@@ -35,6 +35,8 @@ pub struct ServerInfo {
     pub country_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
     #[serde(rename = "latencyMs", default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
     #[serde(default)]
@@ -83,6 +85,8 @@ pub fn servers_from_config() -> Vec<ServerInfo> {
             country: e.country,
             country_code: e.country_code,
             city: e.city,
+            // Protocol isn't in the static TOML entry; the live overlay fills it on connect.
+            protocol: None,
             latency_ms: None,
             healthy: false,
             is_current: false,
@@ -112,7 +116,21 @@ fn resolve_with(baked: Option<String>, proxy: Option<String>) -> Option<String> 
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_with;
+    use super::{resolve_with, ServerInfo};
+
+    // The live snapshot JSON (core `snapshot_to_json`) carries `protocol`; ServerInfo must keep it
+    // through the deserialize → reserialize hop to the frontend (it was silently dropped before).
+    #[test]
+    fn server_info_preserves_protocol_from_live_json() {
+        let json = r#"[{"index":0,"country":"United States","city":"Phoenix","protocol":"hysteria2","latencyMs":502,"healthy":true,"isCurrent":true}]"#;
+        let parsed: Vec<ServerInfo> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed[0].protocol.as_deref(), Some("hysteria2"));
+        let reserialized = serde_json::to_string(&parsed[0]).unwrap();
+        assert!(
+            reserialized.contains(r#""protocol":"hysteria2""#),
+            "protocol must survive reserialization to the frontend: {reserialized}"
+        );
+    }
 
     #[test]
     fn baked_wins_over_proxy() {

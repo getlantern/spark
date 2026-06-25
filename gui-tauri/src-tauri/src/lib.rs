@@ -633,6 +633,7 @@ fn spark_servers() -> Result<Vec<config::ServerInfo>, String> {
                 } else {
                     for l in &live {
                         if let Some(s) = list.get_mut(l.index) {
+                            s.protocol = l.protocol.clone();
                             s.latency_ms = l.latency_ms;
                             s.healthy = l.healthy;
                             s.is_current = l.is_current;
