@@ -1,6 +1,7 @@
 //! The `config-new` request: the JSON body (`ConfigRequest`) + the HTTP request bytes (request line,
 //! `X-Lantern-*` + conditional headers, body). Mirrors radiance `common.ConfigRequest` + headers.go.
 
+use flint_fronted::OneshotRequest;
 use serde::Serialize;
 
 /// Free-tier `config-new` request body. `user_id`/`pro_token`/`wg_public_key` are intentionally
@@ -169,6 +170,42 @@ pub fn build_request_bytes(
     Ok(out)
 }
 
+/// Build the one-shot fronted request for the h2 path — the same `X-Lantern-*` + conditional headers
+/// and JSON body as [`build_request_bytes`], minus the bits h2 owns: the `Host`/`:authority` is set
+/// from the connection's fronted host, and `Content-Length`/`Connection` are managed by h2, so they
+/// are omitted here. Kept in lockstep with [`build_request_bytes`] so the direct and fronted requests
+/// carry identical application headers.
+pub fn build_oneshot_request(
+    path: &str,
+    req: &ConfigRequest,
+    cond: &Conditional,
+) -> Result<OneshotRequest, serde_json::Error> {
+    let body = serde_json::to_vec(req)?;
+    let mut out = OneshotRequest::post(path.to_owned(), body)
+        .header("X-Lantern-App", APP_NAME)
+        .header("X-Lantern-App-Version", req.version.clone())
+        .header("X-Lantern-Version", req.version.clone())
+        .header("X-Lantern-Platform", req.platform.clone())
+        .header(
+            "X-Lantern-Device-Id",
+            header_safe(&req.device_id).into_owned(),
+        )
+        .header("X-Lantern-User-Id", header_safe(&req.user_id).into_owned())
+        .header(
+            "X-Lantern-Time-Zone",
+            header_safe(&req.time_zone).into_owned(),
+        )
+        .header("Content-Type", "application/json")
+        .header("Cache-Control", "no-cache");
+    if let Some(etag) = &cond.etag {
+        out = out.header("If-None-Match", header_safe(etag).into_owned());
+    }
+    if let Some(lm) = &cond.last_modified {
+        out = out.header("If-Modified-Since", header_safe(lm).into_owned());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +329,46 @@ mod tests {
         );
         assert!(s.contains("X-Lantern-Device-Id: devX-Evil: 1\r\n"));
         assert!(s.contains("X-Lantern-Time-Zone: ZoneX-Evil2: 2\r\n"));
+    }
+
+    #[test]
+    fn oneshot_request_carries_lantern_headers_and_body() {
+        // The fronted one-shot request must carry the same application headers + JSON body as the
+        // direct HTTP/1.1 request, minus the h2-owned Host/Content-Length/Connection.
+        let mut req = ConfigRequest::new("dev123".into());
+        req.user_id = "42".into();
+        let cond = Conditional {
+            etag: Some("\"v1\"".into()),
+            last_modified: None,
+        };
+        let os = build_oneshot_request("/api/v1/config-new", &req, &cond).unwrap();
+        assert_eq!(os.method.as_str(), "POST");
+        assert_eq!(os.path, "/api/v1/config-new");
+        let has = |k: &str, v: &str| os.headers.iter().any(|(hk, hv)| hk == k && hv == v);
+        assert!(has("X-Lantern-App", "lantern"));
+        assert!(has("X-Lantern-Device-Id", "dev123"));
+        assert!(has("X-Lantern-User-Id", "42"));
+        assert!(has("Content-Type", "application/json"));
+        assert!(has("If-None-Match", "\"v1\""));
+        // No Host/Content-Length/Connection — h2 owns those.
+        assert!(!os
+            .headers
+            .iter()
+            .any(|(k, _)| ["host", "content-length", "connection"]
+                .contains(&k.to_ascii_lowercase().as_str())));
+        assert_eq!(
+            os.body.as_ref(),
+            serde_json::to_vec(&req).unwrap().as_slice()
+        );
+    }
+
+    #[test]
+    fn oneshot_request_omits_conditional_headers_when_absent() {
+        let req = ConfigRequest::new("d".into());
+        let os = build_oneshot_request("/p", &req, &Conditional::default()).unwrap();
+        assert!(!os
+            .headers
+            .iter()
+            .any(|(k, _)| k == "If-None-Match" || k == "If-Modified-Since"));
     }
 }

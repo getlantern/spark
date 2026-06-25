@@ -1,6 +1,8 @@
 //! Fetch Spark's server pool from the Lantern `config-new` API (design:
-//! `docs/config-new-fetch-design.md`). Direct TLS (no fronting yet), free-tier, disk-cached, fed into
-//! [`crate::config::Config::from_config_str`]. Trust is TLS — no signature, matching radiance.
+//! `docs/config-new-fetch-design.md`). A direct plain-TLS request is raced against a domain-fronted
+//! one-shot request (flint-fronted, embedded `fronted.yaml.gz`) for censored cold-start resilience;
+//! free-tier, disk-cached, fed into [`crate::config::Config::from_config_str`]. Trust is TLS — no
+//! signature, matching radiance.
 
 mod cache;
 mod http;
@@ -46,12 +48,16 @@ pub fn poll_after(server_seconds: u64) -> Duration {
 
 use crate::config::fetch::cache::CacheMeta;
 use crate::config::fetch::http::post_collect;
-use crate::config::fetch::request::{build_request_bytes, Conditional, ConfigRequest};
+use crate::config::fetch::request::{
+    build_oneshot_request, build_request_bytes, Conditional, ConfigRequest,
+};
 use crate::config::Config;
 use crate::transport::{probe::tls_wrap, DirectTransport, Transport};
+use flint_fronted::{FlintDnsResolver, FrontedTlsDialer};
 
-/// Where to fetch from. v1 is direct TLS to either host (no fronting — that's a later milestone):
-/// prod is `df.iantem.io`, staging is `api.staging.iantem.io`.
+/// Where to fetch from: prod is `df.iantem.io`, staging is `api.staging.iantem.io`. The host is
+/// dialed both directly and (for prod, which the embedded fronted config maps) through the fronting
+/// providers; the fetch races the two.
 #[derive(Debug, Clone)]
 pub struct FetchEnv {
     pub host: String,
@@ -104,43 +110,126 @@ pub enum FetchOutcome {
     NotModified,
 }
 
-/// Do one direct fetch: dial the API host directly, TLS-wrap, POST the request, collect the response.
-/// Errors on any network/TLS/HTTP failure (the loop turns errors into backoff-retries). The whole
-/// network sequence is bounded by `ATTEMPT_TIMEOUT` — `post_collect` reads to EOF with no internal
-/// timeout, so a hung/keep-alive server would otherwise stall the refresh loop forever instead of
-/// backing off. Timeout ⇒ error ⇒ backoff-retry, which is the offline-resilience contract.
+/// One config-new fetch: race a direct plain-TLS request against the fronted one-shot request (when a
+/// fronted dialer is available), returning the first usable outcome. Direct typically wins on an open
+/// network; the fronted path wins where the direct dial is censored (DNS poisoning / SNI block / RST).
 async fn fetch_once(
     env: &FetchEnv,
     device_id: &str,
     creds: &user::Creds,
     cond: &Conditional,
+    fronted: Option<&FrontedTlsDialer<FlintDnsResolver>>,
 ) -> std::io::Result<FetchOutcome> {
     const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
     let mut req = ConfigRequest::new(device_id.to_string());
     req.user_id = creds.user_id.clone();
     req.pro_token = creds.pro_token.clone();
+
+    let direct = fetch_once_direct(env, &req, cond, ATTEMPT_TIMEOUT);
+    match fronted {
+        None => direct.await,
+        Some(dialer) => {
+            first_ok(
+                direct,
+                fetch_once_fronted(env, &req, cond, dialer, ATTEMPT_TIMEOUT),
+            )
+            .await
+        }
+    }
+}
+
+/// The direct path: dial the API host directly, plain-boring TLS-wrap, send the HTTP/1.1 request, and
+/// collect the response. Bounded by `timeout` (`post_collect` reads to EOF with no internal timeout).
+async fn fetch_once_direct(
+    env: &FetchEnv,
+    req: &ConfigRequest,
+    cond: &Conditional,
+    timeout: Duration,
+) -> std::io::Result<FetchOutcome> {
     let bytes =
-        build_request_bytes(&env.host, &env.path, &req, cond).map_err(std::io::Error::other)?;
-    let resp = tokio::time::timeout(ATTEMPT_TIMEOUT, async {
+        build_request_bytes(&env.host, &env.path, req, cond).map_err(std::io::Error::other)?;
+    let resp = tokio::time::timeout(timeout, async {
         let addr = resolve(&env.host, env.port).await?;
         let stream = DirectTransport::new(None).dial(addr).await?;
         let tls = tls_wrap(stream, &env.host).await?;
         post_collect(tls, &bytes, 4 * 1024 * 1024).await
     })
     .await
-    .map_err(|_| std::io::Error::other("config-new fetch timed out"))??;
-    match resp.status {
+    .map_err(|_| std::io::Error::other("config-new direct fetch timed out"))??;
+    map_response(resp.status, resp.etag, resp.body)
+}
+
+/// The fronted path: run the config-new request as a one-shot h2 request over `dialer` (the fronting
+/// providers from the embedded config). The provider addresses its fronted host and presents a decoy
+/// SNI; the response is mapped exactly like the direct path. Bounded by `timeout`.
+async fn fetch_once_fronted(
+    env: &FetchEnv,
+    req: &ConfigRequest,
+    cond: &Conditional,
+    dialer: &FrontedTlsDialer<FlintDnsResolver>,
+    timeout: Duration,
+) -> std::io::Result<FetchOutcome> {
+    let oneshot = build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
+    let resp = tokio::time::timeout(timeout, dialer.request(&env.host, &oneshot))
+        .await
+        .map_err(|_| std::io::Error::other("config-new fronted fetch timed out"))?
+        .map_err(std::io::Error::other)?;
+    let etag = resp.header("etag").map(ToOwned::to_owned);
+    map_response(resp.status, etag, resp.body)
+}
+
+/// Map an HTTP status + `ETag` + body into a [`FetchOutcome`] (shared by the direct and fronted paths).
+fn map_response(status: u16, etag: Option<String>, body: Vec<u8>) -> std::io::Result<FetchOutcome> {
+    match status {
         200 | 206 => {
-            let raw = String::from_utf8(resp.body)
+            let raw = String::from_utf8(body)
                 .map_err(|_| std::io::Error::other("config-new body not UTF-8"))?;
-            Ok(FetchOutcome::New {
-                raw,
-                etag: resp.etag,
-            })
+            Ok(FetchOutcome::New { raw, etag })
         }
         304 | 204 => Ok(FetchOutcome::NotModified),
         other => Err(std::io::Error::other(format!("config-new HTTP {other}"))),
+    }
+}
+
+/// Race two fetch attempts, returning the first that succeeds; if both fail, return the last error.
+/// Unlike a plain `select!`, an early *failure* doesn't end the race — the other attempt still runs,
+/// so a censored direct dial doesn't pre-empt the fronted one (and vice versa).
+async fn first_ok<A, B>(a: A, b: B) -> std::io::Result<FetchOutcome>
+where
+    A: std::future::Future<Output = std::io::Result<FetchOutcome>>,
+    B: std::future::Future<Output = std::io::Result<FetchOutcome>>,
+{
+    tokio::pin!(a, b);
+    let (mut a_done, mut b_done) = (false, false);
+    let mut last_err = None;
+    while !(a_done && b_done) {
+        tokio::select! {
+            ra = &mut a, if !a_done => match ra {
+                Ok(outcome) => return Ok(outcome),
+                Err(e) => { a_done = true; last_err = Some(e); }
+            },
+            rb = &mut b, if !b_done => match rb {
+                Ok(outcome) => return Ok(outcome),
+                Err(e) => { b_done = true; last_err = Some(e); }
+            },
+        }
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("no config-new fetch attempt ran")))
+}
+
+/// Build the fronted dialer from the embedded `domainfront/fronted.yaml.gz` (aliyun/akamai/cloudfront).
+/// `None` (→ direct-only fetch) only if the embedded config fails to parse, which shouldn't happen.
+/// The empty country code selects each provider's `default` SNI bucket (e.g. aliyun's `img.alicdn.com`),
+/// matching the production client, which passes no country code.
+fn fronted_dialer() -> Option<FrontedTlsDialer<FlintDnsResolver>> {
+    const FRONTED_CONFIG_GZ: &[u8] = include_bytes!("fronted.yaml.gz");
+    match FrontedTlsDialer::from_gzipped_config_with_default_dns(FRONTED_CONFIG_GZ, "", "") {
+        Ok(dialer) => Some(dialer),
+        Err(e) => {
+            tracing::warn!(err = %e, "config-fetch: embedded fronted config failed to parse; direct-only");
+            None
+        }
     }
 }
 
@@ -175,7 +264,9 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
         Err(e) => return cached_or_err(cached, e),
     };
     // Unconditional fetch (no If-None-Match): every connect pulls the current config and overwrites.
-    match fetch_once(env, &did, &creds, &Conditional::default()).await {
+    // Race the direct request against the fronted one for censored cold-start resilience.
+    let fronted = fronted_dialer();
+    match fetch_once(env, &did, &creds, &Conditional::default(), fronted.as_ref()).await {
         Ok(FetchOutcome::New { raw, etag }) => {
             let cfg = Config::from_config_str(&raw).map_err(std::io::Error::other)?;
             let meta = CacheMeta {
@@ -262,9 +353,11 @@ where
         ),
         None => (Conditional::default(), poll_after(0)),
     };
+    // Build the fronted dialer once (it parses the embedded config) and reuse it across the loop.
+    let fronted = fronted_dialer();
     let mut fail = 0u32;
     while !should_stop() {
-        match fetch_once(env, &did, &creds, &cond).await {
+        match fetch_once(env, &did, &creds, &cond, fronted.as_ref()).await {
             Ok(FetchOutcome::New { raw, etag }) => match Config::from_config_str(&raw) {
                 Ok(cfg) => {
                     fail = 0;
@@ -412,5 +505,46 @@ mod tests {
             !cfg.transport.servers.is_empty(),
             "staging should return a pool"
         );
+    }
+
+    /// Live: fetch **prod** config-new strictly through the domain-fronted path (aliyun/akamai/
+    /// cloudfront via the embedded config), bypassing the direct dial — the end-to-end check that the
+    /// Alibaba (and other) fronting actually reaches the origin. Run:
+    /// `cargo test -p spark-core --features config-fetch -- --ignored live_fronted_fetch`
+    #[tokio::test]
+    #[ignore = "live: needs network + reachable fronting edges"]
+    async fn live_fronted_fetch() {
+        let dialer = fronted_dialer().expect("embedded fronted config parses");
+        let env = FetchEnv::prod();
+        let dir = std::env::temp_dir().join("spark-live-fronted");
+        let _ = std::fs::remove_dir_all(&dir);
+        let did = device_id(&dir).unwrap();
+        // Creds are minted via the (direct) user-create pre-step; the config fetch itself is fronted.
+        let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
+            .await
+            .expect("user-create");
+        let mut req = ConfigRequest::new(did);
+        req.user_id = creds.user_id.clone();
+        req.pro_token = creds.pro_token.clone();
+        let outcome = fetch_once_fronted(
+            &env,
+            &req,
+            &Conditional::default(),
+            &dialer,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("fronted config-new fetch");
+        match outcome {
+            FetchOutcome::New { raw, .. } => {
+                let cfg = Config::from_config_str(&raw).expect("adapt fronted config");
+                assert!(
+                    !cfg.transport.servers.is_empty(),
+                    "fronted fetch should return a pool"
+                );
+            }
+            FetchOutcome::NotModified => panic!("unexpected 304 on unconditional fronted fetch"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
