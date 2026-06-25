@@ -24,7 +24,8 @@ use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
 use crate::config::{
-    AnytlsConfig, Config, Hysteria2Config, SamizdatConfig, ShadowsocksConfig, WasmConfig,
+    AnytlsConfig, Config, FrontedMeekConfig, Hysteria2Config, SamizdatConfig, ShadowsocksConfig,
+    WasmConfig,
 };
 use crate::net::SocketProtector;
 use crate::BoxedStream;
@@ -70,6 +71,8 @@ pub mod discovery;
 /// apernet/hysteria servers, with Salamander+Gecko obfuscation. Behind the `hysteria2` feature so the
 /// base build pulls no QUIC stack.
 #[cfg(feature = "hysteria2")]
+#[cfg(feature = "fronted-meek")]
+pub mod fronted_meek;
 pub mod hysteria2;
 pub mod probe;
 /// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
@@ -156,6 +159,7 @@ pub(crate) fn build_one(
         ServerSpec::Samizdat(cfg) => samizdat_transport(cfg, protector.cloned(), wire.clone()),
         ServerSpec::Shadowsocks(cfg) => shadowsocks_transport(cfg, protector.cloned()),
         ServerSpec::Hysteria2(cfg) => hysteria2_transport(cfg, protector.cloned()),
+        ServerSpec::FrontedMeek(cfg) => fronted_meek_transport(cfg),
         ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
         ServerSpec::Tunnel(cfg) => {
             let server = cfg.server.socket_addr()?;
@@ -218,6 +222,7 @@ fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
         ServerSpec::Samizdat(_) => "samizdat",
         ServerSpec::Shadowsocks(_) => "shadowsocks",
         ServerSpec::Hysteria2(_) => "hysteria2",
+        ServerSpec::FrontedMeek(_) => "fronted-meek",
         ServerSpec::Wasm(_) => "wasm",
         ServerSpec::Tunnel(_) => "tunnel",
     }
@@ -233,6 +238,7 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         ServerSpec::Samizdat(c) => format!("samizdat {}", c.server),
         ServerSpec::Shadowsocks(c) => format!("shadowsocks {}", c.server),
         ServerSpec::Hysteria2(c) => format!("hysteria2 {}", c.server),
+        ServerSpec::FrontedMeek(c) => format!("fronted-meek {}", c.meek_host),
         ServerSpec::Wasm(c) => format!("wasm {}", c.server),
         ServerSpec::Tunnel(c) => format!("tunnel {}", c.server),
     }
@@ -366,6 +372,12 @@ pub fn from_config_with_control(
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
         let (tcp, udp) = wasm_transport(wasm, protector)?;
+        return Ok((tcp, udp, None));
+    }
+    // Domain-fronted meek polling (Shir-o-Khorshid CDN-fronting): self-bootstrapping
+    // (scans CDN edges from the user's own network), above the plain `server` tunnel.
+    if let Some(fm) = &config.transport.fronted_meek {
+        let (tcp, udp) = fronted_meek_transport(fm)?;
         return Ok((tcp, udp, None));
     }
     let (tcp, udp) = match config.transport.server {
@@ -660,6 +672,29 @@ fn hysteria2_transport(
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.hysteria2 is configured but spark was built without the `hysteria2` feature",
+    ))
+}
+
+/// Build the domain-fronted meek polling transport (feature `fronted-meek`).
+/// Self-bootstrapping — it scans CDN edges from the user's own network — so it
+/// takes no per-server address. No protector/wire: the front TLS dial happens
+/// inside `flint` (see the `fronted_meek` module note).
+#[cfg(feature = "fronted-meek")]
+fn fronted_meek_transport(
+    cfg: &FrontedMeekConfig,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let t = Arc::new(fronted_meek::FrontedMeekTransport::new(cfg)?);
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `fronted-meek` feature, a configured fronted-meek transport is a
+/// hard error (mirrors anytls/samizdat/wasm).
+#[cfg(not(feature = "fronted-meek"))]
+fn fronted_meek_transport(
+    _cfg: &FrontedMeekConfig,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.fronted_meek is configured but spark was built without the `fronted-meek` feature",
     ))
 }
 

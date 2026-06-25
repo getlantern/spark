@@ -1,0 +1,159 @@
+//! Domain-fronted meek **polling** transport — the Shir-o-Khorshid CDN-fronting
+//! model (NO MITM, no local cert). Flows tunnel to Lantern's meek-server through
+//! a CDN edge the censor can't block (Akamai/CloudFront/Aliyun): the client TLS-
+//! connects to an edge IP with a benign/empty SNI and carries the real host in
+//! the encrypted `Host` header; the CDN routes by Host to the meek origin, which
+//! relays to a SOCKS5 upstream and out.
+//!
+//! **Self-bootstrapping:** with no server-delivered front list, it discovers
+//! working edges *from the user's own network* — Akamai edge hostnames resolved
+//! through the system resolver (geo-local, truthful), plus CloudFront/Aliyun IPs
+//! sampled from embedded prefix lists (see `flint_fronted::scanner`). The
+//! candidates are raced (the race doubles as the probe); the winning edge is
+//! cached so later flows skip the scan.
+//!
+//! TCP only — `UdpTransport` reports unsupported (meek is a polling HTTP tunnel).
+//!
+//! Limitation: the front TLS dial happens inside `flint`, which doesn't take a
+//! [`SocketProtector`], so meek's own dials aren't yet pinned to the physical
+//! interface. Acceptable while validating; production on macOS needs a
+//! socket-protection hook threaded into `flint_dial`.
+
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use tokio::sync::OnceCell;
+
+use flint_fronted::{
+    dial_fronts, open_meek_poll, scanner, socks5, DialOptions, MaterializedFront, MeekHttpVersion,
+    MeekPollConfig, MeekPollConn, SystemResolver,
+};
+
+use super::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
+use crate::config::FrontedMeekConfig;
+use crate::BoxedStream;
+
+const DEFAULT_MEEK_HOST: &str = "meek.dsa.akamai.getiantem.org";
+
+pub struct FrontedMeekTransport {
+    meek_host: String,
+    http_version: MeekHttpVersion,
+    seed: u64,
+    /// Scanned-once candidate fronts (Akamai/CloudFront/Aliyun), built lazily.
+    fronts: OnceCell<Vec<MaterializedFront>>,
+    /// Last front that worked — tried first to skip the race on the next flow.
+    cached: Mutex<Option<MaterializedFront>>,
+}
+
+impl FrontedMeekTransport {
+    pub fn new(cfg: &FrontedMeekConfig) -> io::Result<Self> {
+        // Default h1: the deployed meek endpoint (Akamai DSA → Caddy) negotiates
+        // HTTP/1.1 with a Chrome ALPN. h2 is selectable for endpoints behind a CDN
+        // that re-originates h2. (Proper per-connection ALPN auto-select needs a
+        // flint-dial change to surface the negotiated protocol — a follow-up.)
+        let http_version = match cfg.http_version.as_deref() {
+            None | Some("h1") => MeekHttpVersion::H1,
+            Some("h2") => MeekHttpVersion::H2,
+            Some(other) => {
+                return Err(io::Error::other(format!(
+                    "transport.fronted_meek.http_version {other:?} invalid (want \"h1\" or \"h2\")"
+                )))
+            }
+        };
+        let meek_host = if cfg.meek_host.trim().is_empty() {
+            DEFAULT_MEEK_HOST.to_owned()
+        } else {
+            cfg.meek_host.clone()
+        };
+        Ok(Self {
+            meek_host,
+            http_version,
+            seed: seed_now(),
+            fronts: OnceCell::new(),
+            cached: Mutex::new(None),
+        })
+    }
+
+    fn meek_cfg(&self) -> MeekPollConfig {
+        let mut m = MeekPollConfig::new(self.meek_host.clone());
+        m.http_version = self.http_version;
+        m
+    }
+
+    /// Lazily scan once: Akamai local-DNS + CloudFront/Aliyun prefix sampling →
+    /// materialized candidate fronts. No server config required.
+    async fn candidate_fronts(&self) -> &[MaterializedFront] {
+        self.fronts
+            .get_or_init(|| async {
+                let targets = scanner::ScanTargets::for_host(self.meek_host.clone());
+                let cands =
+                    scanner::all_candidates(&SystemResolver::new(), &targets, self.seed).await;
+                cands
+                    .iter()
+                    .map(|c| MaterializedFront {
+                        front: c.to_front(),
+                        addrs: vec![c.addr],
+                    })
+                    .collect()
+            })
+            .await
+    }
+
+    async fn open_tunnel(&self) -> io::Result<MeekPollConn> {
+        // Last-known-good front first: a single dial, no race.
+        let cached = self.cached.lock().unwrap().clone();
+        if let Some(front) = cached {
+            if let Ok(conn) = dial_fronts(
+                &self.meek_host,
+                std::slice::from_ref(&front),
+                DialOptions::default(),
+            )
+            .await
+            {
+                return open_meek_poll(conn, self.meek_cfg());
+            }
+        }
+        // Race the full candidate pool; cache the winner.
+        let fronts = self.candidate_fronts().await;
+        let conn = dial_fronts(&self.meek_host, fronts, DialOptions::default())
+            .await
+            .map_err(io::Error::other)?;
+        if let Some(win) = fronts.get(conn.candidate_index) {
+            *self.cached.lock().unwrap() = Some(win.clone());
+        }
+        open_meek_poll(conn, self.meek_cfg())
+    }
+}
+
+#[async_trait]
+impl Transport for FrontedMeekTransport {
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        let mut conn = self.open_tunnel().await?;
+        // The meek-server relays each session to a SOCKS5 upstream (microsocks);
+        // CONNECT to the application's target over the tunnel.
+        socks5::connect(&mut conn, &socks5::Target::Ip(target)).await?;
+        Ok(Box::new(conn))
+    }
+}
+
+#[async_trait]
+impl UdpTransport for FrontedMeekTransport {
+    async fn dial_udp(
+        &self,
+        _target: SocketAddr,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        Err(io::Error::other(
+            "fronted_meek: UDP is not supported (meek is a TCP polling tunnel)",
+        ))
+    }
+}
+
+fn seed_now() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+}

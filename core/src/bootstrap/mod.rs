@@ -208,6 +208,7 @@ pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver)
             }
             crate::config::ServerSpec::Tunnel(c) => entries.push((&mut c.server, Some(&mut c.sni))),
             crate::config::ServerSpec::Wasm(_) => {} // wasm.server is a SocketAddr, never a hostname
+            crate::config::ServerSpec::FrontedMeek(_) => {} // self-bootstrapping; no server host to resolve
         }
     }
     for (ep, sni) in entries {
