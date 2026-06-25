@@ -108,5 +108,5 @@ http_version = "h1"     # or "h2"; omit to auto-select from the negotiated ALPN
 2. **Cache persistence:** the winning front is cached in-memory per process;
    persisting it (and a working-front list) across restarts would cut cold-start
    latency, mirroring radiance's on-disk scanner cache.
-3. **flint dep:** spark pins flint to a `fisk/fronted-meek` commit; bump to a
-   `main` rev once flint#10 merges.
+
+(The flint dependency is pinned to the merged `main` commit `95f4cd7` — flint#10.)
