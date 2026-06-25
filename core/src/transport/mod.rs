@@ -245,7 +245,7 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
             "fronted-meek {}",
             // Match FrontedMeekTransport::new, which treats whitespace-only as unset.
             if c.meek_host.trim().is_empty() {
-                "meek.dsa.akamai.getiantem.org"
+                crate::config::DEFAULT_FRONTED_MEEK_HOST
             } else {
                 c.meek_host.trim()
             }

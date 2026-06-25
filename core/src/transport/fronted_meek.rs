@@ -32,10 +32,8 @@ use flint_fronted::{
 };
 
 use super::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
-use crate::config::FrontedMeekConfig;
+use crate::config::{FrontedMeekConfig, DEFAULT_FRONTED_MEEK_HOST};
 use crate::BoxedStream;
-
-const DEFAULT_MEEK_HOST: &str = "meek.dsa.akamai.getiantem.org";
 
 pub struct FrontedMeekTransport {
     meek_host: String,
@@ -54,9 +52,9 @@ impl FrontedMeekTransport {
         // Unset → auto-select per connection from the ALPN the edge negotiates
         // (the boring Chrome dial offers h2,http/1.1). The deployed Akamai endpoint
         // negotiates h1; a CDN that re-originates h2 gets h2 — automatically.
-        // "h1"/"h2" force it.
-        let http_version = match cfg.http_version.as_deref() {
-            None => None,
+        // "h1"/"h2" force it; empty/whitespace is treated as unset (like meek_host).
+        let http_version = match cfg.http_version.as_deref().map(str::trim) {
+            None | Some("") => None,
             Some("h1") => Some(MeekHttpVersion::H1),
             Some("h2") => Some(MeekHttpVersion::H2),
             Some(other) => {
@@ -67,7 +65,7 @@ impl FrontedMeekTransport {
         };
         let trimmed = cfg.meek_host.trim();
         let meek_host = if trimmed.is_empty() {
-            DEFAULT_MEEK_HOST.to_owned()
+            DEFAULT_FRONTED_MEEK_HOST.to_owned()
         } else {
             // Use the trimmed host — leading/trailing whitespace would break DNS/HTTP.
             trimmed.to_owned()
@@ -165,7 +163,7 @@ impl UdpTransport for FrontedMeekTransport {
         _target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         Err(io::Error::other(
-            "fronted_meek: UDP is not supported (meek is a TCP polling tunnel)",
+            "fronted-meek: UDP is not supported (meek is a TCP polling tunnel)",
         ))
     }
 }
@@ -192,7 +190,7 @@ mod tests {
     #[test]
     fn empty_host_defaults_and_unset_version_is_auto() {
         let t = FrontedMeekTransport::new(&cfg(None)).expect("new");
-        assert_eq!(t.meek_host, DEFAULT_MEEK_HOST);
+        assert_eq!(t.meek_host, DEFAULT_FRONTED_MEEK_HOST);
         assert_eq!(t.http_version, None); // auto-select from ALPN
     }
 

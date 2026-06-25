@@ -344,6 +344,10 @@ pub struct WasmConfig {
     pub floor_path: Option<PathBuf>,
 }
 
+/// The built-in meek endpoint used when `transport.fronted_meek.meek_host` is
+/// unset. Single source of truth, referenced by the transport and diagnostics.
+pub const DEFAULT_FRONTED_MEEK_HOST: &str = "meek.dsa.akamai.getiantem.org";
+
 /// Domain-fronted meek polling transport configuration. Every field is optional:
 /// with an empty `[transport.fronted_meek]` table the transport self-bootstraps
 /// (scans Akamai/CloudFront/Aliyun edges from the user's own network) and fronts
