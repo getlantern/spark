@@ -32,12 +32,12 @@ md-5.workspace = true
 postcard.workspace = true
 # Opening-handshake wire shaping (tcp_split + record_fragment), extracted to the reusable flint crate.
 # Non-optional: the gambit genome (always compiled) bridges its Layer C to flint_shaping::WirePlan.
-flint-shaping = { git = "https://github.com/getlantern/flint", rev = "76c5cd3694613ea43b5ebbd15acb0346615ffa66" }
+flint-shaping = { git = "https://github.com/getlantern/flint", rev = "95f4cd7426f46a3677e9365549552b67a0831da7" }
 # Chrome-mimicry TLS: the gambit ClientHello genome, JA4, the boring Chrome connector + Profile + the
 # JA4 anchor — extracted to flint. Non-optional (gambit/ja4/profile are always compiled, e.g. by
 # `config` and `discovery`); the boring connector rides flint-tls's `boring` feature, enabled by
 # spark's `anytls`. Pinned to the same rev as flint-shaping (flint-tls path-depends on it).
-flint-tls = { git = "https://github.com/getlantern/flint", rev = "76c5cd3694613ea43b5ebbd15acb0346615ffa66" }
+flint-tls = { git = "https://github.com/getlantern/flint", rev = "95f4cd7426f46a3677e9365549552b67a0831da7" }
 # AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
 # `pq-experimental` exposes Chrome's post-quantum group X25519MLKEM768; `cert-compression` exposes
 # brotli cert compression — both part of the Chrome ClientHello profile.
@@ -54,18 +54,18 @@ http = { workspace = true, optional = true }
 wasmi = { workspace = true, optional = true }
 # Signed-blob verification (Ed25519 + versioned framing + anti-rollback), extracted from this crate's
 # wasm `signing.rs` into the reusable flint crate. Only the `wasm-transport` feature pulls it.
-flint-verify = { git = "https://github.com/getlantern/flint", rev = "76c5cd3694613ea43b5ebbd15acb0346615ffa66", optional = true }
+flint-verify = { git = "https://github.com/getlantern/flint", rev = "95f4cd7426f46a3677e9365549552b67a0831da7", optional = true }
 # Bootstrap control-plane name resolution (design: docs/bootstrap-resolver-design.md). flint-dial
 # supplies happy-eyeballs racing (race_with / race_windowed); flint-dns supplies the un-poisoned DoH
 # resolver + the A/AAAA codec + answer validation. Both optional — only the `bootstrap-dns` feature
 # pulls them (and the boring Chrome connector they dial over). Same rev as the other flint crates.
-flint-dial = { git = "https://github.com/getlantern/flint", rev = "76c5cd3694613ea43b5ebbd15acb0346615ffa66", optional = true }
-flint-dns = { git = "https://github.com/getlantern/flint", rev = "76c5cd3694613ea43b5ebbd15acb0346615ffa66", optional = true }
+flint-dial = { git = "https://github.com/getlantern/flint", rev = "95f4cd7426f46a3677e9365549552b67a0831da7", optional = true }
+flint-dns = { git = "https://github.com/getlantern/flint", rev = "95f4cd7426f46a3677e9365549552b67a0831da7", optional = true }
 # Domain-fronting transport for the censored cold-start config fetch (config-new-fetch-design.md §9):
 # `FrontedTlsDialer` + the one-shot h2 request (`OneshotRequest`/`HttpResponse`), seeded from the
 # embedded `domainfront/fronted.yaml.gz` (aliyun/akamai/cloudfront). The `boring` feature pulls the
 # Chrome dial path (flint-dial/flint-dns boring). Only `config-fetch` pulls it; same rev as the others.
-flint-fronted = { git = "https://github.com/getlantern/flint", rev = "76c5cd3694613ea43b5ebbd15acb0346615ffa66", optional = true, features = ["boring"] }
+flint-fronted = { git = "https://github.com/getlantern/flint", rev = "95f4cd7426f46a3677e9365549552b67a0831da7", optional = true, features = ["boring"] }
 blake3 = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
@@ -122,6 +122,12 @@ multi-server = ["dep:flint-dial"]
 # cold start fronts the config-new fetch (config-new-fetch-design.md §9). `dep:flint-fronted` pulls
 # the fronting transport + its boring dial path. See docs/config-fetch-cross-platform-design.md.
 config-fetch = ["anytls", "multi-server", "dep:flint-fronted"]
+# Domain-fronted meek polling transport (Shir-o-Khorshid CDN-fronting, no MITM).
+# Pulls flint-fronted (with its boring Chrome dial path) for fronting + the meek
+# polling client + the vantage-point scanner (Akamai local-DNS + CloudFront/Aliyun
+# prefix sampling). Self-bootstrapping; needs no server address. See
+# docs/fronted-meek-design.md.
+fronted-meek = ["dep:flint-fronted"]
 # Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with
 # deployed shadowsocks-rust servers. `ring` provides the AEADs; `blake3` derives session subkeys and
 # `aes` provides the raw block cipher for the UDP separate-header. Off by default so the base build

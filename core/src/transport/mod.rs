@@ -24,7 +24,8 @@ use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
 use crate::config::{
-    AnytlsConfig, Config, Hysteria2Config, SamizdatConfig, ShadowsocksConfig, WasmConfig,
+    AnytlsConfig, Config, FrontedMeekConfig, Hysteria2Config, SamizdatConfig, ShadowsocksConfig,
+    WasmConfig,
 };
 use crate::net::SocketProtector;
 use crate::BoxedStream;
@@ -66,6 +67,11 @@ pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
+/// Domain-fronted meek polling transport (Shir-o-Khorshid CDN-fronting, no MITM).
+/// Behind the `fronted-meek` feature so the base build pulls neither flint-fronted
+/// nor its boring dial path. See docs/fronted-meek-design.md.
+#[cfg(feature = "fronted-meek")]
+pub mod fronted_meek;
 /// Hysteria 2 transport (ADR 0010): a QUIC client (quinn/rustls-ring) interoperable with deployed
 /// apernet/hysteria servers, with Salamander+Gecko obfuscation. Behind the `hysteria2` feature so the
 /// base build pulls no QUIC stack.
@@ -156,6 +162,7 @@ pub(crate) fn build_one(
         ServerSpec::Samizdat(cfg) => samizdat_transport(cfg, protector.cloned(), wire.clone()),
         ServerSpec::Shadowsocks(cfg) => shadowsocks_transport(cfg, protector.cloned()),
         ServerSpec::Hysteria2(cfg) => hysteria2_transport(cfg, protector.cloned()),
+        ServerSpec::FrontedMeek(cfg) => fronted_meek_transport(cfg),
         ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
         ServerSpec::Tunnel(cfg) => {
             let server = cfg.server.socket_addr()?;
@@ -218,6 +225,7 @@ fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
         ServerSpec::Samizdat(_) => "samizdat",
         ServerSpec::Shadowsocks(_) => "shadowsocks",
         ServerSpec::Hysteria2(_) => "hysteria2",
+        ServerSpec::FrontedMeek(_) => "fronted-meek",
         ServerSpec::Wasm(_) => "wasm",
         ServerSpec::Tunnel(_) => "tunnel",
     }
@@ -233,6 +241,15 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         ServerSpec::Samizdat(c) => format!("samizdat {}", c.server),
         ServerSpec::Shadowsocks(c) => format!("shadowsocks {}", c.server),
         ServerSpec::Hysteria2(c) => format!("hysteria2 {}", c.server),
+        ServerSpec::FrontedMeek(c) => format!(
+            "fronted-meek {}",
+            // Match FrontedMeekTransport::new, which treats whitespace-only as unset.
+            if c.meek_host.trim().is_empty() {
+                crate::config::DEFAULT_FRONTED_MEEK_HOST
+            } else {
+                c.meek_host.trim()
+            }
+        ),
         ServerSpec::Wasm(c) => format!("wasm {}", c.server),
         ServerSpec::Tunnel(c) => format!("tunnel {}", c.server),
     }
@@ -366,6 +383,12 @@ pub fn from_config_with_control(
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
         let (tcp, udp) = wasm_transport(wasm, protector)?;
+        return Ok((tcp, udp, None));
+    }
+    // Domain-fronted meek polling (Shir-o-Khorshid CDN-fronting): self-bootstrapping
+    // (scans CDN edges from the user's own network), above the plain `server` tunnel.
+    if let Some(fm) = &config.transport.fronted_meek {
+        let (tcp, udp) = fronted_meek_transport(fm)?;
         return Ok((tcp, udp, None));
     }
     let (tcp, udp) = match config.transport.server {
@@ -660,6 +683,29 @@ fn hysteria2_transport(
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.hysteria2 is configured but spark was built without the `hysteria2` feature",
+    ))
+}
+
+/// Build the domain-fronted meek polling transport (feature `fronted-meek`).
+/// Self-bootstrapping — it scans CDN edges from the user's own network — so it
+/// takes no per-server address. No protector/wire: the front TLS dial happens
+/// inside `flint` (see the `fronted_meek` module note).
+#[cfg(feature = "fronted-meek")]
+fn fronted_meek_transport(
+    cfg: &FrontedMeekConfig,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let t = Arc::new(fronted_meek::FrontedMeekTransport::new(cfg)?);
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `fronted-meek` feature, a configured fronted-meek transport is a
+/// hard error (mirrors anytls/samizdat/wasm).
+#[cfg(not(feature = "fronted-meek"))]
+fn fronted_meek_transport(
+    _cfg: &FrontedMeekConfig,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.fronted_meek is configured but spark was built without the `fronted-meek` feature",
     ))
 }
 
@@ -1426,6 +1472,37 @@ auth = "s3cr3t"
         assert!(
             matches!(entry.spec, crate::config::ServerSpec::Hysteria2(_)),
             "expected a Hysteria2 pool entry, got: {:?}",
+            entry.spec
+        );
+    }
+}
+
+#[cfg(all(test, feature = "fronted-meek"))]
+mod fronted_meek_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_config_builds_a_fronted_meek_transport() {
+        // Empty table → self-bootstrapping defaults; new() is lazy (no dial/scan).
+        let toml = "[transport.fronted_meek]\n";
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        let _ = from_config(&cfg).expect("fronted-meek transport builds");
+    }
+
+    #[test]
+    fn from_config_parses_a_fronted_meek_pool_entry() {
+        // `kind = "fronted-meek"` (hyphenated) must deserialize to FrontedMeek — guards
+        // the serde rename against the lowercase-default "frontedmeek".
+        let toml = r#"
+[[transport.servers]]
+kind = "fronted-meek"
+meek_host = "meek.example.org"
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        let entry = &cfg.transport.servers[0];
+        assert!(
+            matches!(entry.spec, crate::config::ServerSpec::FrontedMeek(_)),
+            "expected a FrontedMeek pool entry, got: {:?}",
             entry.spec
         );
     }

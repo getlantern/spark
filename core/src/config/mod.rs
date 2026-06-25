@@ -249,6 +249,13 @@ pub struct TransportConfig {
     /// QUIC, optionally obfuscated with Salamander+Gecko. Requires the `hysteria2` build feature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hysteria2: Option<Hysteria2Config>,
+    /// Domain-fronted meek polling transport: tunnels through a CDN edge
+    /// (Akamai/CloudFront/Aliyun) to Lantern's meek-server via the Shir-o-Khorshid
+    /// CDN-fronting model (no MITM). Self-bootstrapping — discovers working edges
+    /// from the user's own network, so all fields are optional and it can run with
+    /// no other config. Requires the `fronted-meek` build feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fronted_meek: Option<FrontedMeekConfig>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
     /// and Samizdat handshakes (both build their `WirePlan` from this). Default: no shaping.
@@ -279,6 +286,7 @@ impl Default for TransportConfig {
             samizdat: None,
             shadowsocks: None,
             hysteria2: None,
+            fronted_meek: None,
             shaping: ShapingConfig::default(),
             servers: Vec::new(),
             callback_url: None,
@@ -334,6 +342,27 @@ pub struct WasmConfig {
     /// anti-rollback that survives restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floor_path: Option<PathBuf>,
+}
+
+/// The built-in meek endpoint used when `transport.fronted_meek.meek_host` is
+/// unset. Single source of truth, referenced by the transport and diagnostics.
+pub const DEFAULT_FRONTED_MEEK_HOST: &str = "meek.dsa.akamai.getiantem.org";
+
+/// Domain-fronted meek polling transport configuration. Every field is optional:
+/// with an empty `[transport.fronted_meek]` table the transport self-bootstraps
+/// (scans Akamai/CloudFront/Aliyun edges from the user's own network) and fronts
+/// to the default Lantern meek endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrontedMeekConfig {
+    /// Inner meek endpoint host the front routes to. Empty → the built-in default
+    /// (`meek.dsa.akamai.getiantem.org`).
+    #[serde(default)]
+    pub meek_host: String,
+    /// HTTP version over the fronted TLS connection. Unset → auto-select from the
+    /// ALPN the edge negotiates (recommended). `"h1"` or `"h2"` force it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_version: Option<String>,
 }
 
 /// AnyTLS transport configuration (ADR 0001).
@@ -526,6 +555,11 @@ pub enum ServerSpec {
     Shadowsocks(ShadowsocksConfig),
     /// Hysteria 2 (ADR 0010).
     Hysteria2(Hysteria2Config),
+    /// Domain-fronted meek polling (Shir-o-Khorshid CDN-fronting). Renamed so the
+    /// pool `kind` is `"fronted-meek"` (matching `spec_kind()` and the feature name)
+    /// rather than the lowercase-default `"frontedmeek"`.
+    #[serde(rename = "fronted-meek")]
+    FrontedMeek(FrontedMeekConfig),
 }
 
 /// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
@@ -673,6 +707,7 @@ impl Config {
             ServerSpec::Shadowsocks(c) => Some(&c.server),
             ServerSpec::Hysteria2(c) => Some(&c.server),
             ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
+            ServerSpec::FrontedMeek(_) => None, // self-bootstrapping; no server host to resolve
         });
         singles
             .into_iter()
@@ -752,6 +787,7 @@ mod tests {
                     samizdat: None,
                     shadowsocks: None,
                     hysteria2: None,
+                    fronted_meek: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
