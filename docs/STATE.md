@@ -1697,6 +1697,33 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-06-25 (config-fetch fronting — kindling-fronted auto-fetch DONE + live-verified): **the
+  censored cold-start config fetch now races a direct plain-TLS request against a domain-fronted
+  one-shot h2 request** (spark #30; flint #7/#8/#9; `config-new-fetch-design.md §9` marked DONE).
+  config-new is fetched over `flint_fronted::FrontedTlsDialer::request`, seeded from the embedded
+  `core/src/config/fetch/fronted.yaml.gz` (the `domainfront` config — aliyun/akamai/cloudfront, with
+  **Alibaba Cloud now a first-class fronting provider**). `fetch_once` runs `fetch_once_direct`
+  (HTTP/1.1 via `probe::tls_wrap`, unchanged — keeps ETag/304) and `fetch_once_fronted`, taking the
+  first usable config via `first_ok` (an early *failure* doesn't pre-empt the other attempt). The empty
+  country code selects each provider's `default` SNI bucket (Alibaba's `img.alicdn.com` et al.). All
+  pinned flint crates bumped to one rev (`76c5cd3`) so they resolve to a single checkout.
+  **Live-verified against prod** (`live_fronted_fetch`): config-new returned a non-empty server pool
+  *strictly* through the fronting path (decoy SNI → CDN edge, `Host: df.dcdn.getiantem.org`).
+  **Three flint primitives built + merged:** (#7) `Provider::expanded` now applies the `default` SNI
+  bucket even with no country code — the production client passes none, and the old `getlantern/fronted`
+  gate left the new `aliyun` provider's SNIs permanently inert (the transport was otherwise a faithful
+  port: schema, GlobalSign-R3 root pinning, SNI↔verify-host decoupling all already correct, matching
+  `domainfront::ExpandedProvider`); (#8) `DirectH2Dialer`, a non-fronted h2 request-stream (the
+  unfronted sibling of `FrontedMeekDialer`); (#9) a **one-shot** request (`OneshotRequest`/
+  `HttpResponse`/`h2_oneshot` + `request()` on both dialers), separate from the meek tunnel.
+  **Key architectural finding:** meek's `MeekStream` is *respond-first* (sends request headers, then
+  awaits the response before exposing the write half) — correct for a meek server or a GET, but
+  config-new is a read-body-then-respond **POST** that meek would **deadlock**; so a request-first
+  one-shot primitive was split out from the meek transport (Adam's call). NB the §9 sketch said
+  "connector swap in `http.rs`" — superseded by this one-shot design. Follow-ups (not done):
+  AMP→smart→DNSTT escalation; apply the full-connection race (a candidate wins only after a complete
+  response) to flint's `race_materialized_with` meek path as `DirectH2Dialer` got; release-binary size
+  delta of the 69 KB embedded config.
 - 2026-06-16 (M10 s1 — Apple packet-I/O architecture DECIDED + C-ABI staticlib): **fd-trick
   primary (+ packet-object fallback), hand-rolled C ABI, one provider for iOS+macOS.** Decided
   with Adam after deep research (3 agent passes: lantern's own NE, the Rust↔Swift FFI landscape,
