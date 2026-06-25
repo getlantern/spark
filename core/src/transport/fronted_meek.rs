@@ -65,10 +65,12 @@ impl FrontedMeekTransport {
                 )))
             }
         };
-        let meek_host = if cfg.meek_host.trim().is_empty() {
+        let trimmed = cfg.meek_host.trim();
+        let meek_host = if trimmed.is_empty() {
             DEFAULT_MEEK_HOST.to_owned()
         } else {
-            cfg.meek_host.clone()
+            // Use the trimmed host — leading/trailing whitespace would break DNS/HTTP.
+            trimmed.to_owned()
         };
         Ok(Self {
             meek_host,

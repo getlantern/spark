@@ -1477,6 +1477,37 @@ auth = "s3cr3t"
     }
 }
 
+#[cfg(all(test, feature = "fronted-meek"))]
+mod fronted_meek_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_config_builds_a_fronted_meek_transport() {
+        // Empty table → self-bootstrapping defaults; new() is lazy (no dial/scan).
+        let toml = "[transport.fronted_meek]\n";
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        let _ = from_config(&cfg).expect("fronted-meek transport builds");
+    }
+
+    #[test]
+    fn from_config_parses_a_fronted_meek_pool_entry() {
+        // `kind = "fronted-meek"` (hyphenated) must deserialize to FrontedMeek — guards
+        // the serde rename against the lowercase-default "frontedmeek".
+        let toml = r#"
+[[transport.servers]]
+kind = "fronted-meek"
+meek_host = "meek.example.org"
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        let entry = &cfg.transport.servers[0];
+        assert!(
+            matches!(entry.spec, crate::config::ServerSpec::FrontedMeek(_)),
+            "expected a FrontedMeek pool entry, got: {:?}",
+            entry.spec
+        );
+    }
+}
+
 /// P4a gambit realization: the Layer-B record-split wiring (`with_record_split`) and confirmation
 /// that the static-config explicit-order + session-id-inject knobs flow through to boring
 /// automatically via the bumped flint connector.
