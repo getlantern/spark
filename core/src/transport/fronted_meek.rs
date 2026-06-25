@@ -67,15 +67,16 @@ impl FrontedMeekTransport {
         let meek_host = if trimmed.is_empty() {
             DEFAULT_FRONTED_MEEK_HOST.to_owned()
         } else {
-            // A bare authority (host[:port]); reject embedded whitespace/control or
-            // authority-breaking chars that would corrupt the DNS name / Host header
-            // (fail fast here rather than at dial time). Mirrors flint's check.
-            if trimmed
-                .bytes()
-                .any(|b| b <= 0x20 || b >= 0x7f || matches!(b, b'/' | b'?' | b'#' | b'@' | b'\\'))
-            {
+            // A bare DNS host (no port — meek always fronts on TLS/443; the host is
+            // used as the DNS name + HTTP Host/verify identity). Reject embedded
+            // whitespace/control, authority-breaking chars (`/?#@\`), and `:` — fail
+            // fast here rather than at dial time.
+            if trimmed.bytes().any(|b| {
+                b <= 0x20 || b >= 0x7f || matches!(b, b'/' | b'?' | b'#' | b'@' | b'\\' | b':')
+            }) {
                 return Err(io::Error::other(format!(
-                    "transport.fronted_meek.meek_host {trimmed:?} contains invalid characters"
+                    "transport.fronted_meek.meek_host {trimmed:?} is not a bare host \
+                     (no whitespace/control, `/?#@\\`, or port `:`)"
                 )));
             }
             trimmed.to_owned()
@@ -132,6 +133,9 @@ impl FrontedMeekTransport {
                 {
                     break 'conn c;
                 }
+                // The cached front failed — evict it so every subsequent flow
+                // doesn't pay its full dial timeout before falling back to the race.
+                *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
             let fronts = self.candidate_fronts().await;
             let c = dial_fronts_alpn(&self.meek_host, fronts, DialOptions::default())
