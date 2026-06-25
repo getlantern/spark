@@ -189,8 +189,15 @@ retries.
 ## 9. Deferred — own milestones
 
 - **Fronting / kindling-equivalent** (domain-fronting → AMP → smart → DNSTT): the censored cold-start
-  path. A connector swap inside `config::fetch::http` — uses `flint-tls`'s boring Chrome connector + a
-  fronted host/SNI list. This is the natural next milestone after v1.
+  path. ✅ **DONE** (spark #30, flint #7/#8/#9). `config::fetch` now races the direct plain-TLS request
+  against a domain-fronted **one-shot h2 request** (`flint_fronted::FrontedTlsDialer::request`), seeded
+  from the embedded `core/src/config/fetch/fronted.yaml.gz` (the `domainfront` config —
+  aliyun/akamai/cloudfront). The empty country code selects each provider's `default` SNI bucket (e.g.
+  Alibaba's `img.alicdn.com`); `first_ok` takes the first usable config. Live-verified against prod via
+  the `live_fronted_fetch` test. **Implementation note:** done as a *one-shot* request (request-first),
+  NOT the originally-sketched connector swap inside `http.rs` — config-new is a read-body-then-respond
+  POST that meek's respond-first `MeekStream` would deadlock (so a one-shot primitive was split out from
+  the meek transport; flint #9). AMP → smart → DNSTT escalation remains future work.
 - **Pro tier**: `/user-create`, `user_id`, `pro_token`, the account flow, and WireGuard outbounds.
 - **Smart-routing / DNS / ad-block** ingestion from the response (already deferred in the adapter).
 
