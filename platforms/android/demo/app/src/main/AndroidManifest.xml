@@ -2,10 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="false"
-        android:label="Spark">
+        android:label="Spark"
+        android:supportsRtl="true">
 
         <activity
             android:name=".MainActivity"
@@ -16,14 +20,20 @@
             </intent-filter>
         </activity>
 
-        <!-- The VpnService must require BIND_VPN_SERVICE and advertise the VpnService action. -->
+        <!-- The VpnService must require BIND_VPN_SERVICE and advertise the VpnService action.
+             It runs in the foreground (foregroundServiceType=specialUse + the "vpn" subtype) so
+             Android keeps the tunnel alive while the app is backgrounded. -->
         <service
             android:name=".SparkVpnService"
             android:exported="false"
+            android:foregroundServiceType="specialUse"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
         </service>
     </application>
 </manifest>

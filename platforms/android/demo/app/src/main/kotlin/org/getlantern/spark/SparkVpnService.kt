@@ -1,7 +1,14 @@
 package org.getlantern.spark
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
+import android.os.Build
 import android.util.Log
 import kotlin.concurrent.thread
 
@@ -29,8 +36,56 @@ class SparkVpnService : VpnService() {
         return START_STICKY
     }
 
+    /**
+     * Promote the service to the foreground with an ongoing notification so Android keeps the
+     * tunnel alive once the app is backgrounded (an unpromoted VpnService is killed on background).
+     *
+     * minSdk is 24, so the channel + `Notification.Builder(Context, channelId)` constructor (both
+     * API 26+) are version-gated; on API 24/25 we fall back to the deprecated channel-less
+     * `Notification.Builder(Context)`. AndroidX is not a dependency here, so this stays
+     * framework-only rather than using NotificationCompat. On API 34+ we must declare the
+     * foreground-service type at runtime (specialUse, matching the manifest's "vpn" subtype).
+     */
+    private fun startInForeground() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (nm.getNotificationChannel(CHANNEL_ID) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(CHANNEL_ID, "Spark VPN", NotificationManager.IMPORTANCE_LOW),
+                )
+            }
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        // An explicit MainActivity intent (never null, unlike getLaunchIntentForPackage) so tapping
+        // the notification reopens the app. FLAG_IMMUTABLE is required on API 23+.
+        val tap = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notif = builder
+            .setContentTitle("Spark")
+            .setContentText("Connected")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setOngoing(true)
+            .setContentIntent(tap)
+            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIF_ID, notif)
+        }
+    }
+
     private fun startTunnel(config: String?) {
         if (worker != null) return
+        // Promote to foreground FIRST so the tunnel survives backgrounding (and so we satisfy the
+        // platform requirement to call startForeground promptly after startForegroundService).
+        startInForeground()
         val builder = Builder()
             .setSession("spark")
             .setMtu(MTU)
@@ -89,6 +144,7 @@ class SparkVpnService : VpnService() {
         SparkBridge.nativeStop()
         worker?.join(2000)
         worker = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
@@ -103,6 +159,8 @@ class SparkVpnService : VpnService() {
         private const val TUN_ADDR = "10.0.0.2" // the in-tunnel client address
         private const val TUN_PREFIX = 24
         private const val READY_TIMEOUT_MS = 30_000 // ceiling for cold-start self-fetch before giving up
+        private const val CHANNEL_ID = "spark_vpn" // foreground-service notification channel (API 26+)
+        private const val NOTIF_ID = 1 // ongoing foreground notification id
         const val ACTION_STOP = "org.getlantern.spark.STOP"
 
         /** Optional Intent string extra: an explicit config (IP:port / TOML / config_raw.json; the
