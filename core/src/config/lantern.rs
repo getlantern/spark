@@ -97,6 +97,18 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
     Ok(cfg)
 }
 
+/// Extract the bare host from a meek-server `url` (e.g. `"https://meek.example/"` → `"meek.example"`).
+/// The meek wire carries a full URL; spark's scanner wants just the inner Host. Returns `None` for an
+/// empty/hostless value (→ the client self-bootstraps to its built-in default endpoint).
+#[cfg(feature = "fronted-meek")]
+fn host_from_url(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // Strip an optional `:port` (meek hosts are DNS names, so no IPv6-literal handling needed).
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 /// Map one raw sing-box outbound into a spark [`ServerSpec`], or `None` if spark can't represent it
 /// (unsupported `type`, a missing required field, or a non-SS-2022 Shadowsocks method).
 fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
@@ -147,12 +159,18 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
             method: ss_method(ob.method.as_deref()?)?,
             password: ob.password.clone()?,
         })),
-        // Self-bootstrapping: no `server` endpoint needed (the scanner finds edges); just carry the
-        // optional inner host + forced HTTP version. Gated to the transport's feature.
+        // Self-bootstrapping: no `server` endpoint needed (the client scans edges). The wire carries
+        // the meek-server `url`; derive the bare inner host. Empty/absent → the client uses its
+        // built-in default endpoint. http_version isn't on the wire, so it auto-selects from ALPN.
+        // Gated to the transport's feature.
         #[cfg(feature = "fronted-meek")]
-        "fronted-meek" => Some(ServerSpec::FrontedMeek(super::FrontedMeekConfig {
-            meek_host: ob.meek_host.clone().unwrap_or_default(),
-            http_version: ob.http_version.clone(),
+        "meek" => Some(ServerSpec::FrontedMeek(super::FrontedMeekConfig {
+            meek_host: ob
+                .url
+                .as_deref()
+                .and_then(host_from_url)
+                .unwrap_or_default(),
+            http_version: None,
         })),
         _ => None, // unbounded, etc. — no spark transport
     }
@@ -213,15 +231,13 @@ struct RawOutbound {
     tls: Option<RawTls>,
     #[serde(default)]
     method: Option<String>,
-    // fronted-meek (self-bootstrapping; `server`/`server_port` are unused — the scanner finds edges).
-    // Gated so the fields aren't dead code in builds without the transport (unknown JSON keys are
-    // ignored, so a fronted-meek outbound is simply skipped there).
+    // meek (self-bootstrapping domain-fronted; `server`/`server_port` are unused — the client scans
+    // edges itself). The lantern-box meek outbound carries the meek-server `url`; spark derives the
+    // bare inner host from it. Gated so the field isn't dead code without the transport (unknown JSON
+    // keys are ignored, so a meek outbound is simply skipped there).
     #[cfg(feature = "fronted-meek")]
     #[serde(default)]
-    meek_host: Option<String>,
-    #[cfg(feature = "fronted-meek")]
-    #[serde(default)]
-    http_version: Option<String>,
+    url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -366,34 +382,51 @@ mod tests {
 
     #[cfg(feature = "fronted-meek")]
     #[test]
-    fn maps_fronted_meek_outbound_self_bootstrapping() {
-        // No `server` endpoint required (the scanner finds edges); carries the optional inner host +
-        // forced HTTP version straight through to FrontedMeekConfig.
+    fn maps_meek_outbound_deriving_host_from_url() {
+        // No `server` endpoint required (the client scans edges); the meek-server `url` is carried on
+        // the wire and the bare inner host is derived from it.
         let raw = r#"{ "options": { "outbounds": [
-            { "type": "fronted-meek", "tag": "fm-1",
-              "meek_host": "meek.dsa.akamai.getiantem.org", "http_version": "h1" }
+            { "type": "meek", "tag": "meek-1", "url": "https://meek.dsa.akamai.getiantem.org/" }
         ]}}"#;
         let cfg = from_config_raw_json(raw).expect("config_raw adapts");
         assert_eq!(cfg.transport.servers.len(), 1);
         let ServerSpec::FrontedMeek(fm) = &cfg.transport.servers[0].spec else {
-            panic!("expected a fronted-meek pool entry");
+            panic!("expected a meek pool entry");
         };
         assert_eq!(fm.meek_host, "meek.dsa.akamai.getiantem.org");
-        assert_eq!(fm.http_version.as_deref(), Some("h1"));
+        assert!(fm.http_version.is_none()); // not on the wire — client auto-selects from ALPN
     }
 
     #[cfg(feature = "fronted-meek")]
     #[test]
-    fn maps_bare_fronted_meek_to_self_bootstrap_defaults() {
-        // An empty fronted-meek outbound maps to the self-bootstrapping defaults: empty meek_host →
-        // the built-in endpoint, no forced HTTP version (auto-select from ALPN).
-        let raw = r#"{ "options": { "outbounds": [ { "type": "fronted-meek", "tag": "fm-2" } ]}}"#;
+    fn maps_bare_meek_to_self_bootstrap_defaults() {
+        // A meek outbound with no url maps to the self-bootstrapping defaults: empty meek_host → the
+        // client's built-in endpoint, no forced HTTP version.
+        let raw = r#"{ "options": { "outbounds": [ { "type": "meek", "tag": "meek-2" } ]}}"#;
         let cfg = from_config_raw_json(raw).expect("config_raw adapts");
         let ServerSpec::FrontedMeek(fm) = &cfg.transport.servers[0].spec else {
-            panic!("expected fronted-meek");
+            panic!("expected meek");
         };
         assert!(fm.meek_host.is_empty());
         assert!(fm.http_version.is_none());
+    }
+
+    #[cfg(feature = "fronted-meek")]
+    #[test]
+    fn host_from_url_extracts_bare_host() {
+        assert_eq!(
+            host_from_url("https://meek.example/"),
+            Some("meek.example".to_string())
+        );
+        assert_eq!(
+            host_from_url("https://meek.example:8443/path"),
+            Some("meek.example".to_string())
+        );
+        assert_eq!(
+            host_from_url("meek.example"),
+            Some("meek.example".to_string())
+        );
+        assert_eq!(host_from_url(""), None);
     }
 
     #[test]

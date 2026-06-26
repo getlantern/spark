@@ -225,7 +225,7 @@ fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
         ServerSpec::Samizdat(_) => "samizdat",
         ServerSpec::Shadowsocks(_) => "shadowsocks",
         ServerSpec::Hysteria2(_) => "hysteria2",
-        ServerSpec::FrontedMeek(_) => "fronted-meek",
+        ServerSpec::FrontedMeek(_) => "meek",
         ServerSpec::Wasm(_) => "wasm",
         ServerSpec::Tunnel(_) => "tunnel",
     }
@@ -242,7 +242,7 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         ServerSpec::Shadowsocks(c) => format!("shadowsocks {}", c.server),
         ServerSpec::Hysteria2(c) => format!("hysteria2 {}", c.server),
         ServerSpec::FrontedMeek(c) => format!(
-            "fronted-meek {}",
+            "meek {}",
             // Match FrontedMeekTransport::new, which treats whitespace-only as unset.
             if c.meek_host.trim().is_empty() {
                 crate::config::DEFAULT_FRONTED_MEEK_HOST
@@ -1490,12 +1490,12 @@ mod fronted_meek_config_tests {
     }
 
     #[test]
-    fn from_config_parses_a_fronted_meek_pool_entry() {
-        // `kind = "fronted-meek"` (hyphenated) must deserialize to FrontedMeek — guards
-        // the serde rename against the lowercase-default "frontedmeek".
+    fn from_config_parses_a_meek_pool_entry() {
+        // `kind = "meek"` must deserialize to FrontedMeek — guards the serde rename (the wire/pool
+        // identifier is `meek`, matching the server-side protocol; the Rust variant stays FrontedMeek).
         let toml = r#"
 [[transport.servers]]
-kind = "fronted-meek"
+kind = "meek"
 meek_host = "meek.example.org"
 "#;
         let cfg = crate::config::Config::from_toml_str(toml).unwrap();

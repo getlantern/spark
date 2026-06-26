@@ -70,11 +70,19 @@ impl ConfigRequest {
             singbox_version: "1.11.0".to_string(),
             version: LANTERN_VERSION.to_string(),
             locale: "en-US".to_string(),
-            protocols: vec![
-                "samizdat".to_string(),
-                "hysteria2".to_string(),
-                "shadowsocks".to_string(),
-            ],
+            protocols: {
+                #[allow(unused_mut)]
+                let mut protocols = vec![
+                    "samizdat".to_string(),
+                    "hysteria2".to_string(),
+                    "shadowsocks".to_string(),
+                ];
+                // Advertise meek only when the transport is built in, so the server's protocol gate
+                // doesn't assign a meek track to a build that can't run it.
+                #[cfg(feature = "fronted-meek")]
+                protocols.push("meek".to_string());
+                protocols
+            },
             time_zone: local_timezone(),
         }
     }

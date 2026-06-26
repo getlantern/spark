@@ -555,10 +555,10 @@ pub enum ServerSpec {
     Shadowsocks(ShadowsocksConfig),
     /// Hysteria 2 (ADR 0010).
     Hysteria2(Hysteria2Config),
-    /// Domain-fronted meek polling (Shir-o-Khorshid CDN-fronting). Renamed so the
-    /// pool `kind` is `"fronted-meek"` (matching `spec_kind()` and the feature name)
-    /// rather than the lowercase-default `"frontedmeek"`.
-    #[serde(rename = "fronted-meek")]
+    /// Domain-fronted meek polling (Shir-o-Khorshid CDN-fronting). Renamed to `"meek"` so the pool
+    /// `kind` matches the server-side protocol/outbound type and `spec_kind()` (the Rust variant stays
+    /// `FrontedMeek` — the transport-impl name; only the wire/protocol identifier is `meek`).
+    #[serde(rename = "meek")]
     FrontedMeek(FrontedMeekConfig),
 }
 
