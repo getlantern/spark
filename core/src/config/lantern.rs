@@ -147,6 +147,13 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
             method: ss_method(ob.method.as_deref()?)?,
             password: ob.password.clone()?,
         })),
+        // Self-bootstrapping: no `server` endpoint needed (the scanner finds edges); just carry the
+        // optional inner host + forced HTTP version. Gated to the transport's feature.
+        #[cfg(feature = "fronted-meek")]
+        "fronted-meek" => Some(ServerSpec::FrontedMeek(super::FrontedMeekConfig {
+            meek_host: ob.meek_host.clone().unwrap_or_default(),
+            http_version: ob.http_version.clone(),
+        })),
         _ => None, // unbounded, etc. — no spark transport
     }
 }
@@ -206,6 +213,15 @@ struct RawOutbound {
     tls: Option<RawTls>,
     #[serde(default)]
     method: Option<String>,
+    // fronted-meek (self-bootstrapping; `server`/`server_port` are unused — the scanner finds edges).
+    // Gated so the fields aren't dead code in builds without the transport (unknown JSON keys are
+    // ignored, so a fronted-meek outbound is simply skipped there).
+    #[cfg(feature = "fronted-meek")]
+    #[serde(default)]
+    meek_host: Option<String>,
+    #[cfg(feature = "fronted-meek")]
+    #[serde(default)]
+    http_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +362,38 @@ mod tests {
         // unbounded has no ServerSpec variant; the pool is exactly the 3 supported entries
         // (samizdat + hysteria2 + ss-2022). unbounded + legacy-ss are dropped.
         assert_eq!(cfg.transport.servers.len(), 3);
+    }
+
+    #[cfg(feature = "fronted-meek")]
+    #[test]
+    fn maps_fronted_meek_outbound_self_bootstrapping() {
+        // No `server` endpoint required (the scanner finds edges); carries the optional inner host +
+        // forced HTTP version straight through to FrontedMeekConfig.
+        let raw = r#"{ "options": { "outbounds": [
+            { "type": "fronted-meek", "tag": "fm-1",
+              "meek_host": "meek.dsa.akamai.getiantem.org", "http_version": "h1" }
+        ]}}"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        assert_eq!(cfg.transport.servers.len(), 1);
+        let ServerSpec::FrontedMeek(fm) = &cfg.transport.servers[0].spec else {
+            panic!("expected a fronted-meek pool entry");
+        };
+        assert_eq!(fm.meek_host, "meek.dsa.akamai.getiantem.org");
+        assert_eq!(fm.http_version.as_deref(), Some("h1"));
+    }
+
+    #[cfg(feature = "fronted-meek")]
+    #[test]
+    fn maps_bare_fronted_meek_to_self_bootstrap_defaults() {
+        // An empty fronted-meek outbound maps to the self-bootstrapping defaults: empty meek_host →
+        // the built-in endpoint, no forced HTTP version (auto-select from ALPN).
+        let raw = r#"{ "options": { "outbounds": [ { "type": "fronted-meek", "tag": "fm-2" } ]}}"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        let ServerSpec::FrontedMeek(fm) = &cfg.transport.servers[0].spec else {
+            panic!("expected fronted-meek");
+        };
+        assert!(fm.meek_host.is_empty());
+        assert!(fm.http_version.is_none());
     }
 
     #[test]
