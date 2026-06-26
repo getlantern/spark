@@ -29,10 +29,11 @@
     --indicator-off: #dedfdf; /* gray3 */
     --shadow: rgba(0, 97, 98, 0.098); /* shadowColor 0x19006162 (teal-tinted) */
     --bolt: #f5b800;        /* statusWarningBgDot — the smart/auto bolt */
-    /* Latency-pill thresholds: good < 80ms, amber < 160ms, else slow. */
+    /* Latency-pill thresholds: good < 80ms, amber < 160ms, else slow. Ramp connotes speed, not
+       danger: green -> yellow-green -> gold. No red (a slow server is "slower", not an error). */
     --lat-good: #1f9d55;
-    --lat-amber: #c98a00;
-    --lat-slow: #c0341d;
+    --lat-amber: #7ca006;
+    --lat-slow: #c98a00;
     --font: "Urbanist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   :global(html),

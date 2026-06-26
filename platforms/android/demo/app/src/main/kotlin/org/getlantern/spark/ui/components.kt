@@ -41,12 +41,16 @@ fun protocolLabel(p: String?): String = when (p?.lowercase()) {
     else -> p
 }
 
-/** good <80, amber <160, else slow; null -> slow. Mirrors latencyClass. (fg, bg) */
-private fun latColors(ms: Long?): Pair<Color, Color> = when {
-    ms == null -> SparkColors.latSlow to Color(0x1FC0341D)
-    ms < 80 -> SparkColors.latGood to Color(0x1F1F9D55)
-    ms < 160 -> SparkColors.latAmber to Color(0x1FC98A00)
-    else -> SparkColors.latSlow to Color(0x1FC0341D)
+/** good <80, amber <160, else slow; null -> slow. Mirrors latencyClass. Pill = colored text on a
+ *  12%-alpha tint of the same hue (so the bg always tracks the fg — no stale duplicated hex). */
+private fun latColors(ms: Long?): Pair<Color, Color> {
+    val fg = when {
+        ms == null -> SparkColors.latSlow
+        ms < 80 -> SparkColors.latGood
+        ms < 160 -> SparkColors.latAmber
+        else -> SparkColors.latSlow
+    }
+    return fg to fg.copy(alpha = 0.12f)
 }
 
 @Composable

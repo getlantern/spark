@@ -225,8 +225,8 @@
     font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; white-space: nowrap;
   }
   .pill.good { color: var(--lat-good); background: rgba(31, 157, 85, 0.12); }
-  .pill.amber { color: var(--lat-amber); background: rgba(201, 138, 0, 0.12); }
-  .pill.slow { color: var(--lat-slow); background: rgba(192, 52, 29, 0.12); }
+  .pill.amber { color: var(--lat-amber); background: rgba(124, 160, 6, 0.12); }
+  .pill.slow { color: var(--lat-slow); background: rgba(201, 138, 0, 0.12); }
 
   .bolt { font-size: 17px; opacity: 0.28; }
   .bolt.on { opacity: 1; color: var(--bolt); }

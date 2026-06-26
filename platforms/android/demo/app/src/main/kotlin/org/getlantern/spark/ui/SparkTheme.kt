@@ -24,9 +24,11 @@ object SparkColors {
     val success = Color(0xFF00531F)
     val indicatorOff = Color(0xFFDEDFDF)
     val bolt = Color(0xFFF5B800)
+    // Latency ramp connotes speed, not danger: green (fast) -> yellow-green -> gold (slower).
+    // No red — a slow server is "slower", not an error/stop.
     val latGood = Color(0xFF1F9D55)
-    val latAmber = Color(0xFFC98A00)
-    val latSlow = Color(0xFFC0341D)
+    val latAmber = Color(0xFF7CA006)
+    val latSlow = Color(0xFFC98A00)
     val shadow = Color(0x19006162)
 }
 
