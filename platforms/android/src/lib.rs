@@ -116,9 +116,15 @@ mod jni {
         _obj: JObject<'local>,
     ) -> jni::sys::jstring {
         let json = spark_core::fd_tunnel::servers_json();
-        match env.new_string(json) {
-            Ok(s) => s.into_raw(),
-            Err(_) => std::ptr::null_mut(),
+        // Fall back to an empty array so the common path always returns valid JSON, never null.
+        // (The Kotlin side is typed nullable for the catastrophic JVM-allocation case below.)
+        let s = match env.new_string(&json) {
+            Ok(s) => Some(s),
+            Err(_) => env.new_string("[]").ok(),
+        };
+        match s {
+            Some(s) => s.into_raw(),
+            None => std::ptr::null_mut(),
         }
     }
 

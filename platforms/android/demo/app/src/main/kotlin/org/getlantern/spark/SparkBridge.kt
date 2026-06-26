@@ -50,8 +50,9 @@ object SparkBridge {
 
     /** The live server pool as a JSON array (see native `servers_json`): one object per member with
      *  index, location metadata, protocol, latencyMs, healthy, isCurrent. "[]" when no pool is
-     *  active. Safe to call any time; returns "[]" before connect. */
-    external fun nativeServers(): String
+     *  active. Safe to call any time; "[]" before connect. Nullable only for a catastrophic JVM
+     *  string-allocation failure in JNI; callers should treat null as "[]". */
+    external fun nativeServers(): String?
 
     /** Pin which pool member new flows dial: [index] >= 0 pins it, [index] < 0 = auto (fastest).
      *  Returns true if applied (false if out of range / no active pool). */

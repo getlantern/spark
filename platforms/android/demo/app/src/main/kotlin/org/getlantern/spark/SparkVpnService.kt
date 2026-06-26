@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -41,7 +42,9 @@ class SparkVpnService : VpnService() {
     // tear down the service. A restart's nativeStop() wakes the OLD readiness thread with rc=-1;
     // without this guard that stale thread would nativeStop()+stopSelf() the tunnel the restart is
     // rebuilding. @Volatile so the old readiness thread sees the bump across threads.
-    @Volatile private var tunnelGeneration = 0
+    // Atomic so concurrent (re)starts can't lose an increment and hand two readiness threads the
+    // same generation (which would defeat the stale-thread guard).
+    private val tunnelGeneration = AtomicInteger(0)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -101,14 +104,14 @@ class SparkVpnService : VpnService() {
         }
     }
 
+    @Synchronized
     private fun startTunnel(config: String?) {
         // Stash the config FIRST so a restart (which calls back into startTunnel) can reuse it.
         lastConfig = config
         if (worker != null) return
         // Bump the generation for this real start so the readiness thread below can detect if a later
         // (re)connect supersedes it (only the current generation may stop the service).
-        tunnelGeneration += 1
-        val generation = tunnelGeneration
+        val generation = tunnelGeneration.incrementAndGet()
         // Promote to foreground FIRST so the tunnel survives backgrounding (and so we satisfy the
         // platform requirement to call startForeground promptly after startForegroundService).
         startInForeground()
@@ -158,11 +161,12 @@ class SparkVpnService : VpnService() {
         // stop the VPN cleanly so traffic falls back to direct rather than a black hole.
         thread(name = "spark-ready") {
             val rc = SparkBridge.nativeWaitReady(READY_TIMEOUT_MS)
-            if (generation != tunnelGeneration) {
+            val now = tunnelGeneration.get()
+            if (generation != now) {
                 // A newer (re)connect superseded this attempt — don't touch the service. A restart's
                 // nativeStop() wakes this stale thread with rc=-1; without this guard it would
                 // nativeStop()+stopSelf() the tunnel the restart is rebuilding.
-                Log.i(TAG, "stale readiness result (gen=$generation now=$tunnelGeneration); ignoring")
+                Log.i(TAG, "stale readiness result (gen=$generation now=$now); ignoring")
                 return@thread
             }
             if (rc != 0) {
@@ -262,6 +266,7 @@ class SparkVpnService : VpnService() {
      * can't deadlock. Clearing `worker` BEFORE calling startTunnel is what lets the restart past
      * startTunnel's `if (worker != null) return` guard.
      */
+    @Synchronized
     private fun restartTunnel() {
         Log.i(TAG, "restartTunnel: tearing down + re-establishing with lastConfig")
         val cfg = lastConfig
@@ -271,6 +276,7 @@ class SparkVpnService : VpnService() {
         startTunnel(cfg)
     }
 
+    @Synchronized
     private fun stopTunnel() {
         // Stop watching the network first so an in-flight network change can't trigger a restart
         // while we're tearing down.
