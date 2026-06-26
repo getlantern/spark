@@ -146,7 +146,8 @@ private fun AppBar() {
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-            Icon(MenuIcon, contentDescription = "Menu", tint = SparkColors.textTertiary, modifier = Modifier.size(22.dp))
+            // Decorative for now (no menu/settings screen in this build) — null so TalkBack skips it.
+            Icon(MenuIcon, contentDescription = null, tint = SparkColors.textTertiary, modifier = Modifier.size(22.dp))
         }
         Text(
             "Spark",

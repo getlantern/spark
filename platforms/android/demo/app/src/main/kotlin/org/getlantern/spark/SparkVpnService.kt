@@ -312,7 +312,12 @@ class SparkVpnService : VpnService() {
 
     @Synchronized
     private fun stopTunnel() {
-        SparkState.state.value = VpnState.DISCONNECTED
+        // Don't clobber a FAILED state set by the readiness gate (whose stopSelf() lands us here via
+        // onDestroy) — keep FAILED visible until the next connect flips it back to CONNECTING. A
+        // normal user stop is in CONNECTED/CONNECTING here, so it still resolves to DISCONNECTED.
+        if (SparkState.state.value != VpnState.FAILED) {
+            SparkState.state.value = VpnState.DISCONNECTED
+        }
         // Stop watching the network first so an in-flight network change can't trigger a restart
         // while we're tearing down.
         netCallback?.let {

@@ -17,6 +17,11 @@ object VpnController {
     }
 
     fun stop(ctx: Context) {
+        // Deliver ACTION_STOP so the service stops ITSELF (stopForeground + stopSelf): the canonical,
+        // reliable way to tear down a foreground service. stopService() does NOT reliably stop our
+        // foreground specialUse service (verified: onDestroy never fires), so we don't use it. This is
+        // only ever called from the toggle while connected, i.e. the service is already running, so it
+        // doesn't trip Android 8+'s background-service-start restriction.
         ctx.startService(
             Intent(ctx, SparkVpnService::class.java).setAction(SparkVpnService.ACTION_STOP),
         )
