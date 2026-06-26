@@ -296,6 +296,9 @@ class SparkVpnService : VpnService() {
         netCallback = null
         netCbThread?.quitSafely()
         netCbThread = null
+        // Reset so a later re-register treats its first onAvailable as the initial network (prev ==
+        // null), not a spurious "change" from the prior run that would churn an immediate restart.
+        currentNet = null
         SparkBridge.nativeStop()
         worker?.join(2000)
         worker = null
