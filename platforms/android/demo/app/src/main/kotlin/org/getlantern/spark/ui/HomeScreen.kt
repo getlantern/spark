@@ -37,6 +37,10 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -174,7 +178,15 @@ private fun VpnSwitch(on: Boolean, busy: Boolean, onToggle: () -> Unit) {
             .height(70.dp)
             .clip(RoundedCornerShape(35.dp))
             .background(if (on) SparkColors.brand else SparkColors.off)
-            .clickable(enabled = !busy) { onToggle() },
+            .semantics {
+                contentDescription = "VPN"
+                stateDescription = if (on) "Connected" else "Disconnected"
+            }
+            .clickable(
+                enabled = !busy,
+                onClickLabel = if (on) "Disconnect" else "Connect",
+                role = Role.Switch,
+            ) { onToggle() },
         contentAlignment = Alignment.CenterStart,
     ) {
         if (busy) {

@@ -18,9 +18,15 @@ object Selection {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Pin [idx] (null = auto): reflect it in [index] immediately, and apply the native pin off the
-     *  main thread on the process-lived scope so a back-navigation can't cancel it before it lands. */
+     *  main thread on the process-lived scope so a back-navigation can't cancel it before it lands.
+     *  If the native pin is a no-op (no active pool / stale index) and nothing newer was chosen
+     *  since, revert so the UI doesn't claim a selection the core didn't apply. */
     fun pin(idx: Int?) {
+        val previous = _index.value
         _index.value = idx
-        scope.launch { SparkBridge.nativeSelectServer(idx ?: -1) }
+        scope.launch {
+            val applied = SparkBridge.nativeSelectServer(idx ?: -1)
+            if (!applied && _index.value == idx) _index.value = previous
+        }
     }
 }
