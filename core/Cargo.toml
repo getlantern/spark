@@ -122,10 +122,12 @@ multi-server = ["dep:flint-dial"]
 # Off by default; the Apple (iOS + iOS-sim + macOS) and Android shim builds enable it — BoringSSL
 # cross-compiles for all those targets, so the fetch uses one uniform (cert-verifying) BoringSSL
 # handshake on every platform with no second TLS stack. The fetch races a *direct* plain-boring TLS
-# request (probe::tls_wrap, HTTP/1.1) against a *fronted* one-shot h2 request (flint-fronted's
-# FrontedTlsDialer over the embedded domainfront config — aliyun/akamai/cloudfront), so a censored
-# cold start fronts the config-new fetch (config-new-fetch-design.md §9). `dep:flint-fronted` pulls
-# the fronting transport + its boring dial path. See docs/config-fetch-cross-platform-design.md.
+# request (probe::tls_wrap, HTTP/1.1) against two *fronted* one-shot h2 avenues: flint-fronted's
+# FrontedTlsDialer over the embedded domainfront config (aliyun/akamai/cloudfront), and the
+# vantage-point scanner (flint-kindling's `FrontedBootstrap`) that discovers live edges from the user's
+# own network — so a fully-blocked embedded front list self-heals (config-new-fetch-design.md §9).
+# `dep:flint-fronted` pulls the fronting transport + its boring dial path; `dep:flint-kindling` pulls
+# the scanner bootstrap. See docs/config-fetch-cross-platform-design.md.
 config-fetch = ["anytls", "multi-server", "dep:flint-fronted", "dep:flint-kindling"]
 # Domain-fronted meek polling transport (Shir-o-Khorshid CDN-fronting, no MITM).
 # Pulls flint-fronted (with its boring Chrome dial path) for fronting + the meek

@@ -137,7 +137,7 @@ async fn fetch_once(
     req.user_id = creds.user_id.clone();
     req.pro_token = creds.pro_token.clone();
 
-    let mut attempts: Vec<FetchAttempt> = Vec::with_capacity(3);
+    let mut attempts: Vec<FetchAttempt<'_>> = Vec::with_capacity(3);
     attempts.push(Box::pin(fetch_once_direct(
         env,
         &req,
