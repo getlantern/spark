@@ -14,7 +14,7 @@ import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
 import android.util.Log
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
@@ -35,6 +35,9 @@ class SparkVpnService : VpnService() {
     // the change and re-establish. These vars are touched from both the service thread and the
     // ConnectivityManager callback thread; the operations are coarse and the window is tiny.
     private var netCallback: ConnectivityManager.NetworkCallback? = null
+    // Network callbacks (and the blocking restartTunnel they trigger) run on this dedicated thread,
+    // never the main looper — restartTunnel's nativeStop()+join would otherwise risk an ANR.
+    private var netCbThread: HandlerThread? = null
     private var currentNet: Network? = null
     private var lastConfig: String? = null // last config handed to startTunnel, reused on restart
 
@@ -92,7 +95,9 @@ class SparkVpnService : VpnService() {
         )
         val notif = builder
             .setContentTitle("Spark")
-            .setContentText("Connected")
+            // State-neutral: shown from before readiness through connected (the readiness gate can
+            // still fail). Phase 2 wires this to live status.
+            .setContentText("VPN running")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .setContentIntent(tap)
@@ -106,9 +111,10 @@ class SparkVpnService : VpnService() {
 
     @Synchronized
     private fun startTunnel(config: String?) {
-        // Stash the config FIRST so a restart (which calls back into startTunnel) can reuse it.
-        lastConfig = config
+        // Already running? Leave lastConfig alone — it must reflect the config the *running* tunnel
+        // was started with, so a later restart reuses the right one (not a stray second Connect tap).
         if (worker != null) return
+        lastConfig = config
         // Bump the generation for this real start so the readiness thread below can detect if a later
         // (re)connect supersedes it (only the current generation may stop the service).
         val generation = tunnelGeneration.incrementAndGet()
@@ -250,7 +256,10 @@ class SparkVpnService : VpnService() {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             .build()
-        val handler = Handler(Looper.getMainLooper())
+        // A background thread, not the main looper: onAvailable triggers the blocking restartTunnel.
+        val cbThread = HandlerThread("spark-netwatch").apply { start() }
+        netCbThread = cbThread
+        val handler = Handler(cbThread.looper)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             Log.i(TAG, "netwatch: registerBestMatchingNetworkCallback (API ${Build.VERSION.SDK_INT})")
             cm.registerBestMatchingNetworkCallback(request, cb, handler)
@@ -285,6 +294,8 @@ class SparkVpnService : VpnService() {
                 .unregisterNetworkCallback(it)
         }
         netCallback = null
+        netCbThread?.quitSafely()
+        netCbThread = null
         SparkBridge.nativeStop()
         worker?.join(2000)
         worker = null
