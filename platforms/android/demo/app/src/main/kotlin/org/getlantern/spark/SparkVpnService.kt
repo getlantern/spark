@@ -9,8 +9,12 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import kotlin.concurrent.thread
 
@@ -175,27 +179,81 @@ class SparkVpnService : VpnService() {
         if (netCallback == null) registerNetworkWatcher()
     }
 
+    /** Human-readable description of a network for the debug logs: handle, interface, transports. */
+    private fun netDesc(cm: ConnectivityManager, network: Network?): String {
+        if (network == null) return "none"
+        val caps = cm.getNetworkCapabilities(network)
+        val iface = cm.getLinkProperties(network)?.interfaceName
+        val transports = if (caps == null) {
+            "?"
+        } else {
+            buildList {
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("WIFI")
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("CELLULAR")
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) add("ETHERNET")
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) add("VPN")
+            }.joinToString("|").ifEmpty { "(no transports)" }
+        }
+        return "net=$network iface=$iface transports=$transports"
+    }
+
     /**
-     * Watch the default network and restart the tunnel when it actually changes (e.g. Wi-Fi →
-     * cellular). registerDefaultNetworkCallback fires onAvailable immediately for the current
-     * network at registration; we adopt that first network without restarting and only restart on a
-     * subsequent, different handle.
+     * Watch the underlying physical network and react when it actually changes (e.g. Wi-Fi →
+     * cellular). NOTE: `registerDefaultNetworkCallback` reports OUR VPN as the default on API 28+
+     * (so it never sees the underlying change). Lantern's fix, mirrored here: on API 31+ use
+     * `registerBestMatchingNetworkCallback` with an INTERNET + NOT_RESTRICTED request (it tracks the
+     * physical network); on 24..30 fall back to `registerDefaultNetworkCallback`. On a changed
+     * non-VPN network we update the VPN's underlying network and restart the tunnel so new dials use
+     * it. Heavily logged under tag "$TAG" / "netwatch" while we validate the path.
      */
     private fun registerNetworkWatcher() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 val prev = currentNet
-                currentNet = network
-                // First callback = current network at registration: adopt it, don't restart.
-                if (prev != null && prev != network) {
-                    Log.i(TAG, "default network changed; restarting tunnel")
-                    restartTunnel()
+                val isVpn = cm.getNetworkCapabilities(network)
+                    ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+                Log.i(TAG, "netwatch onAvailable: ${netDesc(cm, network)} isVpn=$isVpn prev=${netDesc(cm, prev)}")
+                if (isVpn) {
+                    Log.i(TAG, "netwatch: reported network is our own VPN; ignoring (not an underlying change)")
+                    return
                 }
+                currentNet = network
+                // Tell the system which physical network the VPN's sockets ride (Lantern does this).
+                runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                    .onSuccess { Log.i(TAG, "netwatch: setUnderlyingNetworks($network) ok") }
+                    .onFailure { Log.w(TAG, "netwatch: setUnderlyingNetworks failed", it) }
+                if (prev == null) {
+                    Log.i(TAG, "netwatch: adopted initial underlying network; no restart")
+                } else if (prev != network) {
+                    Log.i(TAG, "netwatch: underlying network changed ($prev -> $network); restarting tunnel")
+                    restartTunnel()
+                } else {
+                    Log.i(TAG, "netwatch: same underlying network re-reported; no restart")
+                }
+            }
+
+            override fun onLost(network: Network) {
+                Log.i(TAG, "netwatch onLost: $network (current=$currentNet)")
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                Log.i(TAG, "netwatch onCapabilitiesChanged: ${netDesc(cm, network)}")
             }
         }
         netCallback = cb
-        cm.registerDefaultNetworkCallback(cb)
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            .build()
+        val handler = Handler(Looper.getMainLooper())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Log.i(TAG, "netwatch: registerBestMatchingNetworkCallback (API ${Build.VERSION.SDK_INT})")
+            cm.registerBestMatchingNetworkCallback(request, cb, handler)
+        } else {
+            Log.i(TAG, "netwatch: registerDefaultNetworkCallback (API ${Build.VERSION.SDK_INT})")
+            cm.registerDefaultNetworkCallback(cb, handler)
+        }
     }
 
     /**
@@ -205,6 +263,7 @@ class SparkVpnService : VpnService() {
      * startTunnel's `if (worker != null) return` guard.
      */
     private fun restartTunnel() {
+        Log.i(TAG, "restartTunnel: tearing down + re-establishing with lastConfig")
         val cfg = lastConfig
         SparkBridge.nativeStop()
         worker?.join(2000)
