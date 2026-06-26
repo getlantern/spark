@@ -32,11 +32,20 @@ use flint_fronted::{
 };
 
 use super::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
-use crate::config::{FrontedMeekConfig, DEFAULT_FRONTED_MEEK_HOST};
+use crate::config::{
+    FrontedMeekConfig, DEFAULT_ALIYUN_MEEK_HOST, DEFAULT_CLOUDFRONT_MEEK_HOST,
+    DEFAULT_FRONTED_MEEK_HOST,
+};
 use crate::BoxedStream;
 
 pub struct FrontedMeekTransport {
+    /// Inner host each CDN's fronts route to. The inner `Host` is CDN-specific, so
+    /// these can't share one value; the winning front's host is used per connection
+    /// (see `open_tunnel`). `meek_host` is Akamai (primary); cloudfront/aliyun feed
+    /// the scanner's per-CDN candidate generation.
     meek_host: String,
+    cloudfront_host: String,
+    aliyun_host: String,
     /// `None` = auto-select per connection from the negotiated ALPN; `Some` =
     /// forced by config.
     http_version: Option<MeekHttpVersion>,
@@ -63,26 +72,14 @@ impl FrontedMeekTransport {
                 )))
             }
         };
-        let trimmed = cfg.meek_host.trim();
-        let meek_host = if trimmed.is_empty() {
-            DEFAULT_FRONTED_MEEK_HOST.to_owned()
-        } else {
-            // A bare DNS host (no port — meek always fronts on TLS/443; the host is
-            // used as the DNS name + HTTP Host/verify identity). Reject embedded
-            // whitespace/control, authority-breaking chars (`/?#@\`), and `:` — fail
-            // fast here rather than at dial time.
-            if trimmed.bytes().any(|b| {
-                b <= 0x20 || b >= 0x7f || matches!(b, b'/' | b'?' | b'#' | b'@' | b'\\' | b':')
-            }) {
-                return Err(io::Error::other(format!(
-                    "transport.fronted_meek.meek_host {trimmed:?} is not a bare host \
-                     (no whitespace/control, `/?#@\\`, or port `:`)"
-                )));
-            }
-            trimmed.to_owned()
-        };
         Ok(Self {
-            meek_host,
+            meek_host: bare_host(&cfg.meek_host, DEFAULT_FRONTED_MEEK_HOST, "meek_host")?,
+            cloudfront_host: bare_host(
+                &cfg.cloudfront_host,
+                DEFAULT_CLOUDFRONT_MEEK_HOST,
+                "cloudfront_host",
+            )?,
+            aliyun_host: bare_host(&cfg.aliyun_host, DEFAULT_ALIYUN_MEEK_HOST, "aliyun_host")?,
             http_version,
             seed: seed_now(),
             fronts: OnceCell::new(),
@@ -90,17 +87,21 @@ impl FrontedMeekTransport {
         })
     }
 
-    fn meek_cfg(&self) -> MeekPollConfig {
-        // http_version is set per-connection in open_tunnel (forced or auto from ALPN).
-        MeekPollConfig::new(self.meek_host.clone())
-    }
-
     /// Lazily scan once: Akamai local-DNS + CloudFront/Aliyun prefix sampling →
     /// materialized candidate fronts. No server config required.
     async fn candidate_fronts(&self) -> &[MaterializedFront] {
         self.fronts
             .get_or_init(|| async {
-                let targets = scanner::ScanTargets::for_host(self.meek_host.clone());
+                // Each CDN routes to its own inner host; an empty host disables that
+                // CDN's candidates (the scanner skips it rather than scan a host that
+                // can't route there).
+                let mut targets = scanner::ScanTargets::for_host(self.meek_host.clone());
+                if !self.cloudfront_host.is_empty() {
+                    targets = targets.with_cloudfront_host(self.cloudfront_host.clone());
+                }
+                if !self.aliyun_host.is_empty() {
+                    targets = targets.with_aliyun_host(self.aliyun_host.clone());
+                }
                 let cands =
                     scanner::all_candidates(&SystemResolver::new(), &targets, self.seed).await;
                 cands
@@ -122,7 +123,9 @@ impl FrontedMeekTransport {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let conn = 'conn: {
+        // The meek POSTs must address the host the *winning* front routes to (the
+        // inner Host is CDN-specific), so carry it out of the dial with the conn.
+        let (conn, inner_host) = 'conn: {
             if let Some(front) = cached {
                 if let Ok(c) = dial_fronts_alpn(
                     &self.meek_host,
@@ -131,7 +134,7 @@ impl FrontedMeekTransport {
                 )
                 .await
                 {
-                    break 'conn c;
+                    break 'conn (c, front.front.fronted_host.clone());
                 }
                 // The cached front failed — evict it so every subsequent flow
                 // doesn't pay its full dial timeout before falling back to the race.
@@ -141,20 +144,25 @@ impl FrontedMeekTransport {
             let c = dial_fronts_alpn(&self.meek_host, fronts, DialOptions::default())
                 .await
                 .map_err(io::Error::other)?;
+            let inner = fronts
+                .get(c.candidate_index)
+                .map(|f| f.front.fronted_host.clone())
+                .unwrap_or_else(|| self.meek_host.clone());
             if let Some(win) = fronts.get(c.candidate_index) {
                 *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(win.clone());
             }
-            c
+            (c, inner)
         };
-        // Open meek, picking the HTTP version: forced by config, or auto-detected
-        // from the ALPN the winning edge negotiated.
+        // Open meek to the winning front's inner host, picking the HTTP version:
+        // forced by config, or auto-detected from the ALPN the winning edge negotiated.
+        let m = MeekPollConfig::new(inner_host);
         match self.http_version {
             Some(v) => {
-                let mut m = self.meek_cfg();
+                let mut m = m;
                 m.http_version = v;
                 open_meek_poll(conn, m)
             }
-            None => open_meek_poll_auto(conn, self.meek_cfg()),
+            None => open_meek_poll_auto(conn, m),
         }
     }
 }
@@ -182,6 +190,27 @@ impl UdpTransport for FrontedMeekTransport {
     }
 }
 
+/// Validate a configured meek inner host as a bare DNS authority, defaulting to
+/// `default` when empty. meek always fronts on TLS/443, so the host is the DNS
+/// name + HTTP Host / verify identity — reject embedded whitespace/control,
+/// authority-breaking chars (`/?#@\`), and a port `:`; fail fast here, not at dial.
+fn bare_host(value: &str, default: &str, field: &str) -> io::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(default.to_owned());
+    }
+    if trimmed
+        .bytes()
+        .any(|b| b <= 0x20 || b >= 0x7f || matches!(b, b'/' | b'?' | b'#' | b'@' | b'\\' | b':'))
+    {
+        return Err(io::Error::other(format!(
+            "transport.fronted_meek.{field} {trimmed:?} is not a bare host \
+             (no whitespace/control, `/?#@\\`, or port `:`)"
+        )));
+    }
+    Ok(trimmed.to_owned())
+}
+
 fn seed_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -204,8 +233,28 @@ mod tests {
     #[test]
     fn empty_host_defaults_and_unset_version_is_auto() {
         let t = FrontedMeekTransport::new(&cfg(None)).expect("new");
+        // Each CDN defaults to its own inner host (they can't share one).
         assert_eq!(t.meek_host, DEFAULT_FRONTED_MEEK_HOST);
+        assert_eq!(t.cloudfront_host, DEFAULT_CLOUDFRONT_MEEK_HOST);
+        assert_eq!(t.aliyun_host, DEFAULT_ALIYUN_MEEK_HOST);
         assert_eq!(t.http_version, None); // auto-select from ALPN
+    }
+
+    #[test]
+    fn per_cdn_hosts_are_validated_as_bare_hosts() {
+        let bad = FrontedMeekConfig {
+            cloudfront_host: "https://evil.example/path".into(),
+            ..Default::default()
+        };
+        assert!(FrontedMeekTransport::new(&bad).is_err());
+        let ok = FrontedMeekConfig {
+            cloudfront_host: "d123.cloudfront.net".into(),
+            aliyun_host: "meek.aliyun.example".into(),
+            ..Default::default()
+        };
+        let t = FrontedMeekTransport::new(&ok).expect("new");
+        assert_eq!(t.cloudfront_host, "d123.cloudfront.net");
+        assert_eq!(t.aliyun_host, "meek.aliyun.example");
     }
 
     #[test]
