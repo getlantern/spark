@@ -46,17 +46,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.getlantern.spark.Selection
 import org.getlantern.spark.ServerInfo
 import org.getlantern.spark.SparkBridge
 import org.getlantern.spark.parseServers
-import androidx.compose.runtime.rememberCoroutineScope
 
 @Composable
 fun ServersScreen(onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
     val selectedIdx by Selection.index.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -82,8 +79,9 @@ fun ServersScreen(onBack: () -> Unit) {
     // Pin [index] (or auto when null) and pop back. Reflect the choice in the shared UI state
     // immediately; the native pin is best-effort (it may be a no-op when not yet connected).
     fun choose(index: Int?) {
-        Selection.index.value = index
-        scope.launch(Dispatchers.IO) { SparkBridge.nativeSelectServer(index ?: -1) }
+        // Selection.pin applies the native pin on a process-lived scope, so navigating back here
+        // (which cancels this composition) can't cancel it before it lands.
+        Selection.pin(index)
         onBack()
     }
 
