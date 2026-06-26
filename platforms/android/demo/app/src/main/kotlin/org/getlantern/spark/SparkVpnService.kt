@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.util.Log
@@ -22,6 +24,20 @@ import kotlin.concurrent.thread
  */
 class SparkVpnService : VpnService() {
     private var worker: Thread? = null
+
+    // Default-network reconnection state. Mobile clients roam between Wi-Fi and cellular; when the
+    // default network changes the tunnel's underlying socket dies and stays dead, so we watch for
+    // the change and re-establish. These vars are touched from both the service thread and the
+    // ConnectivityManager callback thread; the operations are coarse and the window is tiny.
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
+    private var currentNet: Network? = null
+    private var lastConfig: String? = null // last config handed to startTunnel, reused on restart
+
+    // Generation counter so a stale readiness thread (from a superseded connect attempt) doesn't
+    // tear down the service. A restart's nativeStop() wakes the OLD readiness thread with rc=-1;
+    // without this guard that stale thread would nativeStop()+stopSelf() the tunnel the restart is
+    // rebuilding. @Volatile so the old readiness thread sees the bump across threads.
+    @Volatile private var tunnelGeneration = 0
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -82,7 +98,13 @@ class SparkVpnService : VpnService() {
     }
 
     private fun startTunnel(config: String?) {
+        // Stash the config FIRST so a restart (which calls back into startTunnel) can reuse it.
+        lastConfig = config
         if (worker != null) return
+        // Bump the generation for this real start so the readiness thread below can detect if a later
+        // (re)connect supersedes it (only the current generation may stop the service).
+        tunnelGeneration += 1
+        val generation = tunnelGeneration
         // Promote to foreground FIRST so the tunnel survives backgrounding (and so we satisfy the
         // platform requirement to call startForeground promptly after startForegroundService).
         startInForeground()
@@ -132,6 +154,13 @@ class SparkVpnService : VpnService() {
         // stop the VPN cleanly so traffic falls back to direct rather than a black hole.
         thread(name = "spark-ready") {
             val rc = SparkBridge.nativeWaitReady(READY_TIMEOUT_MS)
+            if (generation != tunnelGeneration) {
+                // A newer (re)connect superseded this attempt — don't touch the service. A restart's
+                // nativeStop() wakes this stale thread with rc=-1; without this guard it would
+                // nativeStop()+stopSelf() the tunnel the restart is rebuilding.
+                Log.i(TAG, "stale readiness result (gen=$generation now=$tunnelGeneration); ignoring")
+                return@thread
+            }
             if (rc != 0) {
                 Log.e(TAG, "tunnel did not become ready (config unavailable?); stopping VPN")
                 SparkBridge.nativeStop()
@@ -140,9 +169,57 @@ class SparkVpnService : VpnService() {
                 Log.i(TAG, "tunnel data path ready")
             }
         }
+        // Register the default-network watcher once, on the first start. On a restart netCallback is
+        // already set, so we don't stack callbacks — but this fresh startTunnel still re-established
+        // the tunnel and re-promoted the foreground service above.
+        if (netCallback == null) registerNetworkWatcher()
+    }
+
+    /**
+     * Watch the default network and restart the tunnel when it actually changes (e.g. Wi-Fi →
+     * cellular). registerDefaultNetworkCallback fires onAvailable immediately for the current
+     * network at registration; we adopt that first network without restarting and only restart on a
+     * subsequent, different handle.
+     */
+    private fun registerNetworkWatcher() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val prev = currentNet
+                currentNet = network
+                // First callback = current network at registration: adopt it, don't restart.
+                if (prev != null && prev != network) {
+                    Log.i(TAG, "default network changed; restarting tunnel")
+                    restartTunnel()
+                }
+            }
+        }
+        netCallback = cb
+        cm.registerDefaultNetworkCallback(cb)
+    }
+
+    /**
+     * Tear down the current data path and re-establish it with the last config. Runs on the
+     * ConnectivityManager callback thread; the worker is a different thread, so the bounded join
+     * can't deadlock. Clearing `worker` BEFORE calling startTunnel is what lets the restart past
+     * startTunnel's `if (worker != null) return` guard.
+     */
+    private fun restartTunnel() {
+        val cfg = lastConfig
+        SparkBridge.nativeStop()
+        worker?.join(2000)
+        worker = null
+        startTunnel(cfg)
     }
 
     private fun stopTunnel() {
+        // Stop watching the network first so an in-flight network change can't trigger a restart
+        // while we're tearing down.
+        netCallback?.let {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
+                .unregisterNetworkCallback(it)
+        }
+        netCallback = null
         SparkBridge.nativeStop()
         worker?.join(2000)
         worker = null
