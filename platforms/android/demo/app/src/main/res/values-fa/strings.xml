@@ -20,4 +20,7 @@
     <string name="connect">اتصال</string>
     <string name="disconnect">قطع اتصال</string>
     <string name="ms_format">%1$d ms</string>
+    <string name="back">بازگشت</string>
+    <string name="expand">باز کردن</string>
+    <string name="collapse">بستن</string>
 </resources>

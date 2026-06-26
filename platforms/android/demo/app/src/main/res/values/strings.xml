@@ -19,4 +19,8 @@
     <string name="connect">Connect</string>
     <string name="disconnect">Disconnect</string>
     <string name="ms_format">%1$d ms</string>
+    <!-- accessibility (TalkBack) content descriptions -->
+    <string name="back">Back</string>
+    <string name="expand">Expand</string>
+    <string name="collapse">Collapse</string>
 </resources>

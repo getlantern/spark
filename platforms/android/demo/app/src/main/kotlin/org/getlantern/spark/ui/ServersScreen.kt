@@ -119,7 +119,7 @@ fun ServersScreen(onBack: () -> Unit) {
             ) {
                 Icon(
                     BackChevronIcon,
-                    contentDescription = "Back",
+                    contentDescription = stringResource(R.string.back),
                     tint = SparkColors.textPrimary,
                     modifier = Modifier.size(22.dp),
                 )
@@ -319,7 +319,7 @@ private fun CountryGroup(
         bestLatency?.let { LatencyPill(it) }
         Icon(
             ChevronRightIcon,
-            contentDescription = if (expanded) "Collapse" else "Expand",
+            contentDescription = stringResource(if (expanded) R.string.collapse else R.string.expand),
             tint = SparkColors.textTertiary,
             modifier = Modifier
                 .size(20.dp)
