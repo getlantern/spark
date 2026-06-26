@@ -33,7 +33,7 @@ mod jni {
     use std::path::PathBuf;
 
     use jni::objects::{JObject, JString};
-    use jni::sys::jint;
+    use jni::sys::{jboolean, jint};
     use jni::JNIEnv;
 
     /// `SparkBridge.nativeRun(fd, mtu, addr, prefix, systemStack, config, dataDir)` — adopt the
@@ -104,6 +104,39 @@ mod jni {
         _obj: JObject<'local>,
     ) {
         spark_core::fd_tunnel::stop();
+    }
+
+    /// `SparkBridge.nativeServers()` — the live pool snapshot as a JSON array (see
+    /// `spark_core::fd_tunnel::servers_json` / `snapshot_to_json`): one object per member with
+    /// index, location metadata, `protocol`, `latencyMs`, `healthy`, `isCurrent`. `[]` when no pool
+    /// is active (direct / single relay / not yet connected).
+    #[no_mangle]
+    pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeServers<'local>(
+        env: JNIEnv<'local>,
+        _obj: JObject<'local>,
+    ) -> jni::sys::jstring {
+        let json = spark_core::fd_tunnel::servers_json();
+        match env.new_string(json) {
+            Ok(s) => s.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        }
+    }
+
+    /// `SparkBridge.nativeSelectServer(index)` — pin which pool member new flows dial first:
+    /// `index >= 0` pins that member, `index < 0` returns to auto (latency-ranked). Returns whether
+    /// it applied (false if out of range / no active pool). Mirrors the Apple `spark_select_server`.
+    #[no_mangle]
+    pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeSelectServer<'local>(
+        _env: JNIEnv<'local>,
+        _obj: JObject<'local>,
+        index: jint,
+    ) -> jboolean {
+        let pin = if index < 0 {
+            None
+        } else {
+            Some(index as usize)
+        };
+        u8::from(spark_core::fd_tunnel::select_server(pin))
     }
 
     /// `SparkBridge.nativeMarkConnecting()` — mark the data path *connecting* before the `nativeRun`
