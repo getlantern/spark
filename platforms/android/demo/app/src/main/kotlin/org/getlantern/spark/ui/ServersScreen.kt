@@ -14,9 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -70,8 +68,16 @@ fun ServersScreen(onBack: () -> Unit) {
 
     val current = servers.firstOrNull { it.isCurrent }
 
-    // Track expanded state for multi-member country groups
+    // Track expanded state for multi-member country groups.
     val expandedGroups = remember { mutableStateMapOf<String, Boolean>() }
+
+    // Pin [index] (or auto when null) and pop back. Reflect the choice in the shared UI state
+    // immediately; the native pin is best-effort (it may be a no-op when not yet connected).
+    fun choose(index: Int?) {
+        Selection.index.value = index
+        scope.launch(Dispatchers.IO) { SparkBridge.nativeSelectServer(index ?: -1) }
+        onBack()
+    }
 
     Column(
         Modifier
@@ -119,12 +125,20 @@ fun ServersScreen(onBack: () -> Unit) {
             // Smart location section
             item {
                 Spacer(Modifier.height(16.dp))
+                Text(
+                    "Smart location",
+                    fontFamily = Urbanist,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = SparkColors.textSecondary,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
+                )
                 val isAuto = selectedIdx == null
-                Box(
+                Row(
                     Modifier
                         .fillMaxWidth()
                         .shadow(
-                            elevation = 8.dp,
+                            elevation = 16.dp,
                             shape = RoundedCornerShape(16.dp),
                             ambientColor = SparkColors.shadow,
                             spotColor = SparkColors.shadow,
@@ -133,49 +147,36 @@ fun ServersScreen(onBack: () -> Unit) {
                         .background(
                             if (isAuto) SparkColors.brand.copy(alpha = 0.08f) else SparkColors.surface,
                         )
-                        .clickable {
-                            Selection.index.value = null
-                            scope.launch(Dispatchers.IO) {
-                                SparkBridge.nativeSelectServer(-1)
-                            }
-                            onBack()
-                        }
+                        .clickable { choose(null) }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        if (current != null) {
-                            Text(flagEmoji(current.countryCode), fontSize = 21.sp)
-                        } else {
-                            Text("🌐", fontSize = 21.sp)
-                        }
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                if (current != null) serverLabel(current) else "Fastest server",
-                                fontFamily = Urbanist,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = SparkColors.textPrimary,
-                            )
-                            val sub = if (current != null) protocolLabel(current.protocol) else ""
-                            if (sub.isNotEmpty()) {
-                                Text(
-                                    sub,
-                                    fontFamily = Urbanist,
-                                    fontSize = 12.sp,
-                                    color = SparkColors.textTertiary,
-                                )
-                            }
-                        }
-                        current?.latencyMs?.let { LatencyPill(it) }
+                    Text(if (current != null) flagEmoji(current.countryCode) else "🌐", fontSize = 21.sp)
+                    Column(Modifier.weight(1f)) {
                         Text(
-                            "⚡",
-                            fontSize = 18.sp,
-                            color = SparkColors.bolt.copy(alpha = if (isAuto) 1f else 0.28f),
+                            if (current != null) serverLabel(current) else "Fastest server",
+                            fontFamily = Urbanist,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = SparkColors.textPrimary,
                         )
+                        val sub = if (current != null) protocolLabel(current.protocol) else ""
+                        if (sub.isNotEmpty()) {
+                            Text(
+                                sub,
+                                fontFamily = Urbanist,
+                                fontSize = 12.sp,
+                                color = SparkColors.textTertiary,
+                            )
+                        }
                     }
+                    current?.latencyMs?.let { LatencyPill(it) }
+                    Text(
+                        "⚡",
+                        fontSize = 18.sp,
+                        color = SparkColors.bolt.copy(alpha = if (isAuto) 1f else 0.28f),
+                    )
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -206,7 +207,14 @@ fun ServersScreen(onBack: () -> Unit) {
                     }
                 }
             } else if (servers.isNotEmpty()) {
-                // "ALL LOCATIONS" header
+                // Group servers by country (or name, or "—"), alphabetical.
+                val groups = servers
+                    .groupBy { it.country?.takeIf { c -> c.isNotBlank() } ?: (it.name?.takeIf { n -> n.isNotBlank() } ?: "—") }
+                    .entries
+                    .sortedBy { it.key }
+
+                // "ALL LOCATIONS" — one card holding every country group with internal dividers
+                // (mirrors the Tauri page and the home StatusCard: a single surface, not per-row cards).
                 item {
                     Text(
                         "ALL LOCATIONS",
@@ -218,185 +226,151 @@ fun ServersScreen(onBack: () -> Unit) {
                         modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
                     )
                     Spacer(Modifier.height(8.dp))
-                }
 
-                // Group servers by country (or name or "—")
-                val groups = servers
-                    .groupBy { it.country?.takeIf { c -> c.isNotBlank() } ?: (it.name?.takeIf { n -> n.isNotBlank() } ?: "—") }
-                    .entries
-                    .sortedBy { it.key }
-
-                items(groups, key = { it.key }) { (country, members) ->
-                    val isSingle = members.size == 1
-                    val isExpanded = expandedGroups[country] ?: false
-
-                    Box(
+                    Column(
                         Modifier
                             .fillMaxWidth()
                             .shadow(
-                                elevation = 4.dp,
-                                shape = RoundedCornerShape(12.dp),
+                                elevation = 16.dp,
+                                shape = RoundedCornerShape(16.dp),
                                 ambientColor = SparkColors.shadow,
                                 spotColor = SparkColors.shadow,
                             )
-                            .clip(RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(16.dp))
                             .background(SparkColors.surface),
                     ) {
-                        Column {
-                            if (isSingle) {
-                                val s = members[0]
-                                val isSelected = selectedIdx == s.index
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .background(
-                                            if (isSelected) SparkColors.brand.copy(alpha = 0.08f)
-                                            else Color.Transparent,
-                                        )
-                                        .clickable {
-                                            Selection.index.value = s.index
-                                            scope.launch(Dispatchers.IO) {
-                                                SparkBridge.nativeSelectServer(s.index)
-                                            }
-                                            onBack()
-                                        }
-                                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Text(flagEmoji(s.countryCode), fontSize = 21.sp)
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            serverLabel(s),
-                                            fontFamily = Urbanist,
-                                            fontSize = 15.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = SparkColors.textPrimary,
-                                        )
-                                        val proto = protocolLabel(s.protocol)
-                                        if (proto.isNotEmpty()) {
-                                            Text(
-                                                proto,
-                                                fontFamily = Urbanist,
-                                                fontSize = 12.sp,
-                                                color = SparkColors.textTertiary,
-                                            )
-                                        }
-                                    }
-                                    s.latencyMs?.let { LatencyPill(it) }
-                                    if (isSelected) {
-                                        Text("✓", fontSize = 18.sp, color = SparkColors.brand)
-                                    }
-                                }
-                            } else {
-                                // Multi-member: expandable group header
-                                val bestLatency = members.mapNotNull { it.latencyMs }.minOrNull()
-                                val expandRotation by animateFloatAsState(
-                                    targetValue = if (isExpanded) 90f else 0f,
-                                    animationSpec = tween(200),
-                                    label = "expand-$country",
-                                )
-                                // Use the countryCode of the first member for the flag
-                                val groupFlag = members.firstOrNull()?.countryCode
-
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            expandedGroups[country] = !isExpanded
-                                        }
-                                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Text(flagEmoji(groupFlag), fontSize = 21.sp)
-                                    Text(
-                                        country,
-                                        fontFamily = Urbanist,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = SparkColors.textPrimary,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    bestLatency?.let { LatencyPill(it) }
-                                    Icon(
-                                        ChevronRightIcon,
-                                        contentDescription = if (isExpanded) "Collapse" else "Expand",
-                                        tint = SparkColors.textTertiary,
-                                        modifier = Modifier
-                                            .size(20.dp)
-                                            .rotate(expandRotation),
-                                    )
-                                }
-
-                                // City rows when expanded
-                                if (isExpanded) {
-                                    RowDivider()
-                                    members.forEachIndexed { idx, s ->
-                                        val isSelected = selectedIdx == s.index
-                                        Row(
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .background(
-                                                    if (isSelected) SparkColors.brand.copy(alpha = 0.08f)
-                                                    else Color.Transparent,
-                                                )
-                                                .clickable {
-                                                    Selection.index.value = s.index
-                                                    scope.launch(Dispatchers.IO) {
-                                                        SparkBridge.nativeSelectServer(s.index)
-                                                    }
-                                                    onBack()
-                                                }
-                                                .padding(start = 52.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        ) {
-                                            val cityName = s.city?.takeIf { it.isNotBlank() } ?: serverLabel(s)
-                                            Column(Modifier.weight(1f)) {
-                                                Text(
-                                                    cityName,
-                                                    fontFamily = Urbanist,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.Medium,
-                                                    color = SparkColors.textPrimary,
-                                                )
-                                                val proto = protocolLabel(s.protocol)
-                                                if (proto.isNotEmpty()) {
-                                                    Text(
-                                                        proto,
-                                                        fontFamily = Urbanist,
-                                                        fontSize = 12.sp,
-                                                        color = SparkColors.textTertiary,
-                                                    )
-                                                }
-                                            }
-                                            s.latencyMs?.let { LatencyPill(it) }
-                                            if (isSelected) {
-                                                Text("✓", fontSize = 18.sp, color = SparkColors.brand)
-                                            }
-                                        }
-                                        if (idx < members.size - 1) RowDivider()
-                                    }
-                                }
-                            }
+                        groups.forEachIndexed { gi, (country, members) ->
+                            if (gi > 0) RowDivider()
+                            CountryGroup(
+                                country = country,
+                                members = members,
+                                selectedIdx = selectedIdx,
+                                expanded = expandedGroups[country] ?: false,
+                                onToggle = { expandedGroups[country] = !(expandedGroups[country] ?: false) },
+                                onChoose = ::choose,
+                            )
                         }
                     }
-
-                    // 1px divider between groups
-                    Spacer(Modifier.height(1.dp))
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .height(1.dp)
-                            .background(SparkColors.border),
-                    )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(16.dp))
                 }
             }
-
-            item { Spacer(Modifier.height(16.dp)) }
         }
+    }
+}
+
+/** One country in the All-Locations card: a single tappable row, or an expandable header + city rows. */
+@Composable
+private fun CountryGroup(
+    country: String,
+    members: List<ServerInfo>,
+    selectedIdx: Int?,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onChoose: (Int?) -> Unit,
+) {
+    if (members.size == 1) {
+        val s = members[0]
+        ServerRow(
+            flag = flagEmoji(s.countryCode),
+            title = serverLabel(s),
+            protocol = protocolLabel(s.protocol),
+            latencyMs = s.latencyMs,
+            selected = selectedIdx == s.index,
+            onClick = { onChoose(s.index) },
+        )
+        return
+    }
+
+    // Multi-member: expandable header + indented city rows.
+    val bestLatency = members.mapNotNull { it.latencyMs }.minOrNull()
+    val expandRotation by animateFloatAsState(
+        targetValue = if (expanded) 90f else 0f,
+        animationSpec = tween(200),
+        label = "expand-$country",
+    )
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onToggle() }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(flagEmoji(members.firstOrNull()?.countryCode), fontSize = 21.sp)
+        Text(
+            country,
+            fontFamily = Urbanist,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = SparkColors.textPrimary,
+            modifier = Modifier.weight(1f),
+        )
+        bestLatency?.let { LatencyPill(it) }
+        Icon(
+            ChevronRightIcon,
+            contentDescription = if (expanded) "Collapse" else "Expand",
+            tint = SparkColors.textTertiary,
+            modifier = Modifier
+                .size(20.dp)
+                .rotate(expandRotation),
+        )
+    }
+    if (expanded) {
+        members.forEach { s ->
+            RowDivider()
+            ServerRow(
+                flag = null,
+                title = s.city?.takeIf { it.isNotBlank() } ?: serverLabel(s),
+                protocol = protocolLabel(s.protocol),
+                latencyMs = s.latencyMs,
+                selected = selectedIdx == s.index,
+                onClick = { onChoose(s.index) },
+                indented = true,
+            )
+        }
+    }
+}
+
+/** A selectable pool row: flag (or indent) + label + protocol subtitle + latency pill + ✓ when picked. */
+@Composable
+private fun ServerRow(
+    flag: String?,
+    title: String,
+    protocol: String,
+    latencyMs: Long?,
+    selected: Boolean,
+    onClick: () -> Unit,
+    indented: Boolean = false,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(if (selected) SparkColors.brand.copy(alpha = 0.08f) else Color.Transparent)
+            .clickable { onClick() }
+            .padding(start = if (indented) 52.dp else 16.dp, end = 16.dp, top = 11.dp, bottom = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (flag != null) Text(flag, fontSize = 21.sp)
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                fontFamily = Urbanist,
+                fontSize = if (indented) 14.sp else 15.sp,
+                fontWeight = if (indented) FontWeight.Medium else FontWeight.SemiBold,
+                color = SparkColors.textPrimary,
+            )
+            if (protocol.isNotEmpty()) {
+                Text(
+                    protocol,
+                    fontFamily = Urbanist,
+                    fontSize = 12.sp,
+                    color = SparkColors.textTertiary,
+                )
+            }
+        }
+        latencyMs?.let { LatencyPill(it) }
+        if (selected) Text("✓", fontSize = 18.sp, color = SparkColors.brand)
     }
 }
 
