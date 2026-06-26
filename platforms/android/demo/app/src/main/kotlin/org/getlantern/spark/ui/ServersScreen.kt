@@ -398,13 +398,16 @@ private fun RowDivider() {
 
 // --- Inline vector icons ---
 
-private fun strokeVector(name: String, build: ImageVector.Builder.() -> Unit): ImageVector =
+// autoMirror flips direction-sensitive icons (chevrons) in RTL locales (fa); custom ImageVectors
+// are NOT auto-mirrored by Compose otherwise.
+private fun strokeVector(name: String, autoMirror: Boolean = false, build: ImageVector.Builder.() -> Unit): ImageVector =
     ImageVector.Builder(
         name = name,
         defaultWidth = 24.dp,
         defaultHeight = 24.dp,
         viewportWidth = 24f,
         viewportHeight = 24f,
+        autoMirror = autoMirror,
     ).apply(build).build()
 
 private fun ImageVector.Builder.stroke(
@@ -420,10 +423,10 @@ private fun ImageVector.Builder.stroke(
     pathBuilder = pathBuilder,
 )
 
-private val BackChevronIcon: ImageVector = strokeVector("BackChevron") {
+private val BackChevronIcon: ImageVector = strokeVector("BackChevron", autoMirror = true) {
     stroke(2f) { moveTo(15f, 18f); lineTo(9f, 12f); lineTo(15f, 6f) }
 }
 
-private val ChevronRightIcon: ImageVector = strokeVector("ChevronRight") {
+private val ChevronRightIcon: ImageVector = strokeVector("ChevronRight", autoMirror = true) {
     stroke(2f) { moveTo(9f, 18f); lineTo(15f, 12f); lineTo(9f, 6f) }
 }
