@@ -38,6 +38,9 @@ bootstrap-dns = ["spark-core/bootstrap-dns"]
 samizdat = ["spark-core/samizdat"]
 shadowsocks = ["spark-core/shadowsocks"]
 hysteria2 = ["spark-core/hysteria2"]
+# Domain-fronted meek polling transport — another outbound a fetched pool may carry. Pulls
+# flint-fronted, which `config-fetch` already pulls, so this only adds the meek module code itself.
+fronted-meek = ["spark-core/fronted-meek"]
 
 [dependencies]
 spark-core = { path = "../../core" }

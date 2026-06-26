@@ -41,6 +41,7 @@ spark-core = { path = "../../core", features = [
     "samizdat",
     "shadowsocks",
     "hysteria2",
+    "fronted-meek",
 ] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
