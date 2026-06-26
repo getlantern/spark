@@ -1,8 +1,10 @@
 //! Fetch Spark's server pool from the Lantern `config-new` API (design:
-//! `docs/config-new-fetch-design.md`). A direct plain-TLS request is raced against a domain-fronted
-//! one-shot request (flint-fronted, embedded `fronted.yaml.gz`) for censored cold-start resilience;
-//! free-tier, disk-cached, fed into [`crate::config::Config::from_config_str`]. Trust is TLS — no
-//! signature, matching radiance.
+//! `docs/config-new-fetch-design.md`). A direct plain-TLS request is raced against two domain-fronted
+//! one-shot avenues for censored cold-start resilience: the embedded `fronted.yaml.gz` list (a
+//! known-good accelerator) and the vantage-point scanner (`flint_kindling::FrontedBootstrap`), which
+//! discovers live edges from the user's own network and so self-heals when the embedded list is fully
+//! blocked. Free-tier, disk-cached, fed into [`crate::config::Config::from_config_str`]. Trust is
+//! TLS — no signature, matching radiance.
 
 mod cache;
 mod http;
@@ -54,6 +56,7 @@ use crate::config::fetch::request::{
 use crate::config::Config;
 use crate::transport::{probe::tls_wrap, DirectTransport, Transport};
 use flint_fronted::{FlintDnsResolver, FrontedTlsDialer};
+use flint_kindling::FrontedBootstrap;
 
 /// Where to fetch from: prod is `df.iantem.io`, staging is `api.staging.iantem.io`. The host is
 /// dialed both directly and (for prod, which the embedded fronted config maps) through the fronting
@@ -110,15 +113,23 @@ pub enum FetchOutcome {
     NotModified,
 }
 
-/// One config-new fetch: race a direct plain-TLS request against the fronted one-shot request (when a
-/// fronted dialer is available), returning the first usable outcome. Direct typically wins on an open
-/// network; the fronted path wins where the direct dial is censored (DNS poisoning / SNI block / RST).
+/// A boxed config-fetch attempt, borrowing the request/env/dialer for the duration of the race.
+type FetchAttempt<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<FetchOutcome>> + Send + 'a>>;
+
+/// One config-new fetch: race a direct plain-TLS request against the fronted avenues, returning the
+/// first usable outcome. Direct typically wins on an open network; the fronted paths win where the
+/// direct dial is censored (DNS poisoning / SNI block / RST). Two fronted avenues run when available:
+/// the embedded `fronted.yaml.gz` one-shot (a known-good accelerator) and the vantage-point scanner
+/// (`bootstrap`), which discovers live edges from the user's own network and so self-heals when the
+/// embedded front list is fully blocked.
 async fn fetch_once(
     env: &FetchEnv,
     device_id: &str,
     creds: &user::Creds,
     cond: &Conditional,
     fronted: Option<&FrontedTlsDialer<FlintDnsResolver>>,
+    bootstrap: Option<&FrontedBootstrap>,
 ) -> std::io::Result<FetchOutcome> {
     const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -126,17 +137,32 @@ async fn fetch_once(
     req.user_id = creds.user_id.clone();
     req.pro_token = creds.pro_token.clone();
 
-    let direct = fetch_once_direct(env, &req, cond, ATTEMPT_TIMEOUT);
-    match fronted {
-        None => direct.await,
-        Some(dialer) => {
-            first_ok(
-                direct,
-                fetch_once_fronted(env, &req, cond, dialer, ATTEMPT_TIMEOUT),
-            )
-            .await
-        }
+    let mut attempts: Vec<FetchAttempt> = Vec::with_capacity(3);
+    attempts.push(Box::pin(fetch_once_direct(
+        env,
+        &req,
+        cond,
+        ATTEMPT_TIMEOUT,
+    )));
+    if let Some(dialer) = fronted {
+        attempts.push(Box::pin(fetch_once_fronted(
+            env,
+            &req,
+            cond,
+            dialer,
+            ATTEMPT_TIMEOUT,
+        )));
     }
+    if let Some(b) = bootstrap {
+        attempts.push(Box::pin(fetch_once_scanned(
+            env,
+            &req,
+            cond,
+            b,
+            ATTEMPT_TIMEOUT,
+        )));
+    }
+    first_ok(attempts).await
 }
 
 /// The direct path: dial the API host directly, plain-boring TLS-wrap, send the HTTP/1.1 request, and
@@ -179,6 +205,25 @@ async fn fetch_once_fronted(
     map_response(resp.status, etag, resp.body)
 }
 
+/// The scanner path: run the config-new request as a one-shot through `bootstrap`, which discovers
+/// working fronts from the user's *own* network (Akamai local-DNS + CloudFront/Aliyun sampling) and
+/// caches the winner. Self-bootstrapping — needs no embedded/server front list, so it self-heals when
+/// the embedded list is fully blocked. Bounded by `timeout`.
+async fn fetch_once_scanned(
+    env: &FetchEnv,
+    req: &ConfigRequest,
+    cond: &Conditional,
+    bootstrap: &FrontedBootstrap,
+    timeout: Duration,
+) -> std::io::Result<FetchOutcome> {
+    let oneshot = build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
+    let resp = tokio::time::timeout(timeout, bootstrap.request(&oneshot))
+        .await
+        .map_err(|_| std::io::Error::other("config-new scanned fetch timed out"))??;
+    let etag = resp.header("etag").map(ToOwned::to_owned);
+    map_response(resp.status, etag, resp.body)
+}
+
 /// Map an HTTP status + `ETag` + body into a [`FetchOutcome`] (shared by the direct and fronted paths).
 fn map_response(status: u16, etag: Option<String>, body: Vec<u8>) -> std::io::Result<FetchOutcome> {
     match status {
@@ -192,30 +237,22 @@ fn map_response(status: u16, etag: Option<String>, body: Vec<u8>) -> std::io::Re
     }
 }
 
-/// Race two fetch attempts, returning the first that succeeds; if both fail, return the last error.
-/// Unlike a plain `select!`, an early *failure* doesn't end the race — the other attempt still runs,
-/// so a censored direct dial doesn't pre-empt the fronted one (and vice versa).
-async fn first_ok<A, B>(a: A, b: B) -> std::io::Result<FetchOutcome>
-where
-    A: std::future::Future<Output = std::io::Result<FetchOutcome>>,
-    B: std::future::Future<Output = std::io::Result<FetchOutcome>>,
-{
-    tokio::pin!(a, b);
-    let (mut a_done, mut b_done) = (false, false);
-    let mut last_err = None;
-    while !(a_done && b_done) {
-        tokio::select! {
-            ra = &mut a, if !a_done => match ra {
-                Ok(outcome) => return Ok(outcome),
-                Err(e) => { a_done = true; last_err = Some(e); }
-            },
-            rb = &mut b, if !b_done => match rb {
-                Ok(outcome) => return Ok(outcome),
-                Err(e) => { b_done = true; last_err = Some(e); }
-            },
+/// Race several fetch attempts, returning the first that succeeds; if all fail, return the last error.
+/// Unlike a plain `select!`, an early *failure* doesn't end the race — the remaining attempts still
+/// run, so a censored direct dial doesn't pre-empt the fronted ones (and vice versa).
+async fn first_ok(mut attempts: Vec<FetchAttempt<'_>>) -> std::io::Result<FetchOutcome> {
+    let mut last_err = std::io::Error::other("no config-new fetch attempt ran");
+    while !attempts.is_empty() {
+        let (result, _idx, remaining) = futures::future::select_all(attempts).await;
+        match result {
+            Ok(outcome) => return Ok(outcome),
+            Err(e) => {
+                last_err = e;
+                attempts = remaining;
+            }
         }
     }
-    Err(last_err.unwrap_or_else(|| std::io::Error::other("no config-new fetch attempt ran")))
+    Err(last_err)
 }
 
 /// Build the fronted dialer from the embedded `domainfront/fronted.yaml.gz` (aliyun/akamai/cloudfront).
@@ -231,6 +268,22 @@ fn fronted_dialer() -> Option<FrontedTlsDialer<FlintDnsResolver>> {
             None
         }
     }
+}
+
+/// Build the self-bootstrapping fronted requester for the config API host. Fronts to `env.host`
+/// directly via scanner-discovered edges (Akamai local-DNS + CloudFront/Aliyun sampling): a CDN that
+/// doesn't re-originate the host just loses the race, so this is safe to always race and self-heals
+/// whichever CDN does front it — the one avenue that can find a working edge when the embedded list is
+/// fully blocked. `seed` (from the device id) diversifies CloudFront/Aliyun sampling across devices;
+/// the Akamai local-DNS path is seed-independent.
+fn fronted_bootstrap(env: &FetchEnv, seed: u64) -> FrontedBootstrap {
+    FrontedBootstrap::new(env.host.clone()).with_seed(seed)
+}
+
+/// A stable per-device u64 seed from the hex device id (first 16 hex chars), for front-sampling
+/// diversity. Falls back to 0 if the id is too short / non-hex (the Akamai path is unaffected).
+fn seed_from_device_id(did: &str) -> u64 {
+    u64::from_str_radix(did.get(..16).unwrap_or(""), 16).unwrap_or(0)
 }
 
 /// Resolve a host:port to a socket address (IP literal fast-path, else system resolver). Deliberately
@@ -264,9 +317,20 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
         Err(e) => return cached_or_err(cached, e),
     };
     // Unconditional fetch (no If-None-Match): every connect pulls the current config and overwrites.
-    // Race the direct request against the fronted one for censored cold-start resilience.
+    // Race the direct request against both fronted avenues (embedded list + vantage-point scanner) for
+    // censored cold-start resilience.
     let fronted = fronted_dialer();
-    match fetch_once(env, &did, &creds, &Conditional::default(), fronted.as_ref()).await {
+    let bootstrap = fronted_bootstrap(env, seed_from_device_id(&did));
+    match fetch_once(
+        env,
+        &did,
+        &creds,
+        &Conditional::default(),
+        fronted.as_ref(),
+        Some(&bootstrap),
+    )
+    .await
+    {
         Ok(FetchOutcome::New { raw, etag }) => {
             let cfg = Config::from_config_str(&raw).map_err(std::io::Error::other)?;
             let meta = CacheMeta {
@@ -353,11 +417,13 @@ where
         ),
         None => (Conditional::default(), poll_after(0)),
     };
-    // Build the fronted dialer once (it parses the embedded config) and reuse it across the loop.
+    // Build the fronted avenues once and reuse them across the loop: the embedded-config dialer, and
+    // the vantage-point scanner (whose winning-front cache then persists for the loop's lifetime).
     let fronted = fronted_dialer();
+    let bootstrap = fronted_bootstrap(env, seed_from_device_id(&did));
     let mut fail = 0u32;
     while !should_stop() {
-        match fetch_once(env, &did, &creds, &cond, fronted.as_ref()).await {
+        match fetch_once(env, &did, &creds, &cond, fronted.as_ref(), Some(&bootstrap)).await {
             Ok(FetchOutcome::New { raw, etag }) => match Config::from_config_str(&raw) {
                 Ok(cfg) => {
                     fail = 0;

@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "flint-dial"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=95f4cd7426f46a3677e9365549552b67a0831da7#95f4cd7426f46a3677e9365549552b67a0831da7"
+source = "git+https://github.com/getlantern/flint?rev=a5364323145326cd7dd63ce84d5418b774ba7621#a5364323145326cd7dd63ce84d5418b774ba7621"
 dependencies = [
  "flint-shaping",
  "flint-tls",
@@ -910,7 +910,7 @@ dependencies = [
 [[package]]
 name = "flint-dns"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=95f4cd7426f46a3677e9365549552b67a0831da7#95f4cd7426f46a3677e9365549552b67a0831da7"
+source = "git+https://github.com/getlantern/flint?rev=a5364323145326cd7dd63ce84d5418b774ba7621#a5364323145326cd7dd63ce84d5418b774ba7621"
 dependencies = [
  "bytes",
  "flint-dial",
@@ -927,7 +927,7 @@ dependencies = [
 [[package]]
 name = "flint-fronted"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=95f4cd7426f46a3677e9365549552b67a0831da7#95f4cd7426f46a3677e9365549552b67a0831da7"
+source = "git+https://github.com/getlantern/flint?rev=a5364323145326cd7dd63ce84d5418b774ba7621#a5364323145326cd7dd63ce84d5418b774ba7621"
 dependencies = [
  "async-trait",
  "bytes",
@@ -948,9 +948,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "flint-kindling"
+version = "0.0.0"
+source = "git+https://github.com/getlantern/flint?rev=a5364323145326cd7dd63ce84d5418b774ba7621#a5364323145326cd7dd63ce84d5418b774ba7621"
+dependencies = [
+ "flint-fronted",
+ "flint-transport",
+ "tokio",
+]
+
+[[package]]
 name = "flint-shaping"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=95f4cd7426f46a3677e9365549552b67a0831da7#95f4cd7426f46a3677e9365549552b67a0831da7"
+source = "git+https://github.com/getlantern/flint?rev=a5364323145326cd7dd63ce84d5418b774ba7621#a5364323145326cd7dd63ce84d5418b774ba7621"
 dependencies = [
  "ring",
  "tokio",
@@ -959,7 +969,7 @@ dependencies = [
 [[package]]
 name = "flint-tls"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=95f4cd7426f46a3677e9365549552b67a0831da7#95f4cd7426f46a3677e9365549552b67a0831da7"
+source = "git+https://github.com/getlantern/flint?rev=a5364323145326cd7dd63ce84d5418b774ba7621#a5364323145326cd7dd63ce84d5418b774ba7621"
 dependencies = [
  "boring-sys2",
  "boring2",
@@ -977,7 +987,7 @@ dependencies = [
 [[package]]
 name = "flint-transport"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=95f4cd7426f46a3677e9365549552b67a0831da7#95f4cd7426f46a3677e9365549552b67a0831da7"
+source = "git+https://github.com/getlantern/flint?rev=a5364323145326cd7dd63ce84d5418b774ba7621#a5364323145326cd7dd63ce84d5418b774ba7621"
 dependencies = [
  "async-trait",
  "futures",
@@ -988,7 +998,7 @@ dependencies = [
 [[package]]
 name = "flint-verify"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=95f4cd7426f46a3677e9365549552b67a0831da7#95f4cd7426f46a3677e9365549552b67a0831da7"
+source = "git+https://github.com/getlantern/flint?rev=a5364323145326cd7dd63ce84d5418b774ba7621#a5364323145326cd7dd63ce84d5418b774ba7621"
 dependencies = [
  "ring",
  "thiserror 2.0.18",
@@ -2474,6 +2484,7 @@ dependencies = [
  "flint-dial",
  "flint-dns",
  "flint-fronted",
+ "flint-kindling",
  "flint-shaping",
  "flint-tls",
  "flint-verify",

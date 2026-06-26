@@ -38,6 +38,10 @@ bootstrap-dns = ["spark-core/bootstrap-dns"]
 samizdat = ["spark-core/samizdat"]
 shadowsocks = ["spark-core/shadowsocks"]
 hysteria2 = ["spark-core/hysteria2"]
+# Domain-fronted meek polling (Shir-o-Khorshid CDN-fronting): a self-bootstrapping data-plane transport
+# the config-new pool can assign, and whose vantage-point scanner also augments the cold-start config
+# fetch. Pulls boring (like config-fetch); enabled on every Apple slice alongside it.
+fronted-meek = ["spark-core/fronted-meek"]
 
 [dependencies]
 spark-core = { path = "../../core" }
