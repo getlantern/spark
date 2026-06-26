@@ -47,6 +47,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import androidx.compose.ui.res.stringResource
+import org.getlantern.spark.R
 import org.getlantern.spark.Selection
 import org.getlantern.spark.ServerInfo
 import org.getlantern.spark.SparkBridge
@@ -123,7 +125,7 @@ fun ServersScreen(onBack: () -> Unit) {
                 )
             }
             Text(
-                "Server selection",
+                stringResource(R.string.server_selection),
                 fontFamily = Urbanist,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
@@ -141,7 +143,7 @@ fun ServersScreen(onBack: () -> Unit) {
             item {
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    "Smart location",
+                    stringResource(R.string.smart_location),
                     fontFamily = Urbanist,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -170,7 +172,7 @@ fun ServersScreen(onBack: () -> Unit) {
                     Text(if (current != null) flagEmoji(current.countryCode) else "🌐", fontSize = 21.sp)
                     Column(Modifier.weight(1f)) {
                         Text(
-                            if (current != null) serverLabel(current) else "Fastest server",
+                            if (current != null) serverLabel(current) else stringResource(R.string.fastest_server),
                             fontFamily = Urbanist,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -195,7 +197,7 @@ fun ServersScreen(onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Automatically chooses the fastest location.",
+                    stringResource(R.string.auto_fastest_help),
                     fontFamily = Urbanist,
                     fontSize = 13.sp,
                     color = SparkColors.textTertiary,
@@ -214,7 +216,7 @@ fun ServersScreen(onBack: () -> Unit) {
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            "No servers available. Connect first to choose a location.",
+                            stringResource(R.string.no_servers_available),
                             fontFamily = Urbanist,
                             fontSize = 14.sp,
                             color = SparkColors.textTertiary,
@@ -226,7 +228,7 @@ fun ServersScreen(onBack: () -> Unit) {
                 // (mirrors the Tauri page and the home StatusCard: a single surface, not per-row cards).
                 item {
                     Text(
-                        "ALL LOCATIONS",
+                        stringResource(R.string.all_locations),
                         fontFamily = Urbanist,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
