@@ -44,9 +44,9 @@ class SparkVpnService : VpnService() {
     // Generation counter so a stale readiness thread (from a superseded connect attempt) doesn't
     // tear down the service. A restart's nativeStop() wakes the OLD readiness thread with rc=-1;
     // without this guard that stale thread would nativeStop()+stopSelf() the tunnel the restart is
-    // rebuilding. @Volatile so the old readiness thread sees the bump across threads.
-    // Atomic so concurrent (re)starts can't lose an increment and hand two readiness threads the
-    // same generation (which would defeat the stale-thread guard).
+    // rebuilding.
+    // AtomicInteger (not @Volatile + `+=`) so concurrent (re)starts can't lose an increment and hand
+    // two readiness threads the same generation (which would defeat the stale-thread guard).
     private val tunnelGeneration = AtomicInteger(0)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
