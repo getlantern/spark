@@ -52,6 +52,7 @@ import org.getlantern.spark.SparkBridge
 import org.getlantern.spark.SparkState
 import org.getlantern.spark.VpnController
 import org.getlantern.spark.VpnState
+import org.getlantern.spark.Selection
 import android.app.Activity
 
 @Composable
@@ -108,10 +109,12 @@ fun HomeScreen(onOpenServers: () -> Unit) {
             ) {
                 VpnSwitch(on = connected, busy = connecting, onToggle = ::toggle)
             }
+            val selectedIdx by Selection.index.collectAsStateWithLifecycle()
+            val autoSelected = (selectedIdx == null)
             StatusCard(
                 state = state,
                 current = current,
-                autoSelected = true, // no user pin in this single-process build yet
+                autoSelected = autoSelected,
                 onOpenServers = onOpenServers,
             )
             Spacer(Modifier.height(10.dp))
