@@ -53,6 +53,6 @@ private fun latColors(ms: Long?): Pair<Color, Color> = when {
 fun LatencyPill(ms: Long) {
     val (fg, bg) = latColors(ms)
     Box(Modifier.background(bg, RoundedCornerShape(999.dp)).padding(horizontal = 8.dp, vertical = 3.dp)) {
-        Text("$ms ms", color = fg, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text("$ms ms", fontFamily = Urbanist, color = fg, fontSize = 12.sp, fontWeight = FontWeight.Bold)
     }
 }

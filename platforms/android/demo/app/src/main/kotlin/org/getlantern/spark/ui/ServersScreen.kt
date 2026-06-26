@@ -44,6 +44,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.getlantern.spark.Selection
 import org.getlantern.spark.ServerInfo
 import org.getlantern.spark.SparkBridge
@@ -60,7 +61,7 @@ fun ServersScreen(onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            servers = parseServers(SparkBridge.nativeServers())
+            servers = parseServers(withContext(Dispatchers.IO) { SparkBridge.nativeServers() })
             loaded = true
             delay(3000)
         }
