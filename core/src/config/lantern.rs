@@ -100,7 +100,6 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
 /// Extract the bare host from a meek-server `url` (e.g. `"https://meek.example/"` → `"meek.example"`).
 /// The meek wire carries a full URL; spark's scanner wants just the inner Host. Returns `None` for an
 /// empty/hostless value (→ the client self-bootstraps to its built-in default endpoint).
-#[cfg(feature = "fronted-meek")]
 fn host_from_url(url: &str) -> Option<String> {
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
@@ -162,8 +161,8 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
         // Self-bootstrapping: no `server` endpoint needed (the client scans edges). The wire carries
         // the meek-server `url`; derive the bare inner host. Empty/absent → the client uses its
         // built-in default endpoint. http_version isn't on the wire, so it auto-selects from ALPN.
-        // Gated to the transport's feature.
-        #[cfg(feature = "fronted-meek")]
+        // A build without the `fronted-meek` feature still maps this; fronted_meek_transport() then
+        // errors at connect (mirrors samizdat/hysteria2).
         "meek" => Some(ServerSpec::FrontedMeek(super::FrontedMeekConfig {
             meek_host: ob
                 .url
@@ -233,9 +232,7 @@ struct RawOutbound {
     method: Option<String>,
     // meek (self-bootstrapping domain-fronted; `server`/`server_port` are unused — the client scans
     // edges itself). The lantern-box meek outbound carries the meek-server `url`; spark derives the
-    // bare inner host from it. Gated so the field isn't dead code without the transport (unknown JSON
-    // keys are ignored, so a meek outbound is simply skipped there).
-    #[cfg(feature = "fronted-meek")]
+    // bare inner host from it.
     #[serde(default)]
     url: Option<String>,
 }
@@ -380,7 +377,6 @@ mod tests {
         assert_eq!(cfg.transport.servers.len(), 3);
     }
 
-    #[cfg(feature = "fronted-meek")]
     #[test]
     fn maps_meek_outbound_deriving_host_from_url() {
         // No `server` endpoint required (the client scans edges); the meek-server `url` is carried on
@@ -397,7 +393,6 @@ mod tests {
         assert!(fm.http_version.is_none()); // not on the wire — client auto-selects from ALPN
     }
 
-    #[cfg(feature = "fronted-meek")]
     #[test]
     fn maps_bare_meek_to_self_bootstrap_defaults() {
         // A meek outbound with no url maps to the self-bootstrapping defaults: empty meek_host → the
@@ -411,7 +406,6 @@ mod tests {
         assert!(fm.http_version.is_none());
     }
 
-    #[cfg(feature = "fronted-meek")]
     #[test]
     fn host_from_url_extracts_bare_host() {
         assert_eq!(
