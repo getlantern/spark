@@ -79,6 +79,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let ipv4 = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4.includedRoutes = [NEIPv4Route.default()] // capture all IPv4
         settings.ipv4Settings = ipv4
+        let ipv6 = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
+        ipv6.includedRoutes = [NEIPv6Route.default()] // capture all IPv6 (parity with Android)
+        settings.ipv6Settings = ipv6
         settings.mtu = NSNumber(value: mtu)
         settings.dnsSettings = NEDNSSettings(servers: ["8.8.8.8"])
 

@@ -47,4 +47,14 @@ object SparkBridge {
      *  the core fetches config before adopting the fd, so the service gates on this and stops the VPN
      *  on -1 (falling back to direct) rather than blackholing traffic while the fetch is stuck. */
     external fun nativeWaitReady(timeoutMs: Int): Int
+
+    /** The live server pool as a JSON array (see native `servers_json`): one object per member with
+     *  index, location metadata, protocol, latencyMs, healthy, isCurrent. "[]" when no pool is
+     *  active. Safe to call any time; "[]" before connect. Nullable only for a catastrophic JVM
+     *  string-allocation failure in JNI; callers should treat null as "[]". */
+    external fun nativeServers(): String?
+
+    /** Pin which pool member new flows dial: [index] >= 0 pins it, [index] < 0 = auto (fastest).
+     *  Returns true if applied (false if out of range / no active pool). */
+    external fun nativeSelectServer(index: Int): Boolean
 }

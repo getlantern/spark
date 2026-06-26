@@ -3,6 +3,7 @@ package org.getlantern.spark
 import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
@@ -48,7 +49,14 @@ class MainActivity : Activity() {
 
     private fun startVpn() {
         Log.i(TAG, "consent granted; starting SparkVpnService")
-        startService(Intent(this, SparkVpnService::class.java))
+        // The service promotes itself to the foreground (startForeground) so the tunnel survives
+        // backgrounding; on API 26+ a backgrounded app must launch it via startForegroundService.
+        val intent = Intent(this, SparkVpnService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 
     @Deprecated("startActivityForResult is fine for this minimal harness on minSdk 24")
