@@ -99,21 +99,25 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
 
 /// Extract the bare host from a meek-server `url` (e.g. `"https://meek.example/"` → `"meek.example"`).
 /// The meek wire carries a full URL; spark's scanner wants just the inner Host. Returns `None` for an
-/// empty/hostless value (→ the client self-bootstraps to its built-in default endpoint).
+/// empty/hostless or malformed value (→ the client self-bootstraps to its built-in default endpoint).
 fn host_from_url(url: &str) -> Option<String> {
-    let after_scheme = url
-        .trim()
-        .split_once("://")
-        .map_or(url.trim(), |(_, rest)| rest);
+    let trimmed = url.trim();
+    let after_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
     // Authority ends at the first path/query/fragment delimiter.
     let authority = after_scheme
         .split(['/', '?', '#'])
         .next()
         .unwrap_or(after_scheme);
-    // Drop optional `userinfo@`, then an optional `:port` (meek hosts are DNS names, so no
-    // IPv6-literal/bracket handling needed).
+    // Drop optional `userinfo@`, then a trailing `:port` — but only when the suffix is numeric.
+    // A non-numeric suffix means a leftover colon (e.g. a `scheme:host` written without `//`, which
+    // would otherwise yield the scheme as the "host"); treat that as malformed → None. Meek hosts are
+    // DNS names, so a colon never legitimately survives here (no IPv6-literal/bracket handling needed).
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
+    let host = match host_port.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        Some(_) => return None,
+        None => host_port,
+    };
     (!host.is_empty()).then(|| host.to_string())
 }
 
@@ -449,6 +453,17 @@ mod tests {
             host_from_url("https://user:pass@meek.example:443/"),
             Some("meek.example".to_string())
         );
+        // A bare `host:port` (no scheme) still works — the suffix is a numeric port.
+        assert_eq!(
+            host_from_url("meek.example:8443"),
+            Some("meek.example".to_string())
+        );
+        // Malformed `scheme:host` without `//`, or any leftover non-numeric `:suffix`, is treated as
+        // hostless → None, so the client falls back to its built-in default rather than dialing a
+        // bogus host (e.g. the scheme).
+        assert_eq!(host_from_url("https:meek.example"), None);
+        assert_eq!(host_from_url("ftp:something"), None);
+        assert_eq!(host_from_url("meek.example:"), None);
         assert_eq!(host_from_url(""), None);
         assert_eq!(host_from_url("   "), None);
     }

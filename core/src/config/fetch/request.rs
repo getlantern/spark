@@ -49,7 +49,10 @@ pub(crate) const APP_NAME: &str = "lantern";
 /// enforces a minimum ("bad client factors: version … too old"), so this is a recent Lantern version,
 /// NOT spark-core's `CARGO_PKG_VERSION` (0.1.0, which the server rejects). Bump when the server raises
 /// its floor. (Spark presents as a Lantern client; see [`APP_NAME`].)
-pub(crate) const LANTERN_VERSION: &str = "9.1.13";
+///
+/// `9.2.0` is also the floor for the `meek_0.0.1` protocol: the config server only assigns meek tracks
+/// to clients reporting `>= 9.2.0`, so advertising `"meek"` below this version would never get one.
+pub(crate) const LANTERN_VERSION: &str = "9.2.0";
 
 /// This build's platform string in the Lantern convention (`darwin`/`linux`/…). Shared by the
 /// config-new request and the `/user-create` pre-step.
