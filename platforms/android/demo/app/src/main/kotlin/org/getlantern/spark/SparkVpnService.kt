@@ -118,7 +118,7 @@ class SparkVpnService : VpnService() {
         // Bump the generation for this real start so the readiness thread below can detect if a later
         // (re)connect supersedes it (only the current generation may stop the service).
         val generation = tunnelGeneration.incrementAndGet()
-        SparkState.state.value = VpnState.CONNECTING
+        SparkState.set(VpnState.CONNECTING)
         // Promote to foreground FIRST so the tunnel survives backgrounding (and so we satisfy the
         // platform requirement to call startForeground promptly after startForegroundService).
         startInForeground()
@@ -178,12 +178,12 @@ class SparkVpnService : VpnService() {
             }
             if (rc != 0) {
                 Log.e(TAG, "tunnel did not become ready (config unavailable?); stopping VPN")
-                SparkState.state.value = VpnState.FAILED
+                SparkState.set(VpnState.FAILED)
                 SparkBridge.nativeStop()
                 stopSelf()
             } else {
                 Log.i(TAG, "tunnel data path ready")
-                SparkState.state.value = VpnState.CONNECTED
+                SparkState.set(VpnState.CONNECTED)
             }
         }
         // Register the default-network watcher once, on the first start. On a restart netCallback is
@@ -316,7 +316,7 @@ class SparkVpnService : VpnService() {
         // onDestroy) — keep FAILED visible until the next connect flips it back to CONNECTING. A
         // normal user stop is in CONNECTED/CONNECTING here, so it still resolves to DISCONNECTED.
         if (SparkState.state.value != VpnState.FAILED) {
-            SparkState.state.value = VpnState.DISCONNECTED
+            SparkState.set(VpnState.DISCONNECTED)
         }
         // Stop watching the network first so an in-flight network change can't trigger a restart
         // while we're tearing down.

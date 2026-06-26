@@ -73,6 +73,15 @@ fun ServersScreen(onBack: () -> Unit) {
 
     val current = servers.firstOrNull { it.isCurrent }
 
+    // Group by country (or name, or "—"), alphabetical. Memoized on `servers` so expand/collapse
+    // and selection changes don't recompute the grouping/sort.
+    val groups = remember(servers) {
+        servers
+            .groupBy { it.country?.takeIf { c -> c.isNotBlank() } ?: (it.name?.takeIf { n -> n.isNotBlank() } ?: "—") }
+            .entries
+            .sortedBy { it.key }
+    }
+
     // Track expanded state for multi-member country groups.
     val expandedGroups = remember { mutableStateMapOf<String, Boolean>() }
 
@@ -213,12 +222,6 @@ fun ServersScreen(onBack: () -> Unit) {
                     }
                 }
             } else if (servers.isNotEmpty()) {
-                // Group servers by country (or name, or "—"), alphabetical.
-                val groups = servers
-                    .groupBy { it.country?.takeIf { c -> c.isNotBlank() } ?: (it.name?.takeIf { n -> n.isNotBlank() } ?: "—") }
-                    .entries
-                    .sortedBy { it.key }
-
                 // "ALL LOCATIONS" — one card holding every country group with internal dividers
                 // (mirrors the Tauri page and the home StatusCard: a single surface, not per-row cards).
                 item {
