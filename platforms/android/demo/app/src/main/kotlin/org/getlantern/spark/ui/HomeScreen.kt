@@ -1,0 +1,370 @@
+package org.getlantern.spark.ui
+
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.LaunchedEffect
+import org.getlantern.spark.ServerInfo
+import org.getlantern.spark.parseServers
+import org.getlantern.spark.SparkBridge
+import org.getlantern.spark.SparkState
+import org.getlantern.spark.VpnController
+import org.getlantern.spark.VpnState
+import android.app.Activity
+
+@Composable
+fun HomeScreen(onOpenServers: () -> Unit) {
+    val context = LocalContext.current
+    val state by SparkState.state.collectAsStateWithLifecycle()
+
+    var servers by remember { mutableStateOf<List<ServerInfo>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            servers = parseServers(SparkBridge.nativeServers())
+            delay(2000)
+        }
+    }
+    val current = servers.firstOrNull { it.isCurrent }
+
+    val connected = state == VpnState.CONNECTED
+    val connecting = state == VpnState.CONNECTING
+
+    // VPN consent flow: on RESULT_OK start the service. (consentIntent==null => already granted.)
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) VpnController.start(context)
+    }
+
+    fun toggle() {
+        if (connecting) return
+        if (connected) {
+            VpnController.stop(context)
+        } else {
+            val intent = VpnController.consentIntent(context)
+            if (intent != null) launcher.launch(intent) else VpnController.start(context)
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(SparkColors.bg),
+    ) {
+        AppBar()
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+        ) {
+            // Hero: the toggle, vertically centered above the card.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center,
+            ) {
+                VpnSwitch(on = connected, busy = connecting, onToggle = ::toggle)
+            }
+            StatusCard(
+                state = state,
+                current = current,
+                autoSelected = true, // no user pin in this single-process build yet
+                onOpenServers = onOpenServers,
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+    }
+}
+
+@Composable
+private fun AppBar() {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .shadow(elevation = 4.dp, clip = false)
+            .background(SparkColors.bg)
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+            Icon(MenuIcon, contentDescription = "Menu", tint = SparkColors.textTertiary, modifier = Modifier.size(22.dp))
+        }
+        Text(
+            "Spark",
+            fontFamily = Urbanist,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = SparkColors.textPrimary,
+        )
+    }
+}
+
+// VPNSwitch — track 140x70, knob 60 (5dp inset), travel 70 right when on; brand when on,
+// off-grey otherwise; spinner (44dp) in place of the knob while connecting/busy.
+@Composable
+private fun VpnSwitch(on: Boolean, busy: Boolean, onToggle: () -> Unit) {
+    val knobOffset by animateDpAsState(
+        targetValue = if (on) 70.dp else 0.dp,
+        animationSpec = tween(durationMillis = 320),
+        label = "knob",
+    )
+    Box(
+        Modifier
+            .width(140.dp)
+            .height(70.dp)
+            .clip(RoundedCornerShape(35.dp))
+            .background(if (on) SparkColors.brand else SparkColors.off)
+            .clickable(enabled = !busy) { onToggle() },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .offset(x = 13.dp)
+                    .size(44.dp),
+                color = SparkColors.knob,
+                strokeWidth = 6.dp,
+            )
+        } else {
+            Box(
+                Modifier
+                    .offset(x = 5.dp + knobOffset)
+                    .size(60.dp)
+                    .shadow(4.dp, CircleShape)
+                    .background(SparkColors.knob, CircleShape),
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatusCard(
+    state: VpnState,
+    current: ServerInfo?,
+    autoSelected: Boolean,
+    onOpenServers: () -> Unit,
+) {
+    val statusValue = when (state) {
+        VpnState.CONNECTED -> "Connected"
+        VpnState.CONNECTING -> "Connecting…"
+        VpnState.FAILED -> "Failed"
+        VpnState.DISCONNECTED -> "Disconnected"
+    }
+    val dotColor = when (state) {
+        VpnState.CONNECTED -> SparkColors.success
+        VpnState.CONNECTING -> SparkColors.brand
+        else -> SparkColors.indicatorOff
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .shadow(elevation = 16.dp, shape = RoundedCornerShape(16.dp), ambientColor = SparkColors.shadow, spotColor = SparkColors.shadow)
+            .clip(RoundedCornerShape(16.dp))
+            .background(SparkColors.surface),
+    ) {
+        // VPN status
+        StatusRow(
+            leading = { Icon(GlobeIcon, null, tint = SparkColors.textSecondary, modifier = Modifier.size(20.dp)) },
+            label = "VPN status",
+            value = statusValue,
+            valueColor = if (state == VpnState.CONNECTED) SparkColors.success else SparkColors.textPrimary,
+            trailing = {
+                Box(
+                    Modifier
+                        .size(10.dp)
+                        .background(dotColor, CircleShape),
+                )
+            },
+        )
+        Divider()
+        // Smart location -> servers
+        StatusRow(
+            modifier = Modifier.clickable { onOpenServers() },
+            leading = {
+                if (current != null) {
+                    Text(flagEmoji(current.countryCode), fontSize = 18.sp)
+                } else {
+                    Icon(PinIcon, null, tint = SparkColors.textSecondary, modifier = Modifier.size(20.dp))
+                }
+            },
+            label = if (autoSelected) "Smart location" else "Selected location",
+            value = if (current != null) serverLabel(current) else "Fastest server",
+            valueColor = SparkColors.textPrimary,
+            subtitle = current?.latencyMs?.let { "$it ms" },
+            trailing = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (autoSelected) Text("⚡", color = SparkColors.bolt, fontSize = 16.sp)
+                    Icon(ChevronIcon, null, tint = SparkColors.textTertiary, modifier = Modifier.size(20.dp))
+                }
+            },
+        )
+        Divider()
+        // Routing (non-interactive)
+        StatusRow(
+            leading = { Icon(RouteIcon, null, tint = SparkColors.textSecondary, modifier = Modifier.size(20.dp)) },
+            label = "Routing",
+            value = "Full tunnel",
+            valueColor = SparkColors.textPrimary,
+            trailing = {
+                Icon(ChevronIcon, null, tint = SparkColors.textTertiary, modifier = Modifier.size(20.dp))
+            },
+        )
+    }
+}
+
+@Composable
+private fun StatusRow(
+    modifier: Modifier = Modifier,
+    leading: @Composable () -> Unit,
+    label: String,
+    value: String,
+    valueColor: Color,
+    subtitle: String? = null,
+    trailing: @Composable () -> Unit,
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        // head: icon + label
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) { leading() }
+            Text(label, fontFamily = Urbanist, fontSize = 14.sp, color = SparkColors.textSecondary)
+        }
+        // body: value (indented to align under the label) + trailing
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 32.dp, top = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                value,
+                fontFamily = Urbanist,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = valueColor,
+                modifier = Modifier.weight(1f),
+            )
+            trailing()
+        }
+        if (subtitle != null) {
+            Text(
+                subtitle,
+                fontFamily = Urbanist,
+                fontSize = 12.sp,
+                color = SparkColors.textTertiary,
+                modifier = Modifier.padding(start = 32.dp, top = 1.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun Divider() {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .height(1.dp)
+            .background(SparkColors.border),
+    )
+}
+
+// --- Vector icons mirroring the Tauri SVGs (stroke-based, 24x24 viewport). ---
+
+private fun strokeVector(name: String, build: ImageVector.Builder.() -> Unit): ImageVector =
+    ImageVector.Builder(name = name, defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f)
+        .apply(build).build()
+
+private fun ImageVector.Builder.stroke(
+    width: Float = 1.8f,
+    pathBuilder: androidx.compose.ui.graphics.vector.PathBuilder.() -> Unit,
+) = path(
+    fill = null,
+    stroke = SolidColor(Color.Black),
+    strokeLineWidth = width,
+    strokeLineCap = StrokeCap.Round,
+    strokeLineJoin = StrokeJoin.Round,
+    pathFillType = PathFillType.NonZero,
+    pathBuilder = pathBuilder,
+)
+
+private val MenuIcon: ImageVector = strokeVector("Menu") {
+    stroke(2f) { moveTo(3f, 6f); lineTo(21f, 6f) }
+    stroke(2f) { moveTo(3f, 12f); lineTo(21f, 12f) }
+    stroke(2f) { moveTo(3f, 18f); lineTo(21f, 18f) }
+}
+
+private val GlobeIcon: ImageVector = strokeVector("Globe") {
+    // circle r=9
+    stroke { moveTo(21f, 12f); arcToRelative(9f, 9f, 0f, true, true, -18f, 0f); arcToRelative(9f, 9f, 0f, true, true, 18f, 0f); close() }
+    stroke { moveTo(3f, 12f); lineTo(21f, 12f) }
+    stroke { moveTo(12f, 3f); curveToRelative(4.5f, 4.5f, 4.5f, 13.5f, 0f, 18f); curveToRelative(-4.5f, -4.5f, -4.5f, -13.5f, 0f, -18f); close() }
+}
+
+private val PinIcon: ImageVector = strokeVector("Pin") {
+    stroke { moveTo(12f, 21f); curveTo(12f, 21f, 6f, 15.7f, 6f, 11f); arcToRelative(6f, 6f, 0f, false, true, 12f, 0f); curveToRelative(0f, 4.7f, -6f, 10f, -6f, 10f); close() }
+    stroke { moveTo(14.2f, 11f); arcToRelative(2.2f, 2.2f, 0f, true, true, -4.4f, 0f); arcToRelative(2.2f, 2.2f, 0f, true, true, 4.4f, 0f); close() }
+}
+
+private val RouteIcon: ImageVector = strokeVector("Route") {
+    // bottom-left node (6,19 r2.5)
+    stroke { moveTo(8.5f, 19f); arcToRelative(2.5f, 2.5f, 0f, true, true, -5f, 0f); arcToRelative(2.5f, 2.5f, 0f, true, true, 5f, 0f); close() }
+    // top-right node (18,5 r2.5)
+    stroke { moveTo(20.5f, 5f); arcToRelative(2.5f, 2.5f, 0f, true, true, -5f, 0f); arcToRelative(2.5f, 2.5f, 0f, true, true, 5f, 0f); close() }
+    // connecting S-curve
+    stroke { moveTo(8.5f, 19f); lineTo(14f, 19f); arcToRelative(4f, 4f, 0f, false, false, 0f, -8f); lineTo(10f, 11f); arcToRelative(4f, 4f, 0f, false, true, 0f, -8f); lineTo(15.5f, 3f) }
+}
+
+private val ChevronIcon: ImageVector = strokeVector("Chevron") {
+    stroke(2f) { moveTo(9f, 18f); lineTo(15f, 12f); lineTo(9f, 6f) }
+}
