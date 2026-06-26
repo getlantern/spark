@@ -1477,10 +1477,16 @@ auth = "s3cr3t"
     }
 }
 
-#[cfg(all(test, feature = "fronted-meek"))]
+#[cfg(test)]
 mod fronted_meek_config_tests {
+    // Only the transport-build test needs `super` items (`from_config`); the serde tests use
+    // fully-qualified `crate::config::*` paths, so the glob import is unused in the base build.
+    #[cfg(feature = "fronted-meek")]
     use super::*;
 
+    // Building the transport needs the feature compiled in; the serde tests below don't (the
+    // FrontedMeek variant + `fronted-meek` alias are unconditional), so they run in every build.
+    #[cfg(feature = "fronted-meek")]
     #[test]
     fn from_config_builds_a_fronted_meek_transport() {
         // Empty table → self-bootstrapping defaults; new() is lazy (no dial/scan).
