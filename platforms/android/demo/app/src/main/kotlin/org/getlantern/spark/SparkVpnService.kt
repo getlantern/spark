@@ -91,6 +91,8 @@ class SparkVpnService : VpnService() {
             .setMtu(MTU)
             .addAddress(TUN_ADDR, TUN_PREFIX) // the in-tunnel client address
             .addRoute("0.0.0.0", 0) // capture all IPv4
+            .addAddress(TUN_ADDR6, TUN_PREFIX6) // in-tunnel client v6 address (ULA)
+            .addRoute("::", 0) // capture all IPv6 (fail-closed if the core can't proxy v6)
             .addDnsServer("8.8.8.8")
         try {
             builder.addDisallowedApplication(packageName)
@@ -158,6 +160,8 @@ class SparkVpnService : VpnService() {
         private const val MTU = 1500
         private const val TUN_ADDR = "10.0.0.2" // the in-tunnel client address
         private const val TUN_PREFIX = 24
+        private const val TUN_ADDR6 = "fd00::2"
+        private const val TUN_PREFIX6 = 64
         private const val READY_TIMEOUT_MS = 30_000 // ceiling for cold-start self-fetch before giving up
         private const val CHANNEL_ID = "spark_vpn" // foreground-service notification channel (API 26+)
         private const val NOTIF_ID = 1 // ongoing foreground notification id
