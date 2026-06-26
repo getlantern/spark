@@ -180,7 +180,11 @@ private fun VpnSwitch(on: Boolean, busy: Boolean, onToggle: () -> Unit) {
             .background(if (on) SparkColors.brand else SparkColors.off)
             .semantics {
                 contentDescription = "VPN"
-                stateDescription = if (on) "Connected" else "Disconnected"
+                stateDescription = when {
+                    busy -> "Connecting"
+                    on -> "Connected"
+                    else -> "Disconnected"
+                }
             }
             .clickable(
                 enabled = !busy,
