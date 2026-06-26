@@ -292,6 +292,13 @@ class SparkVpnService : VpnService() {
      */
     @Synchronized
     private fun restartTunnel() {
+        // A network callback can be queued/in-flight when the service stops (quitSafely() drains the
+        // queue). stopTunnel() nulls netCallback first, so bail here to avoid a late callback
+        // resurrecting a tunnel the user just stopped.
+        if (netCallback == null) {
+            Log.i(TAG, "restartTunnel: service stopping; ignoring late network callback")
+            return
+        }
         Log.i(TAG, "restartTunnel: tearing down + re-establishing with lastConfig")
         val cfg = lastConfig
         SparkBridge.nativeStop()
