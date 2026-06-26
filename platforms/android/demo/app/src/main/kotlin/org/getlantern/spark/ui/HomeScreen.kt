@@ -61,15 +61,19 @@ import android.app.Activity
 fun HomeScreen(onOpenServers: () -> Unit) {
     val context = LocalContext.current
     val state by SparkState.state.collectAsStateWithLifecycle()
+    val selectedIdx by Selection.index.collectAsStateWithLifecycle()
 
     var servers by remember { mutableStateOf<List<ServerInfo>>(emptyList()) }
     LaunchedEffect(Unit) {
         while (true) {
-            servers = parseServers(withContext(Dispatchers.IO) { SparkBridge.nativeServers() })
+            servers = withContext(Dispatchers.IO) { parseServers(SparkBridge.nativeServers()) }
             delay(2000)
         }
     }
-    val current = servers.firstOrNull { it.isCurrent }
+    // Prefer the pinned member (Selection.index) over the auto-best (isCurrent) so the card
+    // matches the "Selected location" label immediately after a pin, before the next poll.
+    val current = selectedIdx?.let { idx -> servers.firstOrNull { it.index == idx } }
+        ?: servers.firstOrNull { it.isCurrent }
 
     val connected = state == VpnState.CONNECTED
     val connecting = state == VpnState.CONNECTING
@@ -111,12 +115,10 @@ fun HomeScreen(onOpenServers: () -> Unit) {
             ) {
                 VpnSwitch(on = connected, busy = connecting, onToggle = ::toggle)
             }
-            val selectedIdx by Selection.index.collectAsStateWithLifecycle()
-            val autoSelected = (selectedIdx == null)
             StatusCard(
                 state = state,
                 current = current,
-                autoSelected = autoSelected,
+                autoSelected = selectedIdx == null,
                 onOpenServers = onOpenServers,
             )
             Spacer(Modifier.height(10.dp))

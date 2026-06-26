@@ -61,7 +61,7 @@ fun ServersScreen(onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            servers = parseServers(withContext(Dispatchers.IO) { SparkBridge.nativeServers() })
+            servers = withContext(Dispatchers.IO) { parseServers(SparkBridge.nativeServers()) }
             loaded = true
             delay(3000)
         }

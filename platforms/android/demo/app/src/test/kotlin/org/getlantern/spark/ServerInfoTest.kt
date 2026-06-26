@@ -22,4 +22,11 @@ class ServerInfoTest {
         assertEquals(emptyList<ServerInfo>(), parseServers("[]"))
         assertEquals(emptyList<ServerInfo>(), parseServers("not json"))
     }
+    @Test fun malformed_element_is_skipped_rest_returned() {
+        // Middle element is missing the required "index" and another is not an object.
+        val json = """[{"index":0,"country":"A"},{"country":"B"},"oops",{"index":2,"country":"C"}]"""
+        val parsed = parseServers(json)
+        assertEquals(listOf(0, 2), parsed.map { it.index })
+        assertEquals(listOf("A", "C"), parsed.map { it.country })
+    }
 }
