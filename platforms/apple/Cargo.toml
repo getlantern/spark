@@ -38,9 +38,8 @@ bootstrap-dns = ["spark-core/bootstrap-dns"]
 samizdat = ["spark-core/samizdat"]
 shadowsocks = ["spark-core/shadowsocks"]
 hysteria2 = ["spark-core/hysteria2"]
-# Domain-fronted meek polling (Shir-o-Khorshid CDN-fronting): a self-bootstrapping data-plane transport
-# the config-new pool can assign, and whose vantage-point scanner also augments the cold-start config
-# fetch. Pulls boring (like config-fetch); enabled on every Apple slice alongside it.
+# Domain-fronted meek polling transport — another outbound a fetched pool may carry. Pulls
+# flint-fronted, which `config-fetch` already pulls, so this only adds the meek module code itself.
 fronted-meek = ["spark-core/fronted-meek"]
 
 [dependencies]
