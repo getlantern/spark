@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Spark</string>
+    <string name="vpn">VPN</string>
+    <string name="vpn_status">Статус VPN</string>
+    <string name="status_connected">Подключено</string>
+    <string name="status_connecting">Подключение…</string>
+    <string name="status_disconnected">Отключено</string>
+    <string name="status_failed">Ошибка</string>
+    <string name="smart_location">Умное расположение</string>
+    <string name="selected_location">Выбранное расположение</string>
+    <string name="fastest_server">Самый быстрый сервер</string>
+    <string name="routing">Маршрутизация</string>
+    <string name="full_tunnel">Полный туннель</string>
+    <string name="server_selection">Выбор сервера</string>
+    <string name="all_locations">ВСЕ РЕГИОНЫ</string>
+    <string name="auto_fastest_help">Автоматически выбирает расположение с самым быстрым сервером.</string>
+    <string name="no_servers_available">Нет доступных серверов. Сначала подключитесь, чтобы выбрать расположение.</string>
+    <string name="connect">Подключиться</string>
+    <string name="disconnect">Отключиться</string>
+    <string name="ms_format">%1$d ms</string>
+</resources>
