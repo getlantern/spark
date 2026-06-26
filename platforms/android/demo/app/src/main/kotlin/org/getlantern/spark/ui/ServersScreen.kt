@@ -40,7 +40,10 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -56,14 +59,18 @@ fun ServersScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val selectedIdx by Selection.index.collectAsStateWithLifecycle()
 
+    val lifecycleOwner = LocalLifecycleOwner.current
     var servers by remember { mutableStateOf<List<ServerInfo>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            servers = withContext(Dispatchers.IO) { parseServers(SparkBridge.nativeServers()) }
-            loaded = true
-            delay(3000)
+    // Poll the live pool only while the UI is at least STARTED — pauses in the background.
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                servers = withContext(Dispatchers.IO) { parseServers(SparkBridge.nativeServers()) }
+                loaded = true
+                delay(3000)
+            }
         }
     }
 

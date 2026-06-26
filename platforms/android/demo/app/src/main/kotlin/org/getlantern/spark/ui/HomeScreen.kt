@@ -43,7 +43,10 @@ import androidx.compose.ui.unit.sp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -63,11 +66,15 @@ fun HomeScreen(onOpenServers: () -> Unit) {
     val state by SparkState.state.collectAsStateWithLifecycle()
     val selectedIdx by Selection.index.collectAsStateWithLifecycle()
 
+    val lifecycleOwner = LocalLifecycleOwner.current
     var servers by remember { mutableStateOf<List<ServerInfo>>(emptyList()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            servers = withContext(Dispatchers.IO) { parseServers(SparkBridge.nativeServers()) }
-            delay(2000)
+    // Poll the live pool only while the UI is at least STARTED — pauses in the background.
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                servers = withContext(Dispatchers.IO) { parseServers(SparkBridge.nativeServers()) }
+                delay(2000)
+            }
         }
     }
     // Prefer the pinned member (Selection.index) over the auto-best (isCurrent) so the card
