@@ -77,7 +77,9 @@ fail-open). Add the three blockers for real-world use:
   *Result: the tunnel survives the user backgrounding the app.*
 - **IPv6.** Add an IPv6 tun address (ULA, e.g. `fd00:0:0:0::2/64`) and `addRoute("::", 0)` so IPv6
   is captured by the tunnel. If the core cannot proxy a v6 destination it fails closed for that
-  flow — never leaks to the censored network. *Result: no IPv6 leak on dual-stack carriers.*
+  flow — never leaks to the censored network. *Result: no IPv6 leak on dual-stack carriers.* The
+  Apple tunnel has the **same IPv4-only gap today** (`PacketTunnelProvider.swift:79-81` configures
+  only `ipv4Settings`, no `ipv6Settings`), so §6 backports the equivalent fix there for parity.
 - **Reconnection.** Register a `ConnectivityManager.NetworkCallback` for the default network;
   on a usable-network change (Wi-Fi↔cellular), tear down and re-establish the tunnel so a moving
   mobile user stays connected. Debounce transient flaps.
@@ -113,6 +115,15 @@ footgun): a Gradle pre-build task runs
 packs the produced `libspark_android.so`. App id, label ("Spark"), launcher icon, and version are
 set for a real (non-demo) build.
 
+### 6. Apple IPv6 parity (backport)
+
+The IPv6 leak is cross-platform, so fix Apple too: in
+`platforms/apple/Sources/SparkNE/PacketTunnelProvider.swift`, add `NEIPv6Settings` with a default
+included route (`NEIPv6Route.default()`) alongside the existing `ipv4Settings`, so the macOS/iOS
+tunnel captures IPv6 instead of letting it leak. Small, self-contained Swift change; ships as its
+own commit/PR. No Rust-core change (the userspace netstack already receives whatever the OS routes
+into the tun fd; if it can't service v6 the flow fails closed, same as Android).
+
 ## Module layout
 
 Promote the app out of `demo/` into a real module (keep the existing `platforms/android/src/lib.rs`
@@ -123,11 +134,12 @@ screens, and the string resources live here.
 
 ## Phasing (each phase is independently shippable + verifiable)
 
-1. **Native bridge + VpnService hardening.** Add the 3 JNI methods; add foreground service +
-   notification, IPv6 capture, and network-change reconnection. *Gate:* on a device, the tunnel
+1. **Native bridge + VpnService hardening (+ Apple IPv6 backport).** Add the 3 JNI methods; add
+   foreground service + notification, IPv6 capture, and network-change reconnection; backport
+   `NEIPv6Settings` to the Apple `PacketTunnelProvider` (§6). *Gate:* on a device, the tunnel
    survives backgrounding, shows no IPv6 leak (test on a dual-stack network /
    `test-ipv6.com`-style check), and survives a Wi-Fi↔cellular switch; `nativeServers/status`
-   return correct JSON while connected.
+   return correct JSON while connected; the Apple build still connects with v6 captured.
 2. **Compose UI.** Home + server-selection screens wired to the bridges, replacing the demo
    activity (no auto-connect). *Gate:* connect/disconnect works from the UI, status is live, the
    server list shows flags/latency/protocol and pinning takes effect.
