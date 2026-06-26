@@ -21,7 +21,7 @@ for t in "${TARGETS[@]}"; do
     # (cert-verifying) BoringSSL handshake everywhere — no per-platform TLS-stack split. NB: v1's fetch
     # is a *plain* boring connector (not yet Chrome-mimicked); Chrome-mimicry for the fetch is the
     # deferred fronting milestone. See docs/config-fetch-cross-platform-design.md.
-    feat=(--features anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2)
+    feat=(--features anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2,fronted-meek)
     cargo build --release -p spark-apple --target "$t" "${feat[@]}" >&2
 done
 
