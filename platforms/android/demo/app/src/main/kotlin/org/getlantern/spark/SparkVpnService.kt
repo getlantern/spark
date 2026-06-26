@@ -256,17 +256,32 @@ class SparkVpnService : VpnService() {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             .build()
-        // A background thread, not the main looper: onAvailable triggers the blocking restartTunnel.
-        val cbThread = HandlerThread("spark-netwatch").apply { start() }
-        netCbThread = cbThread
-        val handler = Handler(cbThread.looper)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            Log.i(TAG, "netwatch: registerBestMatchingNetworkCallback (API ${Build.VERSION.SDK_INT})")
-            cm.registerBestMatchingNetworkCallback(request, cb, handler)
-        } else {
-            Log.i(TAG, "netwatch: registerDefaultNetworkCallback (API ${Build.VERSION.SDK_INT})")
-            cm.registerDefaultNetworkCallback(cb, handler)
+        when {
+            // 31+: registerBestMatchingNetworkCallback (handler overload) tracks the physical net.
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+                Log.i(TAG, "netwatch: registerBestMatchingNetworkCallback (API ${Build.VERSION.SDK_INT})")
+                cm.registerBestMatchingNetworkCallback(request, cb, backgroundCallbackHandler())
+            }
+            // 26..30: registerDefaultNetworkCallback's Handler overload (added in API 26).
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
+                Log.i(TAG, "netwatch: registerDefaultNetworkCallback+handler (API ${Build.VERSION.SDK_INT})")
+                cm.registerDefaultNetworkCallback(cb, backgroundCallbackHandler())
+            }
+            // 24..25: the Handler overload doesn't exist yet. The 1-arg version delivers on
+            // ConnectivityManager's own thread (not main), so restartTunnel still runs off-main.
+            else -> {
+                Log.i(TAG, "netwatch: registerDefaultNetworkCallback (API ${Build.VERSION.SDK_INT})")
+                cm.registerDefaultNetworkCallback(cb)
+            }
         }
+    }
+
+    /** A Handler on a dedicated background thread for network callbacks, so the blocking
+     *  restartTunnel they trigger never runs on the main looper. Stored in [netCbThread] for cleanup. */
+    private fun backgroundCallbackHandler(): Handler {
+        val t = HandlerThread("spark-netwatch").apply { start() }
+        netCbThread = t
+        return Handler(t.looper)
     }
 
     /**
