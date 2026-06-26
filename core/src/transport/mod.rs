@@ -1506,6 +1506,22 @@ meek_host = "meek.example.org"
             entry.spec
         );
     }
+
+    #[test]
+    fn from_config_accepts_legacy_fronted_meek_pool_kind() {
+        // The pre-rename pool tag `kind = "fronted-meek"` must still deserialize (serde alias), so a
+        // native-TOML pool written by an older build keeps working after the rename to `meek`.
+        let toml = r#"
+[[transport.servers]]
+kind = "fronted-meek"
+meek_host = "meek.example.org"
+"#;
+        let cfg = crate::config::Config::from_toml_str(toml).unwrap();
+        assert!(matches!(
+            cfg.transport.servers[0].spec,
+            crate::config::ServerSpec::FrontedMeek(_)
+        ));
+    }
 }
 
 /// P4a gambit realization: the Layer-B record-split wiring (`with_record_split`) and confirmation

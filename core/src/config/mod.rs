@@ -557,8 +557,9 @@ pub enum ServerSpec {
     Hysteria2(Hysteria2Config),
     /// Domain-fronted meek polling (Shir-o-Khorshid CDN-fronting). Renamed to `"meek"` so the pool
     /// `kind` matches the server-side protocol/outbound type and `spec_kind()` (the Rust variant stays
-    /// `FrontedMeek` — the transport-impl name; only the wire/protocol identifier is `meek`).
-    #[serde(rename = "meek")]
+    /// `FrontedMeek` — the transport-impl name; only the wire/protocol identifier is `meek`). The
+    /// `fronted-meek` alias keeps any native-TOML pools written under the pre-rename tag deserializable.
+    #[serde(rename = "meek", alias = "fronted-meek")]
     FrontedMeek(FrontedMeekConfig),
 }
 

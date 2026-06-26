@@ -101,10 +101,19 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
 /// The meek wire carries a full URL; spark's scanner wants just the inner Host. Returns `None` for an
 /// empty/hostless value (→ the client self-bootstraps to its built-in default endpoint).
 fn host_from_url(url: &str) -> Option<String> {
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
-    // Strip an optional `:port` (meek hosts are DNS names, so no IPv6-literal handling needed).
-    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    let after_scheme = url
+        .trim()
+        .split_once("://")
+        .map_or(url.trim(), |(_, rest)| rest);
+    // Authority ends at the first path/query/fragment delimiter.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop optional `userinfo@`, then an optional `:port` (meek hosts are DNS names, so no
+    // IPv6-literal/bracket handling needed).
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
     (!host.is_empty()).then(|| host.to_string())
 }
 
@@ -161,8 +170,10 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
         // Self-bootstrapping: no `server` endpoint needed (the client scans edges). The wire carries
         // the meek-server `url`; derive the bare inner host. Empty/absent → the client uses its
         // built-in default endpoint. http_version isn't on the wire, so it auto-selects from ALPN.
-        // A build without the `fronted-meek` feature still maps this; fronted_meek_transport() then
-        // errors at connect (mirrors samizdat/hysteria2).
+        // A build without the `fronted-meek` feature still maps this; building the transport then
+        // fails via fronted_meek_transport()'s #[cfg(not)] stub — surfaced at connect in
+        // single-transport mode, or skipped-with-warning as one member by build_selecting() in a
+        // multi-server pool (only an all-meek pool fails). Mirrors samizdat/hysteria2.
         "meek" => Some(ServerSpec::FrontedMeek(super::FrontedMeekConfig {
             meek_host: ob
                 .url
@@ -420,7 +431,26 @@ mod tests {
             host_from_url("meek.example"),
             Some("meek.example".to_string())
         );
+        // No path, but a query or fragment: authority still ends at `?`/`#`.
+        assert_eq!(
+            host_from_url("https://meek.example?x=1"),
+            Some("meek.example".to_string())
+        );
+        assert_eq!(
+            host_from_url("https://meek.example#frag"),
+            Some("meek.example".to_string())
+        );
+        // Surrounding whitespace and optional userinfo are stripped.
+        assert_eq!(
+            host_from_url("  https://meek.example/  "),
+            Some("meek.example".to_string())
+        );
+        assert_eq!(
+            host_from_url("https://user:pass@meek.example:443/"),
+            Some("meek.example".to_string())
+        );
         assert_eq!(host_from_url(""), None);
+        assert_eq!(host_from_url("   "), None);
     }
 
     #[test]
