@@ -130,7 +130,8 @@ impl FrontedMeekTransport {
                 )
                 .await
                 {
-                    break 'conn (c, front.front.fronted_host.clone());
+                    let inner = c.fronted_host().to_owned();
+                    break 'conn (c, inner);
                 }
                 // The cached front failed — evict it so every subsequent flow
                 // doesn't pay its full dial timeout before falling back to the race.
@@ -140,10 +141,10 @@ impl FrontedMeekTransport {
             let c = dial_fronts_alpn(&self.meek_host, fronts, DialOptions::default())
                 .await
                 .map_err(io::Error::other)?;
-            let inner = fronts
-                .get(c.candidate_index)
-                .map(|f| f.front.fronted_host.clone())
-                .unwrap_or_else(|| self.meek_host.clone());
+            // The winning front's own inner host — taken from the connection, not
+            // fronts[candidate_index]: candidate_index indexes the flattened
+            // front×addr dial list, not the fronts slice.
+            let inner = c.fronted_host().to_owned();
             if let Some(win) = fronts.get(c.candidate_index) {
                 *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(win.clone());
             }
