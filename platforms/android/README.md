@@ -20,11 +20,13 @@ VpnService.establish() ──fd──▶ SparkBridge.nativeRun(fd, mtu, …, con
 - **JNI surface** (`SparkBridge`, package `org.getlantern.spark`, via the `jni` crate): the cdylib
   exports `nativeRun(fd, mtu, addr, prefix, systemStack, config, dataDir)` (blocks until stop;
   0 = clean, -1 = error), `nativeStop`, `nativeMarkConnecting`, `nativeWaitReady(timeoutMs)`,
-  `nativeServers(): String` (the live pool as JSON), and `nativeSelectServer(index)` (pin a member,
-  or `< 0` = auto). A null/empty/`"lantern-api"` `config` means self-fetch from the Lantern
-  config-new API, caching `device_id` + the fetched config into `dataDir` (the app files dir); an
-  `IP:port` literal is a plain relay; anything else is a full config (TOML or `config_raw.json`).
-  Run/stop logic is in [`spark_core::android`](../../core/src/android.rs).
+  `nativeServers(): String?` (the live pool as JSON; null only on a catastrophic JNI string-alloc
+  failure — callers treat null as `"[]"`), and `nativeSelectServer(index)` (pin a member, or
+  `< 0` = auto). A null/empty/`"lantern-api"` `config` means self-fetch from the Lantern config-new
+  API, caching `device_id` + the fetched config into `dataDir` (the app files dir); an `IP:port`
+  literal is a plain relay; anything else is a full config (TOML or `config_raw.json`). The
+  run/stop/fd-dispatch logic is in [`core/src/fd_tunnel.rs`](../../core/src/fd_tunnel.rs); the JNI
+  shim (the `Java_org_getlantern_spark_*` exports) is [`platforms/android/src/lib.rs`](src/lib.rs).
 - **Loop avoidance**: the `VpnService` calls `addDisallowedApplication(<own package>)` so the app's
   own sockets (this proxy's upstream dials) bypass the tunnel — the Android analog of the desktop
   `SocketProtector`. No per-socket JNI `protect()` callback is needed.
@@ -107,9 +109,11 @@ adb shell 'printf "GET /generate_204 HTTP/1.1\r\nHost: connectivitycheck.gstatic
 # => HTTP/1.1 204 No Content   ✓   (and `adb logcat -s spark` shows the forwarded TCP flows)
 ```
 
-> **Manual `.so` build** (only if you can't use the Gradle task — e.g. a CI image without it):
+> **Manual `.so` build** (only if you can't use the Gradle task — e.g. a CI image without it).
+> Run from the **repo root** with explicit paths so the output dir is unambiguous:
 > ```bash
-> cargo ndk -t arm64-v8a -t x86_64 -P 24 -o demo/app/src/main/jniLibs build --release -p spark-android
-> rm -f demo/app/src/main/jniLibs/*/libtun_rs-*.so
+> cargo ndk -t arm64-v8a -t x86_64 -P 24 \
+>     -o platforms/android/demo/app/src/main/jniLibs build --release -p spark-android
+> rm -f platforms/android/demo/app/src/main/jniLibs/*/libtun_rs-*.so
 > ```
-> Output lands in `demo/app/src/main/jniLibs/<abi>/libspark_android.so` (gitignored — a build artifact).
+> Output lands in `platforms/android/demo/app/src/main/jniLibs/<abi>/libspark_android.so` (gitignored — a build artifact).
