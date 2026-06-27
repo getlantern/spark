@@ -57,7 +57,8 @@ tasks.register('cargoNdkBuild', Exec) {
     commandLine 'cargo', 'ndk',
         '-t', 'arm64-v8a', '-t', 'x86_64', '-P', "${android.defaultConfig.minSdk}",
         '-o', jniLibsDir.absolutePath,
-        'build', '--release', '-p', 'spark-android'
+        // --locked: don't mutate Cargo.lock (which we declare as an input) — reproducible builds.
+        'build', '--release', '--locked', '-p', 'spark-android'
     // Up-to-date check: re-run only when the Android crate, the core sources/manifest, or the
     // resolved dependency set (Cargo.lock) change — so plain Kotlin/UI edits don't shell out to
     // cargo, but a core feature-flag or dependency bump does.
