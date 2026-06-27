@@ -38,6 +38,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -267,7 +268,7 @@ private fun StatusCard(
             modifier = Modifier.clickable { onOpenServers() },
             leading = {
                 if (current != null) {
-                    Text(flagEmoji(current.countryCode), fontSize = 18.sp)
+                    Text(flagEmoji(current.countryCode), fontSize = 18.sp, modifier = Modifier.clearAndSetSemantics {})
                 } else {
                     Icon(PinIcon, null, tint = SparkColors.textSecondary, modifier = Modifier.size(20.dp))
                 }
@@ -278,7 +279,7 @@ private fun StatusCard(
             subtitle = current?.latencyMs?.let { stringResource(R.string.ms_format, it) },
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (autoSelected) Text("⚡", color = SparkColors.bolt, fontSize = 16.sp)
+                    if (autoSelected) Text("⚡", color = SparkColors.bolt, fontSize = 16.sp, modifier = Modifier.clearAndSetSemantics {})
                     Icon(ChevronIcon, null, tint = SparkColors.textTertiary, modifier = Modifier.size(20.dp))
                 }
             },

@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -169,7 +170,7 @@ fun ServersScreen(onBack: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Text(if (current != null) flagEmoji(current.countryCode) else "🌐", fontSize = 21.sp)
+                    Text(if (current != null) flagEmoji(current.countryCode) else "🌐", fontSize = 21.sp, modifier = Modifier.clearAndSetSemantics {})
                     Column(Modifier.weight(1f)) {
                         Text(
                             if (current != null) serverLabel(current, stringResource(R.string.server)) else stringResource(R.string.fastest_server),
@@ -193,6 +194,7 @@ fun ServersScreen(onBack: () -> Unit) {
                         "⚡",
                         fontSize = 18.sp,
                         color = SparkColors.bolt.copy(alpha = if (isAuto) 1f else 0.28f),
+                        modifier = Modifier.clearAndSetSemantics {},
                     )
                 }
                 Spacer(Modifier.height(8.dp))
@@ -307,7 +309,7 @@ private fun CountryGroup(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(flagEmoji(members.firstOrNull()?.countryCode), fontSize = 21.sp)
+        Text(flagEmoji(members.firstOrNull()?.countryCode), fontSize = 21.sp, modifier = Modifier.clearAndSetSemantics {})
         Text(
             country,
             fontFamily = Urbanist,
@@ -362,7 +364,7 @@ private fun ServerRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (flag != null) Text(flag, fontSize = 21.sp)
+        if (flag != null) Text(flag, fontSize = 21.sp, modifier = Modifier.clearAndSetSemantics {})
         Column(Modifier.weight(1f)) {
             Text(
                 title,
