@@ -178,13 +178,16 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
         // fails via fronted_meek_transport()'s #[cfg(not)] stub — surfaced at connect in
         // single-transport mode, or skipped-with-warning as one member by build_selecting() in a
         // multi-server pool (only an all-meek pool fails). Mirrors samizdat/hysteria2.
+        // Only the Akamai meek_host comes off the wire (from `url`); the CloudFront
+        // and Aliyun inner hosts are left empty so the client uses its built-in
+        // per-CDN defaults.
         "meek" => Some(ServerSpec::FrontedMeek(super::FrontedMeekConfig {
             meek_host: ob
                 .url
                 .as_deref()
                 .and_then(host_from_url)
                 .unwrap_or_default(),
-            http_version: None,
+            ..Default::default()
         })),
         _ => None, // unbounded, etc. — no spark transport
     }

@@ -345,8 +345,16 @@ pub struct WasmConfig {
 }
 
 /// The built-in meek endpoint used when `transport.fronted_meek.meek_host` is
-/// unset. Single source of truth, referenced by the transport and diagnostics.
+/// unset. This is the inner host Akamai fronts route to. Single source of truth,
+/// referenced by the transport and diagnostics.
 pub const DEFAULT_FRONTED_MEEK_HOST: &str = "meek.dsa.akamai.getiantem.org";
+
+/// Built-in inner hosts the CloudFront / Aliyun edges front to, used when the
+/// corresponding config field is unset. Each CDN routes by a *different* inner
+/// host (an Akamai host won't route through a CloudFront/Aliyun distribution), so
+/// they can't share one value.
+pub const DEFAULT_CLOUDFRONT_MEEK_HOST: &str = "d1hludsvicirbc.cloudfront.net";
+pub const DEFAULT_ALIYUN_MEEK_HOST: &str = "meek-aliyun.getiantem.org";
 
 /// Domain-fronted meek polling transport configuration. Every field is optional:
 /// with an empty `[transport.fronted_meek]` table the transport self-bootstraps
@@ -355,10 +363,18 @@ pub const DEFAULT_FRONTED_MEEK_HOST: &str = "meek.dsa.akamai.getiantem.org";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontedMeekConfig {
-    /// Inner meek endpoint host the front routes to. Empty → the built-in default
+    /// Inner host the Akamai edges route to. Empty → the built-in default
     /// (`meek.dsa.akamai.getiantem.org`).
     #[serde(default)]
     pub meek_host: String,
+    /// Inner host the CloudFront edges route to. Empty → the built-in default
+    /// (`d1hludsvicirbc.cloudfront.net`).
+    #[serde(default)]
+    pub cloudfront_host: String,
+    /// Inner host the Aliyun edges route to. Empty → the built-in default
+    /// (`meek-aliyun.getiantem.org`).
+    #[serde(default)]
+    pub aliyun_host: String,
     /// HTTP version over the fronted TLS connection. Unset → auto-select from the
     /// ALPN the edge negotiates (recommended). `"h1"` or `"h2"` force it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
