@@ -4,7 +4,7 @@
 
 **Goal:** Build `libspark_android.so` automatically from the Rust crate during the Gradle build via cargo-ndk, so a clean checkout produces the native lib with no manual step (today the `.so` is built by a hand-run `cargo ndk …` and only bundled by Gradle).
 
-**Architecture:** A Gradle `Exec` task (`cargoNdkBuild`) runs `cargo ndk -t arm64-v8a -t x86_64 -P 24 -o <jniLibs> build --release -p spark-android` (from the `platforms/android` crate dir), then deletes cargo-ndk's stray `libtun_rs-*.so` byproduct (we statically link it). `preBuild` depends on it, so the `.so` exists before AGP merges `src/main/jniLibs`. The `.so` stays gitignored (already is).
+**Architecture:** A Gradle `Exec` task (`cargoNdkBuild`) runs `cargo ndk -t arm64-v8a -t x86_64 -P <minSdk> -o <jniLibs> build --release -p spark-android` (from the `platforms/android` crate dir; `-P` is cargo-ndk's `--platform`/API level, derived from `minSdk`), then deletes cargo-ndk's stray `libtun_rs-*.so` byproduct (we statically link it). `preBuild` depends on it, so the `.so` exists before AGP merges `src/main/jniLibs`. The `.so` stays gitignored (already is).
 
 **Tech Stack:** Gradle (Groovy DSL), cargo-ndk, Android NDK 28.2.13676358 (`ANDROID_NDK_HOME`).
 
