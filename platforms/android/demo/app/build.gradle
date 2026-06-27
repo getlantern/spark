@@ -53,8 +53,9 @@ tasks.register('cargoNdkBuild', Exec) {
     workingDir rustCrateDir
     environment 'ANDROID_NDK_HOME',
         System.getenv('ANDROID_NDK_HOME') ?: "${android.sdkDirectory}/ndk/${ndkVersionForCargo}"
+    // -P is cargo-ndk's --platform (Android API level); derive it from minSdk so the two can't drift.
     commandLine 'cargo', 'ndk',
-        '-t', 'arm64-v8a', '-t', 'x86_64', '-P', '24',
+        '-t', 'arm64-v8a', '-t', 'x86_64', '-P', "${android.defaultConfig.minSdk}",
         '-o', jniLibsDir.absolutePath,
         'build', '--release', '-p', 'spark-android'
     // Up-to-date check: re-run only when the Android crate, the core sources/manifest, or the

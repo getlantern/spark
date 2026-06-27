@@ -31,20 +31,27 @@ tasks.register('cargoNdkBuild', Exec) {
     workingDir rustCrateDir
     environment 'ANDROID_NDK_HOME',
         System.getenv('ANDROID_NDK_HOME') ?: "${android.sdkDirectory}/ndk/${ndkVersion4Cargo}"
+    // -P is cargo-ndk's --platform (Android API level); derive from minSdk so they can't drift.
     commandLine 'cargo', 'ndk',
-        '-t', 'arm64-v8a', '-t', 'x86_64', '-P', '24',
+        '-t', 'arm64-v8a', '-t', 'x86_64', '-P', "${android.defaultConfig.minSdk}",
         '-o', jniLibsDir.absolutePath,
         'build', '--release', '-p', 'spark-android'
-    // Up-to-date check: re-run only when the Android crate or the core sources change.
+    // Up-to-date check: re-run when the Android crate, the core sources/manifest, or the resolved
+    // dependency set (Cargo.lock) change — so plain Kotlin/UI edits don't shell out to cargo.
     inputs.dir new File(rustCrateDir, 'src')
     inputs.file new File(rustCrateDir, 'Cargo.toml')
     inputs.dir new File(repoRootDir, 'core/src')
+    inputs.file new File(repoRootDir, 'core/Cargo.toml')
+    inputs.file new File(repoRootDir, 'Cargo.lock')
     outputs.dir jniLibsDir
     doFirst {
-        // Fail fast with a helpful message if cargo-ndk isn't installed.
-        def hasCargoNdk = ['bash', '-lc', 'command -v cargo-ndk'].execute().waitFor() == 0
-        if (!hasCargoNdk) {
-            throw new GradleException('cargo-ndk not found. Run `cargo install cargo-ndk` and ' +
+        // Cross-platform PATH scan (no shell dependency) for cargo-ndk.
+        def exeNames = ['cargo-ndk', 'cargo-ndk.exe']
+        def onPath = (System.getenv('PATH') ?: '').split(File.pathSeparator).any { dir ->
+            exeNames.any { new File(dir, it).canExecute() }
+        }
+        if (!onPath) {
+            throw new GradleException('cargo-ndk not found on PATH. Run `cargo install cargo-ndk` and ' +
                 'ensure ~/.cargo/bin is on PATH (or build the .so manually per platforms/android/README.md).')
         }
     }
