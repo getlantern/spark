@@ -141,13 +141,16 @@ impl FrontedMeekTransport {
             let c = dial_fronts_alpn(&self.meek_host, fronts, DialOptions::default())
                 .await
                 .map_err(io::Error::other)?;
-            // The winning front's own inner host — taken from the connection, not
-            // fronts[candidate_index]: candidate_index indexes the flattened
-            // front×addr dial list, not the fronts slice.
+            // Cache and address the *winning* front from the connection itself — its
+            // own inner host plus the exact addr that won. Don't index back into
+            // `fronts` by candidate_index: that indexes the flattened front×addr dial
+            // list, not the `fronts` slice, so it can cache the wrong front if a front
+            // ever carries >1 addr.
             let inner = c.fronted_host().to_owned();
-            if let Some(win) = fronts.get(c.candidate_index) {
-                *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(win.clone());
-            }
+            *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(MaterializedFront {
+                front: c.front.clone(),
+                addrs: vec![c.addr],
+            });
             (c, inner)
         };
         // Open meek to the winning front's inner host, picking the HTTP version:
