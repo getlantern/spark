@@ -92,16 +92,12 @@ impl FrontedMeekTransport {
     async fn candidate_fronts(&self) -> &[MaterializedFront] {
         self.fronts
             .get_or_init(|| async {
-                // Each CDN routes to its own inner host; an empty host disables that
-                // CDN's candidates (the scanner skips it rather than scan a host that
-                // can't route there).
-                let mut targets = scanner::ScanTargets::for_host(self.meek_host.clone());
-                if !self.cloudfront_host.is_empty() {
-                    targets = targets.with_cloudfront_host(self.cloudfront_host.clone());
-                }
-                if !self.aliyun_host.is_empty() {
-                    targets = targets.with_aliyun_host(self.aliyun_host.clone());
-                }
+                // Each CDN routes to its own inner host. All three are always set
+                // (new() fills empty/whitespace with the built-in default via
+                // bare_host), so enable all three CDNs' candidates.
+                let targets = scanner::ScanTargets::for_host(self.meek_host.clone())
+                    .with_cloudfront_host(self.cloudfront_host.clone())
+                    .with_aliyun_host(self.aliyun_host.clone());
                 let cands =
                     scanner::all_candidates(&SystemResolver::new(), &targets, self.seed).await;
                 cands
