@@ -25,10 +25,11 @@ fun flagEmoji(code: String?): String {
     return String(Character.toChars(base + a)) + String(Character.toChars(base + b))
 }
 
-/** "Country – City" (or whichever present), else name, else "Server". Mirrors serverLabel. */
-fun serverLabel(s: ServerInfo): String =
+/** "Country – City" (or whichever present), else name, else [fallback]. Mirrors serverLabel.
+ *  [fallback] is passed in (a localized string) since this is a plain helper, not a composable. */
+fun serverLabel(s: ServerInfo, fallback: String): String =
     listOfNotNull(s.country, s.city).filter { it.isNotBlank() }
-        .joinToString(" – ").ifEmpty { s.name ?: "Server" }
+        .joinToString(" – ").ifEmpty { s.name ?: fallback }
 
 /** Canonical protocol name. Mirrors lib/format.ts protocolLabel (+ fronted-meek -> Meek). */
 fun protocolLabel(p: String?): String = when (p?.lowercase()) {

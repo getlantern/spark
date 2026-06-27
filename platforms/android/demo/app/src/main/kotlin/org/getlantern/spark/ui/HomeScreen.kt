@@ -273,7 +273,7 @@ private fun StatusCard(
                 }
             },
             label = if (autoSelected) stringResource(R.string.smart_location) else stringResource(R.string.selected_location),
-            value = if (current != null) serverLabel(current) else stringResource(R.string.fastest_server),
+            value = if (current != null) serverLabel(current, stringResource(R.string.server)) else stringResource(R.string.fastest_server),
             valueColor = SparkColors.textPrimary,
             subtitle = current?.latencyMs?.let { stringResource(R.string.ms_format, it) },
             trailing = {

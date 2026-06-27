@@ -172,7 +172,7 @@ fun ServersScreen(onBack: () -> Unit) {
                     Text(if (current != null) flagEmoji(current.countryCode) else "🌐", fontSize = 21.sp)
                     Column(Modifier.weight(1f)) {
                         Text(
-                            if (current != null) serverLabel(current) else stringResource(R.string.fastest_server),
+                            if (current != null) serverLabel(current, stringResource(R.string.server)) else stringResource(R.string.fastest_server),
                             fontFamily = Urbanist,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -283,7 +283,7 @@ private fun CountryGroup(
         val s = members[0]
         ServerRow(
             flag = flagEmoji(s.countryCode),
-            title = serverLabel(s),
+            title = serverLabel(s, stringResource(R.string.server)),
             protocol = protocolLabel(s.protocol),
             latencyMs = s.latencyMs,
             selected = selectedIdx == s.index,
@@ -331,7 +331,7 @@ private fun CountryGroup(
             RowDivider()
             ServerRow(
                 flag = null,
-                title = s.city?.takeIf { it.isNotBlank() } ?: serverLabel(s),
+                title = s.city?.takeIf { it.isNotBlank() } ?: serverLabel(s, stringResource(R.string.server)),
                 protocol = protocolLabel(s.protocol),
                 latencyMs = s.latencyMs,
                 selected = selectedIdx == s.index,

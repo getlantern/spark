@@ -11,6 +11,7 @@
     <string name="smart_location">مکان هوشمند</string>
     <string name="selected_location">مکان انتخاب‌شده</string>
     <string name="fastest_server">سریع‌ترین سرور</string>
+    <string name="server">سرور</string>
     <string name="routing">مسیریابی</string>
     <string name="full_tunnel">تونل کامل</string>
     <string name="server_selection">انتخاب سرور</string>
