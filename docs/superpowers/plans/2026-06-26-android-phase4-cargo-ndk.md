@@ -17,55 +17,15 @@
 **Files:** Modify `platforms/android/demo/app/build.gradle`.
 
 - [ ] **Step 1:** Add, after the `android { … }` block:
-```groovy
-// Build the Rust JNI lib (libspark_android.so) into src/main/jniLibs via cargo-ndk so a clean
-// build produces the native lib with no manual step. Requires cargo-ndk + the Android NDK.
-def rustCrateDir = rootProject.projectDir.parentFile        // platforms/android (the spark-android crate)
-def repoRootDir = rustCrateDir.parentFile.parentFile        // repo root (workspace root)
-def jniLibsDir = new File(projectDir, 'src/main/jniLibs')
-def ndkVersion4Cargo = '28.2.13676358'
-
-tasks.register('cargoNdkBuild', Exec) {
-    group = 'build'
-    description = 'Cross-compiles libspark_android.so for arm64-v8a + x86_64 via cargo-ndk.'
-    workingDir rustCrateDir
-    environment 'ANDROID_NDK_HOME',
-        System.getenv('ANDROID_NDK_HOME') ?: "${android.sdkDirectory}/ndk/${ndkVersion4Cargo}"
-    // -P is cargo-ndk's --platform (Android API level); derive from minSdk so they can't drift.
-    commandLine 'cargo', 'ndk',
-        '-t', 'arm64-v8a', '-t', 'x86_64', '-P', "${android.defaultConfig.minSdk}",
-        '-o', jniLibsDir.absolutePath,
-        'build', '--release', '-p', 'spark-android'
-    // Up-to-date check: re-run when the Android crate, the core sources/manifest, or the resolved
-    // dependency set (Cargo.lock) change — so plain Kotlin/UI edits don't shell out to cargo.
-    inputs.dir new File(rustCrateDir, 'src')
-    inputs.file new File(rustCrateDir, 'Cargo.toml')
-    inputs.dir new File(repoRootDir, 'core/src')
-    inputs.file new File(repoRootDir, 'core/Cargo.toml')
-    inputs.file new File(repoRootDir, 'Cargo.lock')
-    outputs.dir jniLibsDir
-    doFirst {
-        // Cross-platform PATH scan (no shell dependency) for cargo-ndk.
-        def exeNames = ['cargo-ndk', 'cargo-ndk.exe']
-        def onPath = (System.getenv('PATH') ?: '').split(File.pathSeparator).any { dir ->
-            exeNames.any { new File(dir, it).canExecute() }
-        }
-        if (!onPath) {
-            throw new GradleException('cargo-ndk not found on PATH. Run `cargo install cargo-ndk` and ' +
-                'ensure ~/.cargo/bin is on PATH (or build the .so manually per platforms/android/README.md).')
-        }
-    }
-    doLast {
-        // Drop cargo-ndk's stray copy of tun-rs's dylib byproduct (statically linked into our .so).
-        ['arm64-v8a', 'x86_64'].each { abi ->
-            fileTree(dir: new File(jniLibsDir, abi), include: 'libtun_rs-*.so').each { it.delete() }
-        }
-    }
-}
-
-// Produce the .so before AGP reads/merges src/main/jniLibs.
-tasks.named('preBuild').configure { dependsOn 'cargoNdkBuild' }
-```
+A `cargoNdkBuild` `Exec` task does this — see the **authoritative implementation** in
+`platforms/android/demo/app/build.gradle`. Key points (summarized, not duplicated, so this plan
+can't drift from the code):
+- Runs `cargo ndk -t arm64-v8a -t x86_64 -P <minSdk> -o <jniLibs> build --release -p spark-android`
+  from the `platforms/android` crate dir; `-P` (cargo-ndk's `--platform`/API level) is derived from `minSdk`.
+- `environment 'ANDROID_NDK_HOME'` resolves to `$ANDROID_NDK_HOME` or the pinned `<sdk>/ndk/<ver>`.
+- Up-to-date inputs: the android crate `src` + `Cargo.toml`, `core/src`, `core/Cargo.toml`, `Cargo.lock`; output: `jniLibs`. (So plain Kotlin/UI edits don't shell out to cargo.)
+- `doFirst` fails fast with a clear message if the NDK dir is missing; `doLast` deletes cargo-ndk's stray `libtun_rs-*.so` byproduct.
+- `tasks.named('preBuild').configure { dependsOn 'cargoNdkBuild' }` so the `.so` exists before AGP merges `src/main/jniLibs`.
 - [ ] **Step 2:** Update the stale comment in `buildTypes { debug { … } }` (it currently says "already release-built by cargo-ndk; nothing to do") to note the task now builds it.
 - [ ] **Step 3:** `cd platforms/android/demo && ./gradlew :app:cargoNdkBuild` — Expected: cargo-ndk compiles and writes `src/main/jniLibs/{arm64-v8a,x86_64}/libspark_android.so`, with no `libtun_rs-*.so` left. (First run is slow — compiles the core for two ABIs.)
 - [ ] **Step 4:** Commit `build(android): build libspark_android.so via cargo-ndk in Gradle`.

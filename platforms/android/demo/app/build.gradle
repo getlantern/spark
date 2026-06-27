@@ -68,18 +68,12 @@ tasks.register('cargoNdkBuild', Exec) {
     inputs.file new File(repoRootDir, 'Cargo.lock')
     outputs.dir jniLibsDir
     doFirst {
-        // Cross-platform PATH scan (no shell dependency, works on Windows/CI) for cargo-ndk.
-        def exeNames = ['cargo-ndk', 'cargo-ndk.exe']
-        def onPath = (System.getenv('PATH') ?: '').split(File.pathSeparator).any { dir ->
-            exeNames.any { new File(dir, it).canExecute() }
-        }
+        // Fail fast with a clear message for the common missing-NDK case. cargo-ndk's own absence
+        // surfaces a clear "no such command: ndk" from cargo, so we don't second-guess PATH here
+        // (see platforms/android/README.md for the `cargo install cargo-ndk` prerequisite).
         if (!new File(ndkHome).isDirectory()) {
             throw new GradleException("Android NDK not found at '${ndkHome}'. Install NDK " +
                 "${ndkVersionForCargo} (sdkmanager \"ndk;${ndkVersionForCargo}\") or set ANDROID_NDK_HOME.")
-        }
-        if (!onPath) {
-            throw new GradleException('cargo-ndk not found on PATH. Run `cargo install cargo-ndk` and ' +
-                'ensure ~/.cargo/bin is on PATH (or build the .so manually per platforms/android/README.md).')
         }
     }
     doLast {
