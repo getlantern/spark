@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Spark</string>
+    <string name="vpn">VPN</string>
+    <string name="vpn_status">VPN status</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_failed">Failed</string>
+    <string name="smart_location">Smart location</string>
+    <string name="selected_location">Selected location</string>
+    <string name="fastest_server">Fastest server</string>
+    <string name="server">Server</string>
+    <string name="routing">Routing</string>
+    <string name="full_tunnel">Full tunnel</string>
+    <string name="server_selection">Server selection</string>
+    <string name="all_locations">ALL LOCATIONS</string>
+    <string name="auto_fastest_help">Automatically chooses the fastest location.</string>
+    <string name="no_servers_available">No servers available. Connect first to choose a location.</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="ms_format">%1$d ms</string>
+    <!-- accessibility (TalkBack) content descriptions -->
+    <string name="back">Back</string>
+    <string name="expand">Expand</string>
+    <string name="collapse">Collapse</string>
+</resources>

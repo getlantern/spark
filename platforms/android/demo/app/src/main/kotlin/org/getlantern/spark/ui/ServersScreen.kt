@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +48,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import androidx.compose.ui.res.stringResource
+import org.getlantern.spark.R
 import org.getlantern.spark.Selection
 import org.getlantern.spark.ServerInfo
 import org.getlantern.spark.SparkBridge
@@ -117,13 +120,13 @@ fun ServersScreen(onBack: () -> Unit) {
             ) {
                 Icon(
                     BackChevronIcon,
-                    contentDescription = "Back",
+                    contentDescription = stringResource(R.string.back),
                     tint = SparkColors.textPrimary,
                     modifier = Modifier.size(22.dp),
                 )
             }
             Text(
-                "Server selection",
+                stringResource(R.string.server_selection),
                 fontFamily = Urbanist,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
@@ -141,7 +144,7 @@ fun ServersScreen(onBack: () -> Unit) {
             item {
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    "Smart location",
+                    stringResource(R.string.smart_location),
                     fontFamily = Urbanist,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -167,10 +170,10 @@ fun ServersScreen(onBack: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Text(if (current != null) flagEmoji(current.countryCode) else "🌐", fontSize = 21.sp)
+                    Text(if (current != null) flagEmoji(current.countryCode) else "🌐", fontSize = 21.sp, modifier = Modifier.clearAndSetSemantics {})
                     Column(Modifier.weight(1f)) {
                         Text(
-                            if (current != null) serverLabel(current) else "Fastest server",
+                            if (current != null) serverLabel(current, stringResource(R.string.server)) else stringResource(R.string.fastest_server),
                             fontFamily = Urbanist,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -191,11 +194,12 @@ fun ServersScreen(onBack: () -> Unit) {
                         "⚡",
                         fontSize = 18.sp,
                         color = SparkColors.bolt.copy(alpha = if (isAuto) 1f else 0.28f),
+                        modifier = Modifier.clearAndSetSemantics {},
                     )
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Automatically chooses the fastest location.",
+                    stringResource(R.string.auto_fastest_help),
                     fontFamily = Urbanist,
                     fontSize = 13.sp,
                     color = SparkColors.textTertiary,
@@ -214,7 +218,7 @@ fun ServersScreen(onBack: () -> Unit) {
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            "No servers available. Connect first to choose a location.",
+                            stringResource(R.string.no_servers_available),
                             fontFamily = Urbanist,
                             fontSize = 14.sp,
                             color = SparkColors.textTertiary,
@@ -226,7 +230,7 @@ fun ServersScreen(onBack: () -> Unit) {
                 // (mirrors the Tauri page and the home StatusCard: a single surface, not per-row cards).
                 item {
                     Text(
-                        "ALL LOCATIONS",
+                        stringResource(R.string.all_locations),
                         fontFamily = Urbanist,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
@@ -281,7 +285,7 @@ private fun CountryGroup(
         val s = members[0]
         ServerRow(
             flag = flagEmoji(s.countryCode),
-            title = serverLabel(s),
+            title = serverLabel(s, stringResource(R.string.server)),
             protocol = protocolLabel(s.protocol),
             latencyMs = s.latencyMs,
             selected = selectedIdx == s.index,
@@ -305,7 +309,7 @@ private fun CountryGroup(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(flagEmoji(members.firstOrNull()?.countryCode), fontSize = 21.sp)
+        Text(flagEmoji(members.firstOrNull()?.countryCode), fontSize = 21.sp, modifier = Modifier.clearAndSetSemantics {})
         Text(
             country,
             fontFamily = Urbanist,
@@ -317,7 +321,7 @@ private fun CountryGroup(
         bestLatency?.let { LatencyPill(it) }
         Icon(
             ChevronRightIcon,
-            contentDescription = if (expanded) "Collapse" else "Expand",
+            contentDescription = stringResource(if (expanded) R.string.collapse else R.string.expand),
             tint = SparkColors.textTertiary,
             modifier = Modifier
                 .size(20.dp)
@@ -329,7 +333,7 @@ private fun CountryGroup(
             RowDivider()
             ServerRow(
                 flag = null,
-                title = s.city?.takeIf { it.isNotBlank() } ?: serverLabel(s),
+                title = s.city?.takeIf { it.isNotBlank() } ?: serverLabel(s, stringResource(R.string.server)),
                 protocol = protocolLabel(s.protocol),
                 latencyMs = s.latencyMs,
                 selected = selectedIdx == s.index,
@@ -360,7 +364,7 @@ private fun ServerRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (flag != null) Text(flag, fontSize = 21.sp)
+        if (flag != null) Text(flag, fontSize = 21.sp, modifier = Modifier.clearAndSetSemantics {})
         Column(Modifier.weight(1f)) {
             Text(
                 title,
@@ -396,13 +400,16 @@ private fun RowDivider() {
 
 // --- Inline vector icons ---
 
-private fun strokeVector(name: String, build: ImageVector.Builder.() -> Unit): ImageVector =
+// autoMirror flips direction-sensitive icons (chevrons) in RTL locales (fa); custom ImageVectors
+// are NOT auto-mirrored by Compose otherwise.
+private fun strokeVector(name: String, autoMirror: Boolean = false, build: ImageVector.Builder.() -> Unit): ImageVector =
     ImageVector.Builder(
         name = name,
         defaultWidth = 24.dp,
         defaultHeight = 24.dp,
         viewportWidth = 24f,
         viewportHeight = 24f,
+        autoMirror = autoMirror,
     ).apply(build).build()
 
 private fun ImageVector.Builder.stroke(
@@ -418,10 +425,10 @@ private fun ImageVector.Builder.stroke(
     pathBuilder = pathBuilder,
 )
 
-private val BackChevronIcon: ImageVector = strokeVector("BackChevron") {
+private val BackChevronIcon: ImageVector = strokeVector("BackChevron", autoMirror = true) {
     stroke(2f) { moveTo(15f, 18f); lineTo(9f, 12f); lineTo(15f, 6f) }
 }
 
-private val ChevronRightIcon: ImageVector = strokeVector("ChevronRight") {
+private val ChevronRightIcon: ImageVector = strokeVector("ChevronRight", autoMirror = true) {
     stroke(2f) { moveTo(9f, 18f); lineTo(15f, 12f); lineTo(9f, 6f) }
 }

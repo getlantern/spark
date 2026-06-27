@@ -38,6 +38,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -63,6 +64,8 @@ import org.getlantern.spark.VpnController
 import org.getlantern.spark.VpnState
 import org.getlantern.spark.Selection
 import android.app.Activity
+import androidx.compose.ui.res.stringResource
+import org.getlantern.spark.R
 
 @Composable
 fun HomeScreen(onOpenServers: () -> Unit) {
@@ -154,7 +157,7 @@ private fun AppBar() {
             Icon(MenuIcon, contentDescription = null, tint = SparkColors.textTertiary, modifier = Modifier.size(22.dp))
         }
         Text(
-            "Spark",
+            stringResource(R.string.app_name),
             fontFamily = Urbanist,
             fontSize = 22.sp,
             fontWeight = FontWeight.Bold,
@@ -167,6 +170,12 @@ private fun AppBar() {
 // off-grey otherwise; spinner (44dp) in place of the knob while connecting/busy.
 @Composable
 private fun VpnSwitch(on: Boolean, busy: Boolean, onToggle: () -> Unit) {
+    val vpnLabel = stringResource(R.string.vpn)
+    val connectedLabel = stringResource(R.string.status_connected)
+    val connectingLabel = stringResource(R.string.status_connecting)
+    val disconnectedLabel = stringResource(R.string.status_disconnected)
+    val connectLabel = stringResource(R.string.connect)
+    val disconnectLabel = stringResource(R.string.disconnect)
     val knobOffset by animateDpAsState(
         targetValue = if (on) 70.dp else 0.dp,
         animationSpec = tween(durationMillis = 320),
@@ -179,16 +188,16 @@ private fun VpnSwitch(on: Boolean, busy: Boolean, onToggle: () -> Unit) {
             .clip(RoundedCornerShape(35.dp))
             .background(if (on) SparkColors.brand else SparkColors.off)
             .semantics {
-                contentDescription = "VPN"
+                contentDescription = vpnLabel
                 stateDescription = when {
-                    busy -> "Connecting"
-                    on -> "Connected"
-                    else -> "Disconnected"
+                    busy -> connectingLabel
+                    on -> connectedLabel
+                    else -> disconnectedLabel
                 }
             }
             .clickable(
                 enabled = !busy,
-                onClickLabel = if (on) "Disconnect" else "Connect",
+                onClickLabel = if (on) disconnectLabel else connectLabel,
                 role = Role.Switch,
             ) { onToggle() },
         contentAlignment = Alignment.CenterStart,
@@ -221,10 +230,10 @@ private fun StatusCard(
     onOpenServers: () -> Unit,
 ) {
     val statusValue = when (state) {
-        VpnState.CONNECTED -> "Connected"
-        VpnState.CONNECTING -> "Connecting…"
-        VpnState.FAILED -> "Failed"
-        VpnState.DISCONNECTED -> "Disconnected"
+        VpnState.CONNECTED -> stringResource(R.string.status_connected)
+        VpnState.CONNECTING -> stringResource(R.string.status_connecting)
+        VpnState.FAILED -> stringResource(R.string.status_failed)
+        VpnState.DISCONNECTED -> stringResource(R.string.status_disconnected)
     }
     val dotColor = when (state) {
         VpnState.CONNECTED -> SparkColors.success
@@ -242,7 +251,7 @@ private fun StatusCard(
         // VPN status
         StatusRow(
             leading = { Icon(GlobeIcon, null, tint = SparkColors.textSecondary, modifier = Modifier.size(20.dp)) },
-            label = "VPN status",
+            label = stringResource(R.string.vpn_status),
             value = statusValue,
             valueColor = if (state == VpnState.CONNECTED) SparkColors.success else SparkColors.textPrimary,
             trailing = {
@@ -259,18 +268,18 @@ private fun StatusCard(
             modifier = Modifier.clickable { onOpenServers() },
             leading = {
                 if (current != null) {
-                    Text(flagEmoji(current.countryCode), fontSize = 18.sp)
+                    Text(flagEmoji(current.countryCode), fontSize = 18.sp, modifier = Modifier.clearAndSetSemantics {})
                 } else {
                     Icon(PinIcon, null, tint = SparkColors.textSecondary, modifier = Modifier.size(20.dp))
                 }
             },
-            label = if (autoSelected) "Smart location" else "Selected location",
-            value = if (current != null) serverLabel(current) else "Fastest server",
+            label = if (autoSelected) stringResource(R.string.smart_location) else stringResource(R.string.selected_location),
+            value = if (current != null) serverLabel(current, stringResource(R.string.server)) else stringResource(R.string.fastest_server),
             valueColor = SparkColors.textPrimary,
-            subtitle = current?.latencyMs?.let { "$it ms" },
+            subtitle = current?.latencyMs?.let { stringResource(R.string.ms_format, it) },
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (autoSelected) Text("⚡", color = SparkColors.bolt, fontSize = 16.sp)
+                    if (autoSelected) Text("⚡", color = SparkColors.bolt, fontSize = 16.sp, modifier = Modifier.clearAndSetSemantics {})
                     Icon(ChevronIcon, null, tint = SparkColors.textTertiary, modifier = Modifier.size(20.dp))
                 }
             },
@@ -279,8 +288,8 @@ private fun StatusCard(
         // Routing (non-interactive)
         StatusRow(
             leading = { Icon(RouteIcon, null, tint = SparkColors.textSecondary, modifier = Modifier.size(20.dp)) },
-            label = "Routing",
-            value = "Full tunnel",
+            label = stringResource(R.string.routing),
+            value = stringResource(R.string.full_tunnel),
             valueColor = SparkColors.textPrimary,
             trailing = {
                 Icon(ChevronIcon, null, tint = SparkColors.textTertiary, modifier = Modifier.size(20.dp))
@@ -352,8 +361,10 @@ private fun Divider() {
 
 // --- Vector icons mirroring the Tauri SVGs (stroke-based, 24x24 viewport). ---
 
-private fun strokeVector(name: String, build: ImageVector.Builder.() -> Unit): ImageVector =
-    ImageVector.Builder(name = name, defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f)
+// autoMirror flips direction-sensitive icons (chevrons) in RTL locales (fa); custom ImageVectors
+// are NOT auto-mirrored by Compose otherwise.
+private fun strokeVector(name: String, autoMirror: Boolean = false, build: ImageVector.Builder.() -> Unit): ImageVector =
+    ImageVector.Builder(name = name, defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f, autoMirror = autoMirror)
         .apply(build).build()
 
 private fun ImageVector.Builder.stroke(
@@ -396,6 +407,6 @@ private val RouteIcon: ImageVector = strokeVector("Route") {
     stroke { moveTo(8.5f, 19f); lineTo(14f, 19f); arcToRelative(4f, 4f, 0f, false, false, 0f, -8f); lineTo(10f, 11f); arcToRelative(4f, 4f, 0f, false, true, 0f, -8f); lineTo(15.5f, 3f) }
 }
 
-private val ChevronIcon: ImageVector = strokeVector("Chevron") {
+private val ChevronIcon: ImageVector = strokeVector("Chevron", autoMirror = true) {
     stroke(2f) { moveTo(9f, 18f); lineTo(15f, 12f); lineTo(9f, 6f) }
 }

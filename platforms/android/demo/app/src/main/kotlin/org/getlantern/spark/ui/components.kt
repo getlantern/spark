@@ -8,9 +8,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.getlantern.spark.R
 import org.getlantern.spark.ServerInfo
 
 /** ISO-3166 alpha-2 -> flag emoji; blank/odd -> white flag. Mirrors lib/format.ts flagEmoji. */
@@ -23,10 +25,11 @@ fun flagEmoji(code: String?): String {
     return String(Character.toChars(base + a)) + String(Character.toChars(base + b))
 }
 
-/** "Country – City" (or whichever present), else name, else "Server". Mirrors serverLabel. */
-fun serverLabel(s: ServerInfo): String =
+/** "Country – City" (or whichever present), else name, else [fallback]. Mirrors serverLabel.
+ *  [fallback] is passed in (a localized string) since this is a plain helper, not a composable. */
+fun serverLabel(s: ServerInfo, fallback: String): String =
     listOfNotNull(s.country, s.city).filter { it.isNotBlank() }
-        .joinToString(" – ").ifEmpty { s.name ?: "Server" }
+        .joinToString(" – ").ifEmpty { s.name ?: fallback }
 
 /** Canonical protocol name. Mirrors lib/format.ts protocolLabel (+ fronted-meek -> Meek). */
 fun protocolLabel(p: String?): String = when (p?.lowercase()) {
@@ -57,6 +60,6 @@ private fun latColors(ms: Long?): Pair<Color, Color> {
 fun LatencyPill(ms: Long) {
     val (fg, bg) = latColors(ms)
     Box(Modifier.background(bg, RoundedCornerShape(999.dp)).padding(horizontal = 8.dp, vertical = 3.dp)) {
-        Text("$ms ms", fontFamily = Urbanist, color = fg, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.ms_format, ms), fontFamily = Urbanist, color = fg, fontSize = 12.sp, fontWeight = FontWeight.Bold)
     }
 }
