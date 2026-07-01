@@ -167,7 +167,9 @@ async fn dial_proxy(
                 debug!(domain = %dom, "transport can't carry a domain; resolving client-side")
             }
             Err(e) => {
-                warn!(domain = %dom, error = %e, "proxy dial-by-name failed");
+                // Log hygiene: no destination at warn level (see the module docs); domain at debug.
+                debug!(domain = %dom, "proxy dial-by-name failed");
+                warn!(error = %e, "proxy dial-by-name failed");
                 return None;
             }
         }
@@ -181,7 +183,8 @@ async fn dial_proxy(
             }
         }
     }
-    warn!(domain = %dom, "proxy: neither dial-by-name nor client-side resolution succeeded");
+    debug!(domain = %dom, "proxy: no route for domain");
+    warn!("proxy: neither dial-by-name nor client-side resolution succeeded");
     None
 }
 

@@ -199,14 +199,18 @@ fn is_stale(path: &Path, max_age: Duration) -> bool {
 }
 
 /// Atomically write `bytes` to `path`: create the parent dir, write a temp file, then rename over the
-/// target — so a reader never sees a half-written `.srs`. The temp name is unique (pid-suffixed) so
-/// concurrent/interrupted writers can't collide. On Unix the rename atomically replaces; on Windows
-/// rename fails if the destination exists, so fall back to remove-then-rename there.
+/// target — so a reader never sees a half-written `.srs`. The temp name is unique **per write** (pid +
+/// a monotonic counter), so even overlapping writes for the same tag can't share a temp path. On Unix
+/// the rename atomically replaces; on Windows rename fails if the destination exists, so fall back to
+/// remove-then-rename there.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension(format!("srs.tmp.{}", std::process::id()));
+    let uniq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("srs.tmp.{}.{}", std::process::id(), uniq));
     std::fs::write(&tmp, bytes)?;
     if std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(path);
