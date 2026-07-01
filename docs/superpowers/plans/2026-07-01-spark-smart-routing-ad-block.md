@@ -33,6 +33,8 @@ uvarint reading is hand-rolled (no dep).
 
 ---
 
+> **Status (2026-07-01):** M1 ✅ · M2 ✅ · M3 ✅ (wired at L3) · M4 ✅ (fake-IP DNS wired end-to-end, M4.1–M4.6c) · M5 ⬜ · M6 ⬜. All committed on `fisk/smart-routing-design`; every step green (builds + `clippy -D warnings` + `fmt` on no-feature / `smart-routing` / `all-features`; 200 lib tests pass under `smart-routing`). Remaining: M5 on-device footprint, M6 rule-set fetch/cache/refresh. Not yet enabled in the mobile build's cargo feature set (activation is a separate build-config flip).
+
 ## Milestone M1 — the `.srs` parser (TDD against real fixtures)
 
 **Pinned format (recon done — do NOT re-derive):** `.srs` = ASCII `"SRS"` (3 bytes) + 1 version byte + a **zlib** stream (`0x78 0xda`). Versions **1, 2, and 3** are all in use (getlantern `common.srs`=v3, KaringX `category-ads`=v2, `BanAD`=v1) — the parser must accept all three. Decompressed body = `uvarint` rule count + typed rule records; domains are stored in sing-box's **succinct domain set** (not plain strings). Authoritative encoding: `sagernet/sing-box` `common/srs/binary.go` + `sagernet/sing` `common/domain/{matcher,set}.go`.
@@ -200,16 +202,16 @@ fn parses_fixture_entries_matching_oracle() {
 
 Each milestone below states its deliverable, public interface, verification gate, and open decisions. **Do not implement ahead of the gate; write the detailed task plan for a milestone at its start**, once the prior milestone's concrete types exist.
 
-### M2 — compact matcher + coverage-preserving compaction
+### M2 — compact matcher + coverage-preserving compaction ✅
 - **Deliverable:** `matcher.rs` — build one compact structure per `Action` from many `RuleSet`s: domains in a suffix-trie (or `fst`), IPs in a CIDR-trie; compaction = collapse any domain a broader suffix already covers, dedupe across lists. API: `Matcher::build(entries: &[(Action, RuleSet)]) -> Matcher`; `Matcher::lookup(domain: Option<&str>, ip: IpAddr) -> Option<Action>`.
 - **Verify:** property test — for a large sample of domains/IPs, `lookup` on the compacted matcher returns the same Action as a naive linear scan of the raw entries (compaction preserves results). Report the size reduction (entries + bytes).
 - **Open decision (flag then):** hand-rolled suffix-trie vs the `fst` crate (new dep). Default to hand-rolled unless `fst` wins clearly on size/speed.
 
-### M3 — router + Direct/Reject actions + IP rules (no DNS yet)
+### M3 — router + Direct/Reject actions + IP rules (no DNS yet) ✅
 - **Deliverable:** `router.rs` — `Router::decide(dst_ip, domain: Option<&str>) -> Action` applying the spec precedence (ad_block Reject → route.rules → smart_routing → final Proxy). Wire into `proxy/tcp.rs` + `udp.rs`: replace the single transport with a decision; add **Direct** (protected direct dial) and **Reject** (drop). Extend `config/lantern.rs` to parse `options.route.rules` (ip_cidr) + synthesize `direct`/`reject`.
 - **Verify:** end-to-end at L3 with IP-only rules — the Quad9 `9.9.9.9/32→direct` base rule sends that flow direct; a geoip-malware CIDR is dropped; everything else proxied. No DNS required yet.
 
-### M4 — fake-IP DNS + domain rules + per-action resolver
+### M4 — fake-IP DNS + domain rules + per-action resolver ✅
 - **Deliverable:** `dns/` — DNS server on the in-tunnel resolver, fake-IP allocator (`198.18.0.0/15` + IPv6 ULA) + `fakeip→domain` map (TTL/LRU); connect-time domain recovery feeds the Router. Per-action resolver seams: **local** (`dns_local`) for Direct real-IP resolution; injected resilient `bootstrap::RacingResolver` for bootstrap/blocked. Parse `smart_routing`/`ad_block`/`options.dns` in `config/lantern.rs` → `RoutingConfig`.
 - **Verify:** ad domain dropped; a `smart_routing` common-direct domain egresses direct with a local IP; an ordinary domain is proxied (dialed by name); QUIC/UDP honored; no DNS loop (resolver sockets bypass the TUN).
 
