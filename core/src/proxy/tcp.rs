@@ -144,10 +144,10 @@ async fn dial_direct(
 }
 
 /// Dial a Proxy flow. For a **domain** flow behind a fake IP we prefer **dial-by-name**: carry the
-/// domain to the exit so it resolves (no client DNS leak, exit-optimal CDN IPs) — the tunnel,
-/// shadowsocks, and hysteria2 all carry a domain target. Only if the transport can't (its `dial_addr`
-/// errors) do we fall back to **client-side** resolution (resilient un-poisoned DoH) + dial-by-IP,
-/// which works for every transport. A **real-IP** flow is proxied by IP (today's behavior).
+/// domain to the exit so it resolves (no client DNS leak, exit-optimal CDN IPs) — every proxy
+/// transport carries a domain target. Only if a transport can't (its `dial_addr` returns
+/// `Unsupported`) do we fall back to **client-side** resolution (resilient un-poisoned DoH) +
+/// dial-by-IP, which works for every transport. A **real-IP** flow is proxied by IP (today's behavior).
 async fn dial_proxy(
     proxy: &Arc<dyn Transport>,
     hooks: Option<&RouteHooks>,
