@@ -30,6 +30,21 @@ impl Router {
     }
 }
 
+/// The proxy layer's routing seam ([`crate::proxy::FlowRouter`]), mapping this module's [`Action`]
+/// onto the proxy's `Decision`. Lets the (feature-agnostic) TCP forwarder consult the rules engine
+/// without depending on it.
+impl crate::proxy::FlowRouter for Router {
+    fn decide(&self, ip: IpAddr, domain: Option<&str>) -> crate::proxy::Decision {
+        // Call the inherent `Router::decide` explicitly — a bare `self.decide(..)` would resolve to
+        // this trait method and recurse forever.
+        match Router::decide(self, ip, domain) {
+            Action::Proxy => crate::proxy::Decision::Proxy,
+            Action::Direct => crate::proxy::Decision::Direct,
+            Action::Reject => crate::proxy::Decision::Reject,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

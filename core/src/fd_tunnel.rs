@@ -349,7 +349,13 @@ async fn run_tunnel_data_path(
     set_ready(Readiness::Up);
     let metrics = Arc::new(crate::metrics::Metrics::default());
     tokio::select! {
-        _ = proxy::tcp::run(stack, tcp_transport, metrics) => warn!("netstack accept loop exited"),
+        _ = proxy::tcp::run(
+            stack,
+            tcp_transport,
+            Arc::new(transport::DirectTransport::default()),
+            None::<Arc<dyn proxy::FlowRouter>>,
+            metrics,
+        ) => warn!("netstack accept loop exited"),
         _ = waiter.notified() => info!("stop requested; tearing the tunnel down"),
     }
     drop(tun);
