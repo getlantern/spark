@@ -381,8 +381,9 @@ const DNS_ANSWER_TTL_SECS: u32 = 30;
 #[cfg(feature = "smart-routing")]
 const DNS_FORWARD_DEPTH: usize = 256;
 /// How long a cached `.srs` is considered fresh before the background loop re-fetches it. Rule-sets
-/// change slowly, so this is long — the refresh is a cache-warm, not a hot path.
-#[cfg(feature = "smart-routing")]
+/// change slowly, so this is long — the refresh is a cache-warm, not a hot path. Only the config-fetch
+/// (`lantern-api`) path spawns the refresh loop, so it's gated on both features.
+#[cfg(all(feature = "smart-routing", feature = "config-fetch"))]
 const RULESET_REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 3600);
 
 /// Set up smart routing and the UDP data path in one place, since both share a single fake-IP pool.

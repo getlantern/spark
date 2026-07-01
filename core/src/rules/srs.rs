@@ -372,6 +372,72 @@ struct SuccinctSet {
     labels: Vec<u8>,
 }
 
+/// A precomputed rank/select index over a bitmap: O(1) rank (`ones`/`zeros`) and O(log words + 64)
+/// select (`select_one`), built once. This replaces the succinct-set traversal's former per-call
+/// linear scans, which made [`SuccinctSet::keys`] O(n²) — a large rule-set (e.g. BanAD) took seconds
+/// to parse. `cum_ones[w]` is the number of 1-bits in `words[0..w]` (so `cum_ones.len() == words+1`).
+struct BitRank<'a> {
+    words: &'a [u64],
+    cum_ones: Vec<usize>,
+}
+
+impl<'a> BitRank<'a> {
+    fn new(words: &'a [u64]) -> Self {
+        let mut cum_ones = Vec::with_capacity(words.len() + 1);
+        let mut acc = 0usize;
+        cum_ones.push(0);
+        for w in words {
+            acc += w.count_ones() as usize;
+            cum_ones.push(acc);
+        }
+        Self { words, cum_ones }
+    }
+
+    /// Number of 1-bits in `[0, i)`.
+    fn ones(&self, i: usize) -> usize {
+        let word = i >> 6;
+        if word >= self.words.len() {
+            // At or beyond the last bit: every stored 1 is counted (bits past the bitmap are 0).
+            return self.cum_ones.last().copied().unwrap_or(0);
+        }
+        let bit = i & 63;
+        let partial = if bit == 0 {
+            0
+        } else {
+            (self.words[word] & ((1u64 << bit) - 1)).count_ones() as usize
+        };
+        self.cum_ones[word] + partial
+    }
+
+    /// Number of 0-bits in `[0, i)` — the `countZeros` the traversal needs.
+    fn zeros(&self, i: usize) -> usize {
+        i - self.ones(i)
+    }
+
+    /// 0-based position of the `i`-th (0-based) set bit, or the bit length if absent (matching sing's
+    /// `selectIthOne`). Binary-searches the word, then scans its 64 bits.
+    fn select_one(&self, i: usize) -> usize {
+        let total_bits = self.words.len() << 6;
+        // The i-th one lives in word `p - 1`, where `p` = #(cum_ones entries ≤ i).
+        let p = self.cum_ones.partition_point(|&c| c <= i);
+        if p == 0 || p > self.words.len() {
+            return total_bits; // the i-th one doesn't exist (word index p-1 out of range)
+        }
+        let widx = p - 1;
+        let mut need = i - self.cum_ones[widx]; // rank within the word
+        let w = self.words[widx];
+        for bit in 0..64 {
+            if (w >> bit) & 1 == 1 {
+                if need == 0 {
+                    return (widx << 6) + bit;
+                }
+                need -= 1;
+            }
+        }
+        total_bits
+    }
+}
+
 impl SuccinctSet {
     /// `getBit(bm, i)` — bit `i` of a `[]u64` little-endian-within-word bitmap.
     fn get_bit(bm: &[u64], i: usize) -> bool {
@@ -381,37 +447,14 @@ impl SuccinctSet {
         }
     }
 
-    /// `countZeros(bm, i)` — number of 0-bits in `[0, i)`.
-    fn count_zeros(bm: &[u64], i: usize) -> usize {
-        let mut zeros = 0;
-        for j in 0..i {
-            if !Self::get_bit(bm, j) {
-                zeros += 1;
-            }
-        }
-        zeros
-    }
-
-    /// `selectIthOne(bm, i)` — 0-based position of the `i`-th set bit, or the bit length if absent.
-    fn select_ith_one(bm: &[u64], i: usize) -> usize {
-        let total_bits = bm.len() << 6;
-        let mut ones = 0;
-        for pos in 0..total_bits {
-            if Self::get_bit(bm, pos) {
-                if ones == i {
-                    return pos;
-                }
-                ones += 1;
-            }
-        }
-        total_bits
-    }
-
     /// Recover every reversed-domain key stored in the set — the port of `succinctSet.keys`
     /// (`sing/common/domain/set.go`), written iteratively so a pathological set can't blow the
     /// stack. Each key is the label path from the root to a leaf node.
     fn keys(&self) -> Result<Vec<Vec<u8>>, SrsError> {
         let mut result: Vec<Vec<u8>> = Vec::new();
+        // Rank/select index over the label bitmap, built once — the child lookups below are O(1)/
+        // O(log) instead of the former per-edge linear scans (which made this O(n²)).
+        let rank = BitRank::new(&self.label_bitmap);
         // Frame = (node_id, bm_idx, key-so-far). We push children to walk the trie depth-first,
         // exactly matching the recursive Go traversal's ordering of label edges.
         struct Frame {
@@ -445,11 +488,11 @@ impl SuccinctSet {
                     .labels
                     .get(label_idx)
                     .ok_or(SrsError::Malformed("succinct set: label out of range"))?;
-                let next_node_id = Self::count_zeros(&self.label_bitmap, bm_idx + 1);
+                let next_node_id = rank.zeros(bm_idx + 1);
                 if next_node_id == 0 {
                     return Err(SrsError::Malformed("succinct set: node id underflow"));
                 }
-                let next_bm_idx = Self::select_ith_one(&self.label_bitmap, next_node_id - 1) + 1;
+                let next_bm_idx = rank.select_one(next_node_id - 1) + 1;
                 let mut child_key = key.clone();
                 child_key.push(next_label);
                 stack.push(Frame {
@@ -818,6 +861,28 @@ mod tests {
         );
         let rendered: Vec<String> = out.iter().map(IpCidr::to_string).collect();
         assert_eq!(rendered, ["192.168.0.0/30", "192.168.0.4/31"]);
+    }
+
+    /// The rank/select index matches a naive scan across word boundaries and empty words — the math
+    /// the O(n²)→O(n log n) succinct-set speedup relies on.
+    #[test]
+    fn bit_rank_matches_naive_rank_and_select() {
+        let words = vec![0b1010u64, 0, (1u64 << 63) | 1, u64::MAX];
+        let rank = BitRank::new(&words);
+        let total_bits = words.len() * 64;
+        let bit = |i: usize| (words[i >> 6] >> (i & 63)) & 1 == 1;
+
+        for i in 0..=total_bits {
+            let naive_ones = (0..i).filter(|&j| bit(j)).count();
+            assert_eq!(rank.ones(i), naive_ones, "ones({i})");
+            assert_eq!(rank.zeros(i), i - naive_ones, "zeros({i})");
+        }
+        let ones: Vec<usize> = (0..total_bits).filter(|&j| bit(j)).collect();
+        for (i, &pos) in ones.iter().enumerate() {
+            assert_eq!(rank.select_one(i), pos, "select_one({i})");
+        }
+        // An out-of-range one index returns the bit length (matching sing's selectIthOne).
+        assert_eq!(rank.select_one(ones.len()), total_bits);
     }
 
     /// Negative: a truncated body and an unknown item tag both error rather than panic.
