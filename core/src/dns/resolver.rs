@@ -81,11 +81,15 @@ fn endpoint_to_resolver(ep: &DohEndpoint) -> Option<flint_dns::Resolver> {
     })
 }
 
-/// Ensure a DoH request path is absolute — flint sends it verbatim as the HTTP request target, so a
-/// config path missing its leading `/` (e.g. `dns-query`) would produce an invalid request line.
+/// Ensure a DoH request path is a usable absolute path — flint sends it verbatim as the HTTP request
+/// target. An explicitly-empty path becomes the shared default (`/` alone is not a valid DoH
+/// endpoint for the supported providers); a path missing its leading `/` (e.g. `dns-query`) is made
+/// absolute.
 #[cfg(feature = "bootstrap-dns")]
 fn normalize_doh_path(path: &str) -> String {
-    if path.starts_with('/') {
+    if path.is_empty() {
+        crate::config::default_doh_path()
+    } else if path.starts_with('/') {
         path.to_string()
     } else {
         format!("/{path}")
@@ -233,6 +237,10 @@ mod tests {
             let mut e = ep("9.9.9.9");
             e.path = "/resolve".into();
             assert_eq!(endpoint_to_resolver(&e).unwrap().path, "/resolve");
+            // An explicitly-empty path becomes the default, not a bare "/".
+            let mut e = ep("9.9.9.9");
+            e.path = "".into();
+            assert_eq!(endpoint_to_resolver(&e).unwrap().path, "/dns-query");
         }
 
         #[test]

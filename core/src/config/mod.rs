@@ -187,8 +187,9 @@ fn default_doh_port() -> u16 {
     443
 }
 
-/// The default DoH path when a [`DohEndpoint`] omits it.
-fn default_doh_path() -> String {
+/// The default DoH path when a [`DohEndpoint`] omits it (also reused by the resolver builder to
+/// normalize an explicitly-empty path — hence `pub(crate)`).
+pub(crate) fn default_doh_path() -> String {
     "/dns-query".to_string()
 }
 
