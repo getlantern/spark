@@ -10,5 +10,6 @@
 //! `server` ties them together with a per-action resolver (M4.3+).
 
 pub mod fakeip;
+pub mod resolver;
 pub mod server;
 pub mod wire;
