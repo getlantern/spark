@@ -31,7 +31,7 @@ use flint_fronted::{
     MaterializedFront, MeekHttpVersion, MeekPollConfig, MeekPollConn, SystemResolver,
 };
 
-use super::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
+use super::{Address, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
 use crate::config::{
     FrontedMeekConfig, DEFAULT_ALIYUN_MEEK_HOST, DEFAULT_CLOUDFRONT_MEEK_HOST,
     DEFAULT_FRONTED_MEEK_HOST,
@@ -167,14 +167,34 @@ impl FrontedMeekTransport {
     }
 }
 
+impl FrontedMeekTransport {
+    /// Open a tunnel session and SOCKS5-CONNECT to `target` over it. Shared by [`dial`]/[`dial_addr`].
+    async fn dial_target(&self, target: socks5::Target) -> io::Result<BoxedStream> {
+        let mut conn = self.open_tunnel().await?;
+        // The meek-server relays each session to a SOCKS5 upstream (microsocks); CONNECT to the
+        // application's target over the tunnel.
+        socks5::connect(&mut conn, &target).await?;
+        Ok(Box::new(conn))
+    }
+}
+
 #[async_trait]
 impl Transport for FrontedMeekTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
-        let mut conn = self.open_tunnel().await?;
-        // The meek-server relays each session to a SOCKS5 upstream (microsocks);
-        // CONNECT to the application's target over the tunnel.
-        socks5::connect(&mut conn, &socks5::Target::Ip(target)).await?;
-        Ok(Box::new(conn))
+        self.dial_target(socks5::Target::Ip(target)).await
+    }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        self.dial_target(address_to_target(target)).await
+    }
+}
+
+/// Map a routed [`Address`] to a SOCKS5 target: a domain rides ATYP=3 so the microsocks upstream
+/// resolves it (no client-side DNS — this is the exit-side-resolution path), an IP keeps ATYP 1/4.
+fn address_to_target(target: Address) -> socks5::Target {
+    match target {
+        Address::Ip(sa) => socks5::Target::Ip(sa),
+        Address::Domain { host, port } => socks5::Target::Domain(host, port),
     }
 }
 
@@ -282,6 +302,24 @@ mod tests {
         })
         .unwrap();
         assert_eq!(t.meek_host, "meek.example.org");
+    }
+
+    #[test]
+    fn address_maps_to_socks5_target() {
+        // An IP target keeps ATYP 1/4; a domain rides ATYP=3 so the upstream resolves it (the new
+        // exit-side-resolution path `dial_addr` enables). `socks5::Target` isn't Debug/PartialEq, so
+        // match rather than assert_eq.
+        match address_to_target(Address::Ip("1.2.3.4:80".parse().unwrap())) {
+            socks5::Target::Ip(sa) => assert_eq!(sa, "1.2.3.4:80".parse().unwrap()),
+            _ => panic!("IP address must map to a socks5 Ip target"),
+        }
+        match address_to_target(Address::domain("example.com", 443).unwrap()) {
+            socks5::Target::Domain(host, port) => {
+                assert_eq!(host, "example.com");
+                assert_eq!(port, 443);
+            }
+            _ => panic!("domain address must map to a socks5 Domain target"),
+        }
     }
 
     #[tokio::test]
