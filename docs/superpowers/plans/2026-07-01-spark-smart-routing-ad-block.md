@@ -33,7 +33,7 @@ uvarint reading is hand-rolled (no dep).
 
 ---
 
-> **Status (2026-07-01):** M1 ✅ · M2 ✅ · M3 ✅ (wired at L3) · M4 ✅ (fake-IP DNS wired end-to-end, M4.1–M4.6c) · M5 ⬜ · M6 ⬜. All committed on `fisk/smart-routing-design`; every step green (builds + `clippy -D warnings` + `fmt` on no-feature / `smart-routing` / `all-features`; 200 lib tests pass under `smart-routing`). Remaining: M5 on-device footprint, M6 rule-set fetch/cache/refresh. Not yet enabled in the mobile build's cargo feature set (activation is a separate build-config flip).
+> **Status (2026-07-01):** M1 ✅ · M2 ✅ · M3 ✅ (wired at L3) · M4 ✅ (fake-IP DNS wired end-to-end, M4.1–M4.6c) · M5 🟡 (host binary-size check done, 2.16 MB; on-device RAM/jank + parse-perf pending the Redmi) · M6 🟡 (M6a cache/refresh/offline core + tests done; M6b production TLS fetch + `fd_tunnel` loop wiring remain). All committed on `fisk/smart-routing-design`; every step green (workspace builds + `clippy -D warnings` + `fmt` on no-feature / `smart-routing` / `all-features`; 205 lib tests pass under `smart-routing`). The feature works end-to-end with `.srs` files present on disk. Not yet enabled in the mobile build's cargo feature set (activation is a separate build-config flip). Follow-ups: M5 on-device profiling (see the ⚠ parse-perf finding), M6b networked fetch.
 
 ## Milestone M1 — the `.srs` parser (TDD against real fixtures)
 
@@ -231,13 +231,17 @@ Each milestone below states its deliverable, public interface, verification gate
 - **M4.6 — tunnel wiring** (`proxy/{tcp,udp}.rs`, `fd_tunnel.rs`). TCP forwarder: recover domain from the fake IP (inject the `FakeIpPool`), pass to `Router::decide`; Proxy → dial `Address::Domain`; Direct → resolve via local resolver → dial real IP direct; Reject → drop. UDP: same, plus the DNS splitter (peel :53 → `DnsServer`). Wire the DNS server + fake-IP pool + resolvers in `run_tunnel_data_path` (feature-gated). Verify (integration, loopback): ad domain dropped; common-direct egresses direct with a local IP; ordinary domain dialed by name to a stub proxy; QUIC/UDP honored; DNS does not loop.
 - **Open decision (flag):** hand-rolled DNS server wire codec (M4.1) — **defaulting to hand-rolled** (no new crate; `flint_dns::codec` covers only the client leg). Confirm before adding any DNS crate.
 
-### M5 — mobile footprint
+### M5 — mobile footprint  (partial — host-side done; on-device pending hardware)
 - **Deliverable:** measure RAM + stripped binary on a Redmi-class device with the full rule-sets loaded; tune compaction (and, only if over budget, add subsetting — deferred per spec).
 - **Verify:** within the <3 MB stripped budget + acceptable RAM; no jank/ANR; document the numbers.
+- **Host-side check done (2026-07-01):** release `spark` CLI is **2.16 MB stripped** (under the 3 MB budget); `smart-routing` adds ~0.5 MB to the core rlib (a loose upper bound — rlib metadata; the real `.so` delta is the flate2/miniz + rules/dns code). The authoritative aarch64-android measurement + on-device RAM/jank still needs the physical Redmi.
+- **⚠ Perf finding (feeds M5):** `srs::parse` of `banad_v1` (36 KB, a large BanAD v1 domain set) is **~40 s in a debug build**, ~2 s in release (opt-level=z + LTO). So there's a hot path (succinct-set decode / range→CIDR) that only the optimizer tames — on a low-end ARM CPU even the release cost, times several lists at startup, could add real connect latency/jank. **M5 must profile parse+compaction on-device (release build) and optimize the hot loop if the budget is blown.** (It also makes the debug test suite slow; the M6 ruleset tests use the smallest fixture to stay fast.)
 
-### M6 — ruleset fetch / cache / refresh + offline
-- **Deliverable:** `ruleset.rs` — fetch the `.srs` URLs, disk-cache under `data_dir`, refresh on `poll_interval_seconds`, mirroring config-fetch; offline uses cache; missing cache degrades to proxy-everything.
-- **Verify:** cold fetch populates cache; offline start uses cache; a corrupt/absent cache never fails the tunnel (proxy-everything fallback); refresh picks up an updated `.srs`.
+### M6 — ruleset fetch / cache / refresh + offline  (core done; production fetch + wiring = M6b)
+- **Deliverable:** `rules/ruleset.rs` — fetch the `.srs` URLs, disk-cache under `data_dir`, refresh on `poll_interval_seconds`, mirroring config-fetch; offline uses cache; missing cache degrades to proxy-everything.
+- **Done (M6a):** `rules/ruleset.rs` — `cache_path` (matches the tunnel loader), a `RuleSetFetcher` seam, `refresh_one`/`refresh_all` (**validate-before-cache**: a fetch failure or a non-parsing download never disturbs the existing cache — offline-resilient), atomic `write_atomic`, and `run_refresh_loop`. 5 hermetic tests with a fake fetcher (writes valid, keeps cache on fetch-error, keeps cache on corrupt download, counts updates, path layout).
+- **Remaining (M6b):** the production `RuleSetFetcher` (HTTP(S) GET over TLS, reusing `config::fetch::http::post_collect` + the direct/fronted dial), and wiring `run_refresh_loop` into `fd_tunnel`'s lantern-api background loop (next to the config refresh). Needs the same censorship-resilient dial as config-fetch.
+- **Verify:** cold fetch populates cache; offline start uses cache; a corrupt/absent cache never fails the tunnel (proxy-everything fallback); refresh picks up an updated `.srs`. (Offline/corrupt/missing behaviors are unit-tested in M6a; cold-fetch + live-refresh land with M6b's real fetcher.)
 
 ---
 

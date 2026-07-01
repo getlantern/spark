@@ -10,6 +10,7 @@
 
 pub mod matcher;
 pub mod router;
+pub mod ruleset;
 pub mod srs;
 
 /// The routing decision for a flow.
