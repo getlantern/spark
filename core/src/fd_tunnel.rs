@@ -347,9 +347,10 @@ async fn run_tunnel_data_path(
     };
     let direct_transport: Arc<dyn transport::Transport> =
         Arc::new(transport::DirectTransport::new(protector));
-    // Smart-routing (feature-gated): a per-flow router over the config's rule-sets, loading `.srs`
-    // from `<data_dir>/rulesets/`. `None` (feature off, or no rules configured) proxies everything.
-    let router = build_flow_router(&config, data_dir);
+    // Smart-routing (feature-gated): the per-flow route hooks over the config's rule-sets, loading
+    // `.srs` from `<data_dir>/rulesets/`. `None` (feature off, or no rules configured) proxies
+    // everything. The fake-IP recoverer + per-action resolvers are wired in M4.6c.
+    let hooks = build_route_hooks(&config, data_dir);
     let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
     let idle = Duration::from_secs(config.udp.idle_timeout_secs);
     if let Some((udp_inbound, udp_reply)) = udp_surface {
@@ -366,7 +367,7 @@ async fn run_tunnel_data_path(
     set_ready(Readiness::Up);
     let metrics = Arc::new(crate::metrics::Metrics::default());
     tokio::select! {
-        _ = proxy::tcp::run(stack, tcp_transport, direct_transport, router, metrics)
+        _ = proxy::tcp::run(stack, tcp_transport, direct_transport, hooks, metrics)
             => warn!("netstack accept loop exited"),
         _ = waiter.notified() => info!("stop requested; tearing the tunnel down"),
     }
@@ -374,16 +375,18 @@ async fn run_tunnel_data_path(
     Ok(())
 }
 
-/// Build the per-flow [`proxy::FlowRouter`] from the config's smart-routing rules, or `None` to keep
+/// Build the per-flow [`proxy::RouteHooks`] from the config's smart-routing rules, or `None` to keep
 /// the proxy-everything path. Feature-gated: with `smart-routing` off this is a no-op. Rule-set
 /// `.srs` bytes load from `<data_dir>/rulesets/<tag>.srs`; a rule-set missing from the cache is
 /// skipped (the tunnel still runs, proxying the lists it couldn't load — see [`crate::rules::router`]).
-/// Inline IP rules need no `.srs`, so they apply even with `data_dir == None`.
+/// Inline IP rules need no `.srs`, so they apply even with `data_dir == None`. The fake-IP domain
+/// recoverer and per-action resolvers are wired here in M4.6c; until then they are `None` (routing on
+/// IP/CIDR only, as in M3).
 #[cfg(feature = "smart-routing")]
-fn build_flow_router(
+fn build_route_hooks(
     config: &Config,
     data_dir: Option<&std::path::Path>,
-) -> Option<Arc<dyn proxy::FlowRouter>> {
+) -> Option<Arc<proxy::RouteHooks>> {
     let sr = &config.smart_routing;
     if sr.rule_sets.is_empty() && sr.inline_ip_rules.is_empty() {
         return None; // nothing to route on — keep the plain proxy-everything path
@@ -396,17 +399,22 @@ fn build_flow_router(
     info!(
         rule_sets = sr.rule_sets.len(),
         inline_ip_rules = sr.inline_ip_rules.len(),
-        "smart-routing: per-flow router active"
+        "smart-routing: per-flow route hooks active"
     );
-    Some(Arc::new(router))
+    Some(Arc::new(proxy::RouteHooks {
+        router: Arc::new(router),
+        recoverer: None,       // fake-IP recoverer (M4.6c)
+        direct_resolver: None, // dns::resolver::local_resolver (M4.6c)
+        proxy_resolver: None,  // resilient resolver (M4.6c)
+    }))
 }
 
 /// No-op stand-in when the `smart-routing` feature is off: always proxy everything.
 #[cfg(not(feature = "smart-routing"))]
-fn build_flow_router(
+fn build_route_hooks(
     _config: &Config,
     _data_dir: Option<&std::path::Path>,
-) -> Option<Arc<dyn proxy::FlowRouter>> {
+) -> Option<Arc<proxy::RouteHooks>> {
     None
 }
 

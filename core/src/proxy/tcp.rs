@@ -10,6 +10,7 @@
 //! are logged at `debug` only. The default (`info`) level reports byte counts on close,
 //! which carry no destination.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::io::copy_bidirectional;
@@ -17,57 +18,47 @@ use tracing::{debug, info, warn};
 
 use crate::metrics::{Counting, Metrics, SessionGuard};
 use crate::netstack::{Netstack, TcpFlow};
-use crate::proxy::{Decision, FlowRouter};
-use crate::transport::Transport;
+use crate::proxy::{Decision, RouteHooks};
+use crate::transport::{Address, Transport};
+use crate::BoxedStream;
 
-/// Run the accept→forward loop until the netstack stops yielding flows. For each flow, `router`
-/// (when present) decides whether it is proxied, dialed direct, or rejected; a proxied flow dials
-/// through `proxy_transport`, a direct flow through `direct_transport`. With no `router` every flow
-/// is proxied — today's behavior. `metrics` tallies per-flow byte/session counts.
+/// Run the accept→forward loop until the netstack stops yielding flows. For each flow, `hooks` (when
+/// present) recover its domain (fake-IP DNS), decide the action, and resolve where needed; a proxied
+/// flow dials through `proxy_transport`, a direct flow through `direct_transport`, a rejected flow is
+/// dropped. With no `hooks` every flow is proxied by IP — today's behavior. `metrics` tallies per-flow
+/// byte/session counts.
 ///
-/// Each accepted flow is forwarded on its own task so that a slow (or hung) upstream
-/// dial cannot stall acceptance of other flows.
+/// Each accepted flow is forwarded on its own task so that a slow (or hung) upstream dial — or a
+/// per-flow DNS resolution — cannot stall acceptance of other flows.
 pub async fn run<N: Netstack>(
     mut netstack: N,
     proxy_transport: Arc<dyn Transport>,
     direct_transport: Arc<dyn Transport>,
-    router: Option<Arc<dyn FlowRouter>>,
+    hooks: Option<Arc<RouteHooks>>,
     metrics: Arc<Metrics>,
 ) {
     while let Some(flow) = netstack.accept_tcp().await {
-        // At L3 the domain is not yet known (it is recovered by the fake-IP DNS layer in M4).
-        let decision = router
-            .as_deref()
-            .map(|r| r.decide(flow.original_dst.ip(), None))
-            .unwrap_or(Decision::Proxy);
-        match decision {
-            Decision::Proxy => {
-                tokio::spawn(forward(
-                    flow,
-                    Arc::clone(&proxy_transport),
-                    Arc::clone(&metrics),
-                ));
-            }
-            Decision::Direct => {
-                tokio::spawn(forward(
-                    flow,
-                    Arc::clone(&direct_transport),
-                    Arc::clone(&metrics),
-                ));
-            }
-            Decision::Reject => {
-                // Not forwarded: dropping `flow` closes its stream. Destination is logged at
-                // debug only (log-hygiene note above).
-                debug!(dst = %flow.original_dst, "tcp flow rejected by routing rule");
-            }
-        }
+        tokio::spawn(forward(
+            flow,
+            Arc::clone(&proxy_transport),
+            Arc::clone(&direct_transport),
+            hooks.clone(),
+            Arc::clone(&metrics),
+        ));
     }
     debug!("netstack accept loop ended");
 }
 
-/// Dial `flow.original_dst` through `transport` and copy bytes in both directions until
-/// either side closes, tallying the flow into `metrics`.
-async fn forward(flow: TcpFlow, transport: Arc<dyn Transport>, metrics: Arc<Metrics>) {
+/// Route and forward one flow: recover its domain, decide the action, dial the appropriate upstream
+/// (resolving per action where the destination is a fake IP), then splice bytes until either side
+/// closes. Runs on its own task so resolution/dial latency doesn't stall the accept loop.
+async fn forward(
+    flow: TcpFlow,
+    proxy_transport: Arc<dyn Transport>,
+    direct_transport: Arc<dyn Transport>,
+    hooks: Option<Arc<RouteHooks>>,
+    metrics: Arc<Metrics>,
+) {
     let TcpFlow {
         original_dst,
         src,
@@ -78,23 +69,118 @@ async fn forward(flow: TcpFlow, transport: Arc<dyn Transport>, metrics: Arc<Metr
     // (the guard decrements on drop).
     let _session = SessionGuard::open(Arc::clone(&metrics));
 
-    debug!(src = %src, dst = %original_dst, "tcp flow: dialing upstream");
+    let hooks = hooks.as_deref();
+    // Recover the domain behind the (possibly fake) destination IP, then decide the action on it.
+    let domain = hooks
+        .and_then(|h| h.recoverer.as_deref())
+        .and_then(|r| r.recover(original_dst.ip()));
+    let decision = hooks
+        .map(|h| h.router.decide(original_dst.ip(), domain.as_deref()))
+        .unwrap_or(Decision::Proxy);
+    debug!(src = %src, dst = %original_dst, domain = domain.as_deref().unwrap_or("-"), ?decision, "tcp flow: routing");
 
-    let upstream = match transport.dial(original_dst).await {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "dial to upstream failed");
+    let upstream = match decision {
+        // Dropping `stream` (by returning) closes the flow. Destination at debug only (log hygiene).
+        Decision::Reject => {
+            debug!(dst = %original_dst, "tcp flow rejected by routing rule");
             return;
         }
+        Decision::Direct => {
+            dial_direct(
+                &direct_transport,
+                &proxy_transport,
+                hooks,
+                domain.as_deref(),
+                original_dst,
+            )
+            .await
+        }
+        Decision::Proxy => {
+            dial_proxy(&proxy_transport, hooks, domain.as_deref(), original_dst).await
+        }
+    };
+    let Some(upstream) = upstream else {
+        return; // dial failed (already logged)
     };
     // Wrap the upstream half so writes (app→upstream) count as `up` and reads (upstream→app) as
     // `down`. `&mut *stream` derefs the box to the `dyn` stream `copy_bidirectional` accepts.
     let mut upstream = Counting::new(upstream, metrics);
     match copy_bidirectional(&mut *stream, &mut upstream).await {
-        Ok((to_upstream, to_app)) => {
-            info!(to_upstream, to_app, "tcp flow completed");
-        }
+        Ok((to_upstream, to_app)) => info!(to_upstream, to_app, "tcp flow completed"),
         Err(e) => warn!(error = %e, "tcp flow error"),
+    }
+}
+
+/// Dial a Direct flow. A **domain** flow's `original_dst` is a fake IP, so it must be resolved to a
+/// real IP (via the local resolver) before a direct dial; without a resolver (or on failure) it falls
+/// back to Proxy rather than dial the fake IP. A **real-IP** flow (no domain) is direct-dialed as-is.
+async fn dial_direct(
+    direct: &Arc<dyn Transport>,
+    proxy: &Arc<dyn Transport>,
+    hooks: Option<&RouteHooks>,
+    domain: Option<&str>,
+    original_dst: SocketAddr,
+) -> Option<BoxedStream> {
+    let Some(dom) = domain else {
+        return dial_or_log(direct, original_dst).await; // real-IP flow → direct-dial as-is
+    };
+    if let Some(res) = hooks.and_then(|h| h.direct_resolver.as_deref()) {
+        if let Ok(ips) = res.resolve(dom).await {
+            if let Some(&ip) = ips.first() {
+                return dial_or_log(direct, SocketAddr::new(ip, original_dst.port())).await;
+            }
+        }
+    }
+    // No local resolver, or resolution failed: never direct-dial the fake IP — proxy it instead.
+    debug!(domain = %dom, "direct resolution unavailable; proxying instead");
+    dial_proxy(proxy, hooks, domain, original_dst).await
+}
+
+/// Dial a Proxy flow. A **domain** flow behind a fake IP is resolved client-side (resilient DoH) to a
+/// real IP and dialed through the pool — which works for every transport. If no proxy resolver is
+/// configured (or it fails), fall back to dial-by-name so a domain-capable transport (e.g. the plain
+/// tunnel) can carry the name to the exit. A **real-IP** flow is proxied by IP (today's behavior).
+async fn dial_proxy(
+    proxy: &Arc<dyn Transport>,
+    hooks: Option<&RouteHooks>,
+    domain: Option<&str>,
+    original_dst: SocketAddr,
+) -> Option<BoxedStream> {
+    let Some(dom) = domain else {
+        return dial_or_log(proxy, original_dst).await; // real-IP flow → proxy by IP
+    };
+    if let Some(res) = hooks.and_then(|h| h.proxy_resolver.as_deref()) {
+        if let Ok(ips) = res.resolve(dom).await {
+            if let Some(&ip) = ips.first() {
+                return dial_or_log(proxy, SocketAddr::new(ip, original_dst.port())).await;
+            }
+        }
+    }
+    // No client-side resolution: carry the name to the exit (domain-capable transports resolve it).
+    match Address::domain(dom, original_dst.port()) {
+        Ok(addr) => match proxy.dial_addr(addr).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                warn!(error = %e, "proxy dial-by-name failed");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "invalid domain target for proxy dial");
+            None
+        }
+    }
+}
+
+/// Dial `target` through `transport`, logging (destination at debug via the caller) and returning
+/// `None` on failure.
+async fn dial_or_log(transport: &Arc<dyn Transport>, target: SocketAddr) -> Option<BoxedStream> {
+    match transport.dial(target).await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            warn!(error = %e, "dial to upstream failed");
+            None
+        }
     }
 }
 
@@ -190,7 +276,7 @@ mod tests {
     use std::net::IpAddr;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use crate::proxy::{Decision, FlowRouter};
+    use crate::proxy::{Decision, DomainRecoverer, FlowResolver, FlowRouter, RouteHooks};
 
     /// A `FlowRouter` that returns a fixed decision for every flow.
     struct StubRouter(Decision);
@@ -198,6 +284,39 @@ mod tests {
     impl FlowRouter for StubRouter {
         fn decide(&self, _ip: IpAddr, _domain: Option<&str>) -> Decision {
             self.0
+        }
+    }
+
+    /// Hooks with a fixed-decision router and no recoverer/resolvers (the IP-only routing tests).
+    fn hooks_for(decision: Decision) -> Arc<RouteHooks> {
+        Arc::new(RouteHooks {
+            router: Arc::new(StubRouter(decision)),
+            recoverer: None,
+            direct_resolver: None,
+            proxy_resolver: None,
+        })
+    }
+
+    /// A recoverer that maps every fake IP to one fixed domain (the fake-IP DNS connect-time half).
+    struct StubRecoverer(&'static str);
+
+    impl DomainRecoverer for StubRecoverer {
+        fn recover(&self, _ip: IpAddr) -> Option<String> {
+            Some(self.0.to_string())
+        }
+    }
+
+    /// A resolver that returns one fixed IP for any domain, recording that it was consulted.
+    struct StubResolver {
+        ip: IpAddr,
+        resolved: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl FlowResolver for StubResolver {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<IpAddr>> {
+            self.resolved.store(true, Ordering::SeqCst);
+            Ok(vec![self.ip])
         }
     }
 
@@ -240,7 +359,7 @@ mod tests {
             netstack,
             proxy.clone() as Arc<dyn Transport>,
             Arc::new(DirectTransport::default()),
-            Some(Arc::new(StubRouter(Decision::Direct))),
+            Some(hooks_for(Decision::Direct)),
             Arc::new(Metrics::default()),
         ));
 
@@ -265,7 +384,7 @@ mod tests {
             netstack,
             proxy.clone() as Arc<dyn Transport>,
             direct.clone() as Arc<dyn Transport>,
-            Some(Arc::new(StubRouter(Decision::Reject))),
+            Some(hooks_for(Decision::Reject)),
             Arc::new(Metrics::default()),
         ));
 
@@ -294,7 +413,7 @@ mod tests {
             netstack,
             Arc::new(DirectTransport::default()),
             direct.clone() as Arc<dyn Transport>,
-            Some(Arc::new(StubRouter(Decision::Proxy))),
+            Some(hooks_for(Decision::Proxy)),
             Arc::new(Metrics::default()),
         ));
         app.write_all(b"ping").await.unwrap();
@@ -324,6 +443,128 @@ mod tests {
         assert!(
             !direct.dialed.load(Ordering::SeqCst),
             "the direct transport must not be dialed with no router"
+        );
+    }
+
+    // ---- Domain recovery + per-action resolution (M4.6) ----
+
+    /// A fake destination IP, port matched to `echo` so a resolved dial reaches it.
+    fn fake_dst_for(echo: SocketAddr) -> SocketAddr {
+        SocketAddr::new("198.18.0.9".parse().unwrap(), echo.port())
+    }
+
+    /// Direct + a recovered domain: the fake IP is resolved (local resolver) to the real IP and
+    /// direct-dialed — never the fake IP.
+    #[tokio::test]
+    async fn direct_domain_flow_resolves_then_dials_real_ip() {
+        let echo = spawn_echo().await;
+        let resolved = Arc::new(AtomicBool::new(false));
+        let proxy = Arc::new(RecordingTransport::default());
+        let hooks = Arc::new(RouteHooks {
+            router: Arc::new(StubRouter(Decision::Direct)),
+            recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
+            direct_resolver: Some(Arc::new(StubResolver {
+                ip: echo.ip(),
+                resolved: Arc::clone(&resolved),
+            })),
+            proxy_resolver: None,
+        });
+        let (mut app, netstack) = one_flow(fake_dst_for(echo));
+        tokio::spawn(run(
+            netstack,
+            proxy.clone() as Arc<dyn Transport>,
+            Arc::new(DirectTransport::default()),
+            Some(hooks),
+            Arc::new(Metrics::default()),
+        ));
+        app.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        app.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+        assert!(
+            resolved.load(Ordering::SeqCst),
+            "the direct resolver is consulted"
+        );
+        assert!(
+            !proxy.dialed.load(Ordering::SeqCst),
+            "the proxy transport must not be dialed for a resolved Direct flow"
+        );
+    }
+
+    /// Proxy + a recovered domain: with a proxy resolver present, the domain is resolved client-side
+    /// and the real IP is dialed through the proxy transport (works for every transport).
+    #[tokio::test]
+    async fn proxy_domain_flow_resolves_client_side_then_dials() {
+        let echo = spawn_echo().await;
+        let resolved = Arc::new(AtomicBool::new(false));
+        let direct = Arc::new(RecordingTransport::default());
+        let hooks = Arc::new(RouteHooks {
+            router: Arc::new(StubRouter(Decision::Proxy)),
+            recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
+            direct_resolver: None,
+            proxy_resolver: Some(Arc::new(StubResolver {
+                ip: echo.ip(),
+                resolved: Arc::clone(&resolved),
+            })),
+        });
+        let (mut app, netstack) = one_flow(fake_dst_for(echo));
+        tokio::spawn(run(
+            netstack,
+            Arc::new(DirectTransport::default()),
+            direct.clone() as Arc<dyn Transport>,
+            Some(hooks),
+            Arc::new(Metrics::default()),
+        ));
+        app.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        app.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+        assert!(
+            resolved.load(Ordering::SeqCst),
+            "the proxy resolver is consulted"
+        );
+        assert!(
+            !direct.dialed.load(Ordering::SeqCst),
+            "the direct transport must not be dialed for a Proxy flow"
+        );
+    }
+
+    /// Direct + a recovered domain but no local resolver: never dial the fake IP directly — fall back
+    /// to Proxy (here the proxy resolver resolves it), leaving the direct transport untouched.
+    #[tokio::test]
+    async fn direct_domain_without_local_resolver_falls_back_to_proxy() {
+        let echo = spawn_echo().await;
+        let resolved = Arc::new(AtomicBool::new(false));
+        let direct = Arc::new(RecordingTransport::default());
+        let hooks = Arc::new(RouteHooks {
+            router: Arc::new(StubRouter(Decision::Direct)),
+            recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
+            direct_resolver: None,
+            proxy_resolver: Some(Arc::new(StubResolver {
+                ip: echo.ip(),
+                resolved: Arc::clone(&resolved),
+            })),
+        });
+        let (mut app, netstack) = one_flow(fake_dst_for(echo));
+        // proxy transport dials the resolved IP; the (recording) direct transport must stay unused.
+        tokio::spawn(run(
+            netstack,
+            Arc::new(DirectTransport::default()),
+            direct.clone() as Arc<dyn Transport>,
+            Some(hooks),
+            Arc::new(Metrics::default()),
+        ));
+        app.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        app.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+        assert!(
+            resolved.load(Ordering::SeqCst),
+            "Direct with no local resolver falls back to the proxy resolver"
+        );
+        assert!(
+            !direct.dialed.load(Ordering::SeqCst),
+            "the direct transport must not dial the fake IP when it falls back to proxy"
         );
     }
 
