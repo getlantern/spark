@@ -49,14 +49,20 @@ struct DohResolver {
 #[async_trait::async_trait]
 impl FlowResolver for DohResolver {
     async fn resolve(&self, host: &str) -> io::Result<Vec<IpAddr>> {
-        if let Ok(ips) = flint_dns::resolve(host, flint_dns::TYPE_A, &self.pool).await {
-            if !ips.is_empty() {
-                return Ok(ips);
-            }
+        // Look up A and AAAA concurrently and return **both** families (A first), so the caller's
+        // `pick_ip` can select the family the flow actually needs — returning only A would strand a
+        // v6-requesting flow (or a v6-only network) even when a usable AAAA exists.
+        let (a, aaaa) = tokio::join!(
+            flint_dns::resolve(host, flint_dns::TYPE_A, &self.pool),
+            flint_dns::resolve(host, flint_dns::TYPE_AAAA, &self.pool),
+        );
+        let mut ips = Vec::new();
+        if let Ok(v) = a {
+            ips.extend(v);
         }
-        let ips = flint_dns::resolve(host, flint_dns::TYPE_AAAA, &self.pool)
-            .await
-            .map_err(io::Error::other)?;
+        if let Ok(v) = aaaa {
+            ips.extend(v);
+        }
         if ips.is_empty() {
             return Err(io::Error::other("no A/AAAA records"));
         }

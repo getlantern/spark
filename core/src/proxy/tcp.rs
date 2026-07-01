@@ -157,17 +157,23 @@ async fn dial_proxy(
     let Some(dom) = domain else {
         return dial_or_log(proxy, original_dst).await; // real-IP flow → proxy by IP
     };
-    // Preferred: hand the domain to the exit. `dial_addr` errors for a transport that can't carry a
-    // name (then we fall through to client-side resolution below).
+    // Preferred: hand the domain to the exit. Only fall through to client-side resolution when the
+    // transport genuinely can't carry a name (`Unsupported`) — on a real dial failure we fail fast
+    // rather than leak a client-side DNS lookup and then re-dial the same (failing) proxy.
     if let Ok(addr) = Address::domain(dom, original_dst.port()) {
         match proxy.dial_addr(addr).await {
             Ok(s) => return Some(s),
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                debug!(domain = %dom, "transport can't carry a domain; resolving client-side")
+            }
             Err(e) => {
-                debug!(domain = %dom, error = %e, "proxy dial-by-name unavailable; resolving client-side")
+                warn!(domain = %dom, error = %e, "proxy dial-by-name failed");
+                return None;
             }
         }
     }
-    // Fallback: resolve the domain ourselves (un-poisoned DoH, bypassing the TUN) and dial the real IP.
+    // Fallback (transport can't carry a domain): resolve ourselves (un-poisoned DoH, bypassing the
+    // TUN) and dial the real IP.
     if let Some(res) = hooks.and_then(|h| h.proxy_resolver.as_deref()) {
         if let Ok(ips) = res.resolve(dom).await {
             if let Some(ip) = pick_ip(&ips, original_dst.ip()) {
@@ -692,6 +698,57 @@ mod tests {
         assert!(
             resolved.load(Ordering::SeqCst),
             "the proxy resolver was used for the fallback"
+        );
+    }
+
+    /// A domain-capable transport whose `dial_addr` fails with a **non-`Unsupported`** error (a
+    /// transient dial failure), to check the fail-fast path.
+    struct FailingDomainTransport;
+
+    #[async_trait]
+    impl Transport for FailingDomainTransport {
+        async fn dial(&self, _t: SocketAddr) -> std::io::Result<crate::BoxedStream> {
+            Err(std::io::Error::other("dial failed"))
+        }
+        async fn dial_addr(
+            &self,
+            _t: crate::transport::Address,
+        ) -> std::io::Result<crate::BoxedStream> {
+            Err(std::io::Error::other("transient dial failure")) // NOT ErrorKind::Unsupported
+        }
+    }
+
+    /// A transient proxy dial-by-name failure (not `Unsupported`) fails fast — the flow is dropped
+    /// without a client-side DNS lookup (no privacy/perf regression, no re-dial of the failing proxy).
+    #[tokio::test]
+    async fn proxy_domain_dial_failure_fails_fast_without_client_resolution() {
+        let resolved = Arc::new(AtomicBool::new(false));
+        let hooks = Arc::new(RouteHooks {
+            router: Arc::new(StubRouter(Decision::Proxy)),
+            recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
+            direct_resolver: None,
+            proxy_resolver: Some(Arc::new(StubResolver {
+                ip: "1.2.3.4".parse().unwrap(),
+                resolved: Arc::clone(&resolved),
+            })),
+        });
+        let (mut app, netstack) = one_flow("198.18.0.9:443".parse().unwrap());
+        tokio::spawn(run(
+            netstack,
+            Arc::new(FailingDomainTransport) as Arc<dyn Transport>,
+            Arc::new(RecordingTransport::default()) as Arc<dyn Transport>,
+            Some(hooks),
+            Arc::new(Metrics::default()),
+        ));
+        let mut buf = [0u8; 4];
+        let n = app.read(&mut buf).await.unwrap();
+        assert_eq!(
+            n, 0,
+            "a transient dial-by-name failure drops the flow (fail fast)"
+        );
+        assert!(
+            !resolved.load(Ordering::SeqCst),
+            "no client-side DNS lookup on a non-Unsupported dial failure"
         );
     }
 
