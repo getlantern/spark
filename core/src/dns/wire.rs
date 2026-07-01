@@ -77,8 +77,11 @@ pub fn parse_query(buf: &[u8]) -> Result<Query, DnsError> {
     }
     let recursion_desired = flags0 & 0x01 != 0;
     let qdcount = u16::from_be_bytes([buf[4], buf[5]]);
-    if qdcount == 0 {
-        return Err(DnsError::Malformed("no question"));
+    // We parse and echo exactly one question, and `build_response` emits `QDCOUNT = 1`. Reject
+    // anything else so a multi-question query can't get a header-mismatched response (stub resolvers
+    // never send more than one question anyway).
+    if qdcount != 1 {
+        return Err(DnsError::Malformed("expected exactly one question"));
     }
     let (name, name_end) = read_qname(buf, HEADER_LEN)?;
     // QTYPE + QCLASS (2 + 2) follow the name.
@@ -296,11 +299,20 @@ mod tests {
             parse_query(&resp),
             Err(DnsError::Malformed("QR set (not a query)"))
         );
-        // QDCOUNT = 0.
+        // QDCOUNT must be exactly 1 — reject 0 and >1 (we only parse/echo one question).
         let mut noq = make_query(1, "example.com", TYPE_A, false);
         noq[4] = 0;
         noq[5] = 0;
-        assert_eq!(parse_query(&noq), Err(DnsError::Malformed("no question")));
+        assert_eq!(
+            parse_query(&noq),
+            Err(DnsError::Malformed("expected exactly one question"))
+        );
+        let mut multi = make_query(1, "example.com", TYPE_A, false);
+        multi[5] = 2; // QDCOUNT = 2
+        assert_eq!(
+            parse_query(&multi),
+            Err(DnsError::Malformed("expected exactly one question"))
+        );
         // A compression pointer inside the question name is rejected.
         let mut compressed = Vec::new();
         compressed.extend_from_slice(&1u16.to_be_bytes());

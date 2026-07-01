@@ -598,8 +598,10 @@ mod tests {
         assert_eq!(m.lookup(Some("example.com"), ip("1.1.1.1")), None);
     }
 
+    // The CIDR matcher uses precedence/min-rank semantics (not longest-prefix); this checks plain
+    // membership — in-range hits, out-of-range misses — for both address families.
     #[test]
-    fn cidr_longest_prefix_and_both_families() {
+    fn cidr_membership_both_families() {
         let m = Matcher::build(vec![(
             Action::Reject,
             RuleSet {

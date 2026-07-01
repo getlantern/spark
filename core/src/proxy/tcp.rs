@@ -112,8 +112,10 @@ async fn forward(
 }
 
 /// Dial a Direct flow. A **domain** flow's `original_dst` is a fake IP, so it must be resolved to a
-/// real IP (via the local resolver) before a direct dial; without a resolver (or on failure) it falls
-/// back to Proxy rather than dial the fake IP. A **real-IP** flow (no domain) is direct-dialed as-is.
+/// real IP (via the local resolver) before a direct dial. It falls back to **Proxy** rather than drop
+/// the flow if there is no resolver, resolution fails, *or* the direct dial itself fails (direct
+/// egress temporarily unavailable) — and never dials the fake IP. A **real-IP** flow (no domain) is
+/// direct-dialed as-is.
 async fn dial_direct(
     direct: &Arc<dyn Transport>,
     proxy: &Arc<dyn Transport>,
@@ -127,12 +129,17 @@ async fn dial_direct(
     if let Some(res) = hooks.and_then(|h| h.direct_resolver.as_deref()) {
         if let Ok(ips) = res.resolve(dom).await {
             if let Some(ip) = pick_ip(&ips, original_dst.ip()) {
-                return dial_or_log(direct, SocketAddr::new(ip, original_dst.port())).await;
+                if let Some(stream) =
+                    dial_or_log(direct, SocketAddr::new(ip, original_dst.port())).await
+                {
+                    return Some(stream);
+                }
+                // Direct dial failed — fall through to proxy rather than drop the flow.
             }
         }
     }
-    // No local resolver, or resolution failed: never direct-dial the fake IP — proxy it instead.
-    debug!(domain = %dom, "direct resolution unavailable; proxying instead");
+    // No resolver, resolution failed, or the direct dial failed: never dial the fake IP — proxy it.
+    debug!(domain = %dom, "direct egress unavailable; proxying instead");
     dial_proxy(proxy, hooks, domain, original_dst).await
 }
 
@@ -643,6 +650,48 @@ mod tests {
         assert!(
             !direct.dialed.load(Ordering::SeqCst),
             "the direct transport must not dial the fake IP when it falls back to proxy"
+        );
+    }
+
+    /// Direct + a recovered domain, resolver succeeds, but the direct **dial** fails → fall back to
+    /// Proxy rather than drop the flow (direct egress temporarily unavailable).
+    #[tokio::test]
+    async fn direct_dial_failure_falls_back_to_proxy() {
+        let echo = spawn_echo().await;
+        let direct = Arc::new(RecordingTransport::default()); // its dial always errors
+        let resolved = Arc::new(AtomicBool::new(false));
+        let hooks = Arc::new(RouteHooks {
+            router: Arc::new(StubRouter(Decision::Direct)),
+            recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
+            direct_resolver: Some(Arc::new(StubResolver {
+                ip: echo.ip(),
+                resolved: Arc::new(AtomicBool::new(false)),
+            })),
+            proxy_resolver: Some(Arc::new(StubResolver {
+                ip: echo.ip(),
+                resolved: Arc::clone(&resolved),
+            })),
+        });
+        let (mut app, netstack) = one_flow(fake_dst_for(echo));
+        // proxy transport reaches the echo; the direct transport is the failing recorder.
+        tokio::spawn(run(
+            netstack,
+            Arc::new(DirectTransport::default()),
+            direct.clone() as Arc<dyn Transport>,
+            Some(hooks),
+            Arc::new(Metrics::default()),
+        ));
+        app.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        app.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping", "flow succeeded via the proxy fallback");
+        assert!(
+            direct.dialed.load(Ordering::SeqCst),
+            "direct was attempted first (then fell back on failure)"
+        );
+        assert!(
+            resolved.load(Ordering::SeqCst),
+            "the proxy resolver was used for the fallback"
         );
     }
 
