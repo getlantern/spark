@@ -112,13 +112,15 @@ fn parse_dns(raw: &RawRoot) -> DnsConfig {
         }
         let endpoint = DohEndpoint {
             server: s.server.clone(),
+            // Reuse the shared DohEndpoint defaults so config_raw-derived and TOML-derived endpoints
+            // can't drift.
             port: if s.server_port == 0 {
-                443
+                super::default_doh_port()
             } else {
                 s.server_port
             },
             path: if s.path.is_empty() {
-                "/dns-query".to_string()
+                super::default_doh_path()
             } else {
                 s.path.clone()
             },

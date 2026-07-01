@@ -94,23 +94,33 @@ fn normalize_doh_path(path: &str) -> String {
 
 /// The DoH hostname (cert SAN + `:authority`) for a well-known public resolver IP, or `None` if
 /// unrecognized — covers Quad9 (what Lantern configs use) plus the common alternates, for both IPv4
-/// and IPv6 (the config may carry a v6 literal, which `parse_dns` also captures). IPv6 is matched on
-/// each provider's published DoH prefix so the two families stay in lockstep.
+/// and IPv6 (the config may carry a v6 literal, which `parse_dns` also captures).
+///
+/// Matches only the providers' **exact** published DoH endpoint IPs, not their surrounding ranges: a
+/// range match (e.g. `9.9.9.0/24`) would pin a provider SNI onto an unrelated or typoed address in
+/// that block, whose cert then fails to validate — worse than returning `None` and letting the
+/// caller fall back to the default pool.
 #[cfg(feature = "bootstrap-dns")]
 fn known_resolver_sni(ip: IpAddr) -> Option<&'static str> {
     Some(match ip {
         IpAddr::V4(a) => match a.octets() {
-            [9, 9, 9, _] | [149, 112, 112, _] => "dns.quad9.net",
-            [1, 1, 1, _] | [1, 0, 0, _] => "cloudflare-dns.com",
+            [9, 9, 9, 9..=11] | [149, 112, 112, 9..=11 | 112] => "dns.quad9.net",
+            [1, 1, 1, 1] | [1, 0, 0, 1] => "cloudflare-dns.com",
             [8, 8, 8, 8] | [8, 8, 4, 4] => "dns.google",
             [223, 5, 5, 5] | [223, 6, 6, 6] => "dns.alidns.com",
             _ => return None,
         },
         IpAddr::V6(a) => match a.segments() {
-            [0x2620, 0x00fe, ..] => "dns.quad9.net", // Quad9 2620:fe::/32
-            [0x2606, 0x4700, 0x4700, ..] => "cloudflare-dns.com", // Cloudflare 2606:4700:4700::/48
-            [0x2001, 0x4860, 0x4860, ..] => "dns.google", // Google 2001:4860:4860::/48
-            [0x2400, 0x3200, ..] => "dns.alidns.com", // AliDNS 2400:3200::/32
+            // Quad9 2620:fe::fe / ::9 / ::10 / ::11
+            [0x2620, 0x00fe, 0, 0, 0, 0, 0, 0x9 | 0xfe | 0x10 | 0x11] => "dns.quad9.net",
+            // Cloudflare 2606:4700:4700::1111 / ::1001
+            [0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111 | 0x1001] => "cloudflare-dns.com",
+            // Google 2001:4860:4860::8888 / ::8844
+            [0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888 | 0x8844] => "dns.google",
+            // AliDNS 2400:3200::1 / 2400:3200:baba::1
+            [0x2400, 0x3200, 0, 0, 0, 0, 0, 0x1] | [0x2400, 0x3200, 0xbaba, 0, 0, 0, 0, 0x1] => {
+                "dns.alidns.com"
+            }
             _ => return None,
         },
     })
