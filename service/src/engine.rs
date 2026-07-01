@@ -118,15 +118,20 @@ impl TunnelEngine for CoreEngine {
         // One supervisor task runs the data-path loops. It signals `exit` only if a loop
         // returns on its own; `stop` aborts the task before that line is reached.
         let metrics = Arc::clone(&self.metrics); // shared with the TCP forwarder for counters
+                                                 // The service has no smart-routing hooks (that's the fetched-config path); pass `None` so
+                                                 // every flow is proxied, plus a direct transport for the (here unused) Direct action.
+        let direct_transport = Arc::new(transport::DirectTransport::default());
         let supervisor = tokio::spawn(async move {
             match udp_surface {
                 Some((udp_inbound, udp_reply)) => {
                     tokio::select! {
-                        _ = proxy::tcp::run(stack, tcp_transport, metrics) => {}
+                        _ = proxy::tcp::run(stack, tcp_transport, direct_transport, None, metrics) => {}
                         _ = proxy::udp::run_udp(udp_inbound, udp_reply, udp_transport, idle) => {}
                     }
                 }
-                None => proxy::tcp::run(stack, tcp_transport, metrics).await,
+                None => {
+                    proxy::tcp::run(stack, tcp_transport, direct_transport, None, metrics).await
+                }
             }
             let _ = exit.send(()).await; // unexpected exit (not reached on abort)
         });
