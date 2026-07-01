@@ -149,6 +149,49 @@ pub struct Config {
     /// `smart_routing` / `ad_block` / `options.route.rules` sections. Empty for native TOML
     /// configs, so the base full-tunnel behavior is unchanged.
     pub smart_routing: SmartRoutingConfig,
+    /// Per-action DoH resolver endpoints from `config_raw.json`'s `options.dns` (`dns_local` /
+    /// `dns_remote`). Empty for native TOML configs. With the `bootstrap-dns` feature the
+    /// smart-routing resolvers then fall back to the built-in un-poisoned DoH pool; without it they
+    /// return `None` and flows degrade (Direct→Proxy, Proxy→dial-by-name).
+    pub dns: DnsConfig,
+}
+
+/// The config's `options.dns` endpoints spark uses for per-action resolution: `dns_local` (direct DoH
+/// — the Direct action's local resolver) and `dns_remote` (the Proxy client-side-resolution fallback).
+/// Only IP-addressed `type: "https"` servers are captured (flint dials a fixed IP); hostname or
+/// non-`https` servers are ignored. Data only; the `dns` engine builds resolvers from it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DnsConfig {
+    /// `dns_local` — direct DoH; used to resolve a Direct flow's real (best-local) IP.
+    pub local: Option<DohEndpoint>,
+    /// `dns_remote` — used (alongside the resilient pool) for the Proxy client-side fallback.
+    pub remote: Option<DohEndpoint>,
+}
+
+/// A DoH resolver endpoint: an IP-addressed HTTPS server (RFC 8484).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DohEndpoint {
+    /// The resolver IP literal (flint dials this fixed address).
+    pub server: String,
+    /// The DoH port (443 unless overridden).
+    #[serde(default = "default_doh_port")]
+    pub port: u16,
+    /// The DoH path (usually `/dns-query`).
+    #[serde(default = "default_doh_path")]
+    pub path: String,
+}
+
+/// The default DoH port when a [`DohEndpoint`] omits it.
+fn default_doh_port() -> u16 {
+    443
+}
+
+/// The default DoH path when a [`DohEndpoint`] omits it (also reused by the resolver builder to
+/// normalize an explicitly-empty path — hence `pub(crate)`).
+pub(crate) fn default_doh_path() -> String {
+    "/dns-query".to_string()
 }
 
 /// Rule-based smart-routing + ad-block config. **Data only** — the (feature-gated) `rules` engine
@@ -890,6 +933,14 @@ mod tests {
                         action: RouteAction::Direct,
                     }],
                 },
+                dns: DnsConfig {
+                    local: Some(DohEndpoint {
+                        server: "9.9.9.9".into(),
+                        port: 443,
+                        path: "/dns-query".into(),
+                    }),
+                    remote: None,
+                },
             },
         ] {
             let rendered = cfg.to_toml_string().unwrap();
@@ -1052,6 +1103,27 @@ mod tests {
             let back: W = toml::from_str(&toml).unwrap();
             assert_eq!(w, back, "round-trip changed:\n{toml}");
         }
+    }
+
+    #[test]
+    fn doh_endpoint_defaults_port_and_path() {
+        // Only `server` given: port and path fall back to their defaults.
+        let bare: DohEndpoint = toml::from_str("server = \"9.9.9.9\"").unwrap();
+        assert_eq!(
+            bare,
+            DohEndpoint {
+                server: "9.9.9.9".into(),
+                port: 443,
+                path: "/dns-query".into(),
+            }
+        );
+        // Explicit values override the defaults.
+        let full: DohEndpoint =
+            toml::from_str("server = \"1.1.1.1\"\nport = 8443\npath = \"/resolve\"").unwrap();
+        assert_eq!(full.port, 8443);
+        assert_eq!(full.path, "/resolve");
+        // Unknown fields are rejected (consistent with the other config structs).
+        assert!(toml::from_str::<DohEndpoint>("server = \"9.9.9.9\"\nbogus = true").is_err());
     }
 
     #[test]

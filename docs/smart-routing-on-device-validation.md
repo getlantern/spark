@@ -37,6 +37,10 @@ on a **frontable CDN** (CloudFront / Akamai / Aliyun — kindling can't front a 
       intercepted and other UDP is proxied; confirm no UDP blackhole.
 - [ ] **Fake-IP correctness.** DNS answers for browsed domains return `198.18.x.x` (v4) / `fd00:2018::`
       (v6) fake IPs, and connections to them resolve to the right domain in the routing log.
+- [ ] **Config-driven resolvers work.** The Direct action resolves via the config's `dns_local` DoH
+      (a known public resolver, e.g. Quad9 `9.9.9.9` → `dns.quad9.net` SNI) — confirm a Direct domain
+      actually resolves (the IP→hostname mapping + boring DoH handshake succeed on-device). If the
+      config points at an unknown resolver IP, spark falls back to the built-in DoH pool.
 
 ## 2. Footprint (M5 — the piece that needs the low-end device)
 

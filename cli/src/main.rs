@@ -115,6 +115,8 @@ impl RunArgs {
             // Smart-routing/ad-block rules come from a Lantern `config_raw.json` (`run --config`), not
             // the bare `run` flags; the flag path uses the empty default (proxy-everything).
             smart_routing: config::SmartRoutingConfig::default(),
+            // Per-action DNS resolver endpoints likewise come from `config_raw.json`'s `options.dns`.
+            dns: config::DnsConfig::default(),
             kill_switch: config::KillSwitchConfig::default(),
             log: config::LogConfig { debug: self.debug },
         }
