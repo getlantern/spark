@@ -150,8 +150,9 @@ pub struct Config {
     /// configs, so the base full-tunnel behavior is unchanged.
     pub smart_routing: SmartRoutingConfig,
     /// Per-action DoH resolver endpoints from `config_raw.json`'s `options.dns` (`dns_local` /
-    /// `dns_remote`). Empty for native TOML configs — the smart-routing resolvers then fall back to
-    /// the built-in un-poisoned DoH pool.
+    /// `dns_remote`). Empty for native TOML configs. With the `bootstrap-dns` feature the
+    /// smart-routing resolvers then fall back to the built-in un-poisoned DoH pool; without it they
+    /// return `None` and flows degrade (Direct→Proxy, Proxy→dial-by-name).
     pub dns: DnsConfig,
 }
 
