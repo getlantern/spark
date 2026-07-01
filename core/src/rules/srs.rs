@@ -200,6 +200,19 @@ pub struct RuleSet {
     pub ip_cidr: Vec<IpCidr>,
 }
 
+impl RuleSet {
+    /// A rule-set carrying only IP/CIDR entries — used to fold inline `route.rules` (which have no
+    /// domain component) into the matcher alongside the parsed `.srs` rule-sets.
+    pub fn ip_only(ip_cidr: Vec<IpCidr>) -> Self {
+        Self {
+            domain: Vec::new(),
+            domain_suffix: Vec::new(),
+            domain_keyword: Vec::new(),
+            ip_cidr,
+        }
+    }
+}
+
 /// Parse a compiled sing-box `.srs` rule-set into its merged [`RuleSet`].
 ///
 /// Decodes the envelope (magic + version + zlib), reads the `uvarint` rule count, then walks each
