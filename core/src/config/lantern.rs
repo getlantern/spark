@@ -4,9 +4,9 @@
 //! sidecars (`outbound_locations`, `bandit_url_overrides`, `smart_routing`, `ad_block`, …). Spark
 //! does full-tunnel, so this adapter consumes only the slice it can act on — the proxy
 //! **outbounds**, joined by their `tag` to per-outbound geo (`outbound_locations`) and the bandit
-//! callback URL (`bandit_url_overrides`) — and maps each into a [`ServerEntry`] pool member. The DNS
-//! / `route` / `smart_routing` / `ad_block` sections are intentionally ignored for now (deferred; the
-//! raw structs below can grow to cover them without touching callers).
+//! callback URL (`bandit_url_overrides`) — and maps each into a [`ServerEntry`] pool member. The
+//! `smart_routing` / `ad_block` / `options.route.rules` sections feed the smart-routing engine, and
+//! `options.dns`'s `dns_local` / `dns_remote` feed the per-action resolvers.
 //!
 //! Outbounds spark can't represent are skipped (logged), not fatal: an unsupported transport
 //! `type` (e.g. `unbounded`) or an unsupported parameter (e.g. a legacy, non-SS-2022 Shadowsocks
@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::{
-    Config, Endpoint, Hysteria2Config, Hysteria2Tls, Hysteria2TlsMode, InlineIpRule, RouteAction,
-    RuleSetRef, SamizdatConfig, ServerEntry, ServerSpec, ShadowsocksConfig, SmartRoutingConfig,
-    SsMethod,
+    Config, DnsConfig, DohEndpoint, Endpoint, Hysteria2Config, Hysteria2Tls, Hysteria2TlsMode,
+    InlineIpRule, RouteAction, RuleSetRef, SamizdatConfig, ServerEntry, ServerSpec,
+    ShadowsocksConfig, SmartRoutingConfig, SsMethod,
 };
 
 /// Error parsing/adapting a `config_raw.json` payload.
@@ -58,8 +58,9 @@ pub fn looks_like_config_raw(s: &str) -> bool {
 /// server pool. Each `options.outbounds[*]` becomes a [`ServerEntry`], joined by its `tag` to geo
 /// (`outbound_locations`) and the bandit callback URL (`bandit_url_overrides`). Outbounds spark
 /// can't represent — an unsupported transport `type` (e.g. `unbounded`) or a non-SS-2022
-/// Shadowsocks `method` — are skipped with a warning. The `dns` / `route` / `smart_routing` /
-/// `ad_block` sections are ignored for now (deferred).
+/// Shadowsocks `method` — are skipped with a warning. The `smart_routing` / `ad_block` /
+/// `options.route.rules` sections populate [`SmartRoutingConfig`], and `options.dns` populates
+/// [`DnsConfig`].
 pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
     let raw: RawRoot = serde_json::from_str(s)?;
     let mut cfg = Config::default();
@@ -96,7 +97,39 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
         });
     }
     cfg.smart_routing = parse_smart_routing(&raw);
+    cfg.dns = parse_dns(&raw);
     Ok(cfg)
+}
+
+/// Map `options.dns` into the spark [`DnsConfig`]: the IP-addressed `type: "https"` servers tagged
+/// `dns_local` and `dns_remote`. Non-`https` servers (e.g. `fakeip`) and hostname servers are skipped
+/// — flint's DoH dialer needs a fixed IP.
+fn parse_dns(raw: &RawRoot) -> DnsConfig {
+    let mut dns = DnsConfig::default();
+    for s in &raw.options.dns.servers {
+        if s.kind != "https" || s.server.parse::<std::net::IpAddr>().is_err() {
+            continue;
+        }
+        let endpoint = DohEndpoint {
+            server: s.server.clone(),
+            port: if s.server_port == 0 {
+                443
+            } else {
+                s.server_port
+            },
+            path: if s.path.is_empty() {
+                "/dns-query".to_string()
+            } else {
+                s.path.clone()
+            },
+        };
+        match s.tag.as_str() {
+            "dns_local" => dns.local = Some(endpoint),
+            "dns_remote" => dns.remote = Some(endpoint),
+            _ => {}
+        }
+    }
+    dns
 }
 
 /// Map the `smart_routing` / `ad_block` / `options.route.rules` sidecars into the spark
@@ -283,6 +316,33 @@ struct RawOptions {
     /// sing-box `route` block; we consume only `rules` (inline IP rules like Quad9 → direct).
     #[serde(default)]
     route: RawRoute,
+    /// sing-box `dns` block; we consume the IP-addressed `type: "https"` servers tagged `dns_local` /
+    /// `dns_remote` (the per-action DoH resolvers).
+    #[serde(default)]
+    dns: RawDns,
+}
+
+/// The `options.dns` block (only its `servers` are consumed).
+#[derive(Deserialize, Default)]
+struct RawDns {
+    #[serde(default)]
+    servers: Vec<RawDnsServer>,
+}
+
+/// One `options.dns.servers[*]` (sing-box DNS server). Only `type: "https"` with an IP `server` is
+/// usable as a spark DoH resolver; other kinds (`fakeip`, hostname servers, …) are ignored.
+#[derive(Deserialize, Default)]
+struct RawDnsServer {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    server: String,
+    #[serde(default)]
+    server_port: u16,
+    #[serde(default)]
+    path: String,
 }
 
 /// One `smart_routing` category: rule-sets routed to `outbounds` (e.g. `["direct"]`).
@@ -427,8 +487,40 @@ mod tests {
     #[test]
     fn absent_smart_routing_sections_yield_empty() {
         // SAMPLE has an empty route.rules and no smart_routing/ad_block sidecars.
-        let sr = from_config_raw_json(SAMPLE).expect("adapts").smart_routing;
-        assert!(sr.rule_sets.is_empty() && sr.inline_ip_rules.is_empty());
+        let cfg = from_config_raw_json(SAMPLE).expect("adapts");
+        assert!(
+            cfg.smart_routing.rule_sets.is_empty() && cfg.smart_routing.inline_ip_rules.is_empty()
+        );
+        // SAMPLE's dns.servers is empty → no endpoints captured.
+        assert_eq!(cfg.dns, crate::config::DnsConfig::default());
+    }
+
+    #[test]
+    fn parses_dns_local_and_remote_https_servers() {
+        let raw = r#"{
+          "options": {
+            "dns": { "servers": [
+              { "type": "https", "tag": "dns_remote", "detour": "auto", "server": "9.9.9.9", "server_port": 443, "path": "/dns-query" },
+              { "type": "https", "tag": "dns_local", "server": "9.9.9.9", "path": "/dns-query" },
+              { "type": "fakeip", "tag": "dns_fakeip", "inet4_range": "198.18.0.0/15" },
+              { "type": "https", "tag": "dns_hostname", "server": "dns.quad9.net" }
+            ] },
+            "outbounds": [
+              { "type": "samizdat", "tag": "sz-1", "server": "198.51.100.10", "server_port": 8443,
+                "public_key": "aa11bb22", "short_id": "00ff00ff", "server_name": "cover.example.com" }
+            ]
+          }
+        }"#;
+        let dns = from_config_raw_json(raw).expect("adapts").dns;
+        // dns_local: IP https server, port defaulted to 443.
+        let local = dns.local.expect("dns_local");
+        assert_eq!(
+            (local.server.as_str(), local.port, local.path.as_str()),
+            ("9.9.9.9", 443, "/dns-query")
+        );
+        // dns_remote: explicit port.
+        assert_eq!(dns.remote.expect("dns_remote").port, 443);
+        // fakeip + hostname-server entries are ignored (not usable as a fixed-IP DoH resolver).
     }
 
     // A small, structurally-faithful sample with FAKE credentials/IPs/tokens (never the real
