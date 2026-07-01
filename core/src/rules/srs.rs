@@ -825,6 +825,28 @@ mod tests {
         assert!(parse(b"SRS\x03").is_err());
     }
 
+    #[test]
+    fn parse_geoip_exercises_ip_set_end_to_end() {
+        // A real IP-based rule-set (KaringX geoip/malware, v1) drives read_ip_set against real
+        // bytes — the domain fixtures carry no ip_cidr, so without this the IP path is only
+        // synthetically covered (see `range_to_prefixes_v4`).
+        let rs = parse(&fixture("geoip-malware")).expect("parse geoip-malware");
+        assert!(
+            rs.ip_cidr.len() >= 10,
+            "expected many CIDRs from a geoip malware list, got {}",
+            rs.ip_cidr.len()
+        );
+        // Every entry renders as addr/prefix with a sane prefix width.
+        for c in &rs.ip_cidr {
+            let s = c.to_string();
+            assert!(s.contains('/'), "cidr renders with a prefix: {s}");
+            let max = if c.addr.is_ipv4() { 32 } else { 128 };
+            assert!(c.prefix <= max, "prefix {} exceeds {max}", c.prefix);
+        }
+        // A pure geoip set has no domain entries.
+        assert!(rs.domain.is_empty() && rs.domain_suffix.is_empty());
+    }
+
     /// Wrap a plaintext rule body in the `.srs` envelope (magic + version + zlib) for tests.
     fn build_srs(version: u8, plain_body: &[u8]) -> Vec<u8> {
         use std::io::Write as _;
