@@ -33,6 +33,26 @@ pub fn recover_domain(pool: &SharedFakeIp, ip: IpAddr) -> Option<String> {
         .recover(ip, Instant::now())
 }
 
+/// Adapts the shared fake-IP pool to the forwarder's [`crate::proxy::DomainRecoverer`] seam, so the
+/// TCP/UDP forwarders can recover a flow's domain from its fake destination IP at connect time
+/// without depending on the `dns` module directly.
+pub struct FakeIpRecoverer {
+    pool: SharedFakeIp,
+}
+
+impl FakeIpRecoverer {
+    /// A recoverer over `pool` (the same pool the [`DnsServer`] allocates into).
+    pub fn new(pool: SharedFakeIp) -> Self {
+        Self { pool }
+    }
+}
+
+impl crate::proxy::DomainRecoverer for FakeIpRecoverer {
+    fn recover(&self, ip: IpAddr) -> Option<String> {
+        recover_domain(&self.pool, ip)
+    }
+}
+
 /// Answers the app's DNS queries with fake IPs from the shared pool.
 pub struct DnsServer {
     pool: SharedFakeIp,
@@ -189,5 +209,20 @@ mod tests {
         let pool = shared_pool(Duration::from_secs(300), 100);
         let srv = DnsServer::new(pool, 30);
         assert!(srv.handle(&[0, 1, 2]).is_none());
+    }
+
+    #[test]
+    fn recoverer_adapter_recovers_a_served_domain() {
+        use crate::proxy::DomainRecoverer;
+        let pool = shared_pool(Duration::from_secs(300), 100);
+        let srv = DnsServer::new(Arc::clone(&pool), 30);
+        // Serve a query so the pool holds a mapping, then recover it via the forwarder's seam.
+        let resp = srv
+            .handle(&make_query(9, "cdn.example.com", wire::TYPE_A))
+            .unwrap();
+        let ip = first_answer(&resp).expect("an A answer");
+        let recoverer = FakeIpRecoverer::new(Arc::clone(&pool));
+        assert_eq!(recoverer.recover(ip), Some("cdn.example.com".to_string()));
+        assert_eq!(recoverer.recover("8.8.8.8".parse().unwrap()), None);
     }
 }
