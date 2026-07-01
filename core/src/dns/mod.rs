@@ -9,4 +9,5 @@
 //! Pipeline: [`wire`] parses the query / builds the answer → `fakeip` allocates + maps (M4.2) →
 //! `server` ties them together with a per-action resolver (M4.3+).
 
+pub mod fakeip;
 pub mod wire;
