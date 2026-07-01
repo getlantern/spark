@@ -2,7 +2,8 @@
 //!
 //! Rule-sets are cached under `<data_dir>/rulesets/<tag>.srs` (the path the tunnel's loader reads).
 //! Fetching is behind the [`RuleSetFetcher`] seam so the cache/refresh/offline logic is unit-testable
-//! without the network; the production fetcher does an HTTP(S) GET (M6b).
+//! without the network; the production impl ([`KindlingRuleSetFetcher`]) fetches **via kindling**
+//! (domain-fronted, self-bootstrapping) so updates work under censorship.
 //!
 //! Offline-resilience is the invariant: a fetch failure — or a download that doesn't parse — never
 //! disturbs the existing cache, so the tunnel keeps using the last-known-good `.srs`. A first-ever
@@ -27,11 +28,64 @@ pub fn cache_path(data_dir: &Path, tag: &str) -> PathBuf {
 }
 
 /// Fetches a rule-set's raw `.srs` bytes from its URL. Injected so the cache/refresh logic is testable
-/// without the network; the production impl does an HTTP(S) GET (M6b).
+/// without the network; the production impl ([`KindlingRuleSetFetcher`]) fetches via kindling.
 #[async_trait::async_trait]
 pub trait RuleSetFetcher: Send + Sync {
     /// Fetch the `.srs` bytes at `url`.
     async fn fetch(&self, url: &str) -> io::Result<Vec<u8>>;
+}
+
+/// Split an `https://host[/path]` URL into `(host, path)`. Kindling fronts to `host` (443 implied) and
+/// requests `path`. Errors on a non-`https` URL or an empty host.
+#[cfg(feature = "config-fetch")]
+fn split_https_url(url: &str) -> io::Result<(String, String)> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| io::Error::other(format!("ruleset url must be https: {url}")))?;
+    let (host, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    if host.is_empty() {
+        return Err(io::Error::other(format!("ruleset url has no host: {url}")));
+    }
+    Ok((host.to_string(), path.to_string()))
+}
+
+/// The production [`RuleSetFetcher`]: fetch every `.srs` **via kindling**
+/// (`flint_kindling::FrontedBootstrap`) — domain-fronted through CDNs, self-bootstrapping from the
+/// user's own network — so rule-set updates work even where a direct fetch of the `.srs` host is
+/// blocked. There is deliberately **no** direct-dial fallback (kindling is always used). Behind
+/// `config-fetch` (which pulls flint-kindling); the rule-set host must be frontable (served by a CDN
+/// kindling knows — CloudFront / Akamai / Aliyun).
+#[cfg(feature = "config-fetch")]
+pub struct KindlingRuleSetFetcher {
+    seed: u64,
+}
+
+#[cfg(feature = "config-fetch")]
+impl KindlingRuleSetFetcher {
+    /// A fetcher whose CloudFront/Aliyun front-sampling is diversified by `seed` — per-device, from the
+    /// device id (see `config::fetch::seed_from_device_id`), matching the config fetch's sampling.
+    pub fn new(seed: u64) -> Self {
+        Self { seed }
+    }
+}
+
+#[cfg(feature = "config-fetch")]
+#[async_trait::async_trait]
+impl RuleSetFetcher for KindlingRuleSetFetcher {
+    async fn fetch(&self, url: &str) -> io::Result<Vec<u8>> {
+        let (host, path) = split_https_url(url)?;
+        let bootstrap = flint_kindling::FrontedBootstrap::new(host).with_seed(self.seed);
+        let resp = bootstrap
+            .request(&flint_fronted::OneshotRequest::get(path))
+            .await?;
+        match resp.status {
+            200 | 206 => Ok(resp.body),
+            other => Err(io::Error::other(format!("ruleset fetch HTTP {other}"))),
+        }
+    }
 }
 
 /// Fetch one rule-set and, **only if it fetches and parses**, atomically write it to the cache.
@@ -77,8 +131,10 @@ pub async fn refresh_all(
     updated
 }
 
-/// Refresh loop: refresh once up front, then every `interval`, until `stop` is signalled. Mirrors the
-/// config-fetch background loop; spawn it on the tunnel's runtime (M6b wires it into `fd_tunnel`).
+/// Refresh loop: each cycle re-fetches only the rule-sets whose cache is **stale** (missing or older
+/// than `interval`), then waits `interval` — until `stop` is signalled. The staleness gate keeps a
+/// warm cache from being re-downloaded via kindling on every connect. Mirrors the config-fetch
+/// background loop; spawned on the tunnel's runtime by `fd_tunnel`.
 pub async fn run_refresh_loop(
     fetcher: Arc<dyn RuleSetFetcher>,
     data_dir: PathBuf,
@@ -87,11 +143,32 @@ pub async fn run_refresh_loop(
     stop: Arc<tokio::sync::Notify>,
 ) {
     loop {
-        refresh_all(fetcher.as_ref(), &data_dir, &rule_sets).await;
+        let stale: Vec<RuleSetRef> = rule_sets
+            .iter()
+            .filter(|r| is_stale(&cache_path(&data_dir, &r.tag), interval))
+            .cloned()
+            .collect();
+        if !stale.is_empty() {
+            let updated = refresh_all(fetcher.as_ref(), &data_dir, &stale).await;
+            info!(
+                updated,
+                stale = stale.len(),
+                "ruleset: refresh cycle complete"
+            );
+        }
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
             _ = stop.notified() => break,
         }
+    }
+}
+
+/// Whether the cache at `path` is missing or older than `max_age` — i.e. worth re-fetching. A file
+/// whose mtime is unreadable or in the future is treated as stale (fetch to be safe).
+fn is_stale(path: &Path, max_age: Duration) -> bool {
+    match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(mtime) => mtime.elapsed().map(|age| age >= max_age).unwrap_or(true),
+        Err(_) => true,
     }
 }
 
@@ -150,6 +227,44 @@ mod tests {
     fn cache_path_matches_the_loader_layout() {
         let p = cache_path(Path::new("/data"), "banad");
         assert_eq!(p, Path::new("/data/rulesets/banad.srs"));
+    }
+
+    #[test]
+    fn is_stale_flags_missing_and_old_not_fresh() {
+        let dir = tmp("stale");
+        let path = cache_path(&dir, "x");
+        assert!(is_stale(&path, Duration::from_secs(60)), "missing → stale");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"data").unwrap();
+        assert!(
+            !is_stale(&path, Duration::from_secs(3600)),
+            "freshly written → not stale"
+        );
+        assert!(
+            is_stale(&path, Duration::from_secs(0)),
+            "zero max-age → always stale"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(feature = "config-fetch")]
+    #[test]
+    fn split_https_url_parses_host_and_path() {
+        assert_eq!(
+            split_https_url("https://cdn.example.com/rulesets/banad.srs").unwrap(),
+            (
+                "cdn.example.com".to_string(),
+                "/rulesets/banad.srs".to_string()
+            )
+        );
+        // No path → root.
+        assert_eq!(
+            split_https_url("https://cdn.example.com").unwrap(),
+            ("cdn.example.com".to_string(), "/".to_string())
+        );
+        // Non-https and empty-host are rejected.
+        assert!(split_https_url("http://cdn.example.com/x.srs").is_err());
+        assert!(split_https_url("https:///x.srs").is_err());
     }
 
     #[tokio::test]

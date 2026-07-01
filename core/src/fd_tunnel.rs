@@ -380,6 +380,10 @@ const FAKEIP_CAP: usize = 8192;
 const DNS_ANSWER_TTL_SECS: u32 = 30;
 #[cfg(feature = "smart-routing")]
 const DNS_FORWARD_DEPTH: usize = 256;
+/// How long a cached `.srs` is considered fresh before the background loop re-fetches it. Rule-sets
+/// change slowly, so this is long — the refresh is a cache-warm, not a hot path.
+#[cfg(feature = "smart-routing")]
+const RULESET_REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 3600);
 
 /// Set up smart routing and the UDP data path in one place, since both share a single fake-IP pool.
 ///
@@ -606,6 +610,30 @@ pub fn run_fd_lantern_api(
                 _ = loop_stop.notified() => {}
             }
         });
+        // Smart-routing: keep the `.srs` rule-set cache warm in the background, fetched **via kindling**
+        // (censorship-resilient), next to the config refresh. Only stale lists are re-fetched. Rules
+        // apply on the next connect (this warms the on-disk cache; no live router swap in v1, mirroring
+        // the config pool). The per-device seed matches the config fetch's front-sampling.
+        #[cfg(feature = "smart-routing")]
+        if !config.smart_routing.rule_sets.is_empty() {
+            let did = fetch::device_id(&data_dir).unwrap_or_default();
+            let fetcher: Arc<dyn crate::rules::ruleset::RuleSetFetcher> = Arc::new(
+                crate::rules::ruleset::KindlingRuleSetFetcher::new(
+                    crate::config::fetch::seed_from_device_id(&did),
+                ),
+            );
+            info!(
+                rule_sets = config.smart_routing.rule_sets.len(),
+                "lantern-api: starting rule-set refresh (via kindling)"
+            );
+            tokio::spawn(crate::rules::ruleset::run_refresh_loop(
+                fetcher,
+                data_dir.clone(),
+                config.smart_routing.rule_sets.clone(),
+                RULESET_REFRESH_INTERVAL,
+                Arc::clone(&waiter),
+            ));
+        }
         run_tunnel_data_path(fd, mtu, config, Some(data_dir.as_path()), &waiter).await
     });
     deregister(&stop);
