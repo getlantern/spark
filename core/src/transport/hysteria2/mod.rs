@@ -14,7 +14,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::net::SocketProtector;
 use crate::transport::{
-    protected_udp_socket, BoxedPacketSink, BoxedPacketSource, BoxedStream, PacketSink,
+    protected_udp_socket, Address, BoxedPacketSink, BoxedPacketSource, BoxedStream, PacketSink,
     PacketSource, Transport, UdpTransport,
 };
 
@@ -556,18 +556,21 @@ impl Hysteria2Transport {
     }
 }
 
-#[async_trait]
-impl Transport for Hysteria2Transport {
-    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+impl Hysteria2Transport {
+    /// Open a proxied TCP stream to `addr`, a `host:port` string. Hysteria 2's TCPRequest carries the
+    /// address as a string the **server** resolves, so `addr` may be an IP literal *or* a domain (the
+    /// fake-IP proxy path) — the exit resolves the domain (no client-side DNS). Shared by [`dial`] and
+    /// [`dial_addr`].
+    async fn dial_target_str(&self, addr: &str) -> io::Result<BoxedStream> {
         let state = self.connection().await.map_err(io::Error::other)?;
         let conn = state.conn.clone();
         let (mut send, recv) = conn.open_bi().await.map_err(io::Error::other)?;
 
         // Send the TCPRequest. `write_all` here is quinn's inherent `SendStream::write_all`
         // (returning `WriteError`), shadowing tokio's extension method — map its error explicitly.
-        let req = tcp::encode_tcp_request(&target.to_string());
+        let req = tcp::encode_tcp_request(addr);
         send.write_all(&req).await.map_err(io::Error::other)?;
-        tracing::debug!(bytes = req.len(), %target, "hysteria2: TCPRequest sent (TCPResponse read lazily)");
+        tracing::debug!(bytes = req.len(), %addr, "hysteria2: TCPRequest sent (TCPResponse read lazily)");
 
         // Do NOT read the TCPResponse here. sing-box/sing-quic servers write it *lazily* — bundled
         // with the first proxied data, or on handshake-success — so a client that blocks reading it
@@ -576,6 +579,19 @@ impl Transport for Hysteria2Transport {
         // which is why an eager read only failed against sing-box.) `LazyTcpResponse` consumes the
         // status/message/padding on the first read instead — mirroring sing-quic's `clientConn::Read`.
         Ok(Box::new(tokio::io::join(LazyTcpResponse::new(recv), send)))
+    }
+}
+
+#[async_trait]
+impl Transport for Hysteria2Transport {
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        self.dial_target_str(&target.to_string()).await
+    }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        // `Address`'s Display is already `host:port` (domain) / the socket address (IP) — exactly the
+        // TCPRequest string format — so a recovered domain reaches the exit unchanged.
+        self.dial_target_str(&target.to_string()).await
     }
 }
 

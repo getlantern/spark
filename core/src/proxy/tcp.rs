@@ -136,10 +136,11 @@ async fn dial_direct(
     dial_proxy(proxy, hooks, domain, original_dst).await
 }
 
-/// Dial a Proxy flow. A **domain** flow behind a fake IP is resolved client-side (resilient DoH) to a
-/// real IP and dialed through the pool — which works for every transport. If no proxy resolver is
-/// configured (or it fails), fall back to dial-by-name so a domain-capable transport (e.g. the plain
-/// tunnel) can carry the name to the exit. A **real-IP** flow is proxied by IP (today's behavior).
+/// Dial a Proxy flow. For a **domain** flow behind a fake IP we prefer **dial-by-name**: carry the
+/// domain to the exit so it resolves (no client DNS leak, exit-optimal CDN IPs) — the tunnel,
+/// shadowsocks, and hysteria2 all carry a domain target. Only if the transport can't (its `dial_addr`
+/// errors) do we fall back to **client-side** resolution (resilient un-poisoned DoH) + dial-by-IP,
+/// which works for every transport. A **real-IP** flow is proxied by IP (today's behavior).
 async fn dial_proxy(
     proxy: &Arc<dyn Transport>,
     hooks: Option<&RouteHooks>,
@@ -149,6 +150,17 @@ async fn dial_proxy(
     let Some(dom) = domain else {
         return dial_or_log(proxy, original_dst).await; // real-IP flow → proxy by IP
     };
+    // Preferred: hand the domain to the exit. `dial_addr` errors for a transport that can't carry a
+    // name (then we fall through to client-side resolution below).
+    if let Ok(addr) = Address::domain(dom, original_dst.port()) {
+        match proxy.dial_addr(addr).await {
+            Ok(s) => return Some(s),
+            Err(e) => {
+                debug!(domain = %dom, error = %e, "proxy dial-by-name unavailable; resolving client-side")
+            }
+        }
+    }
+    // Fallback: resolve the domain ourselves (un-poisoned DoH, bypassing the TUN) and dial the real IP.
     if let Some(res) = hooks.and_then(|h| h.proxy_resolver.as_deref()) {
         if let Ok(ips) = res.resolve(dom).await {
             if let Some(&ip) = ips.first() {
@@ -156,20 +168,8 @@ async fn dial_proxy(
             }
         }
     }
-    // No client-side resolution: carry the name to the exit (domain-capable transports resolve it).
-    match Address::domain(dom, original_dst.port()) {
-        Ok(addr) => match proxy.dial_addr(addr).await {
-            Ok(s) => Some(s),
-            Err(e) => {
-                warn!(error = %e, "proxy dial-by-name failed");
-                None
-            }
-        },
-        Err(e) => {
-            warn!(error = %e, "invalid domain target for proxy dial");
-            None
-        }
-    }
+    warn!(domain = %dom, "proxy: neither dial-by-name nor client-side resolution succeeded");
+    None
 }
 
 /// Dial `target` through `transport`, logging (destination at debug via the caller) and returning
@@ -451,6 +451,73 @@ mod tests {
     /// A fake destination IP, port matched to `echo` so a resolved dial reaches it.
     fn fake_dst_for(echo: SocketAddr) -> SocketAddr {
         SocketAddr::new("198.18.0.9".parse().unwrap(), echo.port())
+    }
+
+    /// A domain-capable transport (like the tunnel / shadowsocks / hysteria2): its `dial_addr` carries
+    /// a domain to `echo` and records that dial-by-name was used; its plain `dial` errors so a test
+    /// can prove the domain path was taken.
+    struct DomainDialTransport {
+        echo: SocketAddr,
+        dialed_by_name: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Transport for DomainDialTransport {
+        async fn dial(&self, _target: SocketAddr) -> std::io::Result<crate::BoxedStream> {
+            Err(std::io::Error::other("this stub only dials by name"))
+        }
+        async fn dial_addr(
+            &self,
+            target: crate::transport::Address,
+        ) -> std::io::Result<crate::BoxedStream> {
+            if matches!(target, crate::transport::Address::Domain { .. }) {
+                self.dialed_by_name.store(true, Ordering::SeqCst);
+            }
+            Ok(Box::new(tokio::net::TcpStream::connect(self.echo).await?))
+        }
+    }
+
+    /// A recovered domain over a domain-capable proxy transport is dialed **by name** (exit resolves);
+    /// the client-side resolver is left untouched.
+    #[tokio::test]
+    async fn proxy_domain_flow_prefers_dial_by_name() {
+        let echo = spawn_echo().await;
+        let dialed_by_name = Arc::new(AtomicBool::new(false));
+        let resolved = Arc::new(AtomicBool::new(false));
+        let proxy = Arc::new(DomainDialTransport {
+            echo,
+            dialed_by_name: Arc::clone(&dialed_by_name),
+        });
+        let hooks = Arc::new(RouteHooks {
+            router: Arc::new(StubRouter(Decision::Proxy)),
+            recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
+            direct_resolver: None,
+            // Present, but must NOT be consulted when dial-by-name succeeds.
+            proxy_resolver: Some(Arc::new(StubResolver {
+                ip: echo.ip(),
+                resolved: Arc::clone(&resolved),
+            })),
+        });
+        let (mut app, netstack) = one_flow(fake_dst_for(echo));
+        tokio::spawn(run(
+            netstack,
+            proxy as Arc<dyn Transport>,
+            Arc::new(DirectTransport::default()),
+            Some(hooks),
+            Arc::new(Metrics::default()),
+        ));
+        app.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        app.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+        assert!(
+            dialed_by_name.load(Ordering::SeqCst),
+            "the domain was carried to the exit"
+        );
+        assert!(
+            !resolved.load(Ordering::SeqCst),
+            "client-side resolution must be skipped when dial-by-name works"
+        );
     }
 
     /// Direct + a recovered domain: the fake IP is resolved (local resolver) to the real IP and
