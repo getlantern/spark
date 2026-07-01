@@ -170,13 +170,26 @@ pub struct DnsConfig {
 
 /// A DoH resolver endpoint: an IP-addressed HTTPS server (RFC 8484).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DohEndpoint {
     /// The resolver IP literal (flint dials this fixed address).
     pub server: String,
     /// The DoH port (443 unless overridden).
+    #[serde(default = "default_doh_port")]
     pub port: u16,
     /// The DoH path (usually `/dns-query`).
+    #[serde(default = "default_doh_path")]
     pub path: String,
+}
+
+/// The default DoH port when a [`DohEndpoint`] omits it.
+fn default_doh_port() -> u16 {
+    443
+}
+
+/// The default DoH path when a [`DohEndpoint`] omits it.
+fn default_doh_path() -> String {
+    "/dns-query".to_string()
 }
 
 /// Rule-based smart-routing + ad-block config. **Data only** — the (feature-gated) `rules` engine
@@ -1088,6 +1101,27 @@ mod tests {
             let back: W = toml::from_str(&toml).unwrap();
             assert_eq!(w, back, "round-trip changed:\n{toml}");
         }
+    }
+
+    #[test]
+    fn doh_endpoint_defaults_port_and_path() {
+        // Only `server` given: port and path fall back to their defaults.
+        let bare: DohEndpoint = toml::from_str("server = \"9.9.9.9\"").unwrap();
+        assert_eq!(
+            bare,
+            DohEndpoint {
+                server: "9.9.9.9".into(),
+                port: 443,
+                path: "/dns-query".into(),
+            }
+        );
+        // Explicit values override the defaults.
+        let full: DohEndpoint =
+            toml::from_str("server = \"1.1.1.1\"\nport = 8443\npath = \"/resolve\"").unwrap();
+        assert_eq!(full.port, 8443);
+        assert_eq!(full.path, "/resolve");
+        // Unknown fields are rejected (consistent with the other config structs).
+        assert!(toml::from_str::<DohEndpoint>("server = \"9.9.9.9\"\nbogus = true").is_err());
     }
 
     #[test]

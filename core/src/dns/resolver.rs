@@ -77,24 +77,42 @@ fn endpoint_to_resolver(ep: &DohEndpoint) -> Option<flint_dns::Resolver> {
         target: std::net::SocketAddr::new(ip, ep.port),
         sni: sni.to_string(),
         host: sni.to_string(),
-        path: ep.path.clone(),
+        path: normalize_doh_path(&ep.path),
     })
 }
 
+/// Ensure a DoH request path is absolute — flint sends it verbatim as the HTTP request target, so a
+/// config path missing its leading `/` (e.g. `dns-query`) would produce an invalid request line.
+#[cfg(feature = "bootstrap-dns")]
+fn normalize_doh_path(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
 /// The DoH hostname (cert SAN + `:authority`) for a well-known public resolver IP, or `None` if
-/// unrecognized — covers Quad9 (what Lantern configs use) plus the common alternates.
+/// unrecognized — covers Quad9 (what Lantern configs use) plus the common alternates, for both IPv4
+/// and IPv6 (the config may carry a v6 literal, which `parse_dns` also captures). IPv6 is matched on
+/// each provider's published DoH prefix so the two families stay in lockstep.
 #[cfg(feature = "bootstrap-dns")]
 fn known_resolver_sni(ip: IpAddr) -> Option<&'static str> {
-    let v4 = match ip {
-        IpAddr::V4(a) => a.octets(),
-        IpAddr::V6(_) => return None,
-    };
-    Some(match v4 {
-        [9, 9, 9, _] | [149, 112, 112, _] => "dns.quad9.net",
-        [1, 1, 1, _] | [1, 0, 0, _] => "cloudflare-dns.com",
-        [8, 8, 8, 8] | [8, 8, 4, 4] => "dns.google",
-        [223, 5, 5, 5] | [223, 6, 6, 6] => "dns.alidns.com",
-        _ => return None,
+    Some(match ip {
+        IpAddr::V4(a) => match a.octets() {
+            [9, 9, 9, _] | [149, 112, 112, _] => "dns.quad9.net",
+            [1, 1, 1, _] | [1, 0, 0, _] => "cloudflare-dns.com",
+            [8, 8, 8, 8] | [8, 8, 4, 4] => "dns.google",
+            [223, 5, 5, 5] | [223, 6, 6, 6] => "dns.alidns.com",
+            _ => return None,
+        },
+        IpAddr::V6(a) => match a.segments() {
+            [0x2620, 0x00fe, ..] => "dns.quad9.net", // Quad9 2620:fe::/32
+            [0x2606, 0x4700, 0x4700, ..] => "cloudflare-dns.com", // Cloudflare 2606:4700:4700::/48
+            [0x2001, 0x4860, 0x4860, ..] => "dns.google", // Google 2001:4860:4860::/48
+            [0x2400, 0x3200, ..] => "dns.alidns.com", // AliDNS 2400:3200::/32
+            _ => return None,
+        },
     })
 }
 
@@ -167,6 +185,44 @@ mod tests {
             assert!(endpoint_to_resolver(&ep("203.0.113.5")).is_none());
             // A hostname server (not an IP) is also skipped.
             assert!(endpoint_to_resolver(&ep("dns.quad9.net")).is_none());
+        }
+
+        #[test]
+        fn maps_known_resolver_ipv6_to_their_doh_hostname() {
+            // parse_dns captures IPv6 https servers too, so the SNI mapping must handle them.
+            assert_eq!(
+                endpoint_to_resolver(&ep("2620:fe::fe")).unwrap().host,
+                "dns.quad9.net"
+            );
+            assert_eq!(
+                endpoint_to_resolver(&ep("2606:4700:4700::1111"))
+                    .unwrap()
+                    .host,
+                "cloudflare-dns.com"
+            );
+            assert_eq!(
+                endpoint_to_resolver(&ep("2001:4860:4860::8888"))
+                    .unwrap()
+                    .host,
+                "dns.google"
+            );
+            assert_eq!(
+                endpoint_to_resolver(&ep("2400:3200::1")).unwrap().host,
+                "dns.alidns.com"
+            );
+            // An unknown IPv6 literal is skipped like an unknown v4 one.
+            assert!(endpoint_to_resolver(&ep("2001:db8::1")).is_none());
+        }
+
+        #[test]
+        fn a_config_path_without_a_leading_slash_is_made_absolute() {
+            let mut e = ep("9.9.9.9");
+            e.path = "dns-query".into(); // no leading slash
+            assert_eq!(endpoint_to_resolver(&e).unwrap().path, "/dns-query");
+            // An already-absolute path is left untouched.
+            let mut e = ep("9.9.9.9");
+            e.path = "/resolve".into();
+            assert_eq!(endpoint_to_resolver(&e).unwrap().path, "/resolve");
         }
 
         #[test]
