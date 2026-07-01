@@ -65,6 +65,58 @@ pub(crate) fn decode_envelope(bytes: &[u8]) -> Result<Envelope, SrsError> {
     Ok(Envelope { version, body })
 }
 
+/// A forward cursor over the inflated rule body. Every read is bounds-checked and returns
+/// [`SrsError::Truncated`] on a short buffer — no panics, no `unwrap`.
+struct Reader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    /// Read one byte.
+    fn u8(&mut self) -> Result<u8, SrsError> {
+        let b = *self.buf.get(self.pos).ok_or(SrsError::Truncated)?;
+        self.pos += 1;
+        Ok(b)
+    }
+
+    /// Read exactly `n` bytes, borrowing from the underlying buffer.
+    fn bytes(&mut self, n: usize) -> Result<&'a [u8], SrsError> {
+        let end = self.pos.checked_add(n).ok_or(SrsError::Truncated)?;
+        let s = self.buf.get(self.pos..end).ok_or(SrsError::Truncated)?;
+        self.pos = end;
+        Ok(s)
+    }
+
+    /// Read a LEB128 unsigned varint (matches Go's `encoding/binary.Uvarint`, ≤10 bytes for a u64).
+    fn uvarint(&mut self) -> Result<u64, SrsError> {
+        let mut result: u64 = 0;
+        for i in 0..10 {
+            let b = self.u8()?;
+            if i == 9 && b > 1 {
+                return Err(SrsError::Malformed("uvarint overflows u64"));
+            }
+            result |= u64::from(b & 0x7f) << (7 * i);
+            if b & 0x80 == 0 {
+                return Ok(result);
+            }
+        }
+        Err(SrsError::Malformed("uvarint too long"))
+    }
+
+    /// Read a `uvarint`-length-prefixed UTF-8 string.
+    fn string(&mut self) -> Result<&'a str, SrsError> {
+        let len =
+            usize::try_from(self.uvarint()?).map_err(|_| SrsError::Malformed("string len"))?;
+        let s = self.bytes(len)?;
+        std::str::from_utf8(s).map_err(|_| SrsError::Malformed("non-UTF-8 string"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +150,28 @@ mod tests {
         assert!(matches!(
             decode_envelope(b"SRS\x09").unwrap_err(),
             SrsError::UnsupportedVersion(9)
+        ));
+    }
+
+    #[test]
+    fn reader_uvarint_string_and_exhaustion() {
+        let mut r = Reader::new(&[0xbb, 0x01, 0x03, b'a', b'b', b'c']);
+        assert_eq!(r.uvarint().unwrap(), 187); // 0xbb,0x01 = 59 + (1<<7)
+        assert_eq!(r.string().unwrap(), "abc"); // len 3 + "abc"
+        assert!(matches!(r.uvarint().unwrap_err(), SrsError::Truncated)); // exhausted
+    }
+
+    #[test]
+    fn reader_rejects_short_read_and_bad_utf8() {
+        // length prefix says 2 but only 1 byte follows → Truncated
+        assert!(matches!(
+            Reader::new(&[0x02, b'x']).string().unwrap_err(),
+            SrsError::Truncated
+        ));
+        // valid length, invalid UTF-8 → Malformed
+        assert!(matches!(
+            Reader::new(&[0x01, 0xff]).string().unwrap_err(),
+            SrsError::Malformed(_)
         ));
     }
 }
