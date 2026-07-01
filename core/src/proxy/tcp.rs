@@ -755,6 +755,159 @@ mod tests {
         );
     }
 
+    /// End-to-end (sans TUN): compose the **real** fake-IP DNS server + a **real** `.srs`-built
+    /// Router + the forwarder, and drive a flow the way the tunnel does — DNS query → fake IP →
+    /// connect to it → connect-time domain recovery → routing decision from the real rule-sets → dial
+    /// action. The per-layer tests each cover a piece; this proves they compose (in particular, that
+    /// the DNS-assigned fake IP recovers to the same domain the Router matches against the real lists).
+    #[cfg(feature = "smart-routing")]
+    #[tokio::test]
+    async fn e2e_fake_ip_dns_plus_real_rules_route_correctly() {
+        use crate::dns::server::{shared_pool, DnsServer, FakeIpRecoverer, SharedFakeIp};
+        use crate::rules::matcher::Matcher;
+        use crate::rules::router::Router;
+        use crate::rules::{srs, Action};
+        use std::time::Duration;
+
+        // Build an A-record query for `name`.
+        fn a_query(name: &str) -> Vec<u8> {
+            let mut b = vec![0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+            for label in name.split('.') {
+                b.push(label.len() as u8);
+                b.extend_from_slice(label.as_bytes());
+            }
+            b.push(0);
+            b.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
+            b.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+            b
+        }
+        // Decode the single A answer IP from a `build_response` reply (answer name is a pointer).
+        fn answer_ip(resp: &[u8]) -> IpAddr {
+            let mut i = 12;
+            while resp[i] != 0 {
+                i += 1 + resp[i] as usize; // walk the question name
+            }
+            i += 1 + 4; // root label + qtype + qclass
+            i += 2 + 2 + 2 + 4 + 2; // answer: name ptr + type + class + ttl + rdlength
+            IpAddr::from(<[u8; 4]>::try_from(&resp[i..i + 4]).unwrap())
+        }
+        fn fixture(name: &str) -> srs::RuleSet {
+            srs::parse(&std::fs::read(format!("tests/fixtures/srs/{name}.srs")).unwrap()).unwrap()
+        }
+        // A resolver that maps any domain to `ip` (stands in for the real DoH — the network part isn't
+        // what this test exercises).
+        fn to(ip: IpAddr) -> Arc<dyn FlowResolver> {
+            Arc::new(StubResolver {
+                ip,
+                resolved: Arc::new(AtomicBool::new(false)),
+            })
+        }
+
+        // Real router from real rule-sets: ad/malware lists → Reject, the common list → Direct.
+        let router: Arc<dyn FlowRouter> = Arc::new(Router::new(Matcher::build(vec![
+            (Action::Reject, fixture("banad_v1")),
+            (Action::Reject, fixture("category-ads_v2")),
+            (Action::Reject, fixture("geoip-malware")),
+            (Action::Direct, fixture("common_v3")),
+        ])));
+        let echo = spawn_echo().await;
+        let pool = shared_pool(Duration::from_secs(300), 1000);
+        let dns = DnsServer::new(Arc::clone(&pool), 30);
+
+        // Resolve `domain` to its fake IP through the real DNS server, then run one flow to it through
+        // the forwarder with the given transports. Returns the app end of the flow.
+        async fn drive(
+            domain: &str,
+            proxy_t: Arc<dyn Transport>,
+            direct_t: Arc<dyn Transport>,
+            echo: SocketAddr,
+            pool: SharedFakeIp,
+            dns: &DnsServer,
+            router: Arc<dyn FlowRouter>,
+        ) -> tokio::io::DuplexStream {
+            let fake = answer_ip(&dns.handle(&a_query(domain)).expect("dns response"));
+            let hooks = Arc::new(RouteHooks {
+                router,
+                recoverer: Some(Arc::new(FakeIpRecoverer::new(pool))),
+                direct_resolver: Some(to(echo.ip())),
+                proxy_resolver: Some(to(echo.ip())),
+            });
+            // Flow to the fake IP on the echo's port, so a resolved (echo.ip, port) dial reaches it.
+            let (app, netstack) = one_flow(SocketAddr::new(fake, echo.port()));
+            tokio::spawn(run(
+                netstack,
+                proxy_t,
+                direct_t,
+                Some(hooks),
+                Arc::new(Metrics::default()),
+            ));
+            app
+        }
+
+        // 1. Ad domain (banad_v1) → Reject: flow dropped, neither transport dialed.
+        let proxy = Arc::new(RecordingTransport::default());
+        let direct = Arc::new(RecordingTransport::default());
+        let mut app = drive(
+            "doubleclick.net",
+            proxy.clone() as Arc<dyn Transport>,
+            direct.clone() as Arc<dyn Transport>,
+            echo,
+            Arc::clone(&pool),
+            &dns,
+            Arc::clone(&router),
+        )
+        .await;
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            app.read(&mut buf).await.unwrap(),
+            0,
+            "ad domain is rejected (EOF)"
+        );
+        assert!(!proxy.dialed.load(Ordering::SeqCst) && !direct.dialed.load(Ordering::SeqCst));
+
+        // 2. smart_routing common domain (common_v3) → Direct: dialed via the DIRECT transport.
+        let proxy = Arc::new(RecordingTransport::default());
+        let mut app = drive(
+            "app.discord.com",
+            proxy.clone() as Arc<dyn Transport>,
+            Arc::new(DirectTransport::default()),
+            echo,
+            Arc::clone(&pool),
+            &dns,
+            Arc::clone(&router),
+        )
+        .await;
+        app.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        app.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping", "direct domain reaches its upstream");
+        assert!(
+            !proxy.dialed.load(Ordering::SeqCst),
+            "not via the proxy transport"
+        );
+
+        // 3. Unlisted domain → Proxy: dialed via the PROXY transport, not direct.
+        let direct = Arc::new(RecordingTransport::default());
+        let mut app = drive(
+            "example-unlisted-xyz.test",
+            Arc::new(DirectTransport::default()),
+            direct.clone() as Arc<dyn Transport>,
+            echo,
+            Arc::clone(&pool),
+            &dns,
+            Arc::clone(&router),
+        )
+        .await;
+        app.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        app.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping", "unlisted domain is proxied to its upstream");
+        assert!(
+            !direct.dialed.load(Ordering::SeqCst),
+            "not via the direct transport"
+        );
+    }
+
     /// Minimal in-test tunnel relay: read the address header, dial the named target,
     /// forward bytes read past the header, then splice. (Mirrors the M3b integration
     /// relay; kept here so the proxy crate's tests are self-contained.)
