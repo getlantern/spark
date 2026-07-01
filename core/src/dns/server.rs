@@ -87,6 +87,11 @@ impl DnsServer {
             // Non-A/AAAA (HTTPS/SVCB, TXT, PTR, …): NODATA so the client falls back to A/AAAA.
             _ => return Some(wire::build_response(&query, &[], self.answer_ttl_secs)),
         };
+        // An empty QNAME (the DNS root) has no address and can't be recovered into a dialable domain
+        // (`Address::domain("")` is rejected), so answer NODATA rather than store an unusable mapping.
+        if query.name.is_empty() {
+            return Some(wire::build_response(&query, &[], self.answer_ttl_secs));
+        }
         let ip = self
             .pool
             .lock()
@@ -209,6 +214,27 @@ mod tests {
         let pool = shared_pool(Duration::from_secs(300), 100);
         let srv = DnsServer::new(pool, 30);
         assert!(srv.handle(&[0, 1, 2]).is_none());
+    }
+
+    #[test]
+    fn root_name_query_is_nodata_and_allocates_nothing() {
+        let pool = shared_pool(Duration::from_secs(300), 100);
+        let srv = DnsServer::new(Arc::clone(&pool), 30);
+        // An A query for the root: header + a single 0x00 (root label) + qtype A + qclass IN.
+        let mut q = vec![0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0x00];
+        q.extend_from_slice(&wire::TYPE_A.to_be_bytes());
+        q.extend_from_slice(&wire::CLASS_IN.to_be_bytes());
+        let resp = srv.handle(&q).unwrap();
+        assert_eq!(
+            u16::from_be_bytes([resp[6], resp[7]]),
+            0,
+            "NODATA for the root name"
+        );
+        assert_eq!(
+            pool.lock().unwrap().len(),
+            0,
+            "no mapping stored for the root name"
+        );
     }
 
     #[test]

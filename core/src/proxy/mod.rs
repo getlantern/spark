@@ -51,7 +51,7 @@ pub trait FlowResolver: Send + Sync {
 /// The smart-routing hooks the forwarders consult per flow: recover the domain behind a fake IP,
 /// decide the action, and resolve a recovered domain to a real IP. Bundled so the forwarder takes one
 /// optional handle; `None` (feature off / no rules) means proxy-everything. Any individual hook may be
-/// `None` and the forwarder degrades safely (see `dns::planner`).
+/// `None` and the forwarder degrades safely (see the per-action dial logic in [`crate::proxy::tcp`]).
 pub struct RouteHooks {
     /// Decides Proxy/Direct/Reject per flow.
     pub router: Arc<dyn FlowRouter>,
