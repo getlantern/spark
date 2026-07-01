@@ -41,6 +41,10 @@ hysteria2 = ["spark-core/hysteria2"]
 # Domain-fronted meek polling transport — another outbound a fetched pool may carry. Pulls
 # flint-fronted, which `config-fetch` already pulls, so this only adds the meek module code itself.
 fronted-meek = ["spark-core/fronted-meek"]
+# smart-routing + ad-block: fake-IP DNS, per-flow Direct/Proxy/Reject from the config's
+# smart_routing/ad_block/route sections, and kindling-fetched .srs rule-sets. Inert unless the fetched
+# config carries rules; the rule-set fetch + lantern-api path ride `config-fetch` (already on).
+smart-routing = ["spark-core/smart-routing"]
 
 [dependencies]
 spark-core = { path = "../../core" }
