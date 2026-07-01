@@ -21,10 +21,36 @@ use crate::config::RuleSetRef;
 /// Subdirectory of the platform data dir where cached `.srs` files live.
 const RULESETS_SUBDIR: &str = "rulesets";
 
-/// The on-disk cache path for a rule-set `tag`: `<data_dir>/rulesets/<tag>.srs`. Must match the
-/// tunnel's loader (`fd_tunnel::setup_routing_and_udp`).
+/// The on-disk cache path for a rule-set `tag`: `<data_dir>/rulesets/<sanitized-tag>.srs`. The single
+/// place tags become filenames (both the loader and the fetcher call it), so the sanitization can't be
+/// bypassed.
 pub fn cache_path(data_dir: &Path, tag: &str) -> PathBuf {
-    data_dir.join(RULESETS_SUBDIR).join(format!("{tag}.srs"))
+    data_dir
+        .join(RULESETS_SUBDIR)
+        .join(format!("{}.srs", sanitized_tag(tag)))
+}
+
+/// Reduce a (fetched, untrusted) rule-set tag to a filename-safe token so it can't escape the
+/// rulesets dir via path traversal. Keeps `[A-Za-z0-9._-]`, maps anything else (incl. `/` and `\`) to
+/// `_`, then neutralizes any residual `..`. Never empty.
+fn sanitized_tag(tag: &str) -> String {
+    let mut s: String = tag
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while s.contains("..") {
+        s = s.replace("..", "_");
+    }
+    if s.is_empty() {
+        s.push('_');
+    }
+    s
 }
 
 /// Fetches a rule-set's raw `.srs` bytes from its URL. Injected so the cache/refresh logic is testable
@@ -173,14 +199,19 @@ fn is_stale(path: &Path, max_age: Duration) -> bool {
 }
 
 /// Atomically write `bytes` to `path`: create the parent dir, write a temp file, then rename over the
-/// target — so a reader never sees a half-written `.srs`.
+/// target — so a reader never sees a half-written `.srs`. The temp name is unique (pid-suffixed) so
+/// concurrent/interrupted writers can't collide. On Unix the rename atomically replaces; on Windows
+/// rename fails if the destination exists, so fall back to remove-then-rename there.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("srs.tmp");
+    let tmp = path.with_extension(format!("srs.tmp.{}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(path);
+        std::fs::rename(&tmp, path)?;
+    }
     Ok(())
 }
 
@@ -227,6 +258,23 @@ mod tests {
     fn cache_path_matches_the_loader_layout() {
         let p = cache_path(Path::new("/data"), "banad");
         assert_eq!(p, Path::new("/data/rulesets/banad.srs"));
+    }
+
+    #[test]
+    fn cache_path_sanitizes_traversal_tags() {
+        let dir = Path::new("/data");
+        // A malicious fetched tag can't escape the rulesets dir.
+        for tag in ["../../etc/passwd", "..", "a/b\\c", "/abs"] {
+            let p = cache_path(dir, tag);
+            assert!(
+                p.starts_with("/data/rulesets"),
+                "stays under rulesets: {p:?}"
+            );
+            assert!(
+                !p.to_string_lossy().contains(".."),
+                "no `..` survives for {tag:?}: {p:?}"
+            );
+        }
     }
 
     #[test]

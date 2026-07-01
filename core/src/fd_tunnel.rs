@@ -407,10 +407,11 @@ fn setup_routing_and_udp(
     let (hooks, dns_server) = if sr.rule_sets.is_empty() && sr.inline_ip_rules.is_empty() {
         (None, None) // no rules — no fake-IP DNS; proxy everything (today's path)
     } else {
-        let rulesets_dir = data_dir.map(|d| d.join("rulesets"));
         let router = crate::rules::router::Router::build(sr, |r| {
-            let dir = rulesets_dir.as_ref()?;
-            std::fs::read(dir.join(format!("{}.srs", r.tag))).ok()
+            // Go through the shared, tag-sanitizing cache_path so a fetched tag can't traverse out of
+            // the rulesets dir (path-traversal hardening — matches the fetcher's write path).
+            let dir = data_dir?;
+            std::fs::read(crate::rules::ruleset::cache_path(dir, &r.tag)).ok()
         });
         // One pool: the DNS server allocates on query, the recoverer recovers on connect.
         let pool = dns::server::shared_pool(FAKEIP_TTL, FAKEIP_CAP);

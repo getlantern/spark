@@ -886,8 +886,9 @@ pub trait Transport: Send + Sync {
     ///
     /// The default handles only [`Address::Ip`] (delegating to [`dial`](Self::dial)) and rejects a
     /// domain. Transports whose wire protocol carries a domain to the exit (so the exit resolves —
-    /// no client DNS) override this; today that is the plain tunnel and the selecting pool over it.
-    /// For transports that can't, the forwarder falls back to client-side resolution + dial-by-IP.
+    /// no client DNS) override this: the plain tunnel, shadowsocks, and hysteria2 (and the selecting
+    /// pool, which delegates to whichever members it holds). For transports that can't, the forwarder
+    /// falls back to client-side resolution + dial-by-IP.
     async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
         match target {
             Address::Ip(sa) => self.dial(sa).await,
