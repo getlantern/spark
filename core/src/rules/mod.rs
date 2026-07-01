@@ -5,9 +5,11 @@
 //! at the TUN). This module is the *policy* layer: given a destination — an IP, and (via the
 //! fake-IP DNS layer) a domain — it returns an [`Action`].
 //!
-//! Pipeline: [`srs`] parses `.srs` rule-sets → (M2) a compact matcher → (M3) a per-flow router.
+//! Pipeline: [`srs`] parses `.srs` rule-sets → [`matcher`] builds a compact matcher → [`router`]
+//! makes the per-flow decision.
 
 pub mod matcher;
+pub mod router;
 pub mod srs;
 
 /// The routing decision for a flow.
