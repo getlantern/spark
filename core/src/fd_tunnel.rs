@@ -205,6 +205,15 @@ pub fn run_fd_dispatch(
     // A null/absent config string is "no explicit config"; trim so " " / "\n" count as empty too.
     let cfg_str = config.map(str::trim).unwrap_or("");
 
+    // On mobile, boring's default cert store finds no CA roots (Android/iOS keep them outside
+    // OpenSSL's paths), so flint's fronted TLS — the rule-set (`.srs`) fetch and the fronted leg of
+    // config-fetch — can't verify the CDN cert. Install the bundled roots via `SSL_CERT_FILE` before
+    // any fetch runs. No-op off-mobile; needs a writable data dir.
+    #[cfg(feature = "config-fetch")]
+    if let Some(dir) = data_dir {
+        crate::ca_roots::install_bundled_roots(dir);
+    }
+
     // Daemon-owned self-fetch: the *absence* of an explicit config — or the explicit `lantern-api`
     // sentinel — means "fetch the pool from the Lantern config-new API myself, run from it, and
     // refresh in the background". Only on the `config-fetch` slice (which pulls the BoringSSL build
