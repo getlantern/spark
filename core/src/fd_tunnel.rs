@@ -25,6 +25,8 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use crate::config::{Config, StackKind};
+#[cfg(feature = "smart-routing")]
+use crate::dns;
 use crate::netstack;
 use crate::proxy;
 use crate::transport;
@@ -347,20 +349,13 @@ async fn run_tunnel_data_path(
     };
     let direct_transport: Arc<dyn transport::Transport> =
         Arc::new(transport::DirectTransport::new(protector));
-    // Smart-routing (feature-gated): the per-flow route hooks over the config's rule-sets, loading
-    // `.srs` from `<data_dir>/rulesets/`. `None` (feature off, or no rules configured) proxies
-    // everything. The fake-IP recoverer + per-action resolvers are wired in M4.6c.
-    let hooks = build_route_hooks(&config, data_dir);
     let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
     let idle = Duration::from_secs(config.udp.idle_timeout_secs);
-    if let Some((udp_inbound, udp_reply)) = udp_surface {
-        tokio::spawn(proxy::udp::run_udp(
-            udp_inbound,
-            udp_reply,
-            udp_transport,
-            idle,
-        ));
-    }
+    // Build the smart-routing hooks and wire the UDP path together (they share one fake-IP pool):
+    // intercept DNS (`:53`) to the fake-IP server when smart-routing is active, otherwise run the
+    // plain UDP proxy. Returns the per-flow route hooks for the TCP forwarder (`None` = proxy
+    // everything, today's behavior).
+    let hooks = setup_routing_and_udp(&config, data_dir, udp_surface, udp_transport, idle);
     info!(mtu, "spark tunnel up (fd mode)");
     // The fd is adopted and the netstack is about to accept — the data path is live. The platform
     // shim's `wait_ready` gates "connected" on this (see [`Readiness`]).
@@ -375,47 +370,142 @@ async fn run_tunnel_data_path(
     Ok(())
 }
 
-/// Build the per-flow [`proxy::RouteHooks`] from the config's smart-routing rules, or `None` to keep
-/// the proxy-everything path. Feature-gated: with `smart-routing` off this is a no-op. Rule-set
-/// `.srs` bytes load from `<data_dir>/rulesets/<tag>.srs`; a rule-set missing from the cache is
-/// skipped (the tunnel still runs, proxying the lists it couldn't load — see [`crate::rules::router`]).
-/// Inline IP rules need no `.srs`, so they apply even with `data_dir == None`. The fake-IP domain
-/// recoverer and per-action resolvers are wired here in M4.6c; until then they are `None` (routing on
-/// IP/CIDR only, as in M3).
+/// Fake-IP DNS tuning: how long a `fakeip↔domain` mapping lives in the pool, the live-mapping LRU
+/// cap, the TTL stamped into DNS answers, and the DNS-interceptor forward channel depth.
 #[cfg(feature = "smart-routing")]
-fn build_route_hooks(
+const FAKEIP_TTL: Duration = Duration::from_secs(600);
+#[cfg(feature = "smart-routing")]
+const FAKEIP_CAP: usize = 8192;
+#[cfg(feature = "smart-routing")]
+const DNS_ANSWER_TTL_SECS: u32 = 30;
+#[cfg(feature = "smart-routing")]
+const DNS_FORWARD_DEPTH: usize = 256;
+
+/// Set up smart routing and the UDP data path in one place, since both share a single fake-IP pool.
+///
+/// With `smart-routing` on and rules configured: build the per-flow router, a shared fake-IP pool, a
+/// [`dns::server::DnsServer`] over it, and the [`proxy::RouteHooks`] (recoverer + DoH resolvers); then
+/// wire UDP so DNS (`:53`) is answered locally with fake IPs and everything else is proxied. With no
+/// rules (or the feature off) it just spawns the plain UDP proxy. Returns the hooks for the TCP
+/// forwarder (`None` = proxy everything). Rule-set `.srs` bytes load from `<data_dir>/rulesets/`; a
+/// missing list is skipped (the tunnel still runs). Inline IP rules need no `.srs` and apply even with
+/// `data_dir == None`.
+#[cfg(feature = "smart-routing")]
+fn setup_routing_and_udp(
     config: &Config,
     data_dir: Option<&std::path::Path>,
+    udp_surface: Option<netstack::UdpSurface>,
+    udp_transport: Arc<dyn transport::UdpTransport>,
+    idle: Duration,
 ) -> Option<Arc<proxy::RouteHooks>> {
     let sr = &config.smart_routing;
-    if sr.rule_sets.is_empty() && sr.inline_ip_rules.is_empty() {
-        return None; // nothing to route on — keep the plain proxy-everything path
+    let (hooks, dns_server) = if sr.rule_sets.is_empty() && sr.inline_ip_rules.is_empty() {
+        (None, None) // no rules — no fake-IP DNS; proxy everything (today's path)
+    } else {
+        let rulesets_dir = data_dir.map(|d| d.join("rulesets"));
+        let router = crate::rules::router::Router::build(sr, |r| {
+            let dir = rulesets_dir.as_ref()?;
+            std::fs::read(dir.join(format!("{}.srs", r.tag))).ok()
+        });
+        // One pool: the DNS server allocates on query, the recoverer recovers on connect.
+        let pool = dns::server::shared_pool(FAKEIP_TTL, FAKEIP_CAP);
+        // v1: one un-poisoned DoH resolver serves both the Direct (local) and Proxy (resilient) seams.
+        let resolver = dns::resolver::local_resolver();
+        let hooks = Arc::new(proxy::RouteHooks {
+            router: Arc::new(router),
+            recoverer: Some(Arc::new(dns::server::FakeIpRecoverer::new(pool.clone()))),
+            direct_resolver: resolver.clone(),
+            proxy_resolver: resolver,
+        });
+        let dns_server = Arc::new(dns::server::DnsServer::new(pool, DNS_ANSWER_TTL_SECS));
+        info!(
+            rule_sets = sr.rule_sets.len(),
+            inline_ip_rules = sr.inline_ip_rules.len(),
+            "smart-routing: fake-IP DNS + per-flow route hooks active"
+        );
+        (Some(hooks), Some(dns_server))
+    };
+
+    if let Some((udp_inbound, udp_reply)) = udp_surface {
+        match dns_server {
+            // Interpose the DNS interceptor between the netstack and the UDP proxy: `:53` → fake-IP
+            // server (replies on `udp_reply`), everything else → `run_udp` via a fresh channel.
+            Some(server) => {
+                let (forward_tx, forward_rx) = tokio::sync::mpsc::channel(DNS_FORWARD_DEPTH);
+                tokio::spawn(dns_intercept(
+                    udp_inbound,
+                    forward_tx,
+                    udp_reply.clone(),
+                    server,
+                ));
+                tokio::spawn(proxy::udp::run_udp(
+                    forward_rx,
+                    udp_reply,
+                    udp_transport,
+                    idle,
+                ));
+            }
+            None => {
+                tokio::spawn(proxy::udp::run_udp(
+                    udp_inbound,
+                    udp_reply,
+                    udp_transport,
+                    idle,
+                ));
+            }
+        }
     }
-    let rulesets_dir = data_dir.map(|d| d.join("rulesets"));
-    let router = crate::rules::router::Router::build(sr, |r| {
-        let dir = rulesets_dir.as_ref()?;
-        std::fs::read(dir.join(format!("{}.srs", r.tag))).ok()
-    });
-    info!(
-        rule_sets = sr.rule_sets.len(),
-        inline_ip_rules = sr.inline_ip_rules.len(),
-        "smart-routing: per-flow route hooks active"
-    );
-    Some(Arc::new(proxy::RouteHooks {
-        router: Arc::new(router),
-        recoverer: None,       // fake-IP recoverer (M4.6c)
-        direct_resolver: None, // dns::resolver::local_resolver (M4.6c)
-        proxy_resolver: None,  // resilient resolver (M4.6c)
-    }))
+    hooks
 }
 
-/// No-op stand-in when the `smart-routing` feature is off: always proxy everything.
+/// Without `smart-routing`: no route hooks, and the plain UDP proxy (today's behavior).
 #[cfg(not(feature = "smart-routing"))]
-fn build_route_hooks(
+fn setup_routing_and_udp(
     _config: &Config,
     _data_dir: Option<&std::path::Path>,
+    udp_surface: Option<netstack::UdpSurface>,
+    udp_transport: Arc<dyn transport::UdpTransport>,
+    idle: Duration,
 ) -> Option<Arc<proxy::RouteHooks>> {
+    if let Some((udp_inbound, udp_reply)) = udp_surface {
+        tokio::spawn(proxy::udp::run_udp(
+            udp_inbound,
+            udp_reply,
+            udp_transport,
+            idle,
+        ));
+    }
     None
+}
+
+/// Peel DNS (any `:53` UDP) off the netstack's inbound stream and answer it locally with fake IPs
+/// (replying on `reply`); forward every other datagram to the UDP proxy via `forward`. An unparseable
+/// query is dropped (no reply). Ends when either channel closes (teardown).
+#[cfg(feature = "smart-routing")]
+async fn dns_intercept(
+    mut inbound: tokio::sync::mpsc::Receiver<netstack::UdpDatagram>,
+    forward: tokio::sync::mpsc::Sender<netstack::UdpDatagram>,
+    reply: tokio::sync::mpsc::Sender<netstack::UdpDatagram>,
+    server: Arc<dns::server::DnsServer>,
+) {
+    while let Some(dgram) = inbound.recv().await {
+        if dgram.original_dst.port() == 53 {
+            if let Some(payload) = server.handle(&dgram.payload) {
+                // The netstack writes the reply as src=original_dst, dst=client_src, so the app sees
+                // the answer coming from the DNS server it queried — keep both fields as received.
+                let reply_dgram = netstack::UdpDatagram {
+                    client_src: dgram.client_src,
+                    original_dst: dgram.original_dst,
+                    payload,
+                };
+                if reply.send(reply_dgram).await.is_err() {
+                    break; // netstack reply channel closed (teardown)
+                }
+            }
+        } else if forward.send(dgram).await.is_err() {
+            break; // UDP proxy gone (teardown)
+        }
+    }
 }
 
 /// `lantern-api` self-fetch entry (shared by every platform's [`run_fd_dispatch`]): fetch the boot
@@ -721,5 +811,66 @@ mod tests {
 
         deregister(&a);
         deregister(&b);
+    }
+
+    /// The DNS interceptor answers `:53` locally with a fake IP (allocating a pool mapping) and
+    /// forwards non-DNS datagrams to the UDP proxy untouched.
+    #[cfg(feature = "smart-routing")]
+    #[tokio::test]
+    async fn dns_intercept_answers_53_and_forwards_the_rest() {
+        use crate::netstack::UdpDatagram;
+
+        // A minimal A-query for `name` (one question, no compression).
+        fn a_query(name: &str) -> Vec<u8> {
+            let mut b = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+            for label in name.split('.') {
+                b.push(label.len() as u8);
+                b.extend_from_slice(label.as_bytes());
+            }
+            b.push(0);
+            b.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
+            b.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+            b
+        }
+
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel(8);
+        let (fwd_tx, mut fwd_rx) = tokio::sync::mpsc::channel(8);
+        let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(8);
+        let pool = dns::server::shared_pool(Duration::from_secs(300), 100);
+        let server = Arc::new(dns::server::DnsServer::new(Arc::clone(&pool), 30));
+        tokio::spawn(dns_intercept(in_rx, fwd_tx, reply_tx, server));
+
+        // A DNS query to :53 → answered locally; a fake IP is allocated and a reply is returned to
+        // the querying app (same client_src/original_dst so the netstack sources it from the server).
+        in_tx
+            .send(UdpDatagram {
+                client_src: "10.0.0.2:5000".parse().unwrap(),
+                original_dst: "8.8.8.8:53".parse().unwrap(),
+                payload: a_query("example.com"),
+            })
+            .await
+            .unwrap();
+        let reply = reply_rx.recv().await.expect("a DNS reply");
+        assert_eq!(reply.original_dst, "8.8.8.8:53".parse().unwrap());
+        assert_eq!(reply.client_src, "10.0.0.2:5000".parse().unwrap());
+        assert_eq!(
+            u16::from_be_bytes([reply.payload[6], reply.payload[7]]),
+            1,
+            "one A answer"
+        );
+        assert_eq!(pool.lock().unwrap().len(), 1, "a fake IP was allocated");
+
+        // A non-DNS datagram (:443) → forwarded to the UDP proxy untouched, no reply.
+        in_tx
+            .send(UdpDatagram {
+                client_src: "10.0.0.2:5001".parse().unwrap(),
+                original_dst: "1.2.3.4:443".parse().unwrap(),
+                payload: vec![9, 9, 9],
+            })
+            .await
+            .unwrap();
+        let fwd = fwd_rx.recv().await.expect("a forwarded datagram");
+        assert_eq!(fwd.original_dst, "1.2.3.4:443".parse().unwrap());
+        assert_eq!(fwd.payload, vec![9, 9, 9]);
     }
 }
