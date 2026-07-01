@@ -185,13 +185,16 @@ impl Transport for FrontedMeekTransport {
     }
 
     async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
-        // SOCKS5 ATYP=3 carries the domain to the microsocks upstream, which resolves it (no client
-        // DNS). IP targets keep ATYP 1/4.
-        let t = match target {
-            Address::Ip(sa) => socks5::Target::Ip(sa),
-            Address::Domain { host, port } => socks5::Target::Domain(host, port),
-        };
-        self.dial_target(t).await
+        self.dial_target(address_to_target(target)).await
+    }
+}
+
+/// Map a routed [`Address`] to a SOCKS5 target: a domain rides ATYP=3 so the microsocks upstream
+/// resolves it (no client-side DNS — this is the exit-side-resolution path), an IP keeps ATYP 1/4.
+fn address_to_target(target: Address) -> socks5::Target {
+    match target {
+        Address::Ip(sa) => socks5::Target::Ip(sa),
+        Address::Domain { host, port } => socks5::Target::Domain(host, port),
     }
 }
 
@@ -299,6 +302,24 @@ mod tests {
         })
         .unwrap();
         assert_eq!(t.meek_host, "meek.example.org");
+    }
+
+    #[test]
+    fn address_maps_to_socks5_target() {
+        // An IP target keeps ATYP 1/4; a domain rides ATYP=3 so the upstream resolves it (the new
+        // exit-side-resolution path `dial_addr` enables). `socks5::Target` isn't Debug/PartialEq, so
+        // match rather than assert_eq.
+        match address_to_target(Address::Ip("1.2.3.4:80".parse().unwrap())) {
+            socks5::Target::Ip(sa) => assert_eq!(sa, "1.2.3.4:80".parse().unwrap()),
+            _ => panic!("IP address must map to a socks5 Ip target"),
+        }
+        match address_to_target(Address::domain("example.com", 443).unwrap()) {
+            socks5::Target::Domain(host, port) => {
+                assert_eq!(host, "example.com");
+                assert_eq!(port, 443);
+            }
+            _ => panic!("domain address must map to a socks5 Domain target"),
+        }
     }
 
     #[tokio::test]
