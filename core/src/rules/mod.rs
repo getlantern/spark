@@ -7,6 +7,7 @@
 //!
 //! Pipeline: [`srs`] parses `.srs` rule-sets → (M2) a compact matcher → (M3) a per-flow router.
 
+pub mod matcher;
 pub mod srs;
 
 /// The routing decision for a flow.
