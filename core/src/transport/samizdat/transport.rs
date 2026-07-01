@@ -127,6 +127,15 @@ impl SamizdatTransport {
     /// CONNECT to `authority` (`host:port` — an IP or a domain the exit resolves), retrying once on a
     /// dead shared connection. Shared by [`dial`]/[`dial_addr`]. Never logged: it's a destination.
     async fn dial_authority(&self, authority: &str) -> io::Result<BoxedStream> {
+        // Reject a malformed `:authority` (empty / whitespace / control chars — possible via a hostile
+        // recovered domain) up front, so a bad *client input* can't fail the CONNECT and trip the
+        // "connection died" retry below, needlessly invalidating the shared h2 conn other tunnels use.
+        if authority.is_empty() || authority.bytes().any(|b| b <= 0x20 || b == 0x7f) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "samizdat: invalid CONNECT authority",
+            ));
+        }
         let conn = self.conn().await?;
         match conn.connect(authority).await {
             Ok(stream) => Ok(Box::new(stream)),
