@@ -415,13 +415,13 @@ fn setup_routing_and_udp(
         });
         // One pool: the DNS server allocates on query, the recoverer recovers on connect.
         let pool = dns::server::shared_pool(FAKEIP_TTL, FAKEIP_CAP);
-        // v1: one un-poisoned DoH resolver serves both the Direct (local) and Proxy (resilient) seams.
-        let resolver = dns::resolver::local_resolver();
+        // Per-action resolvers from the config's `options.dns`: `dns_local` (direct, best-local) for
+        // the Direct action, `dns_remote` + the resilient pool for the Proxy client-side fallback.
         let hooks = Arc::new(proxy::RouteHooks {
             router: Arc::new(router),
             recoverer: Some(Arc::new(dns::server::FakeIpRecoverer::new(pool.clone()))),
-            direct_resolver: resolver.clone(),
-            proxy_resolver: resolver,
+            direct_resolver: dns::resolver::direct_resolver(&config.dns),
+            proxy_resolver: dns::resolver::proxy_resolver(&config.dns),
         });
         let dns_server = Arc::new(dns::server::DnsServer::new(pool, DNS_ANSWER_TTL_SECS));
         info!(
