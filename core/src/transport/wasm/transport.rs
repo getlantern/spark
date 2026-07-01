@@ -77,9 +77,10 @@ impl WasmTransport {
     }
 }
 
-#[async_trait]
-impl Transport for WasmTransport {
-    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+impl WasmTransport {
+    /// Connect, wrap in the transform, and announce `target` (an IP or a domain the exit resolves) in
+    /// the address header. Shared by [`dial`]/[`dial_addr`].
+    async fn dial_target(&self, target: Address) -> io::Result<BoxedStream> {
         let conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         let transform = self
             .module
@@ -89,12 +90,22 @@ impl Transport for WasmTransport {
 
         // The address header is the first thing through the transform; the server reads it back
         // after applying the inverse, then relays the obfuscated stream that follows.
-        let addr = Address::from(target);
-        let mut header = BytesMut::with_capacity(addr.encoded_len());
-        addr.encode(&mut header);
+        let mut header = BytesMut::with_capacity(target.encoded_len());
+        target.encode(&mut header);
         wrapped.write_all(&header).await?;
 
         Ok(Box::new(wrapped))
+    }
+}
+
+#[async_trait]
+impl Transport for WasmTransport {
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        self.dial_target(Address::Ip(target)).await
+    }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        self.dial_target(target).await
     }
 }
 
@@ -315,6 +326,67 @@ mod tests {
         let mut got = vec![0u8; message.len()];
         stream.read_exact(&mut got).await.expect("read");
         assert_eq!(got.as_slice(), &message[..]);
+    }
+
+    /// `dial_addr` with a **domain** target: the client announces the name, and the server recovers it
+    /// (the exit resolves it — no client-side DNS). Exercises the shared `Address::Domain` encode path
+    /// (the same one anytls uses) end-to-end through the obfuscated tunnel.
+    #[tokio::test]
+    async fn dial_addr_carries_a_domain_to_the_server() {
+        let module = xor_module();
+
+        // The echo the exit would resolve the domain to (here, any domain → this loopback echo).
+        let echo = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
+        let echo_addr = echo.local_addr().expect("echo addr");
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 256];
+                    loop {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) if s.write_all(&buf[..n]).await.is_err() => break,
+                            Ok(_) => {}
+                        }
+                    }
+                });
+            }
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let server_addr = listener.local_addr().expect("server addr");
+        let server = WasmServer::new(module.clone());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.expect("accept");
+            let (target, leftover, mut wrapped) = server.accept(conn).await.expect("read header");
+            let host = match target {
+                Address::Domain { host, .. } => host,
+                Address::Ip(_) => panic!("expected a domain target"),
+            };
+            let _ = tx.send(host); // report what the server recovered
+            let mut upstream = TcpStream::connect(echo_addr).await.expect("connect echo");
+            if !leftover.is_empty() {
+                upstream.write_all(&leftover).await.expect("leftover");
+            }
+            let _ = copy_bidirectional(&mut wrapped, &mut upstream).await;
+        });
+
+        let transport = WasmTransport::new(server_addr, module);
+        let mut stream = transport
+            .dial_addr(Address::domain("cdn.example.com", 443).expect("domain"))
+            .await
+            .expect("dial_addr");
+        let message = b"hello via a domain target";
+        stream.write_all(message).await.expect("write");
+        let mut got = vec![0u8; message.len()];
+        stream.read_exact(&mut got).await.expect("read");
+        assert_eq!(got.as_slice(), &message[..]);
+        assert_eq!(
+            rx.await.unwrap(),
+            "cdn.example.com",
+            "the server recovered the domain the client announced"
+        );
     }
 
     /// Read the `[sentinel][target]` UDP-associate handshake from a (deobfuscating) stream, returning

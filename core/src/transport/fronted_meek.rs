@@ -31,7 +31,7 @@ use flint_fronted::{
     MaterializedFront, MeekHttpVersion, MeekPollConfig, MeekPollConn, SystemResolver,
 };
 
-use super::{BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
+use super::{Address, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport};
 use crate::config::{
     FrontedMeekConfig, DEFAULT_ALIYUN_MEEK_HOST, DEFAULT_CLOUDFRONT_MEEK_HOST,
     DEFAULT_FRONTED_MEEK_HOST,
@@ -167,14 +167,31 @@ impl FrontedMeekTransport {
     }
 }
 
+impl FrontedMeekTransport {
+    /// Open a tunnel session and SOCKS5-CONNECT to `target` over it. Shared by [`dial`]/[`dial_addr`].
+    async fn dial_target(&self, target: socks5::Target) -> io::Result<BoxedStream> {
+        let mut conn = self.open_tunnel().await?;
+        // The meek-server relays each session to a SOCKS5 upstream (microsocks); CONNECT to the
+        // application's target over the tunnel.
+        socks5::connect(&mut conn, &target).await?;
+        Ok(Box::new(conn))
+    }
+}
+
 #[async_trait]
 impl Transport for FrontedMeekTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
-        let mut conn = self.open_tunnel().await?;
-        // The meek-server relays each session to a SOCKS5 upstream (microsocks);
-        // CONNECT to the application's target over the tunnel.
-        socks5::connect(&mut conn, &socks5::Target::Ip(target)).await?;
-        Ok(Box::new(conn))
+        self.dial_target(socks5::Target::Ip(target)).await
+    }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        // SOCKS5 ATYP=3 carries the domain to the microsocks upstream, which resolves it (no client
+        // DNS). IP targets keep ATYP 1/4.
+        let t = match target {
+            Address::Ip(sa) => socks5::Target::Ip(sa),
+            Address::Domain { host, port } => socks5::Target::Domain(host, port),
+        };
+        self.dial_target(t).await
     }
 }
 

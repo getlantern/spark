@@ -15,7 +15,8 @@ use async_trait::async_trait;
 use crate::net::SocketProtector;
 use crate::transport::uot::{self, UOT_MAGIC};
 use crate::transport::{
-    protected_tcp_connect, BoxedPacketSink, BoxedPacketSource, BoxedStream, Transport, UdpTransport,
+    protected_tcp_connect, Address, BoxedPacketSink, BoxedPacketSource, BoxedStream, Transport,
+    UdpTransport,
 };
 use flint_shaping::{SegmentShapingStream, WirePlan};
 use flint_tls::Profile;
@@ -122,14 +123,12 @@ impl SamizdatTransport {
     }
 }
 
-#[async_trait]
-impl Transport for SamizdatTransport {
-    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
-        // The CONNECT `:authority` is the original destination (an address — like spark's other
-        // transports carry the target). Never logged: it's a destination.
-        let authority = target.to_string();
+impl SamizdatTransport {
+    /// CONNECT to `authority` (`host:port` — an IP or a domain the exit resolves), retrying once on a
+    /// dead shared connection. Shared by [`dial`]/[`dial_addr`]. Never logged: it's a destination.
+    async fn dial_authority(&self, authority: &str) -> io::Result<BoxedStream> {
         let conn = self.conn().await?;
-        match conn.connect(&authority).await {
+        match conn.connect(authority).await {
             Ok(stream) => Ok(Box::new(stream)),
             // A CONNECT rejection (non-200) is stream-level: the shared connection is healthy and
             // still serves other tunnels, and retrying a refused target won't help — surface it.
@@ -139,9 +138,22 @@ impl Transport for SamizdatTransport {
             Err(_) => {
                 self.invalidate(&conn);
                 let conn = self.conn().await?;
-                Ok(Box::new(conn.connect(&authority).await?))
+                Ok(Box::new(conn.connect(authority).await?))
             }
         }
+    }
+}
+
+#[async_trait]
+impl Transport for SamizdatTransport {
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        self.dial_authority(&target.to_string()).await
+    }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        // `Address`'s Display is `host:port` (domain) / the socket address (IP) — exactly a CONNECT
+        // authority, so a recovered domain reaches the exit unchanged (it resolves; no client DNS).
+        self.dial_authority(&target.to_string()).await
     }
 }
 

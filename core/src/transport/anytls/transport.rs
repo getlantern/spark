@@ -236,17 +236,30 @@ async fn sweep_loop(inner: Arc<Inner>) {
     }
 }
 
-#[async_trait]
-impl Transport for AnytlsTransport {
-    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+impl AnytlsTransport {
+    /// Open a stream and announce `target` (an IP or a domain the exit resolves) in the SOCKS5-grammar
+    /// header. Shared by [`dial`]/[`dial_addr`].
+    async fn dial_target(&self, target: Address) -> io::Result<BoxedStream> {
         let session = self.inner.acquire().await?;
         let mut stream = session.open_stream().await?;
         // AnyTLS choreography: the target address is the stream's first bytes (SOCKS5 grammar),
         // which also flushes the buffered cmdSettings+cmdSYN as padded packet 1.
         let mut addr = BytesMut::new();
-        Address::Ip(target).encode(&mut addr);
+        target.encode(&mut addr);
         stream.write_all(&addr).await?;
         Ok(Box::new(stream))
+    }
+}
+
+#[async_trait]
+impl Transport for AnytlsTransport {
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        self.dial_target(Address::Ip(target)).await
+    }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        // SOCKS5 ATYP=3 carries the domain to the exit (it resolves) — no client-side DNS.
+        self.dial_target(target).await
     }
 }
 
