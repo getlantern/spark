@@ -145,6 +145,57 @@ pub struct Config {
     pub kill_switch: KillSwitchConfig,
     /// Logging settings.
     pub log: LogConfig,
+    /// Rule-based smart-routing + ad-block, parsed from `config_raw.json`'s
+    /// `smart_routing` / `ad_block` / `options.route.rules` sections. Empty for native TOML
+    /// configs, so the base full-tunnel behavior is unchanged.
+    pub smart_routing: SmartRoutingConfig,
+}
+
+/// Rule-based smart-routing + ad-block config. **Data only** — the (feature-gated) `rules` engine
+/// loads the referenced `.srs` rule-sets and applies precedence; this just captures the refs and
+/// inline IP rules the Lantern config declared. Distinct from [`RoutingConfig`] (OS route table).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SmartRoutingConfig {
+    /// Rule-sets to fetch/load and the action their matches produce (`ad_block` → Reject;
+    /// `smart_routing` categories → their outbound's action). Precedence is applied by the engine.
+    pub rule_sets: Vec<RuleSetRef>,
+    /// Inline IP/CIDR rules from `options.route.rules` (e.g. Quad9 `9.9.9.9/32` → Direct).
+    pub inline_ip_rules: Vec<InlineIpRule>,
+}
+
+/// A reference to a sing-box `.srs` rule-set and the action its matches produce.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RuleSetRef {
+    /// The action a match yields.
+    pub action: RouteAction,
+    /// The rule-set tag (identifier from the config).
+    pub tag: String,
+    /// The `.srs` URL to fetch.
+    pub url: String,
+}
+
+/// An inline IP/CIDR rule (raw CIDR text, parsed by the engine).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct InlineIpRule {
+    /// CIDR in `a.b.c.d/len` (or IPv6) text form.
+    pub cidr: String,
+    /// The action a match yields.
+    pub action: RouteAction,
+}
+
+/// The routing action a rule yields — the config layer's always-compiled vocabulary; the
+/// (feature-gated) engine maps it to its own action enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteAction {
+    /// Through the proxy pool (the config's `route.final`) — the default.
+    #[default]
+    Proxy,
+    /// Direct, bypassing the proxy.
+    Direct,
+    /// Drop the flow.
+    Reject,
 }
 
 /// Whether spark takes over the routing table to capture all traffic (full-tunnel). Off by
@@ -828,6 +879,17 @@ mod tests {
                 routing: RoutingConfig { manage: true },
                 kill_switch: KillSwitchConfig { fail_closed: true },
                 log: LogConfig { debug: true },
+                smart_routing: SmartRoutingConfig {
+                    rule_sets: vec![RuleSetRef {
+                        action: RouteAction::Reject,
+                        tag: "ads".into(),
+                        url: "https://x/ads.srs".into(),
+                    }],
+                    inline_ip_rules: vec![InlineIpRule {
+                        cidr: "9.9.9.9/32".into(),
+                        action: RouteAction::Direct,
+                    }],
+                },
             },
         ] {
             let rendered = cfg.to_toml_string().unwrap();

@@ -17,8 +17,9 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::{
-    Config, Endpoint, Hysteria2Config, Hysteria2Tls, Hysteria2TlsMode, SamizdatConfig, ServerEntry,
-    ServerSpec, ShadowsocksConfig, SsMethod,
+    Config, Endpoint, Hysteria2Config, Hysteria2Tls, Hysteria2TlsMode, InlineIpRule, RouteAction,
+    RuleSetRef, SamizdatConfig, ServerEntry, ServerSpec, ShadowsocksConfig, SmartRoutingConfig,
+    SsMethod,
 };
 
 /// Error parsing/adapting a `config_raw.json` payload.
@@ -94,7 +95,57 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
             found: raw.options.outbounds.len(),
         });
     }
+    cfg.smart_routing = parse_smart_routing(&raw);
     Ok(cfg)
+}
+
+/// Map the `smart_routing` / `ad_block` / `options.route.rules` sidecars into the spark
+/// [`SmartRoutingConfig`]: rule-set refs (with their action) + inline IP rules. Precedence is
+/// applied later by the engine; here we just capture what the config declared.
+fn parse_smart_routing(raw: &RawRoot) -> SmartRoutingConfig {
+    let mut sr = SmartRoutingConfig::default();
+    // ad_block: every list drops (Reject).
+    for rs in &raw.ad_block {
+        sr.rule_sets.push(RuleSetRef {
+            action: RouteAction::Reject,
+            tag: rs.tag.clone(),
+            url: rs.url.clone(),
+        });
+    }
+    // smart_routing categories: the category's outbound decides the action (e.g. `direct`).
+    for cat in &raw.smart_routing {
+        let action = route_action(&cat.category, cat.outbounds.first().map(String::as_str));
+        for rs in &cat.rule_sets {
+            sr.rule_sets.push(RuleSetRef {
+                action,
+                tag: rs.tag.clone(),
+                url: rs.url.clone(),
+            });
+        }
+    }
+    // options.route.rules: inline IP/CIDR rules (e.g. Quad9 9.9.9.9/32 → direct).
+    for rule in &raw.options.route.rules {
+        let Some(outbound) = rule.outbound.as_deref() else {
+            continue;
+        };
+        let action = route_action(outbound, Some(outbound));
+        if let Some(cidrs) = rule.ip_cidr.as_ref() {
+            for cidr in cidrs.clone().into_vec() {
+                sr.inline_ip_rules.push(InlineIpRule { cidr, action });
+            }
+        }
+    }
+    sr
+}
+
+/// Resolve a sing-box outbound/category name to a spark [`RouteAction`]. `direct` bypasses the
+/// proxy; `reject`/`block` drops; anything else (a proxy outbound / `auto`) is proxied.
+fn route_action(category: &str, outbound: Option<&str>) -> RouteAction {
+    match outbound.unwrap_or(category) {
+        "direct" => RouteAction::Direct,
+        "reject" | "block" => RouteAction::Reject,
+        _ => RouteAction::Proxy,
+    }
 }
 
 /// Extract the bare host from a meek-server `url` (e.g. `"https://meek.example/"` → `"meek.example"`).
@@ -217,12 +268,73 @@ struct RawRoot {
     outbound_locations: HashMap<String, RawLocation>,
     #[serde(default)]
     bandit_url_overrides: HashMap<String, String>,
+    /// Smart-routing categories (rule-sets → an outbound, e.g. common domains → `direct`).
+    #[serde(default)]
+    smart_routing: Vec<RawSmartCategory>,
+    /// Ad/malware/phishing rule-sets to drop.
+    #[serde(default)]
+    ad_block: Vec<RawRuleSetRef>,
 }
 
 #[derive(Deserialize, Default)]
 struct RawOptions {
     #[serde(default)]
     outbounds: Vec<RawOutbound>,
+    /// sing-box `route` block; we consume only `rules` (inline IP rules like Quad9 → direct).
+    #[serde(default)]
+    route: RawRoute,
+}
+
+/// One `smart_routing` category: rule-sets routed to `outbounds` (e.g. `["direct"]`).
+#[derive(Deserialize, Default)]
+struct RawSmartCategory {
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    rule_sets: Vec<RawRuleSetRef>,
+    #[serde(default)]
+    outbounds: Vec<String>,
+}
+
+/// A `.srs` rule-set reference (`smart_routing[*].rule_sets[*]` and `ad_block[*]`).
+#[derive(Deserialize)]
+struct RawRuleSetRef {
+    tag: String,
+    url: String,
+}
+
+/// The `options.route` block (only `rules` is consumed).
+#[derive(Deserialize, Default)]
+struct RawRoute {
+    #[serde(default)]
+    rules: Vec<RawRouteRule>,
+}
+
+/// One `options.route.rules[*]`; spark consumes only inline `ip_cidr` → `outbound` (domain and
+/// rule_set matchers are ignored here — domains arrive via the `.srs` rule-sets).
+#[derive(Deserialize, Default)]
+struct RawRouteRule {
+    #[serde(default)]
+    ip_cidr: Option<StrOrVec>,
+    #[serde(default)]
+    outbound: Option<String>,
+}
+
+/// sing-box fields that accept either a single string or an array of strings (e.g. `ip_cidr`).
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum StrOrVec {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StrOrVec {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            StrOrVec::One(s) => vec![s],
+            StrOrVec::Many(v) => v,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -280,6 +392,44 @@ struct RawLocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_smart_routing_ad_block_and_inline_ip_rules() {
+        let raw = r#"{
+          "options": {
+            "route": { "rules": [ { "ip_cidr": "9.9.9.9/32", "outbound": "direct" } ] },
+            "outbounds": [
+              { "type": "samizdat", "tag": "sz-1", "server": "198.51.100.10", "server_port": 8443,
+                "public_key": "aa11bb22", "short_id": "00ff00ff", "server_name": "cover.example.com" }
+            ]
+          },
+          "smart_routing": [
+            { "category": "direct", "outbounds": ["direct"],
+              "rule_sets": [ { "tag": "common", "url": "https://x/common.srs" } ] }
+          ],
+          "ad_block": [ { "tag": "banad", "url": "https://x/banad.srs" } ]
+        }"#;
+        let sr = from_config_raw_json(raw).expect("adapts").smart_routing;
+        // ad_block → Reject (with its URL), smart_routing direct category → Direct.
+        assert!(sr.rule_sets.iter().any(|r| r.tag == "banad"
+            && r.action == RouteAction::Reject
+            && r.url == "https://x/banad.srs"));
+        assert!(sr
+            .rule_sets
+            .iter()
+            .any(|r| r.tag == "common" && r.action == RouteAction::Direct));
+        // options.route.rules inline ip_cidr → Direct.
+        assert_eq!(sr.inline_ip_rules.len(), 1);
+        assert_eq!(sr.inline_ip_rules[0].cidr, "9.9.9.9/32");
+        assert_eq!(sr.inline_ip_rules[0].action, RouteAction::Direct);
+    }
+
+    #[test]
+    fn absent_smart_routing_sections_yield_empty() {
+        // SAMPLE has an empty route.rules and no smart_routing/ad_block sidecars.
+        let sr = from_config_raw_json(SAMPLE).expect("adapts").smart_routing;
+        assert!(sr.rule_sets.is_empty() && sr.inline_ip_rules.is_empty());
+    }
 
     // A small, structurally-faithful sample with FAKE credentials/IPs/tokens (never the real
     // config_raw.json, which carries live secrets). Covers: samizdat (maps), hysteria2 w/
