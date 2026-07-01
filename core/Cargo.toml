@@ -25,6 +25,8 @@ toml.workspace = true
 # JSON for the Lantern `config_raw.json` adapter (config::lantern). Pure-Rust, no C deps.
 serde_json.workspace = true
 thiserror.workspace = true
+# Pure-Rust zlib for inflating sing-box `.srs` rule-sets; only the `smart-routing` feature pulls it.
+flate2 = { workspace = true, optional = true }
 ring.workspace = true
 md-5.workspace = true
 # Canonical (deterministic) encoding of a gambit genome for Ed25519 signing (ADR 0006 P2). Same codec
@@ -93,6 +95,10 @@ anytls = ["dep:boring2", "dep:tokio-boring2", "dep:webpki-root-certs", "flint-tl
 # Off by default; needs a Linux/macOS-style tun fd (Linux, macOS, Android via VpnService — not iOS).
 # See docs/system-stack-design.md.
 system-stack = []
+# Rule-based smart-routing + ad-block: parse sing-box `.srs` rule-sets and route flows
+# Direct/Proxy/Reject (design: docs/superpowers/specs/2026-07-01-spark-smart-routing-ad-block-design.md).
+# Off by default; pulls pure-Rust zlib (flate2/miniz_oxide) for `.srs` inflate. Mobile shims enable it.
+smart-routing = ["dep:flate2"]
 # Path B dynamic transport (ADR 0003): a wasmi-hosted byte-transform module. Off by default so the
 # base build carries no WASM runtime. See docs/dynamic-transports-design.md §8.4.
 wasm-transport = ["dep:wasmi", "dep:flint-verify"]

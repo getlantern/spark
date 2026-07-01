@@ -12,7 +12,7 @@ use async_trait::async_trait;
 
 use crate::transport::probe::{CallbackUrl, ProbeOutcome};
 use crate::transport::{
-    BoxedPacketSink, BoxedPacketSource, MemberStatus, PoolControl, ServerMeta, Transport,
+    Address, BoxedPacketSink, BoxedPacketSource, MemberStatus, PoolControl, ServerMeta, Transport,
     UdpTransport,
 };
 use crate::BoxedStream;
@@ -258,6 +258,41 @@ impl Transport for SelectingTransport {
             "no pool member could serve the flow; failing open to a direct dial"
         );
         self.direct_tcp.dial(target).await
+    }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        let order = self.order();
+        let mut last_err = None;
+        for &i in order.iter() {
+            match self.members[i].transport.dial_addr(target.clone()).await {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    // Don't demote a member that merely can't carry a domain target (`Unsupported`) —
+                    // it's healthy for the IP-based retry path. Demote only on a real dial failure.
+                    if e.kind() != io::ErrorKind::Unsupported {
+                        self.demote(i);
+                    }
+                    tracing::debug!(member = i, error = %e, "pool member dial_addr failed; failing over");
+                    last_err = Some(e);
+                }
+            }
+        }
+        // Fail open to a direct dial only for an IP target. A domain can't be direct-dialed here
+        // (the recovered name has no address yet), so surface the error — the forwarder then resolves
+        // it client-side and retries by IP.
+        match target {
+            Address::Ip(sa) => {
+                tracing::warn!(
+                    %sa,
+                    pool = self.members.len(),
+                    "no pool member could serve the flow; failing open to a direct dial"
+                );
+                self.direct_tcp.dial(sa).await
+            }
+            Address::Domain { host, port } => Err(last_err.unwrap_or_else(|| {
+                io::Error::other(format!("no pool member could serve {host}:{port}"))
+            })),
+        }
     }
 }
 

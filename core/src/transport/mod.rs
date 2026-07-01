@@ -93,6 +93,11 @@ pub mod select;
 #[cfg(feature = "shadowsocks")]
 pub mod shadowsocks;
 pub mod tcp_tunnel;
+
+/// A dial target that may be an unresolved domain: the fake-IP proxy path recovers a domain from a
+/// flow's fake IP and dials it by name so the exit resolves (no client DNS). Re-exported from the
+/// tunnel header, which already encodes it on the wire.
+pub use tcp_tunnel::header::Address;
 /// UDP-over-TCP v2 (sing-box UoT) framing, shared by the stream transports that tunnel UDP over a
 /// reliable stream (AnyTLS, Samizdat). Gated on those transports so the base build pulls no UoT code.
 #[cfg(any(feature = "anytls", feature = "samizdat"))]
@@ -875,6 +880,27 @@ pub trait Transport: Send + Sync {
     /// Open a stream to `target`. The returned stream relays application bytes
     /// transparently in both directions.
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream>;
+
+    /// Open a stream to a target that may be an unresolved **domain** — the fake-IP proxy path,
+    /// where a flow's real destination is a name recovered from its fake IP (smart-routing/M4).
+    ///
+    /// The default handles only [`Address::Ip`] (delegating to [`dial`](Self::dial)) and rejects a
+    /// domain. Transports whose wire protocol carries a domain to the exit (so the exit resolves —
+    /// no client DNS) override this: the plain tunnel, shadowsocks, and hysteria2 (and the selecting
+    /// pool, which delegates to whichever members it holds). For transports that can't, the forwarder
+    /// falls back to client-side resolution + dial-by-IP.
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        match target {
+            Address::Ip(sa) => self.dial(sa).await,
+            // `Unsupported` (not a generic error) so callers like `SelectingTransport::dial_addr` can
+            // tell "this transport can't carry a domain" from a real dial failure and not demote an
+            // otherwise-healthy member.
+            Address::Domain { host, port } => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("transport does not support domain targets ({host}:{port})"),
+            )),
+        }
+    }
 }
 
 /// The send half of a connected UDP association: datagrams to the negotiated target.
@@ -973,6 +999,33 @@ struct DirectPacketSource(Arc<UdpSocket>);
 impl PacketSource for DirectPacketSource {
     async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.recv(buf).await
+    }
+}
+
+#[cfg(test)]
+mod dial_addr_tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// The default [`Transport::dial_addr`] delegates an `Ip` target to `dial`, and rejects a
+    /// `Domain` (a transport whose wire protocol can't carry a name — the forwarder resolves those
+    /// client-side and retries by IP). Transports that *can* carry a domain override the default.
+    #[tokio::test]
+    async fn default_dial_addr_delegates_ip_and_rejects_domain() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let direct = DirectTransport::new(None);
+        assert!(
+            direct.dial_addr(Address::Ip(addr)).await.is_ok(),
+            "Ip target delegates to dial()"
+        );
+        assert!(
+            direct
+                .dial_addr(Address::domain("example.com", 80).expect("domain"))
+                .await
+                .is_err(),
+            "the default impl can't carry a domain target"
+        );
     }
 }
 

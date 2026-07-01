@@ -112,6 +112,9 @@ impl RunArgs {
             },
             udp: config::UdpConfig::default(),
             routing: config::RoutingConfig::default(),
+            // Smart-routing/ad-block rules come from a Lantern `config_raw.json` (`run --config`), not
+            // the bare `run` flags; the flag path uses the empty default (proxy-everything).
+            smart_routing: config::SmartRoutingConfig::default(),
             kill_switch: config::KillSwitchConfig::default(),
             log: config::LogConfig { debug: self.debug },
         }
@@ -219,7 +222,15 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {
             info!("signal received — shutting down");
         }
-        _ = proxy::tcp::run(stack, tcp_transport, metrics) => {
+        // `spark run` has no smart-routing hooks (that's the fetched-config path); pass `None` so
+        // every flow is proxied, and a direct transport for the (here unused) Direct action.
+        _ = proxy::tcp::run(
+            stack,
+            tcp_transport,
+            Arc::new(transport::DirectTransport::default()),
+            None,
+            metrics,
+        ) => {
             warn!("netstack accept loop exited unexpectedly");
         }
     }

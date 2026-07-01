@@ -66,6 +66,13 @@ impl Transport for TunnelClient {
         let stream = TunnelClient::dial(self, Address::Ip(target)).await?;
         Ok(Box::new(stream))
     }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        // The tunnel carries the target address (IP *or* domain) in its header, so a domain travels
+        // to the server unchanged and the exit resolves it — no client-side DNS for proxied flows.
+        let stream = TunnelClient::dial(self, target).await?;
+        Ok(Box::new(stream))
+    }
 }
 
 #[async_trait]
@@ -88,5 +95,44 @@ impl UdpTransport for TunnelClient {
             Box::new(TunnelUdpSink::new(write)),
             Box::new(TunnelUdpSource::new(read)),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TunnelClient;
+    use crate::transport::{Address, Transport};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    /// Dial a throwaway loopback "server" via `dial_addr` and return the target address it parsed
+    /// out of the tunnel header — proving `dial_addr` carries whatever kind of target it's given.
+    async fn dialed_header(target: Address) -> Address {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 64];
+            let n = sock.read(&mut buf).await.expect("read header");
+            Address::parse(&buf[..n]).expect("parse header").0
+        });
+        let _stream = TunnelClient::new(addr)
+            .dial_addr(target)
+            .await
+            .expect("dial_addr");
+        server.await.expect("join")
+    }
+
+    #[tokio::test]
+    async fn dial_addr_carries_a_domain_target() {
+        // The whole point of M4: a recovered domain reaches the server as a name (the exit resolves).
+        let want = Address::domain("example.com", 443).expect("domain");
+        assert_eq!(dialed_header(want.clone()).await, want);
+    }
+
+    #[tokio::test]
+    async fn dial_addr_carries_an_ip_target() {
+        let want = Address::Ip("1.2.3.4:80".parse().expect("addr"));
+        assert_eq!(dialed_header(want.clone()).await, want);
     }
 }

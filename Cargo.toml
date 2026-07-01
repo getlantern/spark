@@ -29,6 +29,9 @@ futures = "0.3"
 tun-rs = { version = "2.8", features = ["async"] }
 async-trait = "0.1"
 bytes = "1"
+# Pure-Rust zlib (miniz_oxide backend) for inflating sing-box `.srs` rule-sets (rules::srs).
+# Already in the tree transitively; declaring it direct promotes the locked 1.1.x, no churn.
+flate2 = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }

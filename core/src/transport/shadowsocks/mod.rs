@@ -21,8 +21,8 @@ use tokio::net::UdpSocket;
 use crate::config::SsMethod;
 use crate::net::SocketProtector;
 use crate::transport::{
-    protected_tcp_connect, protected_udp_socket, BoxedPacketSink, BoxedPacketSource, BoxedStream,
-    Transport, UdpTransport,
+    protected_tcp_connect, protected_udp_socket, Address, BoxedPacketSink, BoxedPacketSource,
+    BoxedStream, Transport, UdpTransport,
 };
 use tcp::{encode_request, ShadowsocksStream};
 use udp::{ShadowsocksUdpSink, ShadowsocksUdpSource};
@@ -61,17 +61,29 @@ impl ShadowsocksTransport {
     }
 }
 
-#[async_trait]
-impl Transport for ShadowsocksTransport {
-    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+impl ShadowsocksTransport {
+    /// Connect and send the SS-2022 request carrying `target` (an IP or, on the fake-IP proxy path, a
+    /// domain the **server** resolves at the exit — no client DNS). Shared by [`dial`]/[`dial_addr`].
+    async fn dial_target(&self, target: &Address) -> io::Result<BoxedStream> {
         let conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
-        let req = encode_request(self.method, &self.psk, &target).map_err(io::Error::other)?;
+        let req = encode_request(self.method, &self.psk, target).map_err(io::Error::other)?;
         let mut stream = ShadowsocksStream::new(conn, self.method, self.psk.clone(), req);
         // SS-2022 is request-first: the server can't send its response head until it has the request
         // prefix (which carries the target address). Flush it now so a read-first / server-first upper
         // layer doesn't deadlock waiting on a response the server is itself waiting to be unblocked for.
         stream.flush().await?;
         Ok(Box::new(stream))
+    }
+}
+
+#[async_trait]
+impl Transport for ShadowsocksTransport {
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        self.dial_target(&Address::Ip(target)).await
+    }
+
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        self.dial_target(&target).await
     }
 }
 
@@ -111,8 +123,24 @@ impl UdpTransport for ShadowsocksTransport {
     }
 }
 
-/// Append `addr` in SOCKS5 address format: ATYP(1) ‖ address ‖ port(u16be). spark only ever sends an
-/// IP target, so only ATYP 1 (IPv4) and 4 (IPv6) are produced (SIP022 §3.1.3 / RFC 1928 §5).
+/// Append a dial target in SOCKS5 address format, carrying a **domain** (ATYP 3) as well as an IP
+/// (ATYP 1/4). The fake-IP proxy path hands a recovered domain here so the shadowsocks **server**
+/// resolves it at the exit (no client-side DNS). The domain length fits a `u8` — [`Address::domain`]
+/// guarantees 1..=255 bytes.
+pub(super) fn write_socks_target(addr: &Address, out: &mut Vec<u8>) {
+    match addr {
+        Address::Ip(sa) => write_socks_addr(sa, out),
+        Address::Domain { host, port } => {
+            out.push(0x03);
+            out.push(host.len() as u8);
+            out.extend_from_slice(host.as_bytes());
+            out.extend_from_slice(&port.to_be_bytes());
+        }
+    }
+}
+
+/// Append `addr` in SOCKS5 address format: ATYP(1) ‖ address ‖ port(u16be). Only ATYP 1 (IPv4) and 4
+/// (IPv6) are produced here (SIP022 §3.1.3 / RFC 1928 §5); domains go through [`write_socks_target`].
 pub(super) fn write_socks_addr(addr: &SocketAddr, out: &mut Vec<u8>) {
     match addr {
         SocketAddr::V4(a) => {

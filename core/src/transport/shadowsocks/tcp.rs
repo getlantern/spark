@@ -1,7 +1,6 @@
 //! SS-2022 TCP: request/response codec + the AsyncRead+AsyncWrite chunk-framing stream.
 
 use std::io;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -12,7 +11,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::config::SsMethod;
 
 use super::crypto::{session_subkey, Cipher, CryptoError, NonceCounter};
-use super::{now_secs, write_socks_addr};
+use super::{now_secs, write_socks_target};
+use crate::transport::Address;
 
 const HEADER_TYPE_CLIENT: u8 = 0;
 
@@ -31,7 +31,7 @@ pub struct Request {
 pub fn encode_request(
     method: SsMethod,
     psk: &[u8],
-    target: &SocketAddr,
+    target: &Address,
 ) -> Result<Request, CryptoError> {
     let rng = SystemRandom::new();
 
@@ -42,9 +42,10 @@ pub fn encode_request(
     let cipher = Cipher::new(method, &subkey)?;
     let mut counter = NonceCounter::new();
 
-    // Variable-length header plaintext: SOCKS addr ‖ padding_len(u16be) ‖ padding.
-    let mut var = Vec::with_capacity(19 + 2 + 64); // max IPv6 SOCKS addr + pad_len field + max padding
-    write_socks_addr(target, &mut var);
+    // Variable-length header plaintext: SOCKS addr ‖ padding_len(u16be) ‖ padding. The Vec grows for a
+    // domain target (up to 1+1+255+2 bytes); the hint covers the common IP case.
+    let mut var = Vec::with_capacity(19 + 2 + 64);
+    write_socks_target(target, &mut var);
     let mut pad_byte = [0u8; 1];
     rng.fill(&mut pad_byte).map_err(|_| CryptoError::Rng)?;
     let pad_len = (pad_byte[0] % 64) as u16 + 1; // 1..=64
@@ -411,7 +412,7 @@ mod tests {
         let psk = vec![5u8; 32];
         let target: std::net::SocketAddr = "1.2.3.4:443".parse().unwrap();
 
-        let req = encode_request(method, &psk, &target).unwrap();
+        let req = encode_request(method, &psk, &Address::Ip(target)).unwrap();
 
         // Pull the salt off the front, derive the subkey, decrypt the two header chunks.
         let salt = &req.bytes[..method.salt_len()];
@@ -439,6 +440,35 @@ mod tests {
         assert_eq!(var.len(), 7 + 2 + pad_len as usize); // addr + pad_len field + padding, no initial payload
         assert_eq!(off + var_len + 16, req.bytes.len());
         assert_eq!(req.salt, salt.to_vec());
+    }
+
+    #[test]
+    fn request_prefix_encodes_a_domain_target() {
+        // A recovered domain must reach the server as an ATYP-3 SOCKS name (the exit resolves it) —
+        // not resolved client-side. Mirrors `request_prefix_decodes_back` but for a domain target.
+        let method = SsMethod::Aes256Gcm;
+        let psk = vec![5u8; 32];
+        let target = Address::domain("example.com", 443).unwrap();
+
+        let req = encode_request(method, &psk, &target).unwrap();
+
+        let salt = &req.bytes[..method.salt_len()];
+        let subkey = session_subkey(method, &psk, salt);
+        let cipher = Cipher::new(method, &subkey).unwrap();
+        let mut ctr = NonceCounter::new();
+        let mut off = method.salt_len();
+        let mut fixed = req.bytes[off..off + 11 + 16].to_vec();
+        let fixed = cipher.open(ctr.next(), &mut fixed).unwrap().to_vec();
+        let var_len = u16::from_be_bytes([fixed[9], fixed[10]]) as usize;
+        off += 11 + 16;
+        let mut var = req.bytes[off..off + var_len + 16].to_vec();
+        let var = cipher.open(ctr.next(), &mut var).unwrap();
+
+        assert_eq!(var[0], 0x03); // ATYP domain
+        assert_eq!(var[1] as usize, "example.com".len());
+        assert_eq!(&var[2..2 + "example.com".len()], b"example.com");
+        let p = 2 + "example.com".len();
+        assert_eq!(u16::from_be_bytes([var[p], var[p + 1]]), 443); // the target port
     }
 
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
@@ -487,7 +517,7 @@ mod tests {
         let (client_io, server_io) = duplex(64 * 1024);
         let peer = tokio::spawn(ss_echo_peer(server_io, method, psk.clone()));
 
-        let req = encode_request(method, &psk, &target).unwrap();
+        let req = encode_request(method, &psk, &Address::Ip(target)).unwrap();
         let mut stream = ShadowsocksStream::new(client_io, method, psk.clone(), req);
         stream.write_all(b"ping").await.unwrap();
         stream.flush().await.unwrap();
@@ -559,7 +589,7 @@ mod tests {
         let (client_io, server_io) = duplex(8 * 1024); // small duplex => many partial reads
         let peer = tokio::spawn(ss_blob_peer(server_io, method, psk.clone(), blob.clone()));
 
-        let req = encode_request(method, &psk, &target).unwrap();
+        let req = encode_request(method, &psk, &Address::Ip(target)).unwrap();
         let mut stream = ShadowsocksStream::new(client_io, method, psk.clone(), req);
         stream.flush().await.unwrap();
 

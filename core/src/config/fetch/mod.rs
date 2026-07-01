@@ -282,7 +282,8 @@ fn fronted_bootstrap(env: &FetchEnv, seed: u64) -> FrontedBootstrap {
 
 /// A stable per-device u64 seed from the hex device id (first 16 hex chars), for front-sampling
 /// diversity. Falls back to 0 if the id is too short / non-hex (the Akamai path is unaffected).
-fn seed_from_device_id(did: &str) -> u64 {
+/// `pub(crate)` so the smart-routing rule-set fetcher reuses the same per-device seed.
+pub(crate) fn seed_from_device_id(did: &str) -> u64 {
     u64::from_str_radix(did.get(..16).unwrap_or(""), 16).unwrap_or(0)
 }
 

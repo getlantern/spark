@@ -33,6 +33,19 @@ pub mod tun;
 #[cfg(feature = "bootstrap-dns")]
 pub mod bootstrap;
 
+/// Rule-based smart-routing + ad-block: parse sing-box `.srs` rule-sets and decide per-flow
+/// Direct/Proxy/Reject (design: docs/superpowers/specs/2026-07-01-spark-smart-routing-ad-block-design.md).
+/// Distinct from [`routing`], which manages the OS route table. Behind `smart-routing`.
+#[cfg(feature = "smart-routing")]
+pub mod rules;
+
+/// Fake-IP DNS subsystem (M4): spark answers the app's A/AAAA queries with synthetic IPs from a
+/// reserved range, maps `fakeip→domain`, and recovers the domain at connect time so [`rules`] can
+/// decide per-flow. Distinct from upstream/control-plane resolution ([`bootstrap`]). Behind
+/// `smart-routing` (same feature as the rules engine it feeds).
+#[cfg(feature = "smart-routing")]
+pub mod dns;
+
 /// Marker for a bidirectional async byte stream. Blanket-implemented for every
 /// `AsyncRead + AsyncWrite`, so a surfaced netstack flow and a dialed transport stream can
 /// share one boxed type ([`BoxedStream`]).
