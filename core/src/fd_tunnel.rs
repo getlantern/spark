@@ -309,7 +309,7 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
     };
     register(&stop);
     let waiter = Arc::clone(&stop);
-    let result = runtime.block_on(run_tunnel_data_path(fd, mtu, config, &waiter));
+    let result = runtime.block_on(run_tunnel_data_path(fd, mtu, config, None, &waiter));
     deregister(&stop);
     // Drop the pool control handle for this (now torn-down) tunnel so the FFI reports no active pool.
     set_pool(None);
@@ -319,11 +319,14 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
 
 /// The tunnel data path shared by `run_with_handle` and the lantern-api entry: adopt `fd`, build the
 /// transport/netstack from `config`, register the pool control, and run until `waiter` is signalled or
-/// the accept loop exits.
+/// the accept loop exits. `data_dir` is the per-platform cache dir (Apple app-group container, Android
+/// app files dir) the smart-routing loader reads rule-set `.srs` from (`<data_dir>/rulesets/`); `None`
+/// (e.g. the desktop `spawn_tunnel` path) means no on-disk rule-sets — inline IP rules still apply.
 async fn run_tunnel_data_path(
     fd: i32,
     mtu: u16,
     mut config: Config,
+    data_dir: Option<&std::path::Path>,
     waiter: &Notify,
 ) -> std::io::Result<()> {
     crate::resolve_bootstrap(&mut config).await?;
@@ -333,6 +336,20 @@ async fn run_tunnel_data_path(
     );
     let (tcp_transport, udp_transport, control) = transport::from_config_with_control(&config)?;
     set_pool(control);
+    // A direct transport for the router's `Direct` action, pinned to the physical interface
+    // (`transport.protect_interface`) so those flows bypass our own tunnel. On Android the app's own
+    // sockets already bypass via `addDisallowedApplication` (interface usually unset); the lantern-api
+    // path sets it to the physical interface, so direct flows dial off-tunnel there. Built
+    // unconditionally (cheap); only dialed when a router returns `Direct`.
+    let protector = match config.transport.protect_interface.as_deref() {
+        Some(name) => Some(crate::net::SocketProtector::for_interface(name)?),
+        None => None,
+    };
+    let direct_transport: Arc<dyn transport::Transport> =
+        Arc::new(transport::DirectTransport::new(protector));
+    // Smart-routing (feature-gated): a per-flow router over the config's rule-sets, loading `.srs`
+    // from `<data_dir>/rulesets/`. `None` (feature off, or no rules configured) proxies everything.
+    let router = build_flow_router(&config, data_dir);
     let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
     let idle = Duration::from_secs(config.udp.idle_timeout_secs);
     if let Some((udp_inbound, udp_reply)) = udp_surface {
@@ -349,17 +366,48 @@ async fn run_tunnel_data_path(
     set_ready(Readiness::Up);
     let metrics = Arc::new(crate::metrics::Metrics::default());
     tokio::select! {
-        _ = proxy::tcp::run(
-            stack,
-            tcp_transport,
-            Arc::new(transport::DirectTransport::default()),
-            None::<Arc<dyn proxy::FlowRouter>>,
-            metrics,
-        ) => warn!("netstack accept loop exited"),
+        _ = proxy::tcp::run(stack, tcp_transport, direct_transport, router, metrics)
+            => warn!("netstack accept loop exited"),
         _ = waiter.notified() => info!("stop requested; tearing the tunnel down"),
     }
     drop(tun);
     Ok(())
+}
+
+/// Build the per-flow [`proxy::FlowRouter`] from the config's smart-routing rules, or `None` to keep
+/// the proxy-everything path. Feature-gated: with `smart-routing` off this is a no-op. Rule-set
+/// `.srs` bytes load from `<data_dir>/rulesets/<tag>.srs`; a rule-set missing from the cache is
+/// skipped (the tunnel still runs, proxying the lists it couldn't load — see [`crate::rules::router`]).
+/// Inline IP rules need no `.srs`, so they apply even with `data_dir == None`.
+#[cfg(feature = "smart-routing")]
+fn build_flow_router(
+    config: &Config,
+    data_dir: Option<&std::path::Path>,
+) -> Option<Arc<dyn proxy::FlowRouter>> {
+    let sr = &config.smart_routing;
+    if sr.rule_sets.is_empty() && sr.inline_ip_rules.is_empty() {
+        return None; // nothing to route on — keep the plain proxy-everything path
+    }
+    let rulesets_dir = data_dir.map(|d| d.join("rulesets"));
+    let router = crate::rules::router::Router::build(sr, |r| {
+        let dir = rulesets_dir.as_ref()?;
+        std::fs::read(dir.join(format!("{}.srs", r.tag))).ok()
+    });
+    info!(
+        rule_sets = sr.rule_sets.len(),
+        inline_ip_rules = sr.inline_ip_rules.len(),
+        "smart-routing: per-flow router active"
+    );
+    Some(Arc::new(router))
+}
+
+/// No-op stand-in when the `smart-routing` feature is off: always proxy everything.
+#[cfg(not(feature = "smart-routing"))]
+fn build_flow_router(
+    _config: &Config,
+    _data_dir: Option<&std::path::Path>,
+) -> Option<Arc<dyn proxy::FlowRouter>> {
+    None
 }
 
 /// `lantern-api` self-fetch entry (shared by every platform's [`run_fd_dispatch`]): fetch the boot
@@ -460,7 +508,7 @@ pub fn run_fd_lantern_api(
                 _ = loop_stop.notified() => {}
             }
         });
-        run_tunnel_data_path(fd, mtu, config, &waiter).await
+        run_tunnel_data_path(fd, mtu, config, Some(data_dir.as_path()), &waiter).await
     });
     deregister(&stop);
     set_pool(None);
