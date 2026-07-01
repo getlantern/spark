@@ -793,9 +793,11 @@ mod tests {
         if rs.domain.iter().any(|d| d == domain) {
             return true;
         }
+        // Label-boundary suffix match only: `discord.com` covers `discord.com` and `*.discord.com`,
+        // but NOT `notdiscord.com` (a bare `ends_with(s)` would wrongly match that).
         rs.domain_suffix
             .iter()
-            .any(|s| domain == s || domain.ends_with(&format!(".{s}")) || domain.ends_with(s))
+            .any(|s| domain == s || domain.ends_with(&format!(".{s}")))
     }
 
     /// v1 + v2 spot-check: both ad lists decode to hundreds of domains, and known ad domains match.

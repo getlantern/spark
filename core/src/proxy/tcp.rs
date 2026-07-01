@@ -10,7 +10,7 @@
 //! are logged at `debug` only. The default (`info`) level reports byte counts on close,
 //! which carry no destination.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use tokio::io::copy_bidirectional;
@@ -126,7 +126,7 @@ async fn dial_direct(
     };
     if let Some(res) = hooks.and_then(|h| h.direct_resolver.as_deref()) {
         if let Ok(ips) = res.resolve(dom).await {
-            if let Some(&ip) = ips.first() {
+            if let Some(ip) = pick_ip(&ips, original_dst.ip()) {
                 return dial_or_log(direct, SocketAddr::new(ip, original_dst.port())).await;
             }
         }
@@ -163,13 +163,24 @@ async fn dial_proxy(
     // Fallback: resolve the domain ourselves (un-poisoned DoH, bypassing the TUN) and dial the real IP.
     if let Some(res) = hooks.and_then(|h| h.proxy_resolver.as_deref()) {
         if let Ok(ips) = res.resolve(dom).await {
-            if let Some(&ip) = ips.first() {
+            if let Some(ip) = pick_ip(&ips, original_dst.ip()) {
                 return dial_or_log(proxy, SocketAddr::new(ip, original_dst.port())).await;
             }
         }
     }
     warn!(domain = %dom, "proxy: neither dial-by-name nor client-side resolution succeeded");
     None
+}
+
+/// Pick a resolved IP whose family matches `want` (the flow's fake destination family — i.e. what the
+/// app asked for via DNS: A→v4, AAAA→v6), falling back to the first result. Avoids, e.g., dialing a v6
+/// address first for a v4 flow when the resolver returns both. (Full cross-family happy-eyeballs is a
+/// future improvement.)
+fn pick_ip(ips: &[IpAddr], want: IpAddr) -> Option<IpAddr> {
+    ips.iter()
+        .copied()
+        .find(|ip| ip.is_ipv4() == want.is_ipv4())
+        .or_else(|| ips.first().copied())
 }
 
 /// Dial `target` through `transport`, logging (destination at debug via the caller) and returning

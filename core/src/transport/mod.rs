@@ -892,9 +892,13 @@ pub trait Transport: Send + Sync {
     async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
         match target {
             Address::Ip(sa) => self.dial(sa).await,
-            Address::Domain { host, port } => Err(io::Error::other(format!(
-                "transport does not support domain targets ({host}:{port})"
-            ))),
+            // `Unsupported` (not a generic error) so callers like `SelectingTransport::dial_addr` can
+            // tell "this transport can't carry a domain" from a real dial failure and not demote an
+            // otherwise-healthy member.
+            Address::Domain { host, port } => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("transport does not support domain targets ({host}:{port})"),
+            )),
         }
     }
 }

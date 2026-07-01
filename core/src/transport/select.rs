@@ -267,7 +267,11 @@ impl Transport for SelectingTransport {
             match self.members[i].transport.dial_addr(target.clone()).await {
                 Ok(s) => return Ok(s),
                 Err(e) => {
-                    self.demote(i);
+                    // Don't demote a member that merely can't carry a domain target (`Unsupported`) —
+                    // it's healthy for the IP-based retry path. Demote only on a real dial failure.
+                    if e.kind() != io::ErrorKind::Unsupported {
+                        self.demote(i);
+                    }
                     tracing::debug!(member = i, error = %e, "pool member dial_addr failed; failing over");
                     last_err = Some(e);
                 }
