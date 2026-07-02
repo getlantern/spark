@@ -1,6 +1,10 @@
 # DNS-tunnel transport — design
 
-- **Status:** Proposed — clean-slate protocol, no live gate yet. ADR 0011.
+- **Status:** Implemented (M0–M5) — client transport + resolver balancer (aggregation/duplication/
+  failover) + `dns-tunnel-server` (real TCP egress), wired into transport selection. Self-contained
+  gates green: loopback-UDP E2E, multi-resolver aggregation + mid-session failover, real-TCP-egress
+  e2e; base build pulls no DNS-tunnel deps; log-hygiene clean. **Live gates pending infra/root:** the
+  recursive-resolver run via a real NS-delegated domain, and the `sudo` full-TUN run. ADR 0011.
 - **Scope:** Add a **DNS-tunneling** transport: a spark client `Transport` (TCP byte-stream) that
   carries proxied traffic over DNS queries/responses, aggregating over **many recursive resolvers**
   for resilience, plus a matching **Rust server** (authoritative nameserver + egress). The protocol

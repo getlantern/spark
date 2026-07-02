@@ -1,7 +1,11 @@
 # ADR 0011 — DNS-tunnel transport: a clean-slate protocol inspired by MasterDnsVPN, resolver-aggregating, pure-Rust
 
-- **Status:** Proposed — clean-slate protocol, no live gate yet. Full design + build order:
-  `docs/dns-tunnel-design.md`; implementation plan: `docs/dns-tunnel-plan.md`.
+- **Status:** Accepted — implemented M0–M5 (`dns-tunnel-core` + client `DnsTunnelTransport` with
+  resolver balancer/multipath/failover + `dns-tunnel-server` with real TCP egress), wired into
+  transport selection. Self-contained gates green (loopback E2E, multi-resolver aggregation +
+  mid-session failover, real-TCP-egress e2e); base build unaffected; log-hygiene clean. The live
+  recursive-NS and `sudo` full-TUN runs need infrastructure/root — the documented human step. Full
+  design + build order: `docs/dns-tunnel-design.md`; implementation plan: `docs/dns-tunnel-plan.md`.
 - **Scope:** Add a **DNS-tunneling** transport — a spark client `Transport` (TCP byte-stream) that
   tunnels proxied traffic over DNS while **aggregating over many recursive resolvers**, plus a matching
   **Rust server** (authoritative nameserver + session store + TCP egress). Fills the `DNSTT` escalation

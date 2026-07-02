@@ -2569,3 +2569,21 @@ list (config `resolvers`, or `[authoritative]`) + `DnsTunnelTransport::new`, gat
 audit. The literal `<3 MB` in the docs is stale — the repo relaxed the base budget to ~10 MB
 (opt-level=3); the real requirement is feature-gated-so-base-build-unaffected (verify via `cargo tree`
 that base pulls no dns-tunnel deps). Live recursive-NS + `sudo` TUN gates = infra/human step.
+
+**2026-07-01 — DNS-tunnel M5 DONE → transport COMPLETE (M0–M5).** Wired into transport selection:
+`ServerSpec::DnsTunnel` (tag `dns-tunnel`) + `first_unresolved_host`/`build_one`/`spec_kind`/
+`spec_label` arms; `dns_tunnel_transport()` builder (decode PSK, map cipher, resolvers-or-authoritative)
++ `#[cfg(not(feature))]` hard-error stub; `from_config` single-transport precedence
+(`transport.dns_tunnel`); `bootstrap::resolve_endpoints` no-SNI arms; `DnsTunnelTransport` also impls
+`UdpTransport` (TCP-only → dial_udp errors). **Audit green:** base build pulls ZERO dns-tunnel deps
+(`cargo tree`) → base binary byte-identical; feature adds only `dns-tunnel-core`+`lz4_flex`; log
+hygiene clean (only a content-free "listening" line anywhere); `dns-tunnel-server` release binary =
+**1.22 MB**. Tests: dns-tunnel pool-entry parse + gated builder accept/reject; 15 dns_tunnel tests;
+base + feature builds/clippy/fmt clean. Design doc + ADR 0011 flipped to Implemented/Accepted.
+**The transport is complete and green end-to-end** across both crates (`dns-tunnel-core` +
+`dns-tunnel-server`) and spark `core`. **Recursive mode is code-complete** (the resolver-pool path IS
+recursive: the client sends to resolvers that forward to the NS-delegated authoritative zone; the
+loopback/failover tests exercise the identical send-to-resolver mechanism). **Remaining = infra/human
+only:** (1) deploy `dns-tunnel-server` behind an NS-delegated zone and run the client through a real
+public resolver; (2) the `sudo spark run` full-TUN gate. Branch `fisk/spark-dns-tunnel` (not pushed —
+push/PR is a human decision).
