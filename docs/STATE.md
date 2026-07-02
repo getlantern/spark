@@ -2490,3 +2490,22 @@ loop, TCP egress pumping `take_from_client`/`deliver_to_client`) and the client
 `core/src/transport/dns_tunnel/` (`DnsTunnelTransport: Transport` behind the `dns-tunnel` feature,
 config wiring, a `protected_udp_socket` send/recv + `poll_query`/`on_answer` pump). Gate: a real
 loopback UDP 10 MiB integrity test in authoritative mode. Then M4 (balancer/multipath) + M5.
+
+**2026-07-01 — DNS-tunnel M3b-1 (spark config surface) DONE.** `core/src/config/mod.rs`:
+`DnsTunnelConfig` (zone, psk, resolvers, optional `authoritative` endpoint, cipher, compression) +
+`DnsTunnelCipher` (chacha20-poly1305 default / aes-256-gcm) + `DnsTunnelCompression` (off / lz4), and
+`TransportConfig.dns_tunnel` + its Default. 2 round-trip tests; clippy/fmt clean; base build untouched.
+Deliberately did NOT add `ServerSpec::DnsTunnel` yet — it forces exhaustive from_config/build_one
+match arms that need the transport impl, and an error arm would be a stub. **NEXT: M3b-2** — the
+transport impl, self-contained behind the `dns-tunnel` feature so it tests without from_config wiring:
+(1) `core/Cargo.toml`: `dns-tunnel = ["dep:dns-tunnel-core"]` + optional path dep on the workspace
+crate; (2) `#[cfg(feature="dns-tunnel")] pub mod dns_tunnel;` in `transport/mod.rs`;
+(3) `core/src/transport/dns_tunnel/mod.rs`: `DnsTunnelTransport: Transport` — `dial(target)` builds a
+`ClientSession`, binds `protected_udp_socket` connected to `authoritative` (M3 = authoritative mode),
+spawns an async pump (`tokio::select!` over UDP recv / a `tokio::io::duplex` app side / a
+keepalive+RTO tick driving `poll_query`/`on_answer`), returns the duplex half as `BoxedStream`;
+(4) a `#[tokio::test]` loopback gate (in-test UDP server task using `session::Server` + echo egress;
+client `dial`; 10 MiB round-trip). **Verify the `Transport` trait + `BoxedStream`/`Address` types and
+`protected_udp_socket` signature in `transport/mod.rs` first — don't guess.** from_config/build_one/
+`ServerSpec` + `bootstrap::resolve_endpoints` wiring → **M5**; the standalone `dns-tunnel-server` bin
+(production TCP egress + session store) → **M4**.
