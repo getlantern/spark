@@ -1,0 +1,24 @@
+[package]
+name = "dns-tunnel-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Authoritative-side server for spark's DNS-tunnel transport (ADR 0011): UDP tunnel endpoint + real TCP egress + session store."
+
+[[bin]]
+name = "dns-tunnel-server"
+path = "src/main.rs"
+
+[lib]
+name = "dns_tunnel_server"
+path = "src/lib.rs"
+
+[dependencies]
+# The shared, no-I/O protocol core (framing, ARQ, DNS codec, crypto, session state machine).
+dns-tunnel-core = { path = "../dns-tunnel-core" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

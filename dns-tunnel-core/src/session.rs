@@ -257,6 +257,8 @@ struct ServerSession {
     stream: Stream,
     /// The target address bytes the client asked for (the server binary dials this).
     target: Bytes,
+    /// Time (ms) of the last query for this session — for idle expiry.
+    last_seen: u64,
 }
 
 /// The server endpoint: routes DNS tunnel queries to per-ConnectionID sessions and produces answers.
@@ -317,13 +319,33 @@ impl Server {
         let wire = frame::parse_wire(&parsed.data).ok()?;
 
         if wire.salt.is_some() {
-            self.handle_syn(query, &wire)
+            self.handle_syn(query, &wire, now)
         } else {
             self.handle_data(query, &wire, now)
         }
     }
 
-    fn handle_syn(&mut self, query: &[u8], wire: &Wire<'_>) -> Option<Vec<u8>> {
+    /// Remove a session (idle expiry or egress teardown).
+    pub fn remove_session(&mut self, conn_id: &[u8; CONN_ID_LEN]) {
+        self.sessions.remove(conn_id);
+    }
+
+    /// Drop sessions with no query in the last `idle_ms`; returns the removed ConnectionIDs so the
+    /// caller can tear down their egress.
+    pub fn sweep_idle(&mut self, now: u64, idle_ms: u64) -> Vec<[u8; CONN_ID_LEN]> {
+        let stale: Vec<[u8; CONN_ID_LEN]> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| now.saturating_sub(s.last_seen) >= idle_ms)
+            .map(|(k, _)| *k)
+            .collect();
+        for id in &stale {
+            self.sessions.remove(id);
+        }
+        stale
+    }
+
+    fn handle_syn(&mut self, query: &[u8], wire: &Wire<'_>, now: u64) -> Option<Vec<u8>> {
         let salt = wire.salt?;
         let keys = crypto::derive_session_keys(&self.psk, &salt, &wire.conn_id);
         let (up, down, hs) = aeads(self.cfg.cipher, &keys).ok()?;
@@ -344,6 +366,7 @@ impl Server {
                 hs,
                 stream: Stream::new(STREAM_ID, arq_cfg, 0),
                 target: syn.payload.clone(),
+                last_seen: now,
             },
         );
         // Reply SynAck under the handshake key.
@@ -356,6 +379,7 @@ impl Server {
 
     fn handle_data(&mut self, query: &[u8], wire: &Wire<'_>, now: u64) -> Option<Vec<u8>> {
         let sess = self.sessions.get_mut(&wire.conn_id)?;
+        sess.last_seen = now;
         // Open the uplink frame and feed the ARQ.
         if let Ok(f) = frame::open_frame(&sess.up, wire) {
             sess.stream.on_frame(&f, now);
@@ -549,6 +573,26 @@ mod tests {
         let payload = payload_of(4_096);
         let echoed = run_echo(&mut net, &payload, 5_000_000);
         assert_eq!(echoed, payload);
+    }
+
+    #[test]
+    fn server_sweeps_idle_sessions() {
+        let psk = [0x44u8; 32];
+        let zone = "t.example.com";
+        let cfg = Config::default();
+        let mut client = ClientSession::new(&psk, zone, b"1.2.3.4:443", cfg.clone()).unwrap();
+        let mut server = Server::new(&psk, zone, cfg).unwrap();
+        // Handshake establishes the session at t=0.
+        let q = client.poll_query(0).unwrap();
+        server.on_query(&q, 0).unwrap();
+        assert!(server.has_session(&client.conn_id));
+        // Within the idle window → kept.
+        assert!(server.sweep_idle(1_000, 5_000).is_empty());
+        assert!(server.has_session(&client.conn_id));
+        // Past the idle window → swept.
+        let removed = server.sweep_idle(10_000, 5_000);
+        assert_eq!(removed.len(), 1);
+        assert!(!server.has_session(&client.conn_id));
     }
 
     #[test]
