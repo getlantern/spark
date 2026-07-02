@@ -2587,3 +2587,12 @@ loopback/failover tests exercise the identical send-to-resolver mechanism). **Re
 only:** (1) deploy `dns-tunnel-server` behind an NS-delegated zone and run the client through a real
 public resolver; (2) the `sudo spark run` full-TUN gate. Branch `fisk/spark-dns-tunnel` (not pushed —
 push/PR is a human decision).
+  Deferred sub-features (documented, not stubbed — all noted in `dns-tunnel-design.md` §1/§16):
+  (1) **dynamic per-resolver MTU binary-search probing** — v1 uses a correct *conservative static* MTU
+  from `mtu.rs` (sizes segments to the QNAME/TXT capacity for the zone); over-the-wire MTU_UP/DOWN
+  probing to discover larger per-resolver limits is a throughput optimization (add MtuProbe frame
+  kinds + a probe phase). (2) **cookie/replay handshake hardening** — v1 is PSK+HKDF per-session salt;
+  the SYN cookie / anti-replay window is a future add. (3) **UDP-over-tunnel** (`UdpTransport` errors —
+  out of scope v1). (4) **payload compression** wired at the config level (lz4_flex) but not yet
+  applied in the session pump (off by default). (5) formal `cargo fuzz` targets → currently in-suite
+  randomized no-panic guards. None affect the headline capability or correctness.
