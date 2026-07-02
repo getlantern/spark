@@ -1,0 +1,21 @@
+[package]
+name = "dns-tunnel-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared, no-I/O core for spark's DNS-tunnel transport: framing, AEAD+HKDF, ARQ, DNS codec, compression, MTU math (ADR 0011)."
+
+# Pure, no-I/O crate: NO tokio, NO network. Shared verbatim by the spark client transport
+# (core/src/transport/dns_tunnel/, behind the `dns-tunnel` feature) and the `dns-tunnel-server` binary.
+# See docs/dns-tunnel-design.md and docs/dns-tunnel-plan.md.
+[dependencies]
+# Crypto: AEAD (ChaCha20-Poly1305 / AES-256-GCM), HKDF-SHA256, and SystemRandom — all from `ring`
+# (CLAUDE.md locked stack). No other crypto crate, no C.
+ring = { workspace = true }
+# Buffers on every data path (CLAUDE.md).
+bytes = { workspace = true }
+# One thiserror Error enum per module (CLAUDE.md).
+thiserror = { workspace = true }
+# Pure-Rust LZ4 for optional payload compression (§6). Not the C-backed `zstd` crate.
+lz4_flex = { workspace = true }
