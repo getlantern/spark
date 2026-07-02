@@ -2633,3 +2633,18 @@ dns_tunnel tests; base + feature builds/clippy/fmt clean. Commits `e493595` (cor
 (transport). Branch `fisk/spark-dns-tunnel` (not pushed). **Remaining deferred (unchanged):**
 cookie/replay handshake hardening, UDP-over-tunnel, session-pump payload compression, formal
 `cargo fuzz`; plus optional multi-session pooling (v1 shares a single session across all dials).
+
+**2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
+loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
+UDP delay relay to inject RTT; knobs `DNS_BENCH_{MIB,RTT_MS,INFLIGHT,WINDOW}`). Findings: the impl's
+**CPU ceiling is ~560–690 Mbit/s** on loopback (crypto/codec are NOT the bottleneck), but a DNS tunnel
+is **bandwidth-delay-product bound** — at a realistic 50 ms recursive RTT, goodput scales ~linearly
+with the in-flight query budget: inflight 16 → 2.6 Mbit/s, 64 → 10.7, 128 → 20.2, 256 → 38.2. So raised
+`session::Config::default()`: `max_query_inflight` 16 → 64 and ARQ windows to match (`send_window`
+64 → 256 so the pull pipeline isn't re-bottlenecked; `recv_window` 256 → 1024 to absorb reorder from
+spraying queries across resolvers) → ~4× real-world throughput at the default. Doc note: the budget
+should be spread across the resolver pool so no single recursive resolver sees an anomalous query rate
+(`inflight/pool_size` each). Secondary levers (not changed): larger downlink MTU/EDNS (linear in
+bytes/answer, capped by what resolvers carry) and broad pool breadth. Commit `e557477`. **Live
+recursive throughput still pending the infra gate** (deployed NS-delegated server + real public
+resolver); loopback+RTT-sim is the self-contained proxy for it.
