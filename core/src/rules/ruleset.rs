@@ -78,23 +78,27 @@ fn split_https_url(url: &str) -> io::Result<(String, String)> {
     Ok((host.to_string(), path.to_string()))
 }
 
-/// The production [`RuleSetFetcher`]: fetch every `.srs` **via kindling**
-/// (`flint_kindling::FrontedBootstrap`) — domain-fronted through CDNs, self-bootstrapping from the
-/// user's own network — so rule-set updates work even where a direct fetch of the `.srs` host is
-/// blocked. There is deliberately **no** direct-dial fallback (kindling is always used). Behind
-/// `config-fetch` (which pulls flint-kindling); the rule-set host must be frontable (served by a CDN
-/// kindling knows — CloudFront / Akamai / Aliyun).
+/// The production [`RuleSetFetcher`]: fetch every `.srs` **via the embedded fronted config** — the
+/// same domain-fronting map (`config/fetch/fronted.yaml.gz`) config-fetch uses. Its `hostaliases`
+/// already route the rule-set hosts (e.g. `raw.githubusercontent.com`) through Lantern's Akamai /
+/// CloudFront fronting properties, so a rule-set update works even where a direct fetch of the `.srs`
+/// host is blocked — and, unlike the bare front-scanner, it knows which CDN front actually reaches
+/// each host (the scanner guesses generic edges with the raw host as the inner `Host`, which no CDN
+/// serves for GitHub). Behind `config-fetch` (which pulls flint-fronted + the embedded map).
 #[cfg(feature = "config-fetch")]
 pub struct KindlingRuleSetFetcher {
-    seed: u64,
+    dialer: flint_fronted::FrontedTlsDialer<flint_fronted::FlintDnsResolver>,
 }
 
 #[cfg(feature = "config-fetch")]
 impl KindlingRuleSetFetcher {
-    /// A fetcher whose CloudFront/Aliyun front-sampling is diversified by `seed` — per-device, from the
-    /// device id (see `config::fetch::seed_from_device_id`), matching the config fetch's sampling.
-    pub fn new(seed: u64) -> Self {
-        Self { seed }
+    /// Build a fetcher that fronts each `.srs` via the embedded fronted config. `None` only if that
+    /// config fails to parse (shouldn't happen) — the caller then skips rule-set refresh and keeps any
+    /// cached lists.
+    pub fn new() -> Option<Self> {
+        Some(Self {
+            dialer: crate::config::fetch::fronted_dialer()?,
+        })
     }
 }
 
@@ -103,10 +107,14 @@ impl KindlingRuleSetFetcher {
 impl RuleSetFetcher for KindlingRuleSetFetcher {
     async fn fetch(&self, url: &str) -> io::Result<Vec<u8>> {
         let (host, path) = split_https_url(url)?;
-        let bootstrap = flint_kindling::FrontedBootstrap::new(host).with_seed(self.seed);
-        let resp = bootstrap
-            .request(&flint_fronted::OneshotRequest::get(path))
-            .await?;
+        // The dialer maps `host` to its fronting provider via the embedded `hostaliases`, dials a
+        // decoy-SNI front, and requests `path` — so e.g. raw.githubusercontent.com reaches GitHub
+        // through Lantern's Akamai/CloudFront property.
+        let resp = self
+            .dialer
+            .request(&host, &flint_fronted::OneshotRequest::get(path))
+            .await
+            .map_err(io::Error::other)?;
         match resp.status {
             200 | 206 => Ok(resp.body),
             other => Err(io::Error::other(format!("ruleset fetch HTTP {other}"))),

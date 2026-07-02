@@ -627,23 +627,23 @@ pub fn run_fd_lantern_api(
         // the config pool). The per-device seed matches the config fetch's front-sampling.
         #[cfg(feature = "smart-routing")]
         if !config.smart_routing.rule_sets.is_empty() {
-            let did = fetch::device_id(&data_dir).unwrap_or_default();
-            let fetcher: Arc<dyn crate::rules::ruleset::RuleSetFetcher> = Arc::new(
-                crate::rules::ruleset::KindlingRuleSetFetcher::new(
-                    crate::config::fetch::seed_from_device_id(&did),
-                ),
-            );
-            info!(
-                rule_sets = config.smart_routing.rule_sets.len(),
-                "lantern-api: starting rule-set refresh (via kindling)"
-            );
-            tokio::spawn(crate::rules::ruleset::run_refresh_loop(
-                fetcher,
-                data_dir.clone(),
-                config.smart_routing.rule_sets.clone(),
-                RULESET_REFRESH_INTERVAL,
-                Arc::clone(&waiter),
-            ));
+            match crate::rules::ruleset::KindlingRuleSetFetcher::new() {
+                Some(fetcher) => {
+                    let fetcher: Arc<dyn crate::rules::ruleset::RuleSetFetcher> = Arc::new(fetcher);
+                    info!(
+                        rule_sets = config.smart_routing.rule_sets.len(),
+                        "lantern-api: starting rule-set refresh (via kindling)"
+                    );
+                    tokio::spawn(crate::rules::ruleset::run_refresh_loop(
+                        fetcher,
+                        data_dir.clone(),
+                        config.smart_routing.rule_sets.clone(),
+                        RULESET_REFRESH_INTERVAL,
+                        Arc::clone(&waiter),
+                    ));
+                }
+                None => warn!("rule-set refresh skipped: embedded fronted config failed to parse"),
+            }
         }
         run_tunnel_data_path(fd, mtu, config, Some(data_dir.as_path()), &waiter).await
     });
