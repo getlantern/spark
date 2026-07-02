@@ -793,4 +793,183 @@ mod tests {
             "both dials multiplexed over a single session (one ConnectionID)"
         );
     }
+
+    /// An authoritative server that, on each opened stream, floods `blob` bytes downlink once (drains
+    /// and ignores uplink). Models the browsing shape: a tiny request, a large response.
+    async fn spawn_flood_server(
+        psk: Vec<u8>,
+        zone: String,
+        cfg: SessCfg,
+        blob: usize,
+    ) -> SocketAddr {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut server = Server::new(&psk, &zone, cfg).unwrap();
+            let start = Instant::now();
+            let mut buf = vec![0u8; 4096];
+            let payload = vec![0xCDu8; blob];
+            let mut fed: std::collections::HashSet<([u8; 8], u16)> =
+                std::collections::HashSet::new();
+            loop {
+                let (n, from) = match udp.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let now = start.elapsed().as_millis() as u64;
+                if let Some(ans) = server.on_query(&buf[..n], now) {
+                    if udp.send_to(&ans, from).await.is_err() {
+                        return;
+                    }
+                }
+                for id in server.session_ids() {
+                    for sid in server.streams_of(&id) {
+                        let _ = server.take_from_client(&id, sid); // drain + ignore uplink
+                        if fed.insert((id, sid)) {
+                            server.deliver_to_client(&id, sid, &payload);
+                        }
+                    }
+                }
+            }
+        });
+        addr
+    }
+
+    /// A UDP relay that delays every datagram by `one_way_ms` in each direction — models recursive-
+    /// resolver RTT (which dominates real throughput) on an otherwise-loopback path.
+    async fn spawn_delay_relay(server: SocketAddr, one_way_ms: u64) -> SocketAddr {
+        use std::sync::Mutex as StdMutex;
+        let front = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr = front.local_addr().unwrap();
+        let back = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        back.connect(server).await.unwrap();
+        let client: std::sync::Arc<StdMutex<Option<SocketAddr>>> =
+            std::sync::Arc::new(StdMutex::new(None));
+        let delay = Duration::from_millis(one_way_ms);
+        // client → (delay) → server
+        {
+            let (front, back, client) = (front.clone(), back.clone(), client.clone());
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                loop {
+                    let (n, from) = match front.recv_from(&mut buf).await {
+                        Ok(x) => x,
+                        Err(_) => return,
+                    };
+                    *client.lock().unwrap() = Some(from);
+                    let (pkt, back) = (buf[..n].to_vec(), back.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = back.send(&pkt).await;
+                    });
+                }
+            });
+        }
+        // server → (delay) → client
+        {
+            let (front, back, client) = (front.clone(), back.clone(), client.clone());
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                loop {
+                    let n = match back.recv(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    let dst = *client.lock().unwrap();
+                    if let Some(dst) = dst {
+                        let (pkt, front) = (buf[..n].to_vec(), front.clone());
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            let _ = front.send_to(&pkt, dst).await;
+                        });
+                    }
+                }
+            });
+        }
+        addr
+    }
+
+    /// Downlink throughput benchmark (authoritative mode). Skips a warmup window so it measures steady
+    /// state, not handshake + MTU-probe ramp. Not a correctness gate: `#[ignore]`d. Env knobs:
+    /// `DNS_BENCH_MIB` (payload), `DNS_BENCH_RTT_MS` (one-way relay delay; 0 = loopback ceiling),
+    /// `DNS_BENCH_INFLIGHT`, `DNS_BENCH_WINDOW`. Run: `cargo test -p spark-core --features dns-tunnel
+    /// --release bench_downlink_throughput -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "throughput benchmark; run with --ignored --nocapture"]
+    async fn bench_downlink_throughput() {
+        let env = |k: &str, d: u64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(d)
+        };
+        let n = env("DNS_BENCH_MIB", 8) as usize * 1024 * 1024;
+        let rtt_ms = env("DNS_BENCH_RTT_MS", 0);
+        let inflight = env("DNS_BENCH_INFLIGHT", 16) as usize;
+        let window = env("DNS_BENCH_WINDOW", 64.max(inflight as u64)) as u32;
+        // Scale the RTO/timeout floors above the injected RTT so latency isn't read as loss.
+        let round_trip = 2 * rtt_ms;
+        let mut c = cfg();
+        c.max_query_inflight = inflight;
+        c.arq.send_window = window;
+        c.arq.min_rto_ms = (round_trip * 2).max(15);
+        c.arq.initial_rto_ms = (round_trip * 4).max(60);
+        c.query_timeout_ms = (round_trip * 6).max(150);
+
+        let psk = vec![0x11u8; 32];
+        let zone = "t.example.com".to_string();
+        let server = spawn_flood_server(psk.clone(), zone.clone(), c.clone(), n).await;
+        let entry = if rtt_ms > 0 {
+            spawn_delay_relay(server, rtt_ms).await.to_string()
+        } else {
+            server.to_string()
+        };
+        let transport = DnsTunnelTransport::new(
+            zone,
+            psk,
+            vec![entry],
+            PoolConfig {
+                duplication: 1,
+                ..PoolConfig::default()
+            },
+            c.clone(),
+            None,
+        );
+        let stream = transport
+            .dial("93.184.216.34:443".parse().unwrap())
+            .await
+            .unwrap();
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        wr.write_all(b"go").await.unwrap(); // kick the stream open → triggers the flood
+
+        let warmup = (n / 8).min(1024 * 1024);
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut got = 0usize;
+        let mut mark: Option<(Instant, usize)> = None;
+        while got < n {
+            match rd.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(k) => got += k,
+                Err(_) => break,
+            }
+            if mark.is_none() && got >= warmup {
+                mark = Some((Instant::now(), got));
+            }
+        }
+        let (t0, start_bytes) = mark.expect("received at least the warmup");
+        let measured = (got - start_bytes) as f64 / (1024.0 * 1024.0);
+        let secs = t0.elapsed().as_secs_f64();
+        let mibps = measured / secs;
+        println!(
+            "\n[bench_downlink] rtt={}ms(1-way) inflight={} window={} → steady-state {:.1} MiB in \
+             {:.3}s = {:.2} MiB/s ({:.1} Mbit/s)\n",
+            rtt_ms,
+            c.max_query_inflight,
+            c.arq.send_window,
+            measured,
+            secs,
+            mibps,
+            mibps * 8.0,
+        );
+    }
 }

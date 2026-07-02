@@ -66,7 +66,12 @@ pub struct Config {
     pub arq: arq::Config,
     /// EDNS0 UDP payload size advertised on queries/answers.
     pub edns_udp: u16,
-    /// Max DNS queries the client keeps in flight at once.
+    /// Max DNS queries the client keeps in flight at once. This is the **dominant throughput lever**:
+    /// a DNS tunnel is bandwidth-delay-product bound, so goodput ≈ `max_query_inflight × (downlink
+    /// bytes per answer) / RTT`. Raising it scales throughput ~linearly (loopback bench: 50 ms RTT
+    /// gives ~2.6 Mbit/s at 16, ~10 at 64, ~20 at 128). It should be spread across the resolver pool
+    /// so no single recursive resolver sees more than ~`max_query_inflight / pool_size` concurrent
+    /// queries (which would look anomalous / get rate-limited).
     pub max_query_inflight: usize,
     /// How long (ms) to wait for an answer before freeing the query slot.
     pub query_timeout_ms: u64,
@@ -76,9 +81,18 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             cipher: Cipher::ChaCha20Poly1305,
-            arq: arq::Config::default(),
+            // Deepen the ARQ pipeline to match the query budget: the send window must be ≥ the query
+            // budget or it re-bottlenecks the pull model, and the receive window absorbs the reorder
+            // from spraying that many queries across resolvers with differing latencies.
+            arq: arq::Config {
+                send_window: 256,
+                recv_window: 1024,
+                ..arq::Config::default()
+            },
             edns_udp: 1232,
-            max_query_inflight: 16,
+            // 64 (vs a timid 16) ≈ 4× real-world throughput; still modest per-resolver once spread
+            // across a pool. See `max_query_inflight`.
+            max_query_inflight: 64,
             query_timeout_ms: 3_000,
         }
     }
