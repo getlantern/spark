@@ -510,7 +510,9 @@ mod tests {
         for len in 0..300usize {
             let mut buf = Vec::with_capacity(len);
             for _ in 0..len {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 buf.push((state >> 33) as u8);
             }
             let _ = Frame::decode(&buf);

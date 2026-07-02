@@ -104,8 +104,14 @@ mod tests {
         // Garbage LZ4 (valid small size prefix, corrupt body).
         let mut garbage = 16u32.to_le_bytes().to_vec();
         garbage.extend_from_slice(&[0xFF; 3]);
-        assert!(matches!(decompress(ALGO_LZ4, &garbage), Err(CompressError::Lz4)));
+        assert!(matches!(
+            decompress(ALGO_LZ4, &garbage),
+            Err(CompressError::Lz4)
+        ));
         // Too short for even a size prefix.
-        assert!(matches!(decompress(ALGO_LZ4, &[1, 2]), Err(CompressError::Lz4)));
+        assert!(matches!(
+            decompress(ALGO_LZ4, &[1, 2]),
+            Err(CompressError::Lz4)
+        ));
     }
 }

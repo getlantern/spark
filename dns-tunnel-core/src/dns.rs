@@ -128,10 +128,7 @@ impl Name {
 }
 
 fn eq_ci(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.eq_ignore_ascii_case(y))
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 // ---- query ----------------------------------------------------------------------------------------
@@ -147,15 +144,19 @@ pub struct Query {
 
 /// Build a TXT query carrying `data` (base32 in the QNAME under `zone`) with an EDNS0 OPT advertising
 /// `edns_udp` bytes. Errors if the encoded name would exceed 255 bytes.
-pub fn build_query(txn_id: u16, data: &[u8], zone: &Name, edns_udp: u16) -> Result<Vec<u8>, DnsError> {
+pub fn build_query(
+    txn_id: u16,
+    data: &[u8],
+    zone: &Name,
+    edns_udp: u16,
+) -> Result<Vec<u8>, DnsError> {
     let enc = b32_encode(data);
     let data_labels: Vec<&[u8]> = if enc.is_empty() {
         Vec::new()
     } else {
         enc.chunks(MAX_LABEL_LEN).collect()
     };
-    let name_len =
-        data_labels.iter().map(|l| 1 + l.len()).sum::<usize>() + zone.wire_len();
+    let name_len = data_labels.iter().map(|l| 1 + l.len()).sum::<usize>() + zone.wire_len();
     if name_len > MAX_NAME_LEN {
         return Err(DnsError::NameTooLong);
     }
@@ -410,7 +411,9 @@ mod tests {
     #[test]
     fn base32_round_trips_all_remainders() {
         for len in 0..40usize {
-            let data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37).wrapping_add(11)).collect();
+            let data: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
+                .collect();
             let enc = b32_encode(&data);
             assert!(enc.iter().all(|&c| b32_val(c).is_some()));
             assert_eq!(b32_decode(&enc).unwrap(), data, "len {len}");
@@ -426,7 +429,13 @@ mod tests {
         let mixed: Vec<u8> = enc
             .iter()
             .enumerate()
-            .map(|(i, &c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c })
+            .map(|(i, &c)| {
+                if i % 2 == 0 {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                }
+            })
             .collect();
         assert_eq!(b32_decode(&upper).unwrap(), data);
         assert_eq!(b32_decode(&mixed).unwrap(), data);
@@ -505,7 +514,9 @@ mod tests {
         for len in 0..300usize {
             let mut buf = Vec::with_capacity(len);
             for _ in 0..len {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 buf.push((state >> 33) as u8);
             }
             let _ = parse_query(&buf, &zone);

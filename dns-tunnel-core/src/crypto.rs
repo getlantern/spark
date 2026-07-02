@@ -171,7 +171,8 @@ fn expand<const N: usize>(prk: &hkdf::Prk, info: &[&[u8]]) -> [u8; N] {
         .expand(info, Len::<N>)
         .expect("HKDF-SHA256 expand within the 255*HashLen cap");
     let mut out = [0u8; N];
-    okm.fill(&mut out).expect("okm length matches the output buffer");
+    okm.fill(&mut out)
+        .expect("okm length matches the output buffer");
     out
 }
 
@@ -341,7 +342,10 @@ mod tests {
         // Wrong nonce → auth failure.
         let wrong = [3u8; NONCE_LEN];
         let mut buf2 = buf.clone();
-        assert!(matches!(aead.open(&wrong, &mut buf2), Err(CryptoError::Auth)));
+        assert!(matches!(
+            aead.open(&wrong, &mut buf2),
+            Err(CryptoError::Auth)
+        ));
     }
 
     #[test]
