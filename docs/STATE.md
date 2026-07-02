@@ -2634,6 +2634,26 @@ dns_tunnel tests; base + feature builds/clippy/fmt clean. Commits `e493595` (cor
 cookie/replay handshake hardening, UDP-over-tunnel, session-pump payload compression, formal
 `cargo fuzz`; plus optional multi-session pooling (v1 shares a single session across all dials).
 
+**2026-07-02 — DNS-tunnel: LIVE on DigitalOcean, recursive path proven, real throughput measured.**
+Deployed `dns-tunnel-server` (static musl binary via `cargo zigbuild`, 1.7 MB) to a DO droplet
+(`spark-dns-tunnel-test`, nyc3, 138.197.105.130), systemd `spark-dns.service` on UDP:5300 with a
+`:53→:5300` DNAT. Delegated **`t.getiantem.org`** on Cloudflare (NS + glue A → the droplet). Added a
+server hardening (`dns::build_nodata` + `Server::on_query` rework, commit `ab2f31e`): the server now
+answers QNAME-min probes (apex SOA/NS/A) with a benign NOERROR/NODATA instead of dropping — without it
+1.1.1.1/8.8.8.8 SERVFAIL before forwarding tunnel queries. Verified end-to-end: authoritative fetch
+(HTTP 301 relayed from 1.1.1.1:80) AND **recursive** fetch through the public resolver pool (Cloudflare
+/Quad9/OpenDNS) via the getiantem.org delegation — real HTTP carried over DNS on the full
+client→resolver→our-server→egress path. **Throughput (empirical):** loopback CPU ceiling ~560–690
+Mbit/s; **~10 Mbit/s direct-to-server over a real 50 ms WAN** (matches the sim); **~0.1 Mbit/s
+recursive via major public resolvers** — isolated to per-resolver rate-limiting of the
+random-subdomain pattern (Cloudflare-only was as slow as the mixed pool; direct `:53`/DNAT was fast),
+i.e. a resolver-side anti-abuse limit, not our stack. Confirms recursive = the reachability-under-
+shutdown tier; throughput wants large resolver pools / non-throttling paths (the MasterDnsVPN approach).
+Live-fetch harness generalized to a comma-separated resolver list (authoritative or recursive). Assets
+to tear down when done: DO droplet `581811126`, DO SSH key `spark-dns-tunnel` (`57517210`), the two
+Cloudflare records under getiantem.org (`t` NS + `ns-spark` A). PSK in the session scratchpad. New
+build tooling installed locally: `zig` + `cargo-zigbuild` + the `x86_64-unknown-linux-musl` target.
+
 **2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
 loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
 UDP delay relay to inject RTT; knobs `DNS_BENCH_{MIB,RTT_MS,INFLIGHT,WINDOW}`). Findings: the impl's
