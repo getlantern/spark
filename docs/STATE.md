@@ -2695,6 +2695,28 @@ needs a clean domain (our test zone is fine only from an uncensored vantage). (3
 working resolver must retain *some* upstream reach to the authoritative server IP. Throughput in this
 regime is ~one-resolver's-worth (reachability, not streaming) — as intended for the last-resort tier.
 
+**2026-07-02 — DNS-tunnel: system-resolver auto-include, unattributable zone, Linode prod path +
+dnstt-infra reuse.** (1) **`system_resolvers()`** — the builder auto-includes the OS resolver(s)
+(`/etc/resolv.conf` on Unix) in the recursive pool, gated by `DnsTunnelConfig.use_system_resolvers`
+(default true; the shutdown lifeline). Commit `6a50e00`. (2) **Switched the live tunnel zone to an
+unattributable domain** `t.ss7hc6jm.io` (Cloudflare NS + glue), replacing known-Lantern
+`t.getiantem.org` (a censor's resolver would filter it); validated recursive (1.1.1.1/9.9.9.9/8.8.8.8
+NOERROR, HTTP 301 in 0.29 s at dup=3). getiantem.org records can be removed. (3) **Assessed reuse of
+Lantern's dnstt infra** (`getlantern/dnstt`; lantern-cloud `ans/bootstrap-dnstt.yaml` → `dnstts_oci`
+on OCI; zone `t.iantem.io` via TF `dns.yaml`; client config via `flashlight/genconfig` →
+config-server; escalation slot in `kindling/dnstt`+radiance). spark's dns-tunnel is a **drop-in
+modernization of the dnstt tier** (same `:5300`+zone+systemd+`:53`-DNAT shape). Reuse the *plumbing*
+(provisioning, config distribution, escalation slot); keep *separate* binary/IP/zone (protocol
+incompatibility) + *unattributable* domains. **Production targets Linode, not OCI** (Lantern already
+uses Linode; `linode-cli`+`LINODE_TOKEN` on hand). Committed a reusable deploy kit under `deploy/`
+(commit `37861e7`): `provision-linode.sh` + Ansible `bootstrap-spark-dns.yaml` + systemd template +
+inventory + README, adapted from the dnstt playbook. Validated live: Linode us-east nanode
+`45.79.190.108` running it carried real traffic (HTTP 301, ~60 ms RTT). **Two billable test boxes
+live:** DO `581811126` @ 138.197.105.130 (serves ss7hc6jm.io) + Linode `100186047` @ 45.79.190.108
+(validated, not yet in DNS) — consolidate by repointing `ns-spark.ss7hc6jm.io` A → the Linode IP and
+tearing down the DO droplet. Remaining reuse to build: `SparkDNSConfig` + genconfig/config-server
+wiring, and the escalation-tier hook.
+
 **2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
 loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
 UDP delay relay to inject RTT; knobs `DNS_BENCH_{MIB,RTT_MS,INFLIGHT,WINDOW}`). Findings: the impl's
