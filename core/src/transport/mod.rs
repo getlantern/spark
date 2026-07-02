@@ -24,8 +24,8 @@ use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
 use crate::config::{
-    AnytlsConfig, Config, FrontedMeekConfig, Hysteria2Config, SamizdatConfig, ShadowsocksConfig,
-    WasmConfig,
+    AnytlsConfig, Config, DnsTunnelCipher, DnsTunnelConfig, FrontedMeekConfig, Hysteria2Config,
+    SamizdatConfig, ShadowsocksConfig, WasmConfig,
 };
 use crate::net::SocketProtector;
 use crate::BoxedStream;
@@ -172,6 +172,7 @@ pub(crate) fn build_one(
         ServerSpec::Samizdat(cfg) => samizdat_transport(cfg, protector.cloned(), wire.clone()),
         ServerSpec::Shadowsocks(cfg) => shadowsocks_transport(cfg, protector.cloned()),
         ServerSpec::Hysteria2(cfg) => hysteria2_transport(cfg, protector.cloned()),
+        ServerSpec::DnsTunnel(cfg) => dns_tunnel_transport(cfg, protector.cloned()),
         ServerSpec::FrontedMeek(cfg) => fronted_meek_transport(cfg),
         ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
         ServerSpec::Tunnel(cfg) => {
@@ -238,6 +239,7 @@ fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
         ServerSpec::FrontedMeek(_) => "meek",
         ServerSpec::Wasm(_) => "wasm",
         ServerSpec::Tunnel(_) => "tunnel",
+        ServerSpec::DnsTunnel(_) => "dns-tunnel",
     }
 }
 
@@ -262,6 +264,8 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         ),
         ServerSpec::Wasm(c) => format!("wasm {}", c.server),
         ServerSpec::Tunnel(c) => format!("tunnel {}", c.server),
+        // Log hygiene: never surface the tunnel zone/resolvers — just the resolver count.
+        ServerSpec::DnsTunnel(c) => format!("dns-tunnel ({} resolvers)", c.resolvers.len()),
     }
 }
 
@@ -388,6 +392,12 @@ pub fn from_config_with_control(
     // `server` tunnel. Not TLS, so no shaping plan. Not a pool, so no control handle.
     if let Some(hy2) = &config.transport.hysteria2 {
         let (tcp, udp) = hysteria2_transport(hy2, protector)?;
+        return Ok((tcp, udp, None));
+    }
+    // DNS-tunnel (ADR 0011) — the shutdown escalation tier. Like the others, takes precedence over the
+    // plain `server` tunnel. Not TLS (no shaping plan); not a pool (no control handle).
+    if let Some(dt) = &config.transport.dns_tunnel {
+        let (tcp, udp) = dns_tunnel_transport(dt, protector)?;
         return Ok((tcp, udp, None));
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
@@ -694,6 +704,93 @@ fn hysteria2_transport(
     Err(io::Error::other(
         "transport.hysteria2 is configured but spark was built without the `hysteria2` feature",
     ))
+}
+
+/// Build the DNS-tunnel transport (feature `dns-tunnel`, ADR 0011): decode the base64 PSK, map the
+/// config cipher, and build a resolver list (the configured `resolvers`, or the `authoritative`
+/// address when none are given — authoritative mode). TCP only; `UdpTransport` reports unsupported.
+#[cfg(feature = "dns-tunnel")]
+fn dns_tunnel_transport(
+    cfg: &DnsTunnelConfig,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let psk = dns_tunnel_core::crypto::decode_psk(&cfg.psk)
+        .map_err(|e| io::Error::other(format!("transport.dns-tunnel: {e}")))?;
+    let mut resolvers = cfg.resolvers.clone();
+    if resolvers.is_empty() {
+        if let Some(auth) = &cfg.authoritative {
+            resolvers.push(auth.socket_addr()?.to_string());
+        }
+    }
+    if resolvers.is_empty() {
+        return Err(io::Error::other(
+            "transport.dns-tunnel: set `resolvers` or `authoritative`",
+        ));
+    }
+    let cipher = match cfg.cipher {
+        DnsTunnelCipher::ChaCha20Poly1305 => dns_tunnel_core::crypto::Cipher::ChaCha20Poly1305,
+        DnsTunnelCipher::Aes256Gcm => dns_tunnel_core::crypto::Cipher::Aes256Gcm,
+    };
+    let session = dns_tunnel_core::session::Config {
+        cipher,
+        ..Default::default()
+    };
+    let t = Arc::new(dns_tunnel::DnsTunnelTransport::new(
+        cfg.zone.clone(),
+        psk,
+        resolvers,
+        dns_tunnel::balancer::PoolConfig::default(),
+        session,
+        protector,
+    ));
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `dns-tunnel` feature, a configured DNS-tunnel transport is a hard error (mirrors
+/// anytls/shadowsocks/hysteria2/wasm).
+#[cfg(not(feature = "dns-tunnel"))]
+fn dns_tunnel_transport(
+    _cfg: &DnsTunnelConfig,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.dns-tunnel is configured but spark was built without the `dns-tunnel` feature",
+    ))
+}
+
+#[cfg(all(test, feature = "dns-tunnel"))]
+mod dns_tunnel_wiring_tests {
+    use super::*;
+    use crate::config::{DnsTunnelCipher, DnsTunnelCompression, DnsTunnelConfig};
+
+    // 32 zero-ish bytes, base64.
+    const PSK_B64: &str = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
+
+    #[test]
+    fn builder_accepts_a_valid_config() {
+        let cfg = DnsTunnelConfig {
+            zone: "t.example.com".into(),
+            psk: PSK_B64.into(),
+            resolvers: vec!["1.1.1.1".into(), "8.8.8.8:53".into()],
+            authoritative: None,
+            cipher: DnsTunnelCipher::Aes256Gcm,
+            compression: DnsTunnelCompression::Off,
+        };
+        assert!(dns_tunnel_transport(&cfg, None).is_ok());
+    }
+
+    #[test]
+    fn builder_rejects_no_resolvers_and_no_authoritative() {
+        let cfg = DnsTunnelConfig {
+            zone: "t.example.com".into(),
+            psk: PSK_B64.into(),
+            resolvers: vec![],
+            authoritative: None,
+            cipher: DnsTunnelCipher::default(),
+            compression: DnsTunnelCompression::default(),
+        };
+        assert!(dns_tunnel_transport(&cfg, None).is_err());
+    }
 }
 
 /// Build the domain-fronted meek polling transport (feature `fronted-meek`).

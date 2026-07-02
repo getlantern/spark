@@ -27,7 +27,9 @@ use tokio::net::UdpSocket;
 use dns_tunnel_core::session::{self, ClientSession};
 
 use crate::net::SocketProtector;
-use crate::transport::{protected_udp_socket, Transport};
+use crate::transport::{
+    protected_udp_socket, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport,
+};
 use crate::BoxedStream;
 
 /// Resolver pool + balancer (ADR 0011 §4): the headline resolver aggregation — pool parse/expand,
@@ -122,6 +124,18 @@ impl Transport for DnsTunnelTransport {
             inner: app_side,
             pump,
         }))
+    }
+}
+
+#[async_trait]
+impl UdpTransport for DnsTunnelTransport {
+    async fn dial_udp(
+        &self,
+        _target: SocketAddr,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        Err(io::Error::other(
+            "dns-tunnel: UDP-over-tunnel is unsupported in this build (TCP only, ADR 0011 v1)",
+        ))
     }
 }
 

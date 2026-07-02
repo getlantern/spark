@@ -726,6 +726,9 @@ pub enum ServerSpec {
     /// `fronted-meek` alias keeps any native-TOML pools written under the pre-rename tag deserializable.
     #[serde(rename = "meek", alias = "fronted-meek")]
     FrontedMeek(FrontedMeekConfig),
+    /// DNS-tunnel (ADR 0011).
+    #[serde(rename = "dns-tunnel")]
+    DnsTunnel(DnsTunnelConfig),
 }
 
 /// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
@@ -865,6 +868,12 @@ impl Config {
             self.transport.samizdat.as_ref().map(|c| &c.server),
             self.transport.shadowsocks.as_ref().map(|c| &c.server),
             self.transport.hysteria2.as_ref().map(|c| &c.server),
+            // DNS-tunnel: the resolvers are IP literals (parsed by the balancer); only the optional
+            // `authoritative` endpoint can be a hostname needing resolution.
+            self.transport
+                .dns_tunnel
+                .as_ref()
+                .and_then(|c| c.authoritative.as_ref()),
         ];
         let pool = self.transport.servers.iter().filter_map(|e| match &e.spec {
             ServerSpec::Anytls(c) => Some(&c.server),
@@ -874,6 +883,7 @@ impl Config {
             ServerSpec::Hysteria2(c) => Some(&c.server),
             ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
             ServerSpec::FrontedMeek(_) => None, // self-bootstrapping; no server host to resolve
+            ServerSpec::DnsTunnel(c) => c.authoritative.as_ref(), // resolvers are IP literals
         });
         singles
             .into_iter()
@@ -1315,6 +1325,21 @@ authoritative = "127.0.0.1:5300"
                 assert_eq!(ss.server, "1.2.3.4:8388".parse().unwrap());
             }
             other => panic!("expected a shadowsocks pool entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_a_dns_tunnel_pool_entry() {
+        let c = Config::from_toml_str(
+            "[[transport.servers]]\nkind = \"dns-tunnel\"\nzone = \"t.example.com\"\npsk = \"QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=\"\nresolvers = [\"1.1.1.1\", \"8.8.8.8\"]\n",
+        )
+        .unwrap();
+        match &c.transport.servers[0].spec {
+            ServerSpec::DnsTunnel(dt) => {
+                assert_eq!(dt.zone, "t.example.com");
+                assert_eq!(dt.resolvers.len(), 2);
+            }
+            other => panic!("expected a dns-tunnel pool entry, got {other:?}"),
         }
     }
 
