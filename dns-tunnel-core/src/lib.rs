@@ -22,4 +22,5 @@
 #![forbid(unsafe_code)]
 
 pub mod crypto;
+pub mod dns;
 pub mod frame;
