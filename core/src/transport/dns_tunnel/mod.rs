@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 use tokio::net::UdpSocket;
 
-use dns_tunnel_core::session::{self, ClientSession};
+use dns_tunnel_core::session::{self, AnswerOutcome, ClientSession};
 
 use crate::net::SocketProtector;
 use crate::transport::{
@@ -42,6 +42,10 @@ use balancer::{PoolConfig, ResolverPool};
 const DUPLEX_BUF: usize = 64 * 1024;
 /// The keepalive/RTO wakeup cadence (ms): drives downlink polling + retransmits while idle.
 const TICK_MS: u64 = 20;
+/// Downlink MTU-probe candidate sizes (payload bytes); the largest that survives the path wins.
+const PROBE_CANDIDATES: &[u16] = &[400, 600, 800, 1000, 1200];
+/// How long to collect probe responses before applying the discovered synced downlink MTU (ms).
+const PROBE_WINDOW_MS: u64 = 400;
 
 /// A DNS-tunnel transport. Cheap to clone; one pump task + resolver pool is spawned per `dial`.
 #[derive(Clone)]
@@ -162,6 +166,11 @@ async fn run_pump(
     let mut pending: HashMap<u16, (Vec<SocketAddr>, u64)> = HashMap::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(TICK_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Downlink MTU probe state: fire one round of probes after the handshake, collect the largest
+    // size that returns, then SetMtu it. Probe queries are deliberately NOT tracked in `pending`
+    // (a probe failing at a too-large size is expected, not resolver loss).
+    let (mut probe_sent, mut probe_done, mut probe_best, mut probe_deadline) =
+        (false, false, 0u16, 0u64);
 
     loop {
         let now = start.elapsed().as_millis() as u64;
@@ -175,7 +184,11 @@ async fn run_pump(
                             pool.on_success(&from, now.saturating_sub(sent_at));
                         }
                     }
-                    session.on_answer(&dns_buf[..n], now);
+                    if let AnswerOutcome::ProbeResp { target } =
+                        session.on_answer(&dns_buf[..n], now)
+                    {
+                        probe_best = probe_best.max(target);
+                    }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(_) => return,
@@ -204,6 +217,32 @@ async fn run_pump(
             }
             if let Some(txn) = txn_of(&q) {
                 pending.insert(txn, (targets, now));
+            }
+        }
+
+        // MTU probe: once established, fire one round of downlink probes; after the collection window,
+        // tell the server the largest size that survived the path (a synced-pool downlink MTU). Runs
+        // alongside early data, which uses the conservative default until the probe settles.
+        if !probe_done && session.is_established() {
+            if !probe_sent {
+                for &target in PROBE_CANDIDATES {
+                    if let Some(q) = session.build_mtu_probe(target) {
+                        for t in &pool.pick(now) {
+                            let _ = udp.send_to(&q, t).await;
+                        }
+                    }
+                }
+                probe_sent = true;
+                probe_deadline = now + PROBE_WINDOW_MS;
+            } else if now >= probe_deadline {
+                if probe_best > 0 {
+                    if let Some(q) = session.build_set_mtu(probe_best) {
+                        for t in &pool.pick(now) {
+                            let _ = udp.send_to(&q, t).await;
+                        }
+                    }
+                }
+                probe_done = true;
             }
         }
 
@@ -312,6 +351,45 @@ mod tests {
         addr
     }
 
+    /// Like `spawn_echo_server`, but records the max downlink segment any session reaches into
+    /// `report` (so a test can observe the pump's MTU probe raising it via SetMtu).
+    async fn spawn_echo_server_reporting(
+        psk: Vec<u8>,
+        zone: String,
+        cfg: SessCfg,
+        report: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SocketAddr {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut server = Server::new(&psk, &zone, cfg).unwrap();
+            let start = Instant::now();
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let (n, from) = match udp.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let now = start.elapsed().as_millis() as u64;
+                if let Some(ans) = server.on_query(&buf[..n], now) {
+                    if udp.send_to(&ans, from).await.is_err() {
+                        return;
+                    }
+                }
+                for id in server.session_ids() {
+                    if let Some(seg) = server.downlink_segment(&id) {
+                        report.fetch_max(seg, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let d = server.take_from_client(&id);
+                    if !d.is_empty() {
+                        server.deliver_to_client(&id, &d);
+                    }
+                }
+            }
+        });
+        addr
+    }
+
     /// A `127.0.0.1` address with (almost certainly) nothing listening: bind to grab a free port,
     /// then drop the socket so sends there go unanswered.
     async fn dead_addr() -> SocketAddr {
@@ -416,5 +494,44 @@ mod tests {
             None,
         );
         round_trip(transport, 64 * 1024).await;
+    }
+
+    #[tokio::test]
+    async fn probe_raises_downlink_mtu() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let psk = vec![0x99u8; 32];
+        let zone = "t.example.com".to_string();
+        let report = Arc::new(AtomicUsize::new(0));
+        let server =
+            spawn_echo_server_reporting(psk.clone(), zone.clone(), cfg(), report.clone()).await;
+        let transport = DnsTunnelTransport::new(
+            zone,
+            psk,
+            vec![server.to_string()],
+            PoolConfig {
+                duplication: 1,
+                ..PoolConfig::default()
+            },
+            cfg(),
+            None,
+        );
+        let target: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let stream = transport.dial(target).await.unwrap();
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        // Establish + a tiny round-trip.
+        wr.write_all(b"hi").await.unwrap();
+        let mut b = [0u8; 2];
+        rd.read_exact(&mut b).await.unwrap();
+        // Hold the stream open past the probe window so the pump fires probes + SetMtu.
+        tokio::time::sleep(Duration::from_millis(PROBE_WINDOW_MS + 300)).await;
+        // Over loopback every candidate returns, so the pump discovers the largest (1200) and SetMtu's
+        // it — proving the probe fired end-to-end and adapted the server's downlink segment.
+        assert_eq!(
+            report.load(Ordering::Relaxed),
+            *PROBE_CANDIDATES.last().unwrap() as usize,
+            "MTU probe raised the server downlink to the largest surviving candidate"
+        );
     }
 }

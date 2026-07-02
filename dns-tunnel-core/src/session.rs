@@ -184,6 +184,11 @@ impl ClientSession {
         self.stream.remote_finished()
     }
 
+    /// Whether the session handshake has completed (the SYN-ACK arrived).
+    pub fn is_established(&self) -> bool {
+        self.handshake_acked
+    }
+
     fn next_txn(&mut self) -> u16 {
         self.txn = self.txn.wrapping_add(1);
         self.txn
