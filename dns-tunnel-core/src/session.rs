@@ -92,6 +92,24 @@ fn aeads(cipher: Cipher, keys: &SessionKeys) -> Result<(Aead, Aead, Aead), crypt
     ))
 }
 
+/// Largest MTU-probe payload the server will pad a response to (a sane DNS-over-UDP ceiling).
+const MAX_PROBE_PAYLOAD: usize = 4096;
+
+/// Read a big-endian u16 from the front of `b`.
+fn read_u16(b: &[u8]) -> Option<u16> {
+    b.get(..2).map(|s| u16::from_be_bytes([s[0], s[1]]))
+}
+
+/// What [`ClientSession::on_answer`] did with an answer, so the pump can react to control frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerOutcome {
+    /// A normal answer (SYN-ACK, data, ack, or empty) was consumed into the session.
+    Consumed,
+    /// A downlink MTU-probe response for `target` payload bytes returned intact — that downlink size
+    /// works on the path the answer came back over.
+    ProbeResp { target: u16 },
+}
+
 /// A DNS query the client has sent and is awaiting an answer for.
 struct Outstanding {
     txn: u16,
@@ -217,19 +235,19 @@ impl ClientSession {
     }
 
     /// Process a DNS answer received for a prior query.
-    pub fn on_answer(&mut self, answer: &[u8], now: u64) {
+    pub fn on_answer(&mut self, answer: &[u8], now: u64) -> AnswerOutcome {
         let Ok(parsed) = dns::parse_answer(answer) else {
-            return;
+            return AnswerOutcome::Consumed;
         };
-        // Free the matching query slot.
+        // Free the matching query slot (probe/SetMtu queries aren't tracked here — the pump owns them).
         if let Some(pos) = self.outstanding.iter().position(|o| o.txn == parsed.txn_id) {
             self.outstanding.swap_remove(pos);
         }
         if parsed.data.is_empty() {
-            return; // server had nothing to send
+            return AnswerOutcome::Consumed; // server had nothing to send
         }
         let Ok(wire) = frame::parse_wire(&parsed.data) else {
-            return;
+            return AnswerOutcome::Consumed;
         };
         if !self.handshake_acked {
             // Expect the SynAck, sealed with the handshake key.
@@ -238,9 +256,41 @@ impl ClientSession {
                     self.handshake_acked = true;
                 }
             }
-        } else if let Ok(f) = frame::open_frame(&self.down, &wire) {
+            return AnswerOutcome::Consumed;
+        }
+        if let Ok(f) = frame::open_frame(&self.down, &wire) {
+            if f.kind == Kind::MtuProbeResp {
+                return AnswerOutcome::ProbeResp {
+                    target: read_u16(&f.payload).unwrap_or(0),
+                };
+            }
             self.stream.on_frame(&f, now);
         }
+        AnswerOutcome::Consumed
+    }
+
+    /// Build a downlink MTU-probe query requesting a padded response of ~`target` bytes. The pump sends
+    /// it to a chosen resolver; if the padded response returns, that downlink size survives that path.
+    pub fn build_mtu_probe(&mut self, target: u16) -> Option<Vec<u8>> {
+        let nonce = crypto::random_nonce().ok()?;
+        let mut f = Frame::new(Kind::MtuProbe);
+        f.payload = Bytes::copy_from_slice(&target.to_be_bytes());
+        let wire = frame::seal_short(&self.up, &self.conn_id, &nonce, &f);
+        dns::build_query(self.next_txn(), &wire, &self.zone, self.cfg.edns_udp).ok()
+    }
+
+    /// Build a query telling the server to cap its downlink segment at `size` bytes (post-probe).
+    pub fn build_set_mtu(&mut self, size: u16) -> Option<Vec<u8>> {
+        let nonce = crypto::random_nonce().ok()?;
+        let mut f = Frame::new(Kind::SetMtu);
+        f.payload = Bytes::copy_from_slice(&size.to_be_bytes());
+        let wire = frame::seal_short(&self.up, &self.conn_id, &nonce, &f);
+        dns::build_query(self.next_txn(), &wire, &self.zone, self.cfg.edns_udp).ok()
+    }
+
+    /// Retune the client's uplink send-segment (e.g. after uplink probing / policy).
+    pub fn set_uplink_segment(&mut self, size: usize) {
+        self.stream.set_max_segment(size);
     }
 
     /// The current send-side timeout hint (ms) for scheduling the next `poll_query`.
@@ -380,9 +430,30 @@ impl Server {
     fn handle_data(&mut self, query: &[u8], wire: &Wire<'_>, now: u64) -> Option<Vec<u8>> {
         let sess = self.sessions.get_mut(&wire.conn_id)?;
         sess.last_seen = now;
-        // Open the uplink frame and feed the ARQ.
         if let Ok(f) = frame::open_frame(&sess.up, wire) {
-            sess.stream.on_frame(&f, now);
+            match f.kind {
+                Kind::MtuProbe => {
+                    // Reply with a response padded to the requested size. If it's too big for the
+                    // path it won't return, and the client's probe at that size fails.
+                    let target = read_u16(&f.payload)
+                        .map(|t| (t as usize).clamp(2, MAX_PROBE_PAYLOAD))
+                        .unwrap_or(2);
+                    let mut payload = (target as u16).to_be_bytes().to_vec();
+                    payload.resize(target, 0);
+                    let mut resp = Frame::new(Kind::MtuProbeResp);
+                    resp.payload = Bytes::from(payload);
+                    let nonce = crypto::random_nonce().ok()?;
+                    let out = frame::seal_short(&sess.down, &wire.conn_id, &nonce, &resp);
+                    return dns::build_answer(query, &out, self.cfg.edns_udp).ok();
+                }
+                Kind::SetMtu => {
+                    if let Some(sz) = read_u16(&f.payload) {
+                        sess.stream.set_max_segment(sz as usize);
+                    }
+                    // Fall through to a normal answer.
+                }
+                _ => sess.stream.on_frame(&f, now),
+            }
         }
         // Answer with the next downlink frame (data / ack / …), or an empty answer if none.
         let downlink = match sess.stream.poll_transmit(now) {
@@ -393,6 +464,11 @@ impl Server {
             None => Vec::new(),
         };
         dns::build_answer(query, &downlink, self.cfg.edns_udp).ok()
+    }
+
+    /// The current downlink send-segment size for a session (telemetry/tests) — reflects any `SetMtu`.
+    pub fn downlink_segment(&self, conn_id: &[u8; CONN_ID_LEN]) -> Option<usize> {
+        self.sessions.get(conn_id).map(|s| s.stream.max_segment())
     }
 }
 
@@ -557,6 +633,46 @@ mod tests {
             b"hello world",
             "client receives the echo"
         );
+    }
+
+    #[test]
+    fn mtu_probe_round_trips() {
+        let psk = [0x66u8; 32];
+        let zone = "t.example.com";
+        let cfg = Config::default();
+        let mut client = ClientSession::new(&psk, zone, b"1.2.3.4:443", cfg.clone()).unwrap();
+        let mut server = Server::new(&psk, zone, cfg).unwrap();
+        // Handshake.
+        let q = client.poll_query(0).unwrap();
+        let a = server.on_query(&q, 0).unwrap();
+        client.on_answer(&a, 0);
+        assert!(client.handshake_acked);
+        // Probe downlink at 300 bytes; the padded response round-trips and reports the target.
+        let pq = client.build_mtu_probe(300).unwrap();
+        let pa = server.on_query(&pq, 1).expect("probe answer");
+        assert_eq!(
+            client.on_answer(&pa, 1),
+            AnswerOutcome::ProbeResp { target: 300 }
+        );
+    }
+
+    #[test]
+    fn set_mtu_resizes_server_downlink() {
+        let psk = [0x77u8; 32];
+        let zone = "t.example.com";
+        let cfg = Config::default();
+        let mut client = ClientSession::new(&psk, zone, b"1.2.3.4:443", cfg.clone()).unwrap();
+        let mut server = Server::new(&psk, zone, cfg).unwrap();
+        let conn = client.conn_id;
+        // Establish the session (server side needs only the SYN).
+        let q = client.poll_query(0).unwrap();
+        server.on_query(&q, 0).unwrap();
+        let before = server.downlink_segment(&conn).unwrap();
+        assert_ne!(before, 200);
+        // SetMtu caps the server's downlink segment.
+        let sq = client.build_set_mtu(200).unwrap();
+        server.on_query(&sq, 1).unwrap();
+        assert_eq!(server.downlink_segment(&conn), Some(200));
     }
 
     #[test]
