@@ -2429,3 +2429,19 @@ unaffected). Crates: `dns-tunnel-core` (shared, no-I/O) + `dns-tunnel-server` (b
 `core/src/transport/dns_tunnel/`. **NEXT: M1** — `dns-tunnel-core` codec (frame/AEAD/DNS/base32/EDNS0,
 golden vectors + `cargo fuzz`; no network). Ladder M1→M5 in the plan. Open items: server crate home
 (spark workspace vs lantern-box), `dns-tunnel-core`→`flint` migration, protocol codename.
+
+**2026-07-01 — DNS-tunnel M1 (dns-tunnel-core codec) DONE.** New pure/no-I/O workspace crate
+`dns-tunnel-core` (33 tests, clippy -D warnings / fmt clean, feature-independent — base build
+untouched). Modules: `crypto` (base64 PSK decode; HKDF-SHA256 per-session schedule → up/down/
+handshake keys + commitment; `ring` AEAD ChaCha20-Poly1305/AES-256-GCM with random 96-bit nonce/msg;
+SystemRandom helpers — grounded in the samizdat/shadowsocks in-repo `ring` idioms), `frame` (inner
+version/kind/flags header + optional stream_id/seq/fragment/comp_algo + payload; QUIC-style long/short
+wire form — short=FORM|conn_id|nonce|AEAD, long/SYN adds cleartext salt; conn_id bound via the
+HKDF key's info, not AAD, so no header-check byte), `dns` (hand-rolled TXT query/answer, base32 QNAME
+packing [case-insensitive decode for 0x20], EDNS0 OPT, answer via 0xC00C compression pointer;
+bounds-checked panic-free Reader), `compress` (LZ4 via lz4_flex, compress-if-smaller + anti-bomb size
+cap), `mtu` (QNAME/base32 capacity math; a cross-check test proves the bound == dns::build_query's
+exact QNAME budget). `cargo fuzz` deferred → in-suite randomized no-panic guards on both parsers cover
+the contract for now. Design doc §2.2 synced to the implemented wire form. **NEXT: M2** — the ARQ core
+(reliable per-stream state machine: seq/ack/NACK gap recovery, RFC-6298 RTO, windowed flow control,
+lifecycle; tested on a simulated lossy/dup/reorder channel). The dominant lift.
