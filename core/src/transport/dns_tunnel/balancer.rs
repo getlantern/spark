@@ -310,6 +310,48 @@ impl ResolverPool {
     }
 }
 
+/// The OS-configured DNS resolver(s), as pool specs (`ip:53`, IPv6 as `[ip]:53`). On Unix this reads
+/// `/etc/resolv.conf`'s `nameserver` lines; other platforms return empty for now (a follow-up can add
+/// the Windows adapter API). Used to auto-include the local resolver — during a national shutdown the
+/// mandated local/ISP resolver is often the only one that still forwards DNS, so it's the lifeline.
+///
+/// **Log hygiene:** callers must not log the returned IPs (spark rule: never log resolver IPs).
+pub fn system_resolvers() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        std::fs::read_to_string("/etc/resolv.conf")
+            .map(|s| parse_resolv_conf(&s))
+            .unwrap_or_default()
+    }
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
+}
+
+/// Parse `nameserver` lines from `resolv.conf` content into pool specs (`ip:53`; IPv6 bracketed as
+/// `[ip]:53` so [`parse_spec`] accepts it). Comments (`#`/`;`) and non-`nameserver` directives are
+/// skipped, as are unparseable addresses.
+fn parse_resolv_conf(contents: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        if it.next() != Some("nameserver") {
+            continue;
+        }
+        match it.next().and_then(|s| s.parse::<IpAddr>().ok()) {
+            Some(IpAddr::V4(v4)) => out.push(format!("{v4}:53")),
+            Some(IpAddr::V6(v6)) => out.push(format!("[{v6}]:53")),
+            None => {}
+        }
+    }
+    out
+}
+
 /// Parse one resolver spec into concrete `SocketAddr`s (expanding an IPv4 CIDR), defaulting port 53.
 fn parse_spec(spec: &str, max_hosts: usize) -> Result<Vec<SocketAddr>, PoolError> {
     let spec = spec.trim();
@@ -392,6 +434,32 @@ mod tests {
         // /16 is 65536 hosts; capped at max_hosts.
         let p = pool(&["10.0.0.0/16"], cfg);
         assert_eq!(p.len(), 100);
+    }
+
+    #[test]
+    fn parses_resolv_conf_nameservers() {
+        let sample = "\
+# a comment
+; another comment
+nameserver 8.8.8.8
+nameserver   1.1.1.1
+search example.com
+options edns0
+nameserver 2606:4700:4700::1111
+nameserver not-an-ip
+";
+        let specs = parse_resolv_conf(sample);
+        assert_eq!(
+            specs,
+            vec![
+                "8.8.8.8:53".to_string(),
+                "1.1.1.1:53".to_string(),
+                "[2606:4700:4700::1111]:53".to_string(),
+            ]
+        );
+        // The emitted specs must round-trip through the pool parser (v4 + bracketed v6).
+        let p = ResolverPool::parse(&specs, PoolConfig::default()).unwrap();
+        assert_eq!(p.len(), 3);
     }
 
     #[test]

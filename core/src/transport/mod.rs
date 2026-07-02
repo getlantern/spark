@@ -720,6 +720,12 @@ fn dns_tunnel_transport(
     let psk = dns_tunnel_core::crypto::decode_psk(&cfg.psk)
         .map_err(|e| io::Error::other(format!("transport.dns-tunnel: {e}")))?;
     let mut resolvers = cfg.resolvers.clone();
+    // Auto-include the OS-configured resolver(s) (default on) — during a shutdown the mandated local
+    // resolver is often the only one that still forwards DNS. Recursive mode only (authoritative mode
+    // dials the server directly). Log hygiene: never log the discovered IPs.
+    if cfg.authoritative.is_none() && cfg.use_system_resolvers.unwrap_or(true) {
+        resolvers.extend(dns_tunnel::balancer::system_resolvers());
+    }
     if resolvers.is_empty() {
         if let Some(auth) = &cfg.authoritative {
             resolvers.push(auth.socket_addr()?.to_string());
@@ -727,7 +733,7 @@ fn dns_tunnel_transport(
     }
     if resolvers.is_empty() {
         return Err(io::Error::other(
-            "transport.dns-tunnel: set `resolvers` or `authoritative`",
+            "transport.dns-tunnel: set `resolvers`, `authoritative`, or enable system resolvers",
         ));
     }
     let cipher = match cfg.cipher {
@@ -784,6 +790,7 @@ mod dns_tunnel_wiring_tests {
             cipher: DnsTunnelCipher::Aes256Gcm,
             compression: DnsTunnelCompression::Off,
             duplication: Some(3),
+            use_system_resolvers: Some(false),
         };
         assert!(dns_tunnel_transport(&cfg, None).is_ok());
     }
@@ -798,6 +805,9 @@ mod dns_tunnel_wiring_tests {
             cipher: DnsTunnelCipher::default(),
             compression: DnsTunnelCompression::default(),
             duplication: None,
+            // Deterministic: don't pull in this machine's /etc/resolv.conf, so the empty-pool error
+            // path is what's exercised.
+            use_system_resolvers: Some(false),
         };
         assert!(dns_tunnel_transport(&cfg, None).is_err());
     }

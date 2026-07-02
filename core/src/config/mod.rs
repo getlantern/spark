@@ -606,6 +606,13 @@ pub struct DnsTunnelConfig {
     /// for shutdown / last-resort profiles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplication: Option<usize>,
+    /// Auto-include the OS-configured resolver(s) (`/etc/resolv.conf` on Unix) in the recursive pool.
+    /// Default **true**: during a national shutdown the mandated local/ISP resolver is often the only
+    /// one that still forwards DNS, so it's the lifeline. Ignored in authoritative mode. Set false to
+    /// use only the configured `resolvers` (e.g. to avoid routing tunnel queries through the ISP's
+    /// resolver when public resolvers are reachable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_system_resolvers: Option<bool>,
 }
 
 /// The AEAD cipher for the DNS-tunnel transport (ADR 0011).
@@ -1285,6 +1292,7 @@ resolvers = ["1.1.1.1", "8.8.8.8:53", "9.9.9.0/30"]
 cipher = "aes-256-gcm"
 compression = "lz4"
 duplication = 3
+use_system_resolvers = false
 "#;
         let cfg = Config::from_toml_str(toml).unwrap();
         let dt = cfg.transport.dns_tunnel.clone().unwrap();
@@ -1293,6 +1301,7 @@ duplication = 3
         assert_eq!(dt.cipher, DnsTunnelCipher::Aes256Gcm);
         assert_eq!(dt.compression, DnsTunnelCompression::Lz4);
         assert_eq!(dt.duplication, Some(3));
+        assert_eq!(dt.use_system_resolvers, Some(false));
         assert!(dt.authoritative.is_none());
         let out = cfg.to_toml_string().unwrap();
         assert!(out.contains("aes-256-gcm"));
