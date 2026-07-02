@@ -47,9 +47,13 @@ pub mod rules;
 pub mod dns;
 
 /// Install bundled CA roots so flint's fronted TLS can verify on mobile (Android/iOS lack a
-/// boring-readable system trust store). Behind `config-fetch` (the feature whose fronted fetches
-/// need it).
-#[cfg(feature = "config-fetch")]
+/// boring-readable system trust store). Gated to the fd-tunnel platforms: its only caller,
+/// [`fd_tunnel::run_fd_dispatch`], compiles only on android/ios/macos, so declaring `ca_roots` more
+/// broadly would leave the desktop no-op as dead code on linux/windows.
+#[cfg(all(
+    feature = "config-fetch",
+    any(target_os = "android", target_os = "ios", target_os = "macos")
+))]
 mod ca_roots;
 
 /// Marker for a bidirectional async byte stream. Blanket-implemented for every
