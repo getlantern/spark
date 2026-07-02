@@ -336,9 +336,11 @@ mod tests {
                 }
             }
             for id in server.session_ids() {
-                let d = server.take_from_client(&id);
-                if !d.is_empty() {
-                    server.deliver_to_client(&id, &d);
+                for sid in server.streams_of(&id) {
+                    let d = server.take_from_client(&id, sid);
+                    if !d.is_empty() {
+                        server.deliver_to_client(&id, sid, &d);
+                    }
                 }
             }
         }
@@ -380,9 +382,11 @@ mod tests {
                     if let Some(seg) = server.downlink_segment(&id) {
                         report.fetch_max(seg, std::sync::atomic::Ordering::Relaxed);
                     }
-                    let d = server.take_from_client(&id);
-                    if !d.is_empty() {
-                        server.deliver_to_client(&id, &d);
+                    for sid in server.streams_of(&id) {
+                        let d = server.take_from_client(&id, sid);
+                        if !d.is_empty() {
+                            server.deliver_to_client(&id, sid, &d);
+                        }
                     }
                 }
             }

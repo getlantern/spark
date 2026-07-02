@@ -1,7 +1,9 @@
 //! Server for spark's DNS-tunnel transport (ADR 0011): binds a UDP endpoint (the authoritative
 //! nameserver side of the tunnel), runs the sans-I/O [`dns_tunnel_core::session::Server`], and does
-//! **real TCP egress** — on a new session it decodes the SYN's SOCKS5 target, `TcpStream::connect`s
-//! it, and bridges the session's byte stream to/from the socket. Includes an idle session sweep.
+//! **real TCP egress** — for each multiplexed stream it decodes the SYN's SOCKS5 target,
+//! `TcpStream::connect`s it, and bridges that stream's byte channel to/from the socket. One crypto
+//! session (ConnectionID) can carry many streams, each with its own independent TCP egress. Includes
+//! an idle session sweep.
 //!
 //! **Log hygiene (ADR 0011 / GOAL.md):** never log the tunnel zone, target addresses, or client/
 //! resolver IPs. Log only coarse, non-identifying events.
@@ -18,6 +20,9 @@ use tokio::sync::mpsc;
 
 /// A session ConnectionID (matches `dns_tunnel_core`'s 8-byte id).
 type ConnId = [u8; 8];
+
+/// A multiplexed stream, addressed by its session and StreamID — one TCP egress each.
+type StreamKey = (ConnId, u16);
 
 /// Server configuration.
 pub struct ServerConfig {
@@ -70,8 +75,8 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let start = Instant::now();
     let mut buf = vec![0u8; 2048];
-    let (egress_tx, mut egress_rx) = mpsc::channel::<(ConnId, Egress)>(1024);
-    let mut egress: HashMap<ConnId, EgressHandle> = HashMap::new();
+    let (egress_tx, mut egress_rx) = mpsc::channel::<(StreamKey, Egress)>(1024);
+    let mut egress: HashMap<StreamKey, EgressHandle> = HashMap::new();
     let mut sweep = tokio::time::interval(Duration::from_secs(5));
 
     loop {
@@ -82,68 +87,76 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
                 if let Some(ans) = server.on_query(&buf[..n], now) {
                     let _ = udp.send_to(&ans, from).await;
                 }
-                // Spawn egress for any new session; push uplink bytes to each session's egress.
+                // Spawn TCP egress for any newly opened stream, then push each stream's uplink bytes.
                 for id in server.session_ids() {
-                    if let std::collections::hash_map::Entry::Vacant(e) = egress.entry(id) {
-                        match server.take_new_target(&id).as_deref().and_then(decode_target) {
+                    for (sid, target) in server.open_targets(&id) {
+                        let key = (id, sid);
+                        match decode_target(&target) {
                             Some(addr) => {
                                 let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
-                                let task = tokio::spawn(egress_task(id, addr, rx, egress_tx.clone()));
-                                e.insert(EgressHandle { tx, task });
+                                let task = tokio::spawn(egress_task(key, addr, rx, egress_tx.clone()));
+                                egress.insert(key, EgressHandle { tx, task });
                             }
-                            None => {
-                                server.remove_session(&id);
-                                continue;
-                            }
+                            // An undecodable target: close just that stream (client sees the FIN).
+                            None => server.close_stream(&id, sid),
                         }
                     }
-                    let up = server.take_from_client(&id);
-                    if !up.is_empty() {
-                        // `send().await` applies backpressure (no data loss). A slow target can stall
-                        // the loop for other sessions — acceptable for v1; per-session fairness later.
-                        if let Some(h) = egress.get(&id) {
-                            if h.tx.send(up.to_vec()).await.is_err() {
-                                drop_session(&mut server, &mut egress, &id);
+                    for sid in server.streams_of(&id) {
+                        let up = server.take_from_client(&id, sid);
+                        if !up.is_empty() {
+                            // `send().await` applies backpressure (no data loss). A slow target can
+                            // stall the loop for other streams — acceptable for v1; fairness later.
+                            if let Some(h) = egress.get(&(id, sid)) {
+                                if h.tx.send(up.to_vec()).await.is_err() {
+                                    drop_stream(&mut server, &mut egress, (id, sid));
+                                }
                             }
                         }
                     }
                 }
             }
-            Some((id, msg)) = egress_rx.recv() => match msg {
-                Egress::Data(d) => server.deliver_to_client(&id, &d),
-                Egress::Eof => drop_session(&mut server, &mut egress, &id),
+            Some((key, msg)) = egress_rx.recv() => match msg {
+                Egress::Data(d) => server.deliver_to_client(&key.0, key.1, &d),
+                // The target closed: FIN the stream so the client sees EOF, and retire its egress.
+                Egress::Eof => {
+                    server.close_stream(&key.0, key.1);
+                    if let Some(h) = egress.remove(&key) {
+                        h.task.abort();
+                    }
+                }
             },
             _ = sweep.tick() => {
                 let now = start.elapsed().as_millis() as u64;
                 for id in server.sweep_idle(now, cfg.idle_timeout_ms) {
-                    if let Some(h) = egress.remove(&id) {
-                        h.task.abort();
-                    }
+                    // Abort every egress task belonging to the swept session.
+                    egress.retain(|(cid, _), h| {
+                        if *cid == id { h.task.abort(); false } else { true }
+                    });
                 }
             }
         }
     }
 }
 
-fn drop_session(server: &mut Server, egress: &mut HashMap<ConnId, EgressHandle>, id: &ConnId) {
-    server.remove_session(id);
-    if let Some(h) = egress.remove(id) {
+fn drop_stream(server: &mut Server, egress: &mut HashMap<StreamKey, EgressHandle>, key: StreamKey) {
+    server.close_stream(&key.0, key.1);
+    if let Some(h) = egress.remove(&key) {
         h.task.abort();
     }
 }
 
-/// Per-session TCP egress: connect the target, then bridge the TCP socket to/from the session via
+/// Per-stream TCP egress: connect the target, then bridge the TCP socket to/from the stream via
 /// channels (reader: TCP → core as downlink; writer: core uplink → TCP).
 async fn egress_task(
-    id: ConnId,
+    key: StreamKey,
     addr: SocketAddr,
     mut rx: mpsc::Receiver<Vec<u8>>,
-    etx: mpsc::Sender<(ConnId, Egress)>,
+    etx: mpsc::Sender<(StreamKey, Egress)>,
 ) {
     let stream = match TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(_) => {
-            let _ = etx.send((id, Egress::Eof)).await;
+            let _ = etx.send((key, Egress::Eof)).await;
             return;
         }
     };
@@ -154,12 +167,12 @@ async fn egress_task(
         loop {
             match rd.read(&mut b).await {
                 Ok(0) | Err(_) => {
-                    let _ = etx2.send((id, Egress::Eof)).await;
+                    let _ = etx2.send((key, Egress::Eof)).await;
                     return;
                 }
                 Ok(n) => {
                     if etx2
-                        .send((id, Egress::Data(b[..n].to_vec())))
+                        .send((key, Egress::Data(b[..n].to_vec())))
                         .await
                         .is_err()
                     {

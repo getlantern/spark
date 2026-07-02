@@ -24,9 +24,12 @@ use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
 use crate::config::{
-    AnytlsConfig, Config, DnsTunnelCipher, DnsTunnelConfig, FrontedMeekConfig, Hysteria2Config,
-    SamizdatConfig, ShadowsocksConfig, WasmConfig,
+    AnytlsConfig, Config, DnsTunnelConfig, FrontedMeekConfig, Hysteria2Config, SamizdatConfig,
+    ShadowsocksConfig, WasmConfig,
 };
+// Only the cipher-mapping helper (feature-gated) needs this; keep it out of the base build.
+#[cfg(feature = "dns-tunnel")]
+use crate::config::DnsTunnelCipher;
 use crate::net::SocketProtector;
 use crate::BoxedStream;
 use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
