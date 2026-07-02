@@ -2497,6 +2497,7 @@ dependencies = [
  "boring-sys2",
  "boring2",
  "bytes",
+ "dns-tunnel-core",
  "flate2",
  "flint-dial",
  "flint-dns",

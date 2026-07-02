@@ -82,6 +82,9 @@ webpki-roots = { workspace = true, optional = true }
 # Mozilla CA certs loaded into the boring `tls_wrap` connector (probe + config-fetch) so cert
 # verification works on Android/iOS; pulled by `anytls` (the feature that compiles `tls_wrap`).
 webpki-root-certs = { workspace = true, optional = true }
+# The pure, no-I/O DNS-tunnel protocol core (framing, ARQ, DNS codec, crypto, MTU) shared with the
+# server (ADR 0011). Only the `dns-tunnel` feature pulls it (+ its lz4_flex); base build unaffected.
+dns-tunnel-core = { path = "../dns-tunnel-core", optional = true }
 
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
@@ -149,3 +152,7 @@ shadowsocks = ["dep:blake3", "dep:aes"]
 # Hysteria 2 transport (ADR 0010): QUIC (quinn/rustls-ring) client interoperable with apernet/hysteria,
 # with Salamander+Gecko obfuscation. Off by default so the base build pulls no QUIC stack.
 hysteria2 = ["dep:quinn", "dep:quinn-udp", "dep:blake2", "dep:webpki-roots"]
+# DNS-tunnel transport (ADR 0011): a clean-slate DNS-tunnelling protocol that aggregates over many
+# recursive resolvers. Pulls the shared `dns-tunnel-core` crate (+ its pure-Rust lz4_flex). Off by
+# default so the base build stays free of DNS-tunnel code. See docs/dns-tunnel-design.md.
+dns-tunnel = ["dep:dns-tunnel-core"]

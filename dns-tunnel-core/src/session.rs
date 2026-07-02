@@ -305,6 +305,11 @@ impl Server {
         self.sessions.contains_key(conn_id)
     }
 
+    /// The ConnectionIDs of all live sessions (so the caller can pump each one's TCP egress).
+    pub fn session_ids(&self) -> Vec<[u8; CONN_ID_LEN]> {
+        self.sessions.keys().copied().collect()
+    }
+
     /// Process a DNS tunnel query and produce the answer wire bytes. Returns `None` for a query that
     /// is not a valid tunnel query under our zone (the caller drops it — ordinary malformed DNS).
     pub fn on_query(&mut self, query: &[u8], now: u64) -> Option<Vec<u8>> {

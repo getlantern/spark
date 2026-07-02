@@ -67,6 +67,11 @@ pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
+/// DNS-tunnel transport (ADR 0011): a clean-slate DNS-tunnelling protocol that aggregates over many
+/// recursive resolvers. Behind the `dns-tunnel` feature so the base build pulls neither
+/// `dns-tunnel-core` nor its `lz4_flex`.
+#[cfg(feature = "dns-tunnel")]
+pub mod dns_tunnel;
 /// Domain-fronted meek polling transport (Shir-o-Khorshid CDN-fronting, no MITM).
 /// Behind the `fronted-meek` feature so the base build pulls neither flint-fronted
 /// nor its boring dial path. See docs/fronted-meek-design.md.
