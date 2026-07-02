@@ -2,29 +2,37 @@
 //! driving the sans-I/O [`dns_tunnel_core::session::ClientSession`] over UDP, spraying queries across a
 //! pool of recursive resolvers ([`balancer::ResolverPool`]).
 //!
-//! The DNS carrier is request→response and the server can't push, so a background **pump** task per
-//! dial keeps polling: it drains ready answers (attributing RTT/loss to the answering resolver),
-//! picks resolver(s) for each outgoing query (with duplication + sticky failover), delivers received
-//! bytes to the application, and wakes on a keepalive/RTO tick so downlink data and retransmits still
-//! flow when the app is idle. Because the server keys sessions by ConnectionID (not source address),
+//! The DNS carrier is request→response and the server can't push, so a background **pump** task keeps
+//! polling: it drains ready answers (attributing RTT/loss to the answering resolver), picks
+//! resolver(s) for each outgoing query (with duplication + sticky failover), delivers received bytes
+//! to the application, and wakes on a keepalive/RTO tick so downlink data and retransmits still flow
+//! when the app is idle. Because the server keys sessions by ConnectionID (not source address),
 //! answers relayed by *any* resolver reassemble into one tunnel — so a blocked / rate-limited /
 //! mid-session-severed resolver never kills the session while one healthy resolver remains.
+//!
+//! **Multiplexing:** many `dial`s share **one** session, pump, UDP socket, and resolver pool. The
+//! first dial establishes the session (its target becomes stream 1, riding the handshake); each later
+//! dial sends the pump an `Open` request, which allocates a new multiplexed stream over the same
+//! ConnectionID. A tiny per-stream reader task fans the app's uplink bytes into the pump (tagged with
+//! its StreamID), and the pump fans downlink bytes back out to each stream's duplex. When every stream
+//! has been idle-closed for [`IDLE_GRACE_MS`], the pump tears the session down; the next dial rebuilds
+//! one (so an idle tunnel stops querying rather than lingering).
 //!
 //! Authoritative mode (talk straight to the server's UDP address) is just a one-entry pool.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
 use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 
-use dns_tunnel_core::session::{self, AnswerOutcome, ClientSession};
+use dns_tunnel_core::session::{self, AnswerOutcome, ClientSession, PRIMARY_STREAM_ID};
 
 use crate::net::SocketProtector;
 use crate::transport::{
@@ -46,8 +54,32 @@ const TICK_MS: u64 = 20;
 const PROBE_CANDIDATES: &[u16] = &[400, 600, 800, 1000, 1200];
 /// How long to collect probe responses before applying the discovered synced downlink MTU (ms).
 const PROBE_WINDOW_MS: u64 = 400;
+/// How long the shared session lingers with no open streams before the pump tears it down (ms). A new
+/// `dial` within this window reuses the session; after it, the pump exits and the next dial rebuilds.
+const IDLE_GRACE_MS: u64 = 3_000;
 
-/// A DNS-tunnel transport. Cheap to clone; one pump task + resolver pool is spawned per `dial`.
+/// A control message from `dial` to a running pump: open a new multiplexed stream to `target`, wiring
+/// its app-facing duplex (the pump splits it into a downlink writer + an uplink reader task).
+enum Ctl {
+    Open {
+        target: SocketAddr,
+        pump_side: DuplexStream,
+    },
+}
+
+/// A message from a per-stream reader task to the pump: app→session bytes, or app-side EOF.
+enum Up {
+    Data(u16, Vec<u8>),
+    Eof(u16),
+}
+
+/// A handle on the running session's pump, stored in [`Inner`] and shared across dials.
+struct SessionHandle {
+    ctl_tx: mpsc::Sender<Ctl>,
+}
+
+/// A DNS-tunnel transport. Cheap to clone; all dials share **one** session/pump/socket (rebuilt on
+/// demand after an idle teardown).
 #[derive(Clone)]
 pub struct DnsTunnelTransport {
     inner: Arc<Inner>,
@@ -61,6 +93,8 @@ struct Inner {
     pool_cfg: PoolConfig,
     cfg: session::Config,
     protector: Option<SocketProtector>,
+    /// The current shared session's pump handle, if one is running.
+    session: Mutex<Option<SessionHandle>>,
 }
 
 impl DnsTunnelTransport {
@@ -83,8 +117,33 @@ impl DnsTunnelTransport {
                 pool_cfg,
                 cfg,
                 protector,
+                session: Mutex::new(None),
             }),
         }
+    }
+
+    /// Build the session's UDP socket + pump and return the boxed app stream for the primary (first)
+    /// stream together with the handle to store. Called on the first dial (or after an idle teardown).
+    fn spawn_session(
+        &self,
+        target: SocketAddr,
+        app_side: DuplexStream,
+        pump_side: DuplexStream,
+    ) -> io::Result<(BoxedStream, SessionHandle)> {
+        let i = &self.inner;
+        let pool = ResolverPool::parse(&i.resolvers, i.pool_cfg)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let session = ClientSession::new(&i.psk, &i.zone, &encode_target(&target), i.cfg.clone())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        // One protector-pinned, *unconnected* UDP socket (so its own packets bypass the tunnel route);
+        // the pump `send_to`s the picked resolvers. Family follows a representative resolver.
+        let sock = protected_udp_socket(pool.any_addr(), i.protector.as_ref())?;
+        let std_sock: std::net::UdpSocket = sock.into();
+        let udp = UdpSocket::from_std(std_sock)?;
+        let timeout = i.cfg.query_timeout_ms;
+        let (ctl_tx, ctl_rx) = mpsc::channel::<Ctl>(64);
+        tokio::spawn(run_pump(session, udp, pool, timeout, pump_side, ctl_rx));
+        Ok((Box::new(app_side), SessionHandle { ctl_tx }))
     }
 }
 
@@ -109,25 +168,27 @@ fn encode_target(addr: &SocketAddr) -> Vec<u8> {
 #[async_trait]
 impl Transport for DnsTunnelTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
-        let i = &self.inner;
-        let pool = ResolverPool::parse(&i.resolvers, i.pool_cfg)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-        let session = ClientSession::new(&i.psk, &i.zone, &encode_target(&target), i.cfg.clone())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-
-        // One protector-pinned, *unconnected* UDP socket (so its own packets bypass the tunnel route);
-        // the pump `send_to`s the picked resolvers. Family follows a representative resolver.
-        let sock = protected_udp_socket(pool.any_addr(), i.protector.as_ref())?;
-        let std_sock: std::net::UdpSocket = sock.into();
-        let udp = UdpSocket::from_std(std_sock)?;
-
-        let timeout = i.cfg.query_timeout_ms;
         let (app_side, pump_side) = tokio::io::duplex(DUPLEX_BUF);
-        let pump = tokio::spawn(run_pump(session, udp, pool, timeout, pump_side));
-        Ok(Box::new(PumpStream {
-            inner: app_side,
-            pump,
-        }))
+        let mut guard = self.inner.session.lock().await;
+
+        // Attach to the live session if one is running: hand the pump an Open for a new stream.
+        if let Some(h) = guard.as_ref() {
+            match h.ctl_tx.send(Ctl::Open { target, pump_side }).await {
+                Ok(()) => return Ok(Box::new(app_side)),
+                // The pump has exited (idle teardown / fatal): recover the duplex from the failed
+                // send and rebuild a fresh session below, with this dial as the primary stream.
+                Err(mpsc::error::SendError(Ctl::Open { pump_side, .. })) => {
+                    let (stream, handle) = self.spawn_session(target, app_side, pump_side)?;
+                    *guard = Some(handle);
+                    return Ok(stream);
+                }
+            }
+        }
+
+        // No live session: establish one. This dial's target becomes stream 1 (rides the handshake).
+        let (stream, handle) = self.spawn_session(target, app_side, pump_side)?;
+        *guard = Some(handle);
+        Ok(stream)
     }
 }
 
@@ -148,20 +209,66 @@ fn txn_of(msg: &[u8]) -> Option<u16> {
     (msg.len() >= 2).then(|| u16::from_be_bytes([msg[0], msg[1]]))
 }
 
-/// The background driver for one session over a resolver pool.
+/// A per-stream reader task: forward the app's uplink bytes to the pump tagged with `sid`, and signal
+/// EOF when the app closes its write side. One is spawned per open multiplexed stream.
+async fn stream_reader(sid: u16, mut rd: ReadHalf<DuplexStream>, up: mpsc::Sender<Up>) {
+    let mut b = vec![0u8; 16 * 1024];
+    loop {
+        match rd.read(&mut b).await {
+            Ok(0) | Err(_) => {
+                let _ = up.send(Up::Eof(sid)).await;
+                return;
+            }
+            Ok(n) => {
+                if up.send(Up::Data(sid, b[..n].to_vec())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Handle a `Ctl::Open`: allocate the new stream's StreamID and split its duplex into a downlink
+/// writer (kept by the pump) plus an uplink reader task.
+fn open_stream_io(
+    ctl: Ctl,
+    session: &mut ClientSession,
+    writers: &mut HashMap<u16, WriteHalf<DuplexStream>>,
+    readers: &mut HashMap<u16, JoinHandle<()>>,
+    up_tx: &mpsc::Sender<Up>,
+) {
+    let Ctl::Open { target, pump_side } = ctl;
+    let sid = session.open_stream(&encode_target(&target));
+    let (rd, wr) = tokio::io::split(pump_side);
+    writers.insert(sid, wr);
+    readers.insert(sid, tokio::spawn(stream_reader(sid, rd, up_tx.clone())));
+}
+
+/// Tear down a stream's app-side I/O: drop its downlink writer and abort its reader task.
+fn teardown_io(
+    sid: u16,
+    writers: &mut HashMap<u16, WriteHalf<DuplexStream>>,
+    readers: &mut HashMap<u16, JoinHandle<()>>,
+) {
+    writers.remove(&sid);
+    if let Some(h) = readers.remove(&sid) {
+        h.abort();
+    }
+}
+
+/// The background driver for one multiplexed session over a resolver pool. Owns the `ClientSession`,
+/// the UDP socket, the pool, and the per-stream app I/O; runs until the session is torn down (idle
+/// grace with no streams, or a fatal socket error).
 async fn run_pump(
     mut session: ClientSession,
     udp: UdpSocket,
     mut pool: ResolverPool,
     query_timeout_ms: u64,
-    mut io: DuplexStream,
+    primary_pump_side: DuplexStream,
+    ctl_rx: mpsc::Receiver<Ctl>,
 ) {
-    use tokio::io::AsyncReadExt as _;
-    use tokio::io::AsyncWriteExt as _;
-
     let start = Instant::now();
     let mut dns_buf = vec![0u8; 2048];
-    let mut app_buf = vec![0u8; 16 * 1024];
     // txn -> (resolvers the query was sent to, sent_at_ms) — for RTT/loss attribution.
     let mut pending: HashMap<u16, (Vec<SocketAddr>, u64)> = HashMap::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(TICK_MS));
@@ -171,6 +278,23 @@ async fn run_pump(
     // (a probe failing at a too-large size is expected, not resolver loss).
     let (mut probe_sent, mut probe_done, mut probe_best, mut probe_deadline) =
         (false, false, 0u16, 0u64);
+
+    // Per-stream app I/O. Stream 1 (the primary) is pre-registered from the handshake dial; further
+    // streams arrive as `Ctl::Open`. Each stream's app→session bytes fan in through `up_rx`.
+    let (up_tx, mut up_rx) = mpsc::channel::<Up>(1024);
+    let mut writers: HashMap<u16, WriteHalf<DuplexStream>> = HashMap::new();
+    let mut readers: HashMap<u16, JoinHandle<()>> = HashMap::new();
+    {
+        let (rd, wr) = tokio::io::split(primary_pump_side);
+        writers.insert(PRIMARY_STREAM_ID, wr);
+        readers.insert(
+            PRIMARY_STREAM_ID,
+            tokio::spawn(stream_reader(PRIMARY_STREAM_ID, rd, up_tx.clone())),
+        );
+    }
+    // `ctl_rx` goes to `None` once we stop accepting new streams (during the idle-teardown drain).
+    let mut ctl_rx = Some(ctl_rx);
+    let mut last_active = 0u64;
 
     loop {
         let now = start.elapsed().as_millis() as u64;
@@ -246,68 +370,89 @@ async fn run_pump(
             }
         }
 
-        // Deliver received bytes to the application.
-        let data = session.read();
-        if !data.is_empty() && io.write_all(&data).await.is_err() {
-            return;
+        // Fan downlink bytes out to each stream's app duplex, and handle per-stream close.
+        for sid in session.stream_ids() {
+            let mut drop_io = false;
+            if writers.contains_key(&sid) {
+                let data = session.read_stream(sid);
+                if !data.is_empty() {
+                    if let Some(wr) = writers.get_mut(&sid) {
+                        if wr.write_all(&data).await.is_err() {
+                            // The app dropped its read side: close the stream and tear its I/O down.
+                            session.close_stream(sid);
+                            drop_io = true;
+                        }
+                    }
+                }
+            }
+            if !drop_io && session.stream_remote_finished(sid) {
+                // Remote half is done: signal EOF to the app once (drop the downlink writer). The
+                // reader stays until the app closes its side, so uplink can still drain (half-close).
+                if let Some(mut wr) = writers.remove(&sid) {
+                    let _ = wr.shutdown().await;
+                }
+            }
+            if drop_io {
+                teardown_io(sid, &mut writers, &mut readers);
+            }
+        }
+        // Reap fully-closed streams (both halves done): drop their ARQ state + any leftover I/O.
+        for sid in session.reap_closed() {
+            teardown_io(sid, &mut writers, &mut readers);
         }
 
-        if session.is_closed() {
-            return;
+        // Idle teardown: once no stream has been open for the grace window, exit so an idle tunnel
+        // stops querying DNS (the next dial rebuilds a fresh session). Drain any `Open` that raced in
+        // just before giving up so an accepted dial is never silently dropped.
+        let active = !writers.is_empty() || !readers.is_empty() || !session.stream_ids().is_empty();
+        if active {
+            last_active = now;
+        } else if now.saturating_sub(last_active) >= IDLE_GRACE_MS {
+            match ctl_rx.as_mut() {
+                Some(rx) => {
+                    rx.close();
+                    let mut opened = false;
+                    while let Ok(ctl) = rx.try_recv() {
+                        open_stream_io(ctl, &mut session, &mut writers, &mut readers, &up_tx);
+                        opened = true;
+                    }
+                    if !opened {
+                        return;
+                    }
+                    // Serve the late stream(s); stop accepting further Opens (they rebuild elsewhere).
+                    ctl_rx = None;
+                    last_active = now;
+                }
+                None => return,
+            }
         }
 
         tokio::select! {
+            biased;
+            // New multiplexed stream from a dial. A `None` from `recv` means all dial senders dropped
+            // (the transport was dropped); a pending future disables the arm once we stop accepting.
+            ctl = async {
+                match ctl_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending::<Option<Ctl>>().await,
+                }
+            } => match ctl {
+                Some(c) => open_stream_io(c, &mut session, &mut writers, &mut readers, &up_tx),
+                None => ctl_rx = None,
+            },
+            // App→session uplink bytes (or an app-side EOF) from a per-stream reader.
+            up = up_rx.recv() => match up {
+                Some(Up::Data(sid, b)) => session.write_stream(sid, &b),
+                Some(Up::Eof(sid)) => session.close_stream(sid),
+                None => {}
+            },
             r = udp.readable() => {
                 if r.is_err() {
                     return;
                 }
             }
-            r = io.read(&mut app_buf) => match r {
-                Ok(0) => session.close(),
-                Ok(n) => session.write(&app_buf[..n]),
-                Err(_) => return,
-            },
             _ = ticker.tick() => {}
         }
-    }
-}
-
-/// The `BoxedStream` returned by `dial`: the app half of the duplex, owning the pump task so dropping
-/// the stream aborts the pump (no orphaned task).
-struct PumpStream {
-    inner: DuplexStream,
-    pump: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for PumpStream {
-    fn drop(&mut self) {
-        self.pump.abort();
-    }
-}
-
-impl AsyncRead for PumpStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for PumpStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
-    }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
-    }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -382,6 +527,46 @@ mod tests {
                     if let Some(seg) = server.downlink_segment(&id) {
                         report.fetch_max(seg, std::sync::atomic::Ordering::Relaxed);
                     }
+                    for sid in server.streams_of(&id) {
+                        let d = server.take_from_client(&id, sid);
+                        if !d.is_empty() {
+                            server.deliver_to_client(&id, sid, &d);
+                        }
+                    }
+                }
+            }
+        });
+        addr
+    }
+
+    /// Like `spawn_echo_server`, but records the max number of concurrent sessions (distinct
+    /// ConnectionIDs) it ever sees into `max_sessions` — so a test can prove many dials share one.
+    async fn spawn_echo_server_counting(
+        psk: Vec<u8>,
+        zone: String,
+        cfg: SessCfg,
+        max_sessions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SocketAddr {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut server = Server::new(&psk, &zone, cfg).unwrap();
+            let start = Instant::now();
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let (n, from) = match udp.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let now = start.elapsed().as_millis() as u64;
+                if let Some(ans) = server.on_query(&buf[..n], now) {
+                    if udp.send_to(&ans, from).await.is_err() {
+                        return;
+                    }
+                }
+                let ids = server.session_ids();
+                max_sessions.fetch_max(ids.len(), std::sync::atomic::Ordering::Relaxed);
+                for id in ids {
                     for sid in server.streams_of(&id) {
                         let d = server.take_from_client(&id, sid);
                         if !d.is_empty() {
@@ -536,6 +721,76 @@ mod tests {
             report.load(Ordering::Relaxed),
             *PROBE_CANDIDATES.last().unwrap() as usize,
             "MTU probe raised the server downlink to the largest surviving candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_dials_share_one_session() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let psk = vec![0x5Au8; 32];
+        let zone = "t.example.com".to_string();
+        let max_sessions = Arc::new(AtomicUsize::new(0));
+        let server =
+            spawn_echo_server_counting(psk.clone(), zone.clone(), cfg(), max_sessions.clone())
+                .await;
+        let transport = DnsTunnelTransport::new(
+            zone,
+            psk,
+            vec![server.to_string()],
+            PoolConfig {
+                duplication: 1,
+                ..PoolConfig::default()
+            },
+            cfg(),
+            None,
+        );
+
+        // First dial establishes the session (stream 1); the second multiplexes over it (stream 2).
+        let s1 = transport
+            .dial("93.184.216.34:443".parse().unwrap())
+            .await
+            .unwrap();
+        let s2 = transport
+            .dial("198.51.100.7:443".parse().unwrap())
+            .await
+            .unwrap();
+        let (mut r1, mut w1) = tokio::io::split(s1);
+        let (mut r2, mut w2) = tokio::io::split(s2);
+
+        // Distinct payloads (stream 2 = stream 1 + 128) so a cross-stream routing bug corrupts them.
+        let len = 32 * 1024;
+        let p1: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37)).collect();
+        let p2: Vec<u8> = p1.iter().map(|b| b.wrapping_add(128)).collect();
+        let (q1, q2) = (p1.clone(), p2.clone());
+        let writer = tokio::spawn(async move {
+            w1.write_all(&q1).await.unwrap();
+            w1.flush().await.unwrap();
+            w2.write_all(&q2).await.unwrap();
+            w2.flush().await.unwrap();
+        });
+        let read1 = tokio::spawn(async move {
+            let mut g = vec![0u8; len];
+            r1.read_exact(&mut g).await.unwrap();
+            g
+        });
+        let read2 = tokio::spawn(async move {
+            let mut g = vec![0u8; len];
+            r2.read_exact(&mut g).await.unwrap();
+            g
+        });
+        writer.await.unwrap();
+        assert_eq!(read1.await.unwrap(), p1, "stream 1 echo intact");
+        assert_eq!(
+            read2.await.unwrap(),
+            p2,
+            "stream 2 echo intact and not crossed"
+        );
+        assert_eq!(
+            max_sessions.load(Ordering::Relaxed),
+            1,
+            "both dials multiplexed over a single session (one ConnectionID)"
         );
     }
 }
