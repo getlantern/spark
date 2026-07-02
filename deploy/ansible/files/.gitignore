@@ -1,0 +1,3 @@
+# The playbook copies the PSK (secret) + the built server binary from here — never commit them.
+*
+!.gitignore

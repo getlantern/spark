@@ -1,0 +1,14 @@
+# Inventory for the spark dns-tunnel-server fleet. Mirrors lantern-cloud's dnstt inventory shape
+# (`dnstts` → `dnstts_oci`), but production targets Linode rather than OCI. Copy to spark-dns.yaml and
+# fill in the host IP(s) provisioned by provision-linode.sh.
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/spark-dns-tunnel
+  children:
+    spark_dns:
+      children:
+        spark_dns_linode:
+          hosts:
+            spark-dns-use1:
+              ansible_host: 45.79.190.108 # example: the us-east nanode

@@ -1,0 +1,85 @@
+# Deploy spark's dns-tunnel-server (ADR 0011) — the clean-slate DNS-tunnel transport, a drop-in
+# modernization of Lantern's dnstt escalation tier. This mirrors
+# getlantern/lantern-cloud `ans/bootstrap-dnstt.yaml` (same shape: a static binary + a systemd unit +
+# a :53→:5300 DNAT), swapping dnstt's Noise keypair for spark's single pre-shared key. It is meant to
+# be lifted into lantern-cloud/ans/ alongside the dnstt playbook once reviewed.
+#
+# Prereqs:
+#   - inventory group `spark_dns` (see inventory/spark-dns.example.yaml)
+#   - a delegated tunnel zone: `t.<domain>` NS → `ns-spark.<domain>` A → the host IP.
+#     Use an UNATTRIBUTABLE domain (e.g. ss7hc6jm.io), NOT a known Lantern domain — a censor's
+#     resolver is far likelier to filter a recognizable name.
+#   - the cross-built static server binary at files/dns-tunnel-server
+#     (`cargo zigbuild --release -p dns-tunnel-server --target x86_64-unknown-linux-musl`;
+#      use aarch64-unknown-linux-musl for ARM hosts). Static musl → distro-agnostic.
+#   - the PSK at files/spark-dns.psk (base64, ≥32 decoded bytes, mode 0600). A proxy secret.
+#
+# Run: ansible-playbook -i inventory/spark-dns.yaml bootstrap-spark-dns.yaml -e zone=t.ss7hc6jm.io
+- name: Deploy and start spark dns-tunnel-server
+  hosts: spark_dns
+  become: true
+  vars:
+    bind: "0.0.0.0:5300"
+    idle_secs: 300
+  tasks:
+    - name: Require the tunnel zone
+      assert:
+        that:
+          - zone is defined
+          - zone | length > 0
+        fail_msg: "pass -e zone=t.<your-domain> (an unattributable domain, not a known Lantern one)"
+
+    - name: Config dir
+      file:
+        path: /etc/spark-dns
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy the dns-tunnel-server binary
+      copy:
+        src: files/dns-tunnel-server
+        dest: /usr/local/bin/dns-tunnel-server
+        mode: "0755"
+      notify: Restart spark-dns
+
+    - name: Copy the PSK (proxy secret — root-only)
+      copy:
+        src: files/spark-dns.psk
+        dest: /etc/spark-dns/psk
+        owner: root
+        group: root
+        mode: "0600"
+      notify: Restart spark-dns
+
+    # Recursive resolvers always hit :53; the server runs unprivileged on :5300 and we redirect.
+    # Persist across reboot with netfilter-persistent (or an @reboot hook) in real production.
+    - name: DNAT udp/53 → udp/5300
+      iptables:
+        table: nat
+        chain: PREROUTING
+        protocol: udp
+        destination_port: "53"
+        jump: REDIRECT
+        to_ports: "5300"
+        comment: spark-dns 53->5300
+
+    - name: systemd unit
+      template:
+        src: templates/spark-dns.service.j2
+        dest: /etc/systemd/system/spark-dns.service
+      notify: Restart spark-dns
+
+    - name: Enable and start spark-dns
+      systemd:
+        name: spark-dns
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: Restart spark-dns
+      systemd:
+        name: spark-dns
+        state: restarted
