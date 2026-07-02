@@ -501,4 +501,22 @@ mod tests {
         short.extend_from_slice(&[0u8; TAG_LEN - 1]);
         assert!(matches!(parse_wire(&short), Err(FrameError::Truncated)));
     }
+
+    #[test]
+    fn parsers_never_panic_on_random_input() {
+        // Poor-man's fuzz guarding the panic-free contract (formal `cargo fuzz` is a follow-up).
+        let aead = test_aead();
+        let mut state = 0x0DDF_00D5_1234_5678u64;
+        for len in 0..300usize {
+            let mut buf = Vec::with_capacity(len);
+            for _ in 0..len {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                buf.push((state >> 33) as u8);
+            }
+            let _ = Frame::decode(&buf);
+            if let Ok(w) = parse_wire(&buf) {
+                let _ = open_frame(&aead, &w);
+            }
+        }
+    }
 }

@@ -21,6 +21,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compress;
 pub mod crypto;
 pub mod dns;
 pub mod frame;
+pub mod mtu;

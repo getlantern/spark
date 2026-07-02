@@ -89,7 +89,7 @@ aes = "0.8"
 # Pure-Rust LZ4 (block mode) for the DNS-tunnel transport's optional payload compression (ADR 0011).
 # Deliberately NOT the C-backed `zstd` crate — keeps the pure-Rust/no-C rule. Pulled ONLY by the
 # `dns-tunnel` feature (via the `dns-tunnel-core` crate). See docs/dns-tunnel-design.md §6.
-lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 # Hysteria 2 transport (ADR 0010): QUIC client interoperable with apernet/hysteria, with
 # Salamander+Gecko obfuscation. `rustls-ring` uses the ring backend (CLAUDE.md locked stack);
 # `runtime-tokio` is the async runtime bridge. Off by default — only the `hysteria2` feature pulls them.

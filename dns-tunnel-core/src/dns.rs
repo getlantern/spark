@@ -122,7 +122,7 @@ impl Name {
     }
 
     /// Wire length including the terminating zero (only meaningful as a standalone name).
-    fn wire_len(&self) -> usize {
+    pub fn wire_len(&self) -> usize {
         self.labels.iter().map(|l| 1 + l.len()).sum::<usize>() + 1
     }
 }
