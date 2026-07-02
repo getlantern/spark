@@ -2445,3 +2445,16 @@ exact QNAME budget). `cargo fuzz` deferred → in-suite randomized no-panic guar
 the contract for now. Design doc §2.2 synced to the implemented wire form. **NEXT: M2** — the ARQ core
 (reliable per-stream state machine: seq/ack/NACK gap recovery, RFC-6298 RTO, windowed flow control,
 lifecycle; tested on a simulated lossy/dup/reorder channel). The dominant lift.
+
+**2026-07-01 — DNS-tunnel M2a (ARQ reliable data path) DONE.** `dns-tunnel-core/src/arq.rs`: a
+sans-I/O `Stream` driven by a virtual ms clock — write/segment/transmit within a send window,
+in-order delivery + reorder buffer, cumulative ACK, adaptive RFC-6298 RTO retransmit (exponential
+backoff, Karn's algorithm), per-segment seq with RFC-1982 serial arithmetic, no congestion control
+by design. Deterministic sim-channel harness (drop/dup/reorder/latency, seeded xorshift). 5 ARQ
+tests (perfect delivery; recovery over 30% bidirectional loss; delivery under heavy reorder+dup;
+send-window bound; RTO adapts to RTT). 38 crate tests total; clippy/fmt clean. (Also fixed a masked
+fmt-check shell bug → reformatted the M1 modules; use `if cargo fmt -p X -- --check; then` — do NOT
+pipe to `tail && echo`, which hides the exit code.) **NEXT: M2b** — NACK fast-retransmit (receiver
+emits Nack(first-missing) on a gap; sender fast-retransmits without RTO backoff), then **M2c** —
+FIN/RST lifecycle (FIN as a phantom seq, acked in order; RST best-effort) + a property-test matrix.
+Then M3 (single-resolver E2E + minimal server).
