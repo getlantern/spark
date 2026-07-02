@@ -356,15 +356,25 @@ async fn run_tunnel_data_path(
         Some(name) => Some(crate::net::SocketProtector::for_interface(name)?),
         None => None,
     };
-    let direct_transport: Arc<dyn transport::Transport> =
-        Arc::new(transport::DirectTransport::new(protector));
+    // One concrete DirectTransport (one protector), viewed as both a TCP `Transport` (router `Direct`)
+    // and a `UdpTransport` (Direct-routed UDP + the UDP forwarder's fail-open floor).
+    let direct = Arc::new(transport::DirectTransport::new(protector));
+    let direct_transport: Arc<dyn transport::Transport> = direct.clone();
+    let direct_udp: Arc<dyn transport::UdpTransport> = direct;
     let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)?;
     let idle = Duration::from_secs(config.udp.idle_timeout_secs);
     // Build the smart-routing hooks and wire the UDP path together (they share one fake-IP pool):
     // intercept DNS (`:53`) to the fake-IP server when smart-routing is active, otherwise run the
     // plain UDP proxy. Returns the per-flow route hooks for the TCP forwarder (`None` = proxy
     // everything, today's behavior).
-    let hooks = setup_routing_and_udp(&config, data_dir, udp_surface, udp_transport, idle);
+    let hooks = setup_routing_and_udp(
+        &config,
+        data_dir,
+        udp_surface,
+        udp_transport,
+        direct_udp,
+        idle,
+    );
     info!(mtu, "spark tunnel up (fd mode)");
     // The fd is adopted and the netstack is about to accept — the data path is live. The platform
     // shim's `wait_ready` gates "connected" on this (see [`Readiness`]).
@@ -410,6 +420,7 @@ fn setup_routing_and_udp(
     data_dir: Option<&std::path::Path>,
     udp_surface: Option<netstack::UdpSurface>,
     udp_transport: Arc<dyn transport::UdpTransport>,
+    direct_udp: Arc<dyn transport::UdpTransport>,
     idle: Duration,
 ) -> Option<Arc<proxy::RouteHooks>> {
     let sr = &config.smart_routing;
@@ -457,6 +468,8 @@ fn setup_routing_and_udp(
                     forward_rx,
                     udp_reply,
                     udp_transport,
+                    direct_udp,
+                    hooks.clone(),
                     idle,
                 ));
             }
@@ -465,6 +478,8 @@ fn setup_routing_and_udp(
                     udp_inbound,
                     udp_reply,
                     udp_transport,
+                    direct_udp,
+                    hooks.clone(),
                     idle,
                 ));
             }
@@ -480,6 +495,7 @@ fn setup_routing_and_udp(
     _data_dir: Option<&std::path::Path>,
     udp_surface: Option<netstack::UdpSurface>,
     udp_transport: Arc<dyn transport::UdpTransport>,
+    direct_udp: Arc<dyn transport::UdpTransport>,
     idle: Duration,
 ) -> Option<Arc<proxy::RouteHooks>> {
     if let Some((udp_inbound, udp_reply)) = udp_surface {
@@ -487,6 +503,8 @@ fn setup_routing_and_udp(
             udp_inbound,
             udp_reply,
             udp_transport,
+            direct_udp,
+            None,
             idle,
         ));
     }

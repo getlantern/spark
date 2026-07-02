@@ -320,6 +320,33 @@ impl UdpTransport for SelectingTransport {
         );
         self.direct_udp.dial_udp(target).await
     }
+
+    /// UDP dial-by-name counterpart. A member that can't carry a UDP domain (`Unsupported`) is
+    /// skipped without demotion (mirrors [`dial_addr`]); a real failure demotes + fails over. If no
+    /// member can carry the name, fall through to direct — which returns `Unsupported` for a domain,
+    /// letting the UDP forwarder resolve client-side.
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        let order = self.order();
+        for &i in order.iter() {
+            match self.members[i].udp.dial_udp_addr(target.clone()).await {
+                Ok(p) => return Ok(p),
+                Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                    tracing::debug!(
+                        member = i,
+                        "pool member can't carry a UDP domain; trying next"
+                    );
+                }
+                Err(e) => {
+                    self.demote(i);
+                    tracing::debug!(member = i, error = %e, "pool member udp dial_addr failed; failing over");
+                }
+            }
+        }
+        self.direct_udp.dial_udp_addr(target).await
+    }
 }
 
 impl Drop for SelectingTransport {

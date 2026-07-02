@@ -13,7 +13,6 @@
 //! inbound (which enters UoT mode from the magic destination, generically across inbound types).
 
 use std::io;
-use std::net::SocketAddr;
 
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
@@ -30,10 +29,12 @@ pub const UOT_MAGIC: &str = "sp.v2.udp-over-tcp.arpa";
 /// Establish a UoT v2 **connected** association to `target` over `stream`, which the caller must have
 /// already routed to [`UOT_MAGIC`] (AnyTLS: in-band SOCKS5 target; Samizdat: H2 CONNECT authority).
 /// Writes the connect request (`IsConnect = 1 | Destination`), then splits the stream into framed
-/// datagram halves (`[u16 BE len][payload]`).
+/// datagram halves (`[u16 BE len][payload]`). `target` may be a **domain** (ATYP=3): sing-box's UoT
+/// server resolves it at the exit, so a fake-IP UDP flow reaches its real destination with no client
+/// DNS.
 pub async fn associate<S>(
     mut stream: S,
-    target: SocketAddr,
+    target: Address,
 ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -42,7 +43,7 @@ where
     // UoT Request: IsConnect = 1 (connected mode — destination is fixed), then the real destination
     // as a SOCKS5 addr (sing-box `EncodeRequest`: a bool byte + `WriteAddrPort`).
     hdr.put_u8(1);
-    Address::Ip(target).encode(&mut hdr);
+    target.encode(&mut hdr);
     stream.write_all(&hdr).await?;
     stream.flush().await?;
 
@@ -98,7 +99,7 @@ mod tests {
     #[tokio::test]
     async fn writes_singbox_uot_request_then_framed_datagrams() {
         let (client, mut server) = tokio::io::duplex(4096);
-        let target: SocketAddr = "1.2.3.4:53".parse().unwrap();
+        let target = Address::Ip("1.2.3.4:53".parse().unwrap());
         let (mut sink, _src) = associate(client, target).await.unwrap();
 
         // Request: IsConnect(1) + SOCKS5 addr (ATYP 0x01 = IPv4) + 1.2.3.4 + port 53 (u16 BE).
@@ -115,9 +116,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_domain_target_encodes_as_socks5_atyp3() {
+        // A recovered domain rides the UoT request as ATYP=3 so the exit resolves it — no client DNS.
+        let (client, mut server) = tokio::io::duplex(4096);
+        let target = Address::domain("dns.google", 53).unwrap();
+        let (_sink, _src) = associate(client, target).await.unwrap();
+        // IsConnect(1) + ATYP 0x03 + len(10) + "dns.google" + port 53 (u16 BE).
+        let mut got = [0u8; 15];
+        server.read_exact(&mut got).await.unwrap();
+        let mut want = vec![1u8, 0x03, 10];
+        want.extend_from_slice(b"dns.google");
+        want.extend_from_slice(&[0x00, 53]);
+        assert_eq!(got.as_slice(), want.as_slice());
+    }
+
+    #[tokio::test]
     async fn reads_a_framed_datagram() {
         let (client, mut server) = tokio::io::duplex(4096);
-        let (_sink, mut src) = associate(client, "1.2.3.4:53".parse().unwrap())
+        let (_sink, mut src) = associate(client, Address::Ip("1.2.3.4:53".parse().unwrap()))
             .await
             .unwrap();
         // Drain the request `associate` wrote, so the duplex doesn't back up.

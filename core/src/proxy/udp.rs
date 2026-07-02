@@ -29,7 +29,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::netstack::UdpDatagram;
-use crate::transport::{BoxedPacketSink, BoxedPacketSource, UdpTransport};
+use crate::transport::{Address, BoxedPacketSink, BoxedPacketSource, UdpTransport};
+
+use super::{Decision, RouteHooks};
 
 /// Default idle timeout before a UDP association is reclaimed. DNS is request/response and
 /// short-lived; 60s comfortably covers a slow resolver round-trip without stranding state.
@@ -161,6 +163,8 @@ pub async fn run_udp(
     mut inbound: mpsc::Receiver<UdpDatagram>,
     reply_tx: mpsc::Sender<UdpDatagram>,
     transport: Arc<dyn UdpTransport>,
+    direct_transport: Arc<dyn UdpTransport>,
+    hooks: Option<Arc<RouteHooks>>,
     idle_timeout: Duration,
 ) {
     let mut nat: NatTable<Association> = NatTable::new(idle_timeout);
@@ -172,7 +176,7 @@ pub async fn run_udp(
                     debug!("UDP inbound closed; ending udp proxy loop");
                     break;
                 };
-                handle_inbound(&mut nat, &transport, &reply_tx, dgram).await;
+                handle_inbound(&mut nat, &transport, &direct_transport, hooks.as_deref(), &reply_tx, dgram).await;
             }
             _ = sweep.tick() => {
                 for assoc in nat.evict_expired(Instant::now()) {
@@ -192,6 +196,8 @@ pub async fn run_udp(
 async fn handle_inbound(
     nat: &mut NatTable<Association>,
     transport: &Arc<dyn UdpTransport>,
+    direct_transport: &Arc<dyn UdpTransport>,
+    hooks: Option<&RouteHooks>,
     reply_tx: &mpsc::Sender<UdpDatagram>,
     dgram: UdpDatagram,
 ) {
@@ -199,12 +205,12 @@ async fn handle_inbound(
     let now = Instant::now();
 
     if nat.get_mut(&key, now).is_none() {
-        let (sink, source) = match transport.dial_udp(dgram.original_dst).await {
-            Ok(halves) => halves,
-            Err(e) => {
-                warn!(error = %e, "udp: opening association to upstream failed");
-                return;
-            }
+        // Route the flow (recover the fake-IP domain, decide, dial the right transport). `None` =
+        // Rejected or the dial failed (already logged) — drop the datagram, open no association.
+        let Some((sink, source)) =
+            open_association(transport, direct_transport, hooks, dgram.original_dst).await
+        else {
+            return;
         };
         let pump = spawn_reply_pump(
             source,
@@ -224,6 +230,102 @@ async fn handle_inbound(
         warn!(error = %e, "udp: send to upstream failed; dropping association");
         if let Some(assoc) = nat.remove(&key) {
             assoc.pump.abort();
+        }
+    }
+}
+
+/// Route a new UDP flow and open its association. Mirrors the TCP forwarder: recover the domain
+/// behind a (possibly fake) `dst`, Reject encrypted DNS, decide Direct/Proxy/Reject, and dial the
+/// chosen transport — carrying the domain to the exit for Proxy (no client DNS), resolving
+/// client-side only when a transport can't. `hooks=None` (smart-routing off) proxies by IP as before.
+/// The association is keyed by the original (fake) `dst`, so replies map back to what the app sent to.
+async fn open_association(
+    proxy: &Arc<dyn UdpTransport>,
+    direct: &Arc<dyn UdpTransport>,
+    hooks: Option<&RouteHooks>,
+    dst: SocketAddr,
+) -> Option<(BoxedPacketSink, BoxedPacketSource)> {
+    let Some(h) = hooks else {
+        return dial_udp_or_log(proxy, dst).await; // no smart-routing → proxy by IP (prior behavior)
+    };
+    let domain = h.recoverer.as_deref().and_then(|r| r.recover(dst.ip()));
+    // Encrypted DNS to a public resolver → drop, so the client falls back to plain :53 (fake-IP).
+    if super::is_encrypted_dns(dst, domain.as_deref()) {
+        debug!(dst = %dst, "udp: encrypted DNS to a public resolver — dropping so DNS falls back to plain :53");
+        return None;
+    }
+    let decision = h.router.decide(dst.ip(), domain.as_deref());
+    debug!(dst = %dst, domain = domain.as_deref().unwrap_or("-"), ?decision, "udp flow: routing");
+    match decision {
+        Decision::Reject => None,
+        Decision::Direct => match domain.as_deref() {
+            // A domain flow is behind a fake IP → resolve to a real IP before a direct dial (never
+            // dial a fake IP). On resolve/dial failure, proxy it rather than drop.
+            Some(dom) => {
+                if let Some(res) = h.direct_resolver.as_deref() {
+                    if let Ok(ips) = res.resolve(dom).await {
+                        if let Some(ip) = crate::proxy::tcp::pick_ip(&ips, dst.ip()) {
+                            if let Some(halves) =
+                                dial_udp_or_log(direct, SocketAddr::new(ip, dst.port())).await
+                            {
+                                return Some(halves);
+                            }
+                        }
+                    }
+                }
+                open_udp_proxy(proxy, h, dom, dst).await
+            }
+            None => dial_udp_or_log(direct, dst).await, // real-IP flow → direct as-is
+        },
+        Decision::Proxy => match domain.as_deref() {
+            Some(dom) => open_udp_proxy(proxy, h, dom, dst).await,
+            None => dial_udp_or_log(proxy, dst).await, // real-IP flow → proxy by IP
+        },
+    }
+}
+
+/// Proxy a UDP flow to a recovered `dom`: carry the name to the exit via `dial_udp_addr` (the exit
+/// resolves — no client DNS). If the transport can't (`Unsupported`), resolve client-side over the
+/// un-poisoned DoH and dial by IP.
+async fn open_udp_proxy(
+    proxy: &Arc<dyn UdpTransport>,
+    hooks: &RouteHooks,
+    dom: &str,
+    dst: SocketAddr,
+) -> Option<(BoxedPacketSink, BoxedPacketSource)> {
+    if let Ok(addr) = Address::domain(dom, dst.port()) {
+        match proxy.dial_udp_addr(addr).await {
+            Ok(halves) => return Some(halves),
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                debug!(domain = %dom, "udp: transport can't carry a domain; resolving client-side");
+            }
+            Err(e) => {
+                warn!(error = %e, "udp: proxy dial-by-name failed");
+                return None;
+            }
+        }
+    }
+    if let Some(res) = hooks.proxy_resolver.as_deref() {
+        if let Ok(ips) = res.resolve(dom).await {
+            if let Some(ip) = crate::proxy::tcp::pick_ip(&ips, dst.ip()) {
+                return dial_udp_or_log(proxy, SocketAddr::new(ip, dst.port())).await;
+            }
+        }
+    }
+    warn!(domain = %dom, "udp: neither dial-by-name nor client-side resolution succeeded");
+    None
+}
+
+/// Open a UDP association, logging + swallowing a dial error into `None`.
+async fn dial_udp_or_log(
+    transport: &Arc<dyn UdpTransport>,
+    target: SocketAddr,
+) -> Option<(BoxedPacketSink, BoxedPacketSource)> {
+    match transport.dial_udp(target).await {
+        Ok(halves) => Some(halves),
+        Err(e) => {
+            warn!(error = %e, "udp: opening association to upstream failed");
+            None
         }
     }
 }
@@ -352,6 +454,8 @@ mod tests {
             in_rx,
             reply_tx,
             Arc::new(DirectTransport::default()),
+            Arc::new(DirectTransport::default()),
+            None, // no smart-routing hooks → proxy by IP (this test's prior behavior)
             Duration::from_secs(30),
         ));
 

@@ -669,6 +669,13 @@ impl UdpTransport for Hysteria2Transport {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        self.dial_udp_addr(Address::Ip(target)).await
+    }
+
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         let state = self.connection().await.map_err(io::Error::other)?;
         // Honor both the server's `Hysteria-UDP` capability AND the QUIC datagram extension: a
         // `max_datagram_size` of `None` means the peer never enabled datagrams, so UDP relay is
