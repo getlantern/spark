@@ -2675,6 +2675,26 @@ reachability-under-shutdown tier (~0.1 Mbit/s, throttle-bound); real throughput 
 non-throttling paths (our own server, or resolvers that don't throttle). No code shipped from this
 investigation (tree unchanged); findings recorded so the dead ends aren't re-tried.
 
+**2026-07-02 — DNS-tunnel: shutdown-subset resilience (the Iran case) — verified + `duplication`
+exposed.** Unlike the throughput thread (uncensored vantage, all resolvers work, enemy = throttling),
+a national shutdown means *most resolvers are blocked/hijacked and only a subset — often the mandated
+local resolver — forwards anything*. This is the design's home turf, and here sticky-to-best + failover
+is **correct** (the spread/affinity negatives don't apply). Verified live against the DO deployment
+with a mostly-dead pool (3 RFC5737 TEST-NET dead IPs + 2 live resolvers): the tunnel disabled the dead
+ones and carried real traffic (HTTP 301). **Key finding — duplication is the shutdown lever:** with
+duplication=1 the working subset is discovered *serially* (time out through each dead resolver), 27 s to
+first byte; raising duplication probes several per query → parallel discovery: **27 s (dup 1) → 4.6 s
+(dup 3) → 0.30 s (dup 5)**. Shipped: `DnsTunnelConfig.duplication` (was hardcoded to 1 in the builder;
+now configurable, default 1, set ~3–5 for shutdown profiles) + a `DNS_TUNNEL_DUP` live-harness knob
+(commit `e3d6bc3`). **Remaining Iran gaps (not built):** (1) **auto-include the system/DHCP/local
+resolver(s)** in the pool — during a total shutdown the mandated local resolver is often the ONLY thing
+that forwards DNS (MasterDnsVPN's "even if forced onto the government resolver" thesis); the pool is
+currently a static config list. Biggest practical gap. (2) **innocuous, unattributable tunnel zone** —
+`getiantem.org` is a known Lantern domain a censor's resolver may refuse to forward; real deployment
+needs a clean domain (our test zone is fine only from an uncensored vantage). (3) fundamental limit: the
+working resolver must retain *some* upstream reach to the authoritative server IP. Throughput in this
+regime is ~one-resolver's-worth (reachability, not streaming) — as intended for the last-resort tier.
+
 **2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
 loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
 UDP delay relay to inject RTT; knobs `DNS_BENCH_{MIB,RTT_MS,INFLIGHT,WINDOW}`). Findings: the impl's
