@@ -2596,3 +2596,40 @@ push/PR is a human decision).
   out of scope v1). (4) **payload compression** wired at the config level (lz4_flex) but not yet
   applied in the session pump (off by default). (5) formal `cargo fuzz` targets → currently in-suite
   randomized no-panic guards. None affect the headline capability or correctness.
+
+**2026-07-02 — DNS-tunnel: dynamic MTU probing DONE (deferred item #1 resolved).** Added the
+over-the-wire probe loop that discovers a larger downlink MTU than the conservative static bound.
+New frame kinds `MtuProbe`/`MtuProbeResp`/`SetMtu` + `arq::Stream::set_max_segment`; session:
+`build_mtu_probe`/`build_set_mtu`/`on_answer → AnswerOutcome::ProbeResp`, and the server pads a
+`MtuProbeResp` to the requested size (an oversized answer fails to return, so the client learns the
+path limit) and applies `SetMtu` to its downlink segment. Client pump (`core/src/transport/
+dns_tunnel/mod.rs`): after the handshake it fires one round of probes across `PROBE_CANDIDATES`
+(400…1200 B), collects the largest that survives `PROBE_WINDOW_MS`, then `SetMtu`s it. Probe queries
+are deliberately **not** tracked in the RTT/loss `pending` map — an expected over-MTU failure must not
+demote a healthy resolver. Test `probe_raises_downlink_mtu` proves the server downlink reaches the
+largest surviving candidate (1200) end-to-end over loopback. 16 dns_tunnel tests; clippy/fmt clean.
+Commits `adb62dd`/`95ffbfd`/`7c2aa02` (MTU probing 1–3/3).
+
+**2026-07-02 — DNS-tunnel: multi-stream multiplexing DONE.** One crypto session (one ConnectionID +
+HKDF key schedule) now carries **many** independent ARQ streams keyed by StreamID — the DNS-tunnel
+analogue of smux/HTTP-2, replacing the M3 "one session = one stream" model. **Core** (`session.rs`):
+`ClientSession`/`Server` are multiplexers over a `BTreeMap<u16, …>` of streams; stream 1 still opens
+via the handshake SYN (fast path, 1 RTT to first byte), streams ≥2 open with a cheap short-form SYN
+(StreamID + target under the session uplink key) retried on a per-stream timer until a per-stream
+SynAck; `handle_syn` is idempotent so a retransmitted session SYN can't wipe live streams; uplink
+poll + server downlink both round-robin across streams; `SetMtu` applies session-wide; frames route by
+StreamID. Single-stream facade (`write`/`read`/`close`) kept for compile-compat (operates on the
+primary stream). `dns-tunnel-server` does per-`(ConnId,StreamID)` TCP egress (target EOF FINs just
+that stream). **Transport** (`mod.rs`): all dials share **one** session/pump/UDP-socket/pool — first
+dial establishes (target = stream 1), later dials hand the pump a `Ctl::Open` for a new stream; a
+per-stream reader task fans uplink into the pump tagged with its StreamID, the pump fans downlink back
+per stream + handles per-stream half-close/reap; idle lifecycle tears the session down after
+`IDLE_GRACE_MS` (3 s) with no streams so an idle tunnel stops querying (next dial rebuilds), draining
+any raced-in `Open` so an accepted dial is never dropped. Dropped the per-dial `PumpStream` wrapper (a
+`DuplexStream` boxes directly as `BoxedStream`). New tests: `two_streams_multiplex_independently`
+(core: two streams to different targets echo without crossing) + `two_dials_share_one_session`
+(transport: two concurrent dials multiplex over one ConnectionID). 51 core + 1 server-e2e + 17
+dns_tunnel tests; base + feature builds/clippy/fmt clean. Commits `e493595` (core) + `a7927a0`
+(transport). Branch `fisk/spark-dns-tunnel` (not pushed). **Remaining deferred (unchanged):**
+cookie/replay handshake hardening, UDP-over-tunnel, session-pump payload compression, formal
+`cargo fuzz`; plus optional multi-session pooling (v1 shares a single session across all dials).

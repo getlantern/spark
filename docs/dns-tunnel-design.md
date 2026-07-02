@@ -1,10 +1,14 @@
 # DNS-tunnel transport — design
 
-- **Status:** Implemented (M0–M5) — client transport + resolver balancer (aggregation/duplication/
-  failover) + `dns-tunnel-server` (real TCP egress), wired into transport selection. Self-contained
-  gates green: loopback-UDP E2E, multi-resolver aggregation + mid-session failover, real-TCP-egress
-  e2e; base build pulls no DNS-tunnel deps; log-hygiene clean. **Live gates pending infra/root:** the
-  recursive-resolver run via a real NS-delegated domain, and the `sudo` full-TUN run. ADR 0011.
+- **Status:** Implemented (M0–M5) + post-M5 — client transport + resolver balancer (aggregation/
+  duplication/failover) + `dns-tunnel-server` (real TCP egress), wired into transport selection.
+  Post-M5 additions (2026-07-02): **dynamic MTU probing** (over-the-wire `MtuProbe`/`SetMtu`, replacing
+  the conservative static bound) and **multi-stream multiplexing** (one crypto session carries many
+  ARQ streams keyed by StreamID; all client dials share one session/pump/socket, smux/HTTP-2 style).
+  Self-contained gates green: loopback-UDP E2E, multi-resolver aggregation + mid-session failover,
+  real-TCP-egress e2e, MTU-probe raise, two-stream + two-dial mux; base build pulls no DNS-tunnel deps;
+  log-hygiene clean. **Live gates pending infra/root:** the recursive-resolver run via a real
+  NS-delegated domain, and the `sudo` full-TUN run. ADR 0011.
 - **Scope:** Add a **DNS-tunneling** transport: a spark client `Transport` (TCP byte-stream) that
   carries proxied traffic over DNS queries/responses, aggregating over **many recursive resolvers**
   for resilience, plus a matching **Rust server** (authoritative nameserver + egress). The protocol
@@ -118,17 +122,22 @@ concurrent sessions and tied identity to one path. A wide random ID (a) removes 
 **TurboTunnel ClientID** that lets the server reassemble a session from frames arriving via *any*
 resolver / any source address, and (c) is unguessable. The server keys its session table on it.
 
-### 2.3 Session handshake
+### 2.3 Session handshake & stream open
 ```
-Client → SYN     : ConnectionID, proposed { cipher, max upload/download MTU, compression, ARQ params }
-Server → SYN-ACK : accepted params (clamped to server policy), server cookie, verify token
-Client → (data)  : streams opened with per-stream SYN carrying the SOCKS-style target address
+Client → SYN (long)     : ConnectionID + cleartext salt; payload = stream 1's SOCKS-style target
+Server → SYN-ACK        : (handshake key) establishes the session AND opens stream 1
+Client → SYN (short)    : per-stream, StreamID + target — opens streams ≥ 2 over the live session
+Server → SYN-ACK (short): per-stream open ack (session downlink key), StreamID echoed
 ```
-The `SYN` is AEAD-sealed under the PSK-derived handshake key, so only PSK holders produce a valid first
-frame — this is the auth. The server replies only after a valid `SYN` opens (unauthenticated garbage to
-:53 is dropped as ordinary malformed DNS), and issues a random **cookie** the client must echo, which
-gates session-table allocation against spoofed-source floods. A per-connection **verify token** lets
-the server cheaply reject frames not belonging to a live session before doing AEAD work.
+The long-form `SYN` is AEAD-sealed under the PSK-derived handshake key, so only PSK holders produce a
+valid first frame — this is the auth. The server replies only after a valid `SYN` opens (unauthenticated
+garbage to :53 is dropped as ordinary malformed DNS). **Implemented (2026-07-02):** the session and
+streams are decoupled — one crypto session (one ConnectionID + key schedule) multiplexes **many** ARQ
+streams keyed by StreamID. Stream 1's target rides the handshake `SYN` (1 RTT to first byte); further
+streams open with a cheap short-form `SYN` under the session uplink key, retried on a per-stream timer
+until the server returns a short-form `SYN-ACK`. A retransmitted session `SYN` is idempotent (never
+wipes live streams). *Deferred (§16):* the anti-spoof **cookie** and per-connection **verify token**
+(v1 relies on PSK-authenticated frames + the idle sweep).
 
 ### 2.4 Crypto & key schedule
 - **PSK** (config; base64, ≥32 bytes). Fixed shared secret; the server auto-generates one if absent.
@@ -201,13 +210,21 @@ capacity because many concurrent queries spread across many independently-rate-l
 
 ---
 
-## 5. MTU discovery (client `mtu` module)
-Per-resolver, per-direction **binary search**: upload MTU = how many payload bytes survive in the QNAME
-via a given resolver (`MTU_UP_REQ`/`RES` echo); download MTU = how large a TXT response that resolver
-will carry (`MTU_DOWN_REQ`/`RES`). Crypto overhead (12 B nonce + 16 B tag) and base32 expansion
-(8 chars per 5 bytes) fold into the math. After probing, a **synced pool MTU** is chosen statistically
-(e.g. p75 with a bounded drop ratio) so most of the healthy pool shares one MTU; the server clamps it
-via handshake policy. Floors: upload ≥ small constant, download ≥ handshake reply size.
+## 5. MTU discovery (client `mtu` module + session probe loop)
+The `mtu` module computes the **conservative static bound** from first principles: upload = payload
+bytes that survive base32-packed in a 255-byte QNAME for the zone; download = payload that fits a TXT
+answer at the negotiated EDNS0 size. Crypto overhead (12 B nonce + 16 B tag) and base32 expansion
+(8 chars per 5 bytes) fold into the math. Every ARQ stream is sized to this bound at open, so a session
+always works without probing.
+
+**Implemented (2026-07-02) — dynamic downlink probing:** after the handshake the client pump fires one
+round of `MtuProbe` frames across candidate sizes (`PROBE_CANDIDATES` = 400…1200 B); the server pads a
+`MtuProbeResp` to the requested size, so an over-MTU answer simply fails to return and the client learns
+the path limit. The client picks the largest size that survived the collection window and sends a
+`SetMtu`, which the server applies session-wide (the DNS path MTU is shared across streams). Probe
+queries are excluded from the resolver RTT/loss accounting — an expected over-MTU failure must not
+demote a healthy resolver. *Deferred:* uplink probing and a statistically-synced **per-resolver** pool
+MTU (v1 probes one synced downlink size); the static bound remains the uplink floor.
 
 ---
 
