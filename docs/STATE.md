@@ -2654,6 +2654,27 @@ to tear down when done: DO droplet `581811126`, DO SSH key `spark-dns-tunnel` (`
 Cloudflare records under getiantem.org (`t` NS + `ns-spark` A). PSK in the session scratchpad. New
 build tooling installed locally: `zig` + `cargo-zigbuild` + the `x86_64-unknown-linux-musl` target.
 
+**2026-07-02 — DNS-tunnel: recursive-throughput optimization — two negative results (both reverted).**
+Investigated raising recursive throughput past the ~single-resolver ceiling. Measured against the live
+`t.getiantem.org` deployment across a 23-IP public-resolver pool (14 operators). **Findings:**
+(1) *Pool breadth helps sticky via selection* — 8→23 resolvers let the health-ranker find a better
+single resolver (~15→78 KB/s), because operators throttle the DNS-tunnel pattern very unequally.
+(2) **Per-query spread across the pool: 15× WORSE** (5 vs 78 KB/s). A single ordered ARQ stream sprayed
+over 12–400 ms resolvers reorders badly + stalls on the slowest; and at single-stream volume you're
+RTT-bound (~75 KB/s), not rate-limited, so spreading only adds head-of-line cost. (3) **Per-stream
+resolver affinity (pin each mux stream to a distinct resolver): also WORSE in aggregate** — 8 conns
+= 51 KB/s vs 1 conn = 73. Affinity pins but doesn't *chase* a good resolver (only reassigns on hard
+disable), so streams pinned to throttlers crawl and drag the aggregate, and routing stream-1 through
+affinity weakened the common-case single-conn failover. **Root cause / conclusion:** public resolvers
+are heterogeneous *adversarial* DNS-tunnel throttlers; beating the per-good-resolver ~75 KB/s ceiling
+needs throughput-aware selection (measure goodput, use only the good few, flee throttlers) which
+converges back toward "few best," not "spread across many" — high effort, uncertain payoff against an
+adversary. **Both `spread` and `affinity` experiments reverted; default stays sticky-to-best +
+broad-pool selection** (empirically best for the common single connection). Recursive remains the
+reachability-under-shutdown tier (~0.1 Mbit/s, throttle-bound); real throughput (~10 Mbit/s) lives on
+non-throttling paths (our own server, or resolvers that don't throttle). No code shipped from this
+investigation (tree unchanged); findings recorded so the dead ends aren't re-tried.
+
 **2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
 loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
 UDP delay relay to inject RTT; knobs `DNS_BENCH_{MIB,RTT_MS,INFLIGHT,WINDOW}`). Findings: the impl's
