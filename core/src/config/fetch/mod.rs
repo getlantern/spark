@@ -259,7 +259,7 @@ async fn first_ok(mut attempts: Vec<FetchAttempt<'_>>) -> std::io::Result<FetchO
 /// `None` (→ direct-only fetch) only if the embedded config fails to parse, which shouldn't happen.
 /// The empty country code selects each provider's `default` SNI bucket (e.g. aliyun's `img.alicdn.com`),
 /// matching the production client, which passes no country code.
-fn fronted_dialer() -> Option<FrontedTlsDialer<FlintDnsResolver>> {
+pub(crate) fn fronted_dialer() -> Option<FrontedTlsDialer<FlintDnsResolver>> {
     const FRONTED_CONFIG_GZ: &[u8] = include_bytes!("fronted.yaml.gz");
     match FrontedTlsDialer::from_gzipped_config_with_default_dns(FRONTED_CONFIG_GZ, "", "") {
         Ok(dialer) => Some(dialer),

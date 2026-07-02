@@ -46,6 +46,16 @@ pub mod rules;
 #[cfg(feature = "smart-routing")]
 pub mod dns;
 
+/// Install bundled CA roots so flint's fronted TLS can verify on mobile (Android/iOS lack a
+/// boring-readable system trust store). Gated to the fd-tunnel platforms: its only caller,
+/// [`fd_tunnel::run_fd_dispatch`], compiles only on android/ios/macos, so declaring `ca_roots` more
+/// broadly would leave the desktop no-op as dead code on linux/windows.
+#[cfg(all(
+    feature = "config-fetch",
+    any(target_os = "android", target_os = "ios", target_os = "macos")
+))]
+mod ca_roots;
+
 /// Marker for a bidirectional async byte stream. Blanket-implemented for every
 /// `AsyncRead + AsyncWrite`, so a surfaced netstack flow and a dialed transport stream can
 /// share one boxed type ([`BoxedStream`]).
