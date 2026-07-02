@@ -169,6 +169,17 @@ impl Stream {
         self.rto_ms
     }
 
+    /// Reconfigure the max send-segment size (bytes) — e.g. after MTU probing settles the pool MTU.
+    /// Only affects segments cut *after* this call; in-flight segments keep their size.
+    pub fn set_max_segment(&mut self, max_segment: usize) {
+        self.cfg.max_segment = max_segment.max(1);
+    }
+
+    /// The current max send-segment size (bytes).
+    pub fn max_segment(&self) -> usize {
+        self.cfg.max_segment
+    }
+
     /// `true` once the remote's FIN has been delivered in order (application EOF).
     pub fn remote_finished(&self) -> bool {
         self.remote_fin_recvd
@@ -257,8 +268,9 @@ impl Stream {
             Kind::KeepAlive => {
                 self.ack_pending = true;
             }
-            // SYN/SynAck are handled by the session layer, not the stream.
-            Kind::Syn | Kind::SynAck => {}
+            // SYN/SynAck and the MTU-probe/SetMtu control frames are handled by the session layer,
+            // not the per-stream ARQ.
+            Kind::Syn | Kind::SynAck | Kind::MtuProbe | Kind::MtuProbeResp | Kind::SetMtu => {}
         }
     }
 

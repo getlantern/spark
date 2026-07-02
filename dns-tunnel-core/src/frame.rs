@@ -73,6 +73,16 @@ pub enum Kind {
     Rst = 7,
     /// Idle keep-alive / poll (lets the server answer with pending data).
     KeepAlive = 8,
+    /// MTU probe (client→server): a control frame whose payload is `dir(1) ‖ target(u16)`. For a
+    /// downlink probe the server replies with a `MtuProbeResp` padded to `target`; for an uplink probe
+    /// the (large) probe QNAME itself is the test and the server confirms receipt. Not ARQ data.
+    MtuProbe = 9,
+    /// MTU probe response (server→client): echoes `dir(1) ‖ target(u16)` then padding (downlink probes
+    /// are padded to `target` so an oversized answer fails to return). Not ARQ data.
+    MtuProbeResp = 10,
+    /// Set the server's downlink segment size (client→server): payload `size(u16)`. Sent after the
+    /// client has probed a synced pool MTU. Not ARQ data.
+    SetMtu = 11,
 }
 
 impl Kind {
@@ -86,6 +96,9 @@ impl Kind {
             6 => Kind::Fin,
             7 => Kind::Rst,
             8 => Kind::KeepAlive,
+            9 => Kind::MtuProbe,
+            10 => Kind::MtuProbeResp,
+            11 => Kind::SetMtu,
             _ => return None,
         })
     }
