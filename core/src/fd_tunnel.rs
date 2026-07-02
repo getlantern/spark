@@ -621,18 +621,18 @@ pub fn run_fd_lantern_api(
                 _ = loop_stop.notified() => {}
             }
         });
-        // Smart-routing: keep the `.srs` rule-set cache warm in the background, fetched **via kindling**
-        // (censorship-resilient), next to the config refresh. Only stale lists are re-fetched. Rules
-        // apply on the next connect (this warms the on-disk cache; no live router swap in v1, mirroring
-        // the config pool). The per-device seed matches the config fetch's front-sampling.
+        // Smart-routing: keep the `.srs` rule-set cache warm in the background, fetched through the
+        // embedded domain-fronting config (censorship-resilient), next to the config refresh. Only
+        // stale lists are re-fetched. Rules apply on the next connect (this warms the on-disk cache;
+        // no live router swap in v1, mirroring the config pool).
         #[cfg(feature = "smart-routing")]
         if !config.smart_routing.rule_sets.is_empty() {
-            match crate::rules::ruleset::KindlingRuleSetFetcher::new() {
+            match crate::rules::ruleset::FrontedRuleSetFetcher::new() {
                 Some(fetcher) => {
                     let fetcher: Arc<dyn crate::rules::ruleset::RuleSetFetcher> = Arc::new(fetcher);
                     info!(
                         rule_sets = config.smart_routing.rule_sets.len(),
-                        "lantern-api: starting rule-set refresh (via kindling)"
+                        "lantern-api: starting rule-set refresh (fronted)"
                     );
                     tokio::spawn(crate::rules::ruleset::run_refresh_loop(
                         fetcher,

@@ -2,8 +2,8 @@
 //!
 //! Rule-sets are cached under `<data_dir>/rulesets/<tag>.srs` (the path the tunnel's loader reads).
 //! Fetching is behind the [`RuleSetFetcher`] seam so the cache/refresh/offline logic is unit-testable
-//! without the network; the production impl ([`KindlingRuleSetFetcher`]) fetches **via kindling**
-//! (domain-fronted, self-bootstrapping) so updates work under censorship.
+//! without the network; the production impl ([`FrontedRuleSetFetcher`]) fetches through the embedded
+//! domain-fronting config (`fronted.yaml.gz`) so updates work under censorship.
 //!
 //! Offline-resilience is the invariant: a fetch failure — or a download that doesn't parse — never
 //! disturbs the existing cache, so the tunnel keeps using the last-known-good `.srs`. A first-ever
@@ -54,15 +54,16 @@ fn sanitized_tag(tag: &str) -> String {
 }
 
 /// Fetches a rule-set's raw `.srs` bytes from its URL. Injected so the cache/refresh logic is testable
-/// without the network; the production impl ([`KindlingRuleSetFetcher`]) fetches via kindling.
+/// without the network; the production impl ([`FrontedRuleSetFetcher`]) fetches via the embedded
+/// domain-fronting config.
 #[async_trait::async_trait]
 pub trait RuleSetFetcher: Send + Sync {
     /// Fetch the `.srs` bytes at `url`.
     async fn fetch(&self, url: &str) -> io::Result<Vec<u8>>;
 }
 
-/// Split an `https://host[/path]` URL into `(host, path)`. Kindling fronts to `host` (443 implied) and
-/// requests `path`. Errors on a non-`https` URL or an empty host.
+/// Split an `https://host[/path]` URL into `(host, path)`. The fronted dialer fronts to `host` (443
+/// implied) and requests `path`. Errors on a non-`https` URL or an empty host.
 #[cfg(feature = "config-fetch")]
 fn split_https_url(url: &str) -> io::Result<(String, String)> {
     let rest = url
@@ -86,12 +87,12 @@ fn split_https_url(url: &str) -> io::Result<(String, String)> {
 /// each host (the scanner guesses generic edges with the raw host as the inner `Host`, which no CDN
 /// serves for GitHub). Behind `config-fetch` (which pulls flint-fronted + the embedded map).
 #[cfg(feature = "config-fetch")]
-pub struct KindlingRuleSetFetcher {
+pub struct FrontedRuleSetFetcher {
     dialer: flint_fronted::FrontedTlsDialer<flint_fronted::FlintDnsResolver>,
 }
 
 #[cfg(feature = "config-fetch")]
-impl KindlingRuleSetFetcher {
+impl FrontedRuleSetFetcher {
     /// Build a fetcher that fronts each `.srs` via the embedded fronted config. `None` only if that
     /// config fails to parse (shouldn't happen) — the caller then skips rule-set refresh and keeps any
     /// cached lists.
@@ -104,7 +105,7 @@ impl KindlingRuleSetFetcher {
 
 #[cfg(feature = "config-fetch")]
 #[async_trait::async_trait]
-impl RuleSetFetcher for KindlingRuleSetFetcher {
+impl RuleSetFetcher for FrontedRuleSetFetcher {
     async fn fetch(&self, url: &str) -> io::Result<Vec<u8>> {
         let (host, path) = split_https_url(url)?;
         // The dialer maps `host` to its fronting provider via the embedded `hostaliases`, dials a
@@ -167,7 +168,7 @@ pub async fn refresh_all(
 
 /// Refresh loop: each cycle re-fetches only the rule-sets whose cache is **stale** (missing or older
 /// than `interval`), then waits `interval` — until `stop` is signalled. The staleness gate keeps a
-/// warm cache from being re-downloaded via kindling on every connect. Mirrors the config-fetch
+/// warm cache from being re-downloaded on every connect. Mirrors the config-fetch
 /// background loop; spawned on the tunnel's runtime by `fd_tunnel`.
 pub async fn run_refresh_loop(
     fetcher: Arc<dyn RuleSetFetcher>,
@@ -325,6 +326,17 @@ mod tests {
         // Non-https and empty-host are rejected.
         assert!(split_https_url("http://cdn.example.com/x.srs").is_err());
         assert!(split_https_url("https:///x.srs").is_err());
+    }
+
+    #[cfg(feature = "config-fetch")]
+    #[test]
+    fn fronted_fetcher_builds_from_the_embedded_config() {
+        // Rule-set refresh now depends on the embedded `fronted.yaml.gz` parsing into a dialer; if it
+        // ever stops parsing, refresh silently degrades to keeping stale/empty lists. Catch that here.
+        assert!(
+            FrontedRuleSetFetcher::new().is_some(),
+            "embedded fronted config must parse so rule-set refresh has a fetcher"
+        );
     }
 
     #[tokio::test]

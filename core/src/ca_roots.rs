@@ -25,7 +25,10 @@ pub(crate) fn install_bundled_roots(data_dir: &std::path::Path) {
     let path = data_dir.join("ca-roots.pem");
     match write_bundle(&path) {
         Ok(()) => {
-            // Safe: called once during setup, before the fetch/TLS worker tasks spawn.
+            // Set as early as possible in tunnel setup, before the fetch/TLS tasks that read it spawn.
+            // NOTE: process-env mutation isn't guaranteed thread-safe on every platform if another
+            // thread reads the environment concurrently; the cleaner long-term fix is to install this
+            // bundle directly on the SSL context (flint/boring) rather than via SSL_CERT_FILE.
             std::env::set_var("SSL_CERT_FILE", &path);
             tracing::info!(
                 count = webpki_root_certs::TLS_SERVER_ROOT_CERTS.len(),
@@ -44,7 +47,19 @@ pub(crate) fn install_bundled_roots(data_dir: &std::path::Path) {
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn write_bundle(path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension("pem.tmp");
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // The data dir may not exist yet on a first run — create it so File::create can't fail on that.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Per-run-unique temp name (pid + a process-local counter) so two installs racing on the same
+    // data dir can't clobber each other's partial write before the atomic rename.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "pem.tmp.{}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     {
         let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
         for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
