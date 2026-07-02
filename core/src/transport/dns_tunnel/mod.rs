@@ -972,4 +972,74 @@ mod tests {
             mibps * 8.0,
         );
     }
+
+    /// Live end-to-end fetch through a **deployed** server (authoritative mode over the real WAN):
+    /// dials a real target *through* the tunnel and does an HTTP GET. Env: `DNS_TUNNEL_SERVER=ip:port`
+    /// (required — else the test skips), `DNS_TUNNEL_PSK=<base64>`, `DNS_TUNNEL_ZONE`,
+    /// `DNS_TUNNEL_TARGET=ip:port` (default `1.1.1.1:80`), `DNS_TUNNEL_HTTP_HOST` (Host header,
+    /// default `one.one.one.one`), `DNS_TUNNEL_PATH` (default `/`). Prints status + bytes + throughput.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "live test; set DNS_TUNNEL_SERVER=ip:port to a deployed server"]
+    async fn live_authoritative_fetch() {
+        let Ok(server) = std::env::var("DNS_TUNNEL_SERVER") else {
+            eprintln!("skip: set DNS_TUNNEL_SERVER=ip:port");
+            return;
+        };
+        let psk_b64 = std::env::var("DNS_TUNNEL_PSK").expect("DNS_TUNNEL_PSK");
+        let zone = std::env::var("DNS_TUNNEL_ZONE").unwrap_or_else(|_| "t.example.com".into());
+        let target: SocketAddr = std::env::var("DNS_TUNNEL_TARGET")
+            .unwrap_or_else(|_| "1.1.1.1:80".into())
+            .parse()
+            .expect("DNS_TUNNEL_TARGET must be ip:port");
+        let host =
+            std::env::var("DNS_TUNNEL_HTTP_HOST").unwrap_or_else(|_| "one.one.one.one".into());
+        let path = std::env::var("DNS_TUNNEL_PATH").unwrap_or_else(|_| "/".into());
+
+        let psk = dns_tunnel_core::crypto::decode_psk(&psk_b64).expect("valid base64 psk");
+        let transport = DnsTunnelTransport::new(
+            zone,
+            psk,
+            vec![server.clone()],
+            PoolConfig {
+                duplication: 1,
+                ..PoolConfig::default()
+            },
+            SessCfg::default(),
+            None,
+        );
+        let t0 = Instant::now();
+        let stream = transport
+            .dial(target)
+            .await
+            .expect("dial through the tunnel");
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: spark-dns-tunnel\r\nConnection: close\r\n\r\n"
+        );
+        wr.write_all(req.as_bytes()).await.expect("send request");
+        wr.flush().await.unwrap();
+        let mut resp = Vec::new();
+        let mut buf = vec![0u8; 32 * 1024];
+        loop {
+            match rd.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => resp.extend_from_slice(&buf[..n]),
+                Err(e) => {
+                    eprintln!("read error after {} bytes: {e}", resp.len());
+                    break;
+                }
+            }
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        let text = String::from_utf8_lossy(&resp);
+        let status_line = text.lines().next().unwrap_or("(no response)");
+        println!(
+            "\n[live] {server} → {target} : {} bytes in {:.2}s ({:.1} KB/s) | HTTP status: {}\n",
+            resp.len(),
+            secs,
+            (resp.len() as f64 / 1024.0) / secs,
+            status_line,
+        );
+        assert!(!resp.is_empty(), "received a response through the tunnel");
+    }
 }
