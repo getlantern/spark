@@ -29,6 +29,11 @@ use crate::net::SocketProtector;
 use crate::transport::{protected_udp_socket, Transport};
 use crate::BoxedStream;
 
+/// Resolver pool + balancer (ADR 0011 §4): the headline resolver aggregation — pool parse/expand,
+/// per-resolver RTT/loss health, duplication, and per-stream sticky failover. Wired into the pump's
+/// resolver mode.
+pub mod balancer;
+
 /// The app-facing duplex buffer size (bytes) between the caller's stream and the pump.
 const DUPLEX_BUF: usize = 64 * 1024;
 /// The keepalive/RTO wakeup cadence (ms): drives downlink polling + retransmits while idle.
