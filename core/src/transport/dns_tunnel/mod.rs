@@ -981,10 +981,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "live test; set DNS_TUNNEL_SERVER=ip:port to a deployed server"]
     async fn live_authoritative_fetch() {
+        // `DNS_TUNNEL_SERVER` = comma-separated resolver/server list. Authoritative mode: a single
+        // `ip:port` (the server). Recursive mode: many public resolvers, e.g. `1.1.1.1,8.8.8.8,9.9.9.9`.
         let Ok(server) = std::env::var("DNS_TUNNEL_SERVER") else {
-            eprintln!("skip: set DNS_TUNNEL_SERVER=ip:port");
+            eprintln!("skip: set DNS_TUNNEL_SERVER=ip[:port][,ip…]");
             return;
         };
+        let servers: Vec<String> = server.split(',').map(|s| s.trim().to_string()).collect();
         let psk_b64 = std::env::var("DNS_TUNNEL_PSK").expect("DNS_TUNNEL_PSK");
         let zone = std::env::var("DNS_TUNNEL_ZONE").unwrap_or_else(|_| "t.example.com".into());
         let target: SocketAddr = std::env::var("DNS_TUNNEL_TARGET")
@@ -999,7 +1002,7 @@ mod tests {
         let transport = DnsTunnelTransport::new(
             zone,
             psk,
-            vec![server.clone()],
+            servers,
             PoolConfig {
                 duplication: 1,
                 ..PoolConfig::default()

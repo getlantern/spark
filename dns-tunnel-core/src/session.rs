@@ -681,17 +681,34 @@ impl Server {
             .unwrap_or_default()
     }
 
-    /// Process a DNS tunnel query and produce the answer wire bytes. Returns `None` for a query that
-    /// is not a valid tunnel query under our zone (the caller drops it — ordinary malformed DNS).
+    /// Process a DNS tunnel query and produce the answer wire bytes. A valid tunnel query is handled
+    /// as SYN or data; a query **under our zone** that isn't tunnel data (the apex, or the SOA/NS/A
+    /// probes a QNAME-minimizing resolver sends before forwarding) gets a benign NOERROR/NODATA so the
+    /// resolver proceeds instead of SERVFAIL-ing; a query **not** under our zone returns `None` (the
+    /// caller drops it — it isn't ours to answer).
     pub fn on_query(&mut self, query: &[u8], now: u64) -> Option<Vec<u8>> {
-        let parsed = dns::parse_query(query, &self.zone).ok()?;
-        let wire = frame::parse_wire(&parsed.data).ok()?;
-
-        if wire.salt.is_some() {
-            self.handle_syn(query, &wire, now)
-        } else {
-            self.handle_data(query, &wire, now)
+        let parsed = match dns::parse_query(query, &self.zone) {
+            Ok(q) => q,
+            // Not under our zone → not ours.
+            Err(dns::DnsError::WrongZone) => return None,
+            // Under our zone but the labels aren't tunnel data → answer benignly (or drop if the
+            // request is too malformed for even that).
+            Err(_) => return dns::build_nodata(query, &self.zone, self.cfg.edns_udp).ok(),
+        };
+        // Try the tunnel path; a real SYN/data frame produces the tunnel answer.
+        if let Ok(wire) = frame::parse_wire(&parsed.data) {
+            let ans = if wire.salt.is_some() {
+                self.handle_syn(query, &wire, now)
+            } else {
+                self.handle_data(query, &wire, now)
+            };
+            if ans.is_some() {
+                return ans;
+            }
         }
+        // Under our zone but not a valid tunnel query (apex / QNAME-min probe / frame for an unknown
+        // session): NOERROR/NODATA keeps QNAME-minimizing resolvers happy.
+        dns::build_nodata(query, &self.zone, self.cfg.edns_udp).ok()
     }
 
     /// Remove a session (idle expiry or egress teardown).
@@ -1175,6 +1192,30 @@ mod tests {
         let removed = server.sweep_idle(10_000, 5_000);
         assert_eq!(removed.len(), 1);
         assert!(!server.has_session(&client.conn_id));
+    }
+
+    #[test]
+    fn server_answers_nodata_for_qname_min_probe() {
+        // A QNAME-minimizing resolver probes the apex (no tunnel labels) before forwarding tunnel
+        // data; the server must answer NOERROR/NODATA, not drop, or the resolver SERVFAILs.
+        let cfg = Config::default();
+        let mut server = Server::new(&[0x88u8; 32], "t.example.com", cfg).unwrap();
+        let zone = Name::parse("t.example.com").unwrap();
+        let probe = dns::build_query(0x1234, b"", &zone, 1232).unwrap();
+        let ans = server
+            .on_query(&probe, 0)
+            .expect("benign NODATA, not a drop");
+        assert_eq!(ans[2] & 0x80, 0x80, "QR set");
+        assert_eq!(ans[3] & 0x0f, 0, "RCODE NOERROR");
+        assert_eq!(
+            u16::from_be_bytes([ans[8], ans[9]]),
+            1,
+            "SOA in the authority section"
+        );
+        // A query outside our zone is still not ours → dropped.
+        let other = Name::parse("t.evil.example").unwrap();
+        let q = dns::build_query(1, &[0u8; 8], &other, 1232).unwrap();
+        assert!(server.on_query(&q, 0).is_none());
     }
 
     #[test]

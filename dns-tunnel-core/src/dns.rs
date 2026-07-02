@@ -13,6 +13,8 @@
 
 /// TXT record type.
 pub const TYPE_TXT: u16 = 16;
+/// SOA record type.
+pub const TYPE_SOA: u16 = 6;
 /// EDNS0 OPT pseudo-record type.
 pub const TYPE_OPT: u16 = 41;
 /// IN class.
@@ -266,6 +268,59 @@ pub fn build_answer(request: &[u8], downlink: &[u8], edns_udp: u16) -> Result<Ve
     Ok(msg)
 }
 
+/// Write `name`'s labels uncompressed, followed by the root terminator.
+fn write_name(out: &mut Vec<u8>, name: &Name) {
+    for l in &name.labels {
+        out.push(l.len() as u8);
+        out.extend_from_slice(l);
+    }
+    out.push(0);
+}
+
+/// Build a benign NODATA answer (NOERROR, no answer records, an SOA in the authority section) for a
+/// query under our zone that is **not** a tunnel-data query — the zone apex, or the `SOA`/`NS`/`A`
+/// probes that QNAME-minimizing resolvers (1.1.1.1, 8.8.8.8, …) send to confirm the delegation before
+/// forwarding tunnel queries. Dropping those makes such resolvers SERVFAIL and never forward the real
+/// query; a NOERROR from the (authoritative) server lets them proceed. Echoes the question + EDNS0 OPT.
+pub fn build_nodata(request: &[u8], zone: &Name, edns_udp: u16) -> Result<Vec<u8>, DnsError> {
+    let qend = question_end(request)?;
+    let txn_id = u16::from_be_bytes([request[0], request[1]]);
+    let req_flags = u16::from_be_bytes([request[2], request[3]]);
+
+    let mut msg = Vec::with_capacity(qend + 64);
+    msg.extend_from_slice(&txn_id.to_be_bytes());
+    // QR=1, AA=1 (we are authoritative for the zone), copy RD; RCODE=0 (NOERROR).
+    let flags = 0x8400 | (req_flags & 0x0100);
+    msg.extend_from_slice(&flags.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    msg.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT (NODATA)
+    msg.extend_from_slice(&1u16.to_be_bytes()); // NSCOUNT (the SOA)
+    msg.extend_from_slice(&1u16.to_be_bytes()); // ARCOUNT (OPT)
+    msg.extend_from_slice(&request[HEADER_LEN..qend]); // echo the question
+                                                       // Authority: SOA for the zone (owner = apex, uncompressed).
+    write_name(&mut msg, zone);
+    msg.extend_from_slice(&TYPE_SOA.to_be_bytes());
+    msg.extend_from_slice(&CLASS_IN.to_be_bytes());
+    msg.extend_from_slice(&60u32.to_be_bytes()); // TTL
+    let mut rd = Vec::new();
+    write_name(&mut rd, zone); // MNAME (primary NS ≈ apex)
+    write_name(&mut rd, zone); // RNAME (mailbox placeholder — fine for a tunnel zone)
+    rd.extend_from_slice(&1u32.to_be_bytes()); // serial
+    rd.extend_from_slice(&3600u32.to_be_bytes()); // refresh
+    rd.extend_from_slice(&600u32.to_be_bytes()); // retry
+    rd.extend_from_slice(&86400u32.to_be_bytes()); // expire
+    rd.extend_from_slice(&60u32.to_be_bytes()); // minimum
+    msg.extend_from_slice(&(rd.len() as u16).to_be_bytes());
+    msg.extend_from_slice(&rd);
+    // EDNS0 OPT.
+    msg.push(0);
+    msg.extend_from_slice(&TYPE_OPT.to_be_bytes());
+    msg.extend_from_slice(&edns_udp.to_be_bytes());
+    msg.extend_from_slice(&[0, 0, 0, 0]);
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    Ok(msg)
+}
+
 /// A parsed tunnel answer: the transaction id and the recovered downlink bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
@@ -490,6 +545,30 @@ mod tests {
         let parsed = parse_answer(&a).unwrap();
         assert_eq!(parsed.txn_id, 7);
         assert!(parsed.data.is_empty());
+    }
+
+    #[test]
+    fn nodata_answer_is_noerror_with_soa() {
+        let zone = Name::parse("t.example.com").unwrap();
+        // An apex query (no tunnel labels), as a QNAME-minimizing resolver would send.
+        let q = build_query(0x7777, b"", &zone, 1232).unwrap();
+        let a = build_nodata(&q, &zone, 1232).unwrap();
+        assert_eq!(u16::from_be_bytes([a[0], a[1]]), 0x7777, "echoes txn id");
+        assert_eq!(a[2] & 0x80, 0x80, "QR set");
+        assert_eq!(a[2] & 0x04, 0x04, "AA set");
+        assert_eq!(a[3] & 0x0f, 0, "RCODE = NOERROR");
+        assert_eq!(
+            u16::from_be_bytes([a[6], a[7]]),
+            0,
+            "no answer records (NODATA)"
+        );
+        assert_eq!(
+            u16::from_be_bytes([a[8], a[9]]),
+            1,
+            "one authority record (SOA)"
+        );
+        // Parsing it as a tunnel answer yields no downlink (client treats it as 'nothing').
+        assert!(parse_answer(&a).unwrap().data.is_empty());
     }
 
     #[test]
