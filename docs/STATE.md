@@ -2458,3 +2458,18 @@ pipe to `tail && echo`, which hides the exit code.) **NEXT: M2b** — NACK fast-
 emits Nack(first-missing) on a gap; sender fast-retransmits without RTO backoff), then **M2c** —
 FIN/RST lifecycle (FIN as a phantom seq, acked in order; RST best-effort) + a property-test matrix.
 Then M3 (single-resolver E2E + minimal server).
+
+**2026-07-01 — DNS-tunnel M2 (ARQ) COMPLETE.** Added to `arq.rs`: NACK fast-retransmit (receiver
+Nack(first-missing) on a gap; sender fast-retransmits ahead of RTO, no backoff) and the FIN/RST
+lifecycle (FIN = phantom seq acked in order; one-way close → FinSent, symmetric → Closed; RST
+best-effort + propagates; a Closed stream still ACKs the peer's FIN retransmits — TIME_WAIT, fixed a
+real last-ACK hang the graceful-close test caught). **`dns-tunnel-core` is now feature-complete: 43
+tests (crypto/frame/dns/compress/mtu/arq), clippy -D warnings / fmt clean, pure no-I/O.** **NEXT:
+M3 — single-resolver end-to-end.** Build (a) a minimal `dns-tunnel-server` bin crate (bind UDP, parse
+tunnel TXT query via `dns::parse_query`, session table keyed by ConnectionID, per-session ARQ, single
+TCP egress, answer via `dns::build_answer`), and (b) the client `core/src/transport/dns_tunnel/`
+(`DnsTunnelTransport: Transport`, feature `dns-tunnel`, config `DnsTunnelConfig`, one resolver or
+`authoritative` direct, session handshake, ARQ pump over UDP DNS, reuse `protected_udp_socket`).
+Gate: 10 MiB loopback integrity in authoritative mode. Then M4 (balancer/multipath) + M5 (recursive
++ spark wiring). NOTE: M5's recursive gate + `sudo` TUN gate need real infra/root — flag as
+human/infra steps when reached; the loopback E2E (M3) and multipath sim gates are self-contained.
