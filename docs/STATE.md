@@ -2711,11 +2711,12 @@ incompatibility) + *unattributable* domains. **Production targets Linode, not OC
 uses Linode; `linode-cli`+`LINODE_TOKEN` on hand). Committed a reusable deploy kit under `deploy/`
 (commit `37861e7`): `provision-linode.sh` + Ansible `bootstrap-spark-dns.yaml` + systemd template +
 inventory + README, adapted from the dnstt playbook. Validated live: Linode us-east nanode
-`45.79.190.108` running it carried real traffic (HTTP 301, ~60 ms RTT). **Two billable test boxes
-live:** DO `581811126` @ 138.197.105.130 (serves ss7hc6jm.io) + Linode `100186047` @ 45.79.190.108
-(validated, not yet in DNS) — consolidate by repointing `ns-spark.ss7hc6jm.io` A → the Linode IP and
-tearing down the DO droplet. Remaining reuse to build: `SparkDNSConfig` + genconfig/config-server
-wiring, and the escalation-tier hook.
+`45.79.190.108` running it carried real traffic (HTTP 301, ~60 ms RTT). **Consolidated onto Linode:**
+`ns-spark.ss7hc6jm.io` A repointed → 45.79.190.108; verified recursive still worked with the DO
+server *stopped* (definitive), then deleted the DO droplet `581811126` + its DO-account SSH key.
+Sole live server is now **Linode `100186047` @ 45.79.190.108** serving `t.ss7hc6jm.io` (recursive
+re-verified post-deletion). Local key `~/.ssh/spark-dns-tunnel` retained (Linode SSH). Remaining reuse
+to build: `SparkDNSConfig` + genconfig/config-server wiring, and the escalation-tier hook.
 
 **2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
 loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
