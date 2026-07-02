@@ -221,6 +221,11 @@ impl ResolverPool {
         self.resolvers.get(self.sticky).map(|r| r.addr)
     }
 
+    /// A representative resolver address — used to choose the client UDP socket's address family.
+    pub fn any_addr(&self) -> SocketAddr {
+        self.resolvers[0].addr
+    }
+
     fn index_of(&self, addr: &SocketAddr) -> Option<usize> {
         self.resolvers.iter().position(|r| &r.addr == addr)
     }

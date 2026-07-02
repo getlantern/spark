@@ -1,17 +1,18 @@
 //! DNS-tunnel transport (ADR 0011): a [`Transport`] that tunnels a TCP byte-stream over DNS by
-//! driving the sans-I/O [`dns_tunnel_core::session::ClientSession`] over a UDP socket.
-//!
-//! v1 is **authoritative mode**: `dial` talks DNS straight to the tunnel server's UDP address
-//! (`transport.dns-tunnel.authoritative`). Recursive-resolver *aggregation* — spraying queries across
-//! a pool of public resolvers with per-resolver health/failover — is the headline capability and lands
-//! in M4 (this is the single-path skeleton it builds on).
+//! driving the sans-I/O [`dns_tunnel_core::session::ClientSession`] over UDP, spraying queries across a
+//! pool of recursive resolvers ([`balancer::ResolverPool`]).
 //!
 //! The DNS carrier is request→response and the server can't push, so a background **pump** task per
-//! dial keeps polling: it flushes the session's outbound queries, drains all ready answers, delivers
-//! received bytes to the application, and wakes on a keepalive/RTO tick so downlink data and
-//! retransmits still flow when the app is idle. The returned stream owns the pump's `JoinHandle` and
-//! aborts it on drop.
+//! dial keeps polling: it drains ready answers (attributing RTT/loss to the answering resolver),
+//! picks resolver(s) for each outgoing query (with duplication + sticky failover), delivers received
+//! bytes to the application, and wakes on a keepalive/RTO tick so downlink data and retransmits still
+//! flow when the app is idle. Because the server keys sessions by ConnectionID (not source address),
+//! answers relayed by *any* resolver reassemble into one tunnel — so a blocked / rate-limited /
+//! mid-session-severed resolver never kills the session while one healthy resolver remains.
+//!
+//! Authoritative mode (talk straight to the server's UDP address) is just a one-entry pool.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -30,16 +31,17 @@ use crate::transport::{protected_udp_socket, Transport};
 use crate::BoxedStream;
 
 /// Resolver pool + balancer (ADR 0011 §4): the headline resolver aggregation — pool parse/expand,
-/// per-resolver RTT/loss health, duplication, and per-stream sticky failover. Wired into the pump's
-/// resolver mode.
+/// per-resolver RTT/loss health, duplication, and per-stream sticky failover. Wired into the pump.
 pub mod balancer;
+
+use balancer::{PoolConfig, ResolverPool};
 
 /// The app-facing duplex buffer size (bytes) between the caller's stream and the pump.
 const DUPLEX_BUF: usize = 64 * 1024;
 /// The keepalive/RTO wakeup cadence (ms): drives downlink polling + retransmits while idle.
 const TICK_MS: u64 = 20;
 
-/// A DNS-tunnel transport (authoritative mode). Cheap to clone; one pump task is spawned per `dial`.
+/// A DNS-tunnel transport. Cheap to clone; one pump task + resolver pool is spawned per `dial`.
 #[derive(Clone)]
 pub struct DnsTunnelTransport {
     inner: Arc<Inner>,
@@ -48,18 +50,22 @@ pub struct DnsTunnelTransport {
 struct Inner {
     zone: String,
     psk: Vec<u8>,
-    server: SocketAddr,
+    /// Resolver specs (authoritative mode = a single `server_ip:port`).
+    resolvers: Vec<String>,
+    pool_cfg: PoolConfig,
     cfg: session::Config,
     protector: Option<SocketProtector>,
 }
 
 impl DnsTunnelTransport {
-    /// Build the transport. `psk` is the already-decoded pre-shared key (≥32 bytes); `server` is the
-    /// authoritative tunnel-server UDP address; `cfg` carries the cipher + ARQ/poll tuning.
+    /// Build the transport. `psk` is the already-decoded pre-shared key (≥32 bytes); `resolvers` are
+    /// the recursive resolvers to spray across (for authoritative mode, a single `ip:port`); `cfg`
+    /// carries the cipher + ARQ/poll tuning; `pool_cfg` tunes the balancer.
     pub fn new(
         zone: String,
         psk: Vec<u8>,
-        server: SocketAddr,
+        resolvers: Vec<String>,
+        pool_cfg: PoolConfig,
         cfg: session::Config,
         protector: Option<SocketProtector>,
     ) -> Self {
@@ -67,7 +73,8 @@ impl DnsTunnelTransport {
             inner: Arc::new(Inner {
                 zone,
                 psk,
-                server,
+                resolvers,
+                pool_cfg,
                 cfg,
                 protector,
             }),
@@ -97,18 +104,20 @@ fn encode_target(addr: &SocketAddr) -> Vec<u8> {
 impl Transport for DnsTunnelTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
         let i = &self.inner;
+        let pool = ResolverPool::parse(&i.resolvers, i.pool_cfg)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         let session = ClientSession::new(&i.psk, &i.zone, &encode_target(&target), i.cfg.clone())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        // A protector-pinned UDP socket, connected to the authoritative server so its own packets
-        // bypass the tunnel route (like the other transports).
-        let sock = protected_udp_socket(i.server, i.protector.as_ref())?;
+        // One protector-pinned, *unconnected* UDP socket (so its own packets bypass the tunnel route);
+        // the pump `send_to`s the picked resolvers. Family follows a representative resolver.
+        let sock = protected_udp_socket(pool.any_addr(), i.protector.as_ref())?;
         let std_sock: std::net::UdpSocket = sock.into();
         let udp = UdpSocket::from_std(std_sock)?;
-        udp.connect(i.server).await?;
 
+        let timeout = i.cfg.query_timeout_ms;
         let (app_side, pump_side) = tokio::io::duplex(DUPLEX_BUF);
-        let pump = tokio::spawn(run_pump(session, udp, pump_side));
+        let pump = tokio::spawn(run_pump(session, udp, pool, timeout, pump_side));
         Ok(Box::new(PumpStream {
             inner: app_side,
             pump,
@@ -116,32 +125,71 @@ impl Transport for DnsTunnelTransport {
     }
 }
 
-/// The background driver for one session: flush queries, drain answers, deliver downlink, tick.
-async fn run_pump(mut session: ClientSession, udp: UdpSocket, mut io: DuplexStream) {
-    use tokio::io::AsyncWriteExt;
+/// The transaction id is the first two bytes of a DNS message.
+fn txn_of(msg: &[u8]) -> Option<u16> {
+    (msg.len() >= 2).then(|| u16::from_be_bytes([msg[0], msg[1]]))
+}
+
+/// The background driver for one session over a resolver pool.
+async fn run_pump(
+    mut session: ClientSession,
+    udp: UdpSocket,
+    mut pool: ResolverPool,
+    query_timeout_ms: u64,
+    mut io: DuplexStream,
+) {
+    use tokio::io::AsyncReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
 
     let start = Instant::now();
     let mut dns_buf = vec![0u8; 2048];
     let mut app_buf = vec![0u8; 16 * 1024];
+    // txn -> (resolvers the query was sent to, sent_at_ms) — for RTT/loss attribution.
+    let mut pending: HashMap<u16, (Vec<SocketAddr>, u64)> = HashMap::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(TICK_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         let now = start.elapsed().as_millis() as u64;
 
-        // Drain every answer that's ready (bursts arrive faster than one select wake).
+        // Drain every answer that's ready, attributing RTT to the resolver that answered.
         loop {
-            match udp.try_recv(&mut dns_buf) {
-                Ok(n) => session.on_answer(&dns_buf[..n], now),
+            match udp.try_recv_from(&mut dns_buf) {
+                Ok((n, from)) => {
+                    if let Some(txn) = txn_of(&dns_buf[..n]) {
+                        if let Some((_, sent_at)) = pending.remove(&txn) {
+                            pool.on_success(&from, now.saturating_sub(sent_at));
+                        }
+                    }
+                    session.on_answer(&dns_buf[..n], now);
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(_) => return,
             }
         }
 
-        // Flush all queries the session wants to send.
+        // Age out unanswered queries → loss on the resolver(s) they went to.
+        if !pending.is_empty() {
+            let expired: Vec<u16> = pending
+                .iter()
+                .filter(|(_, (_, t))| now.saturating_sub(*t) >= query_timeout_ms)
+                .map(|(k, _)| *k)
+                .collect();
+            for txn in expired {
+                if let Some((targets, _)) = pending.remove(&txn) {
+                    pool.on_loss(&targets, now);
+                }
+            }
+        }
+
+        // Flush queries, each sprayed across the picked resolver(s).
         while let Some(q) = session.poll_query(now) {
-            if udp.send(&q).await.is_err() {
-                return;
+            let targets = pool.pick(now);
+            for t in &targets {
+                let _ = udp.send_to(&q, t).await; // per-send errors (e.g. family mismatch) are non-fatal
+            }
+            if let Some(txn) = txn_of(&q) {
+                pending.insert(txn, (targets, now));
             }
         }
 
@@ -155,7 +203,6 @@ async fn run_pump(mut session: ClientSession, udp: UdpSocket, mut io: DuplexStre
             return;
         }
 
-        // Wait for the next event: socket readable (then loop drains), app bytes, or the tick.
         tokio::select! {
             r = udp.readable() => {
                 if r.is_err() {
@@ -163,7 +210,7 @@ async fn run_pump(mut session: ClientSession, udp: UdpSocket, mut io: DuplexStre
                 }
             }
             r = io.read(&mut app_buf) => match r {
-                Ok(0) => session.close(),          // app closed its write half → half-close
+                Ok(0) => session.close(),
                 Ok(n) => session.write(&app_buf[..n]),
                 Err(_) => return,
             },
@@ -211,8 +258,6 @@ impl AsyncWrite for PumpStream {
     }
 }
 
-use tokio::io::AsyncReadExt as _; // for `io.read` in the pump
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,7 +266,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A minimal in-test authoritative server: answer tunnel queries and echo every received byte back
-    /// (stand-in for the TCP egress, which is the M4 server binary's job).
+    /// (stand-in for the TCP egress, which is the M4c server binary's job).
     async fn echo_server(udp: UdpSocket, psk: Vec<u8>, zone: String, cfg: SessCfg) {
         let mut server = Server::new(&psk, &zone, cfg).unwrap();
         let start = Instant::now();
@@ -237,7 +282,6 @@ mod tests {
                     return;
                 }
             }
-            // Echo egress: feed each session's received bytes straight back as downlink.
             for id in server.session_ids() {
                 let d = server.take_from_client(&id);
                 if !d.is_empty() {
@@ -247,54 +291,116 @@ mod tests {
         }
     }
 
-    fn test_cfg() -> SessCfg {
+    async fn spawn_echo_server(psk: Vec<u8>, zone: String, cfg: SessCfg) -> SocketAddr {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        tokio::spawn(echo_server(udp, psk, zone, cfg));
+        addr
+    }
+
+    /// A `127.0.0.1` address with (almost certainly) nothing listening: bind to grab a free port,
+    /// then drop the socket so sends there go unanswered.
+    async fn dead_addr() -> SocketAddr {
+        let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a = s.local_addr().unwrap();
+        drop(s);
+        a
+    }
+
+    fn cfg() -> SessCfg {
         SessCfg {
             arq: arq::Config {
                 initial_rto_ms: 60,
                 min_rto_ms: 15,
                 ..arq::Config::default()
             },
-            query_timeout_ms: 400,
+            query_timeout_ms: 150,
             max_query_inflight: 16,
             ..SessCfg::default()
         }
     }
 
-    #[tokio::test]
-    async fn loopback_authoritative_round_trip() {
-        // Scaled-down loopback gate: a real UDP round-trip through the full stack (dial → handshake →
-        // stream → data → echo) proving multi-thousand-segment bidirectional reliable transfer.
-        let server_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = server_udp.local_addr().unwrap();
-        let psk = vec![0x11u8; 32];
-        let zone = "t.example.com".to_string();
-        let cfg = test_cfg();
-        tokio::spawn(echo_server(
-            server_udp,
-            psk.clone(),
-            zone.clone(),
-            cfg.clone(),
-        ));
-
-        let transport = DnsTunnelTransport::new(zone, psk, server_addr, cfg, None);
+    async fn round_trip(transport: DnsTunnelTransport, len: usize) {
         let target: SocketAddr = "93.184.216.34:443".parse().unwrap();
         let stream = transport.dial(target).await.unwrap();
         let (mut rd, mut wr) = tokio::io::split(stream);
-
-        const LEN: usize = 512 * 1024;
-        let payload: Vec<u8> = (0..LEN).map(|i| (i as u8).wrapping_mul(37)).collect();
+        let payload: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37)).collect();
         let p2 = payload.clone();
         let writer = tokio::spawn(async move {
             wr.write_all(&p2).await.unwrap();
             wr.flush().await.unwrap();
         });
-
-        let mut got = vec![0u8; LEN];
+        let mut got = vec![0u8; len];
         rd.read_exact(&mut got).await.unwrap();
         writer.await.unwrap();
-        assert_eq!(
-            got, payload,
-            "the full payload round-trips through the DNS tunnel"
+        assert_eq!(got, payload, "payload round-trips through the DNS tunnel");
+    }
+
+    #[tokio::test]
+    async fn loopback_authoritative_round_trip() {
+        // Authoritative mode = a one-entry pool. 512 KiB round-trip through the full stack.
+        let psk = vec![0x11u8; 32];
+        let zone = "t.example.com".to_string();
+        let server = spawn_echo_server(psk.clone(), zone.clone(), cfg()).await;
+        let transport = DnsTunnelTransport::new(
+            zone,
+            psk,
+            vec![server.to_string()],
+            PoolConfig {
+                duplication: 1,
+                ..PoolConfig::default()
+            },
+            cfg(),
+            None,
         );
+        round_trip(transport, 512 * 1024).await;
+    }
+
+    #[tokio::test]
+    async fn aggregation_survives_a_dead_resolver_via_duplication() {
+        // Pool = {live server, dead addr}, duplication 2 → every query is sent to both; the dead path
+        // is silently ignored and the transfer completes. Proves multipath tolerance.
+        let psk = vec![0x22u8; 32];
+        let zone = "t.example.com".to_string();
+        let server = spawn_echo_server(psk.clone(), zone.clone(), cfg()).await;
+        let dead = dead_addr().await;
+        let transport = DnsTunnelTransport::new(
+            zone,
+            psk,
+            vec![server.to_string(), dead.to_string()],
+            PoolConfig {
+                duplication: 2,
+                ..PoolConfig::default()
+            },
+            cfg(),
+            None,
+        );
+        round_trip(transport, 128 * 1024).await;
+    }
+
+    #[tokio::test]
+    async fn fails_over_when_the_sticky_resolver_is_dead() {
+        // Pool = {dead (sticky first), live server}, duplication 1 → the first resolver is dead, so the
+        // handshake/data time out on it; the balancer disables it and fails over to the live server,
+        // and the transfer still completes. Proves per-stream sticky failover end-to-end.
+        let psk = vec![0x33u8; 32];
+        let zone = "t.example.com".to_string();
+        let server = spawn_echo_server(psk.clone(), zone.clone(), cfg()).await;
+        let dead = dead_addr().await;
+        let transport = DnsTunnelTransport::new(
+            zone,
+            psk,
+            vec![dead.to_string(), server.to_string()],
+            PoolConfig {
+                duplication: 1,
+                failover_streak: 2,
+                min_samples: 2.0,
+                disable_loss: 0.8,
+                ..PoolConfig::default()
+            },
+            cfg(),
+            None,
+        );
+        round_trip(transport, 64 * 1024).await;
     }
 }
