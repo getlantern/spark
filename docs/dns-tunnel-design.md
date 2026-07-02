@@ -77,22 +77,37 @@ Following TurboTunnel's decoupling, the **session/reliability layer is independe
 which is exactly what lets one session's frames flow over many resolvers (§4).
 
 ### 2.2 Frame format
-A frame is `AEAD_seal(nonce, header ‖ payload)` where the plaintext framed structure is:
+*(As implemented in `dns-tunnel-core/src/frame.rs`.)* The **inner** (AEAD-sealed) plaintext is:
 
 ```
-version(1)                      // protocol version + reserved flag bits
-flags(1)                        // SYN ACK NACK FIN RST DATA CONTROL COMPRESSED FRAGMENT ...
-ConnectionID(8)                 // random, client-chosen; keys the session on the server (see below)
-StreamID(2)      [if stream]    // mux many proxied connections over one session
-Seq(4)           [if DATA/ACK]  // per-stream sequence / ack number space
-FragIdx(1) FragCnt(1) [if FRAGMENT]
-CompAlgo(1)      [if COMPRESSED]
+version(1)=1  kind(1)  flags(1)
+StreamID(2)      [if FLAG_STREAM]      // mux many proxied connections over one session
+Seq(4)           [if FLAG_SEQ]         // sequence / ack / nack number
+FragIdx(1) FragCnt(1) [if FLAG_FRAGMENT]
+CompAlgo(1)      [if FLAG_COMPRESSED]
 payload...
 ```
 
-On the wire each DNS message carries: `nonce(12) ‖ AEAD_ciphertext ‖ tag(16)`, then base32-encoded into
-the QNAME (uplink) or placed raw in TXT RDATA (downlink). The header is compact (variable, ~12–20 B
-plaintext) — we keep MasterDnsVPN's low-overhead spirit but widen the identifiers for correctness:
+`kind` is a field (Syn/SynAck/Data/Ack/Nack/Fin/Rst/KeepAlive), not a flag bit — cleaner and more
+extensible than cramming every signal into 8 bits; `flags` carries only the *which-optional-fields-
+are-present* modifiers. Undefined flag bits and unknown kinds are rejected on decode.
+
+The **wire** layout uses a QUIC-style long/short header form so the server can parse routing fields
+*before* it has a key:
+
+```
+Short (data / most frames):  FORM_SHORT(1) ‖ ConnectionID(8) ‖ nonce(12) ‖ AEAD(inner)
+Long  (SYN / handshake):     FORM_LONG(1)  ‖ ConnectionID(8) ‖ salt(16) ‖ nonce(12) ‖ AEAD(inner)
+```
+
+The whole wire packet is then base32-encoded into the QNAME (uplink) or placed raw in TXT RDATA
+(downlink). The **ConnectionID and (on the SYN) the salt are cleartext** — the server needs them to
+route to / create the session and run the key schedule before it can decrypt. Neither is bound as
+AEAD AAD, and it does not need to be: the session key is HKDF-derived with the ConnectionID in its
+`info` (§2.4), so a ciphertext is already cryptographically bound to its ConnectionID; tampering the
+cleartext salt/nonce merely makes `open` fail. The AEAD tag authenticates the whole inner header +
+payload, so **no separate header-check byte is needed** (unlike MasterDnsVPN, which had unauthenticated
+modes). We keep MasterDnsVPN's low-overhead spirit but widen the identifiers for correctness:
 
 **ConnectionID is 8 random bytes, not 1.** MasterDnsVPN's 1-byte SessionID capped a server at 255
 concurrent sessions and tied identity to one path. A wide random ID (a) removes the cap, (b) is the
