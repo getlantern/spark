@@ -738,11 +738,16 @@ fn dns_tunnel_transport(
         cipher,
         ..Default::default()
     };
+    let pool_cfg = dns_tunnel::balancer::PoolConfig {
+        // ≥1; higher = delivery probability + fast working-subset discovery under a shutdown.
+        duplication: cfg.duplication.unwrap_or(1).max(1),
+        ..Default::default()
+    };
     let t = Arc::new(dns_tunnel::DnsTunnelTransport::new(
         cfg.zone.clone(),
         psk,
         resolvers,
-        dns_tunnel::balancer::PoolConfig::default(),
+        pool_cfg,
         session,
         protector,
     ));
@@ -778,6 +783,7 @@ mod dns_tunnel_wiring_tests {
             authoritative: None,
             cipher: DnsTunnelCipher::Aes256Gcm,
             compression: DnsTunnelCompression::Off,
+            duplication: Some(3),
         };
         assert!(dns_tunnel_transport(&cfg, None).is_ok());
     }
@@ -791,6 +797,7 @@ mod dns_tunnel_wiring_tests {
             authoritative: None,
             cipher: DnsTunnelCipher::default(),
             compression: DnsTunnelCompression::default(),
+            duplication: None,
         };
         assert!(dns_tunnel_transport(&cfg, None).is_err());
     }

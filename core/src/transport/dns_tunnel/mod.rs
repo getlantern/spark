@@ -999,12 +999,16 @@ mod tests {
         let path = std::env::var("DNS_TUNNEL_PATH").unwrap_or_else(|_| "/".into());
 
         let psk = dns_tunnel_core::crypto::decode_psk(&psk_b64).expect("valid base64 psk");
+        let dup = std::env::var("DNS_TUNNEL_DUP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1usize);
         let transport = DnsTunnelTransport::new(
             zone,
             psk,
             servers,
             PoolConfig {
-                duplication: 1,
+                duplication: dup,
                 ..PoolConfig::default()
             },
             SessCfg::default(),

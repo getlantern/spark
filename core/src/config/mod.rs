@@ -599,6 +599,13 @@ pub struct DnsTunnelConfig {
     /// Payload compression.
     #[serde(default)]
     pub compression: DnsTunnelCompression,
+    /// How many resolvers each query is sent to (default 1). Higher trades proportional bandwidth for
+    /// delivery probability on lossy paths **and fast discovery of the working subset when most
+    /// resolvers are blocked** — e.g. a national shutdown. Measured against a mostly-dead pool,
+    /// time-to-first-byte was 27 s at 1 vs 0.3 s at 5 (serial failover → parallel probing). Set ~3–5
+    /// for shutdown / last-resort profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplication: Option<usize>,
 }
 
 /// The AEAD cipher for the DNS-tunnel transport (ADR 0011).
@@ -1277,6 +1284,7 @@ psk = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
 resolvers = ["1.1.1.1", "8.8.8.8:53", "9.9.9.0/30"]
 cipher = "aes-256-gcm"
 compression = "lz4"
+duplication = 3
 "#;
         let cfg = Config::from_toml_str(toml).unwrap();
         let dt = cfg.transport.dns_tunnel.clone().unwrap();
@@ -1284,6 +1292,7 @@ compression = "lz4"
         assert_eq!(dt.resolvers.len(), 3);
         assert_eq!(dt.cipher, DnsTunnelCipher::Aes256Gcm);
         assert_eq!(dt.compression, DnsTunnelCompression::Lz4);
+        assert_eq!(dt.duplication, Some(3));
         assert!(dt.authoritative.is_none());
         let out = cfg.to_toml_string().unwrap();
         assert!(out.contains("aes-256-gcm"));
