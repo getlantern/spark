@@ -2548,3 +2548,24 @@ idle expiry. Then **M5**: wire the transport into `from_config`/`build_one`/`Ser
 `bootstrap::resolve_endpoints` ("wire into transport selection"), decode the config PSK/cipher into the
 transport, feature-gated release size delta, log-hygiene audit. Live recursive-NS + `sudo` TUN gates
 remain the infra/human step.
+
+**2026-07-01 — DNS-tunnel M4c DONE → M4 COMPLETE.** New workspace crate `dns-tunnel-server`: a tokio
+wrapper around `session::Server` — `serve()` binds UDP, runs the on_query loop, and on each new
+session decodes the SYN's SOCKS5 target, `TcpStream::connect`s it, and bridges the session stream ↔ TCP
+via per-session channels (reader task TCP→downlink; writer uplink→TCP); idle sessions swept
+(`session::Server` gained `last_seen`/`sweep_idle`/`remove_session`). clap `main.rs`
+(--zone/--psk/--bind/--idle-secs), log-hygiene clean. **Gate PASSED: `tests/e2e.rs` drives a real
+ClientSession over real UDP through `serve()` to a real TCP echo target (4 KiB round-trip through
+actual TCP egress).** clippy/fmt clean; spark base build unaffected. **M4 done: aggregation +
+multipath + failover + full server, all proven over real UDP/TCP.** **NEXT: M5 (final) — wire into
+transport selection.** (a) config: add `ServerSpec::DnsTunnel(DnsTunnelConfig)` + the exhaustive match
+arms in `core/src/config/mod.rs` (`first_unresolved_host`, `spec_kind` if any) and
+`core/src/transport/mod.rs` (`build_one`); (b) a `dns_tunnel_transport(cfg, protector)` builder that
+decodes the PSK (`crypto::decode_psk`), maps `DnsTunnelCipher`→`session::Cipher`, builds the resolver
+list (config `resolvers`, or `[authoritative]`) + `DnsTunnelTransport::new`, gated with a
+`#[cfg(not(feature="dns-tunnel"))]` hard-error stub (mirror shadowsocks); (c) `from_config` precedence
+(single-transport `transport.dns_tunnel`) + `bootstrap::resolve_endpoints` no-SNI arm for
+`authoritative`; (d) `cargo build --release --features dns-tunnel` size delta report + a log-hygiene
+audit. The literal `<3 MB` in the docs is stale — the repo relaxed the base budget to ~10 MB
+(opt-level=3); the real requirement is feature-gated-so-base-build-unaffected (verify via `cargo tree`
+that base pulls no dns-tunnel deps). Live recursive-NS + `sudo` TUN gates = infra/human step.
