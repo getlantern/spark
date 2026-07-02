@@ -2529,3 +2529,22 @@ session store with idle expiry). Gates: multipath aggregation (throughput scales
 session resolver-failover — both self-contained (sim or multi-loopback-resolver). Then M5 (recursive
 NS-delegation gate + `from_config`/`ServerSpec` wiring + size/log-hygiene audit; the live recursive +
 `sudo` TUN gates are the infra/human step).
+
+**2026-07-01 — DNS-tunnel M4a+M4b DONE (resolver aggregation + failover, live over UDP).**
+`core/src/transport/dns_tunnel/balancer.rs` (M4a): `ResolverPool` — parse/expand (IP/IP:port/IPv4
+CIDR/CIDR:port/[v6], deduped, :53 default, bounded), per-resolver smoothed RTT + half-life-decayed
+loss, `pick()` (sticky + healthiest others for duplication), `on_success`/`on_loss`, auto-disable +
+reactivate, per-stream sticky failover. M4b: the pump now runs **resolver mode** — one unconnected
+`protected_udp_socket`, each query `send_to` the picked resolver(s), `recv_from` attributes RTT to the
+answerer, unanswered queries age out into per-resolver loss; authoritative mode = a one-entry pool.
+**Headline capability proven end-to-end over real UDP:** `aggregation_survives_a_dead_resolver_via_
+duplication` (dup=2, {live,dead} → completes) and `fails_over_when_the_sticky_resolver_is_dead`
+({dead-first,live}, dup=1 → disables dead sticky, fails over, completes). 10 dns_tunnel tests
+(7 balancer + 3 live-UDP); base build clean (feature off); clippy/fmt clean. **NEXT: M4c** — the
+standalone `dns-tunnel-server` bin crate: a tokio wrapper around `session::Server` (bind UDP, on_query
+loop) with **real TCP egress** — on a new session decode the SYN's SOCKS5 target, `TcpStream::connect`
+it, and pump `take_from_client`→TCP-write / TCP-read→`deliver_to_client`; bounded session store with
+idle expiry. Then **M5**: wire the transport into `from_config`/`build_one`/`ServerSpec::DnsTunnel` +
+`bootstrap::resolve_endpoints` ("wire into transport selection"), decode the config PSK/cipher into the
+transport, feature-gated release size delta, log-hygiene audit. Live recursive-NS + `sudo` TUN gates
+remain the infra/human step.
