@@ -430,13 +430,7 @@ impl Stream {
             return Some(self.nack_frame(seq));
         }
 
-        // 4) A standalone ACK if one is pending.
-        if self.ack_pending {
-            self.ack_pending = false;
-            return Some(self.ack_frame());
-        }
-
-        // 5) A new segment, if the window has room and there are queued bytes.
+        // 4) A new segment, if the window has room and there are queued bytes.
         if self.inflight_count() < self.cfg.send_window && !self.outbox.is_empty() {
             let take = self.outbox.len().min(self.cfg.max_segment);
             let data = self.outbox.split_to(take).freeze();
@@ -454,7 +448,7 @@ impl Stream {
             return Some(self.seg_frame(seq, data, false));
         }
 
-        // 6) The FIN, once all data is queued/sent and the window has room.
+        // 5) The FIN, once all data is queued/sent and the window has room.
         if self.closing
             && self.fin_seq.is_none()
             && self.outbox.is_empty()
@@ -474,6 +468,14 @@ impl Stream {
             );
             self.update_state();
             return Some(self.seg_frame(seq, Bytes::new(), true));
+        }
+
+        // 6) A standalone ACK, only when there's nothing better to send. Deferring it behind data/FIN
+        // keeps ACKs from starving downlink data under continuous incoming traffic (one frame per DNS
+        // answer); a full send window falls through to here, so ACKs still flow.
+        if self.ack_pending {
+            self.ack_pending = false;
+            return Some(self.ack_frame());
         }
 
         None
