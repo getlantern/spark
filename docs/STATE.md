@@ -2410,3 +2410,22 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (`swift build`).** Live gate BLOCKED on provisioning — needs a team-`ACZRKC3LQ9` profile for the
   NE entitlement [human step]; macOS app-extension path + iOS device gate pending.)
   [ ] M11 (transports)
+
+---
+
+**2026-07-01 — DNS-tunnel transport: M0 (spec) DONE.** New M11 transport filling the `DNSTT`
+escalation tier. A **clean-slate** DNS-tunnel protocol inspired by MasterDnsVPN's architecture
+(bespoke low-overhead ARQ, resolver load-balancing with duplication + per-stream sticky failover,
+per-resolver MTU probing, LZ4 compression) but **NOT** wire-compatible with it / dnstt / Slipstream —
+both the client and a Rust server are ours. Rejected Slipstream's QUIC-multipath: its only mature
+stack (picoquic) is C+OpenSSL, violating the pure-Rust/no-C/<3 MB rules. Design:
+`docs/dns-tunnel-design.md`; plan: `docs/dns-tunnel-plan.md`; **ADR 0011**. Fixes over MasterDnsVPN:
+8-byte random ConnectionID (theirs was 1-byte → 255-session cap + path-coupled; wide ID = the
+TurboTunnel ClientID that lets a session reassemble from frames via any resolver), **AEAD-only** via
+`ring` (ChaCha20-Poly1305 default / AES-256-GCM; random 96-bit nonce per DNS message; HKDF-SHA256
+per-session key schedule), dropped XOR / MD5-KDF / AES-192 / unauth-ChaCha20. Pure-Rust: `ring` +
+`lz4_flex` (not C `zstd`), hand-rolled DNS codec, behind a `dns-tunnel` cargo feature (base build
+unaffected). Crates: `dns-tunnel-core` (shared, no-I/O) + `dns-tunnel-server` (bin) + client
+`core/src/transport/dns_tunnel/`. **NEXT: M1** — `dns-tunnel-core` codec (frame/AEAD/DNS/base32/EDNS0,
+golden vectors + `cargo fuzz`; no network). Ladder M1→M5 in the plan. Open items: server crate home
+(spark workspace vs lantern-box), `dns-tunnel-core`→`flint` migration, protocol codename.
