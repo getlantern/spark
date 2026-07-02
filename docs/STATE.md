@@ -2509,3 +2509,23 @@ client `dial`; 10 MiB round-trip). **Verify the `Transport` trait + `BoxedStream
 `protected_udp_socket` signature in `transport/mod.rs` first — don't guess.** from_config/build_one/
 `ServerSpec` + `bootstrap::resolve_endpoints` wiring → **M5**; the standalone `dns-tunnel-server` bin
 (production TCP egress + session store) → **M4**.
+
+**2026-07-01 — DNS-tunnel M3 COMPLETE (single-resolver E2E over real UDP).** M3b-2:
+`core/src/transport/dns_tunnel/mod.rs` behind the new `dns-tunnel` feature — `DnsTunnelTransport`
+impls `Transport`; `dial(target)` builds a `ClientSession`, opens a `protected_udp_socket` to the
+authoritative server (authoritative mode), spawns an async pump (drain-ready-answers-via-`try_recv` +
+flush-queries + deliver-downlink + keepalive/RTO tick), and returns a `PumpStream` that aborts the
+pump `JoinHandle` on drop. Target encoded as SOCKS5 addr bytes in the SYN. Added `Server::session_ids()`
+for egress enumeration. **Gate PASSED: a real loopback-UDP round-trip test moves 512 KiB bidirectionally
+through the full stack (handshake→base32 DNS codec→ARQ→poll model) in ~0.2s.** Base build clean
+(feature off), clippy/fmt clean (feature on). **NEXT: M4 — resolver balancer + multipath + the full
+server.** Two parts: (a) client `core/src/transport/dns_tunnel/balancer.rs` — a resolver pool
+(config `resolvers`, IP/CIDR expansion), per-resolver RTT/loss telemetry, selection strategy, packet
+duplication across resolvers, per-stream sticky failover, health auto-disable/reactivate; the pump
+sends each query to a chosen resolver instead of the single authoritative addr, and the server keys by
+ConnectionID so answers from any resolver reassemble (already true). (b) the standalone
+`dns-tunnel-server` bin crate (real TCP egress: dial the SYN target, pump the session stream ↔ TCP;
+session store with idle expiry). Gates: multipath aggregation (throughput scales with pool) + mid-
+session resolver-failover — both self-contained (sim or multi-loopback-resolver). Then M5 (recursive
+NS-delegation gate + `from_config`/`ServerSpec` wiring + size/log-hygiene audit; the live recursive +
+`sudo` TUN gates are the infra/human step).
