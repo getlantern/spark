@@ -20,3 +20,5 @@
 //! See `docs/dns-tunnel-design.md` for the full wire specification.
 
 #![forbid(unsafe_code)]
+
+pub mod crypto;
