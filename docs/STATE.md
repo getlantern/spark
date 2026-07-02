@@ -2473,3 +2473,20 @@ TCP egress, answer via `dns::build_answer`), and (b) the client `core/src/transp
 Gate: 10 MiB loopback integrity in authoritative mode. Then M4 (balancer/multipath) + M5 (recursive
 + spark wiring). NOTE: M5's recursive gate + `sudo` TUN gate need real infra/root — flag as
 human/infra steps when reached; the loopback E2E (M3) and multipath sim gates are self-contained.
+
+**2026-07-01 — DNS-tunnel M3a (sans-I/O session layer) DONE.** `dns-tunnel-core/src/session.rs`
+composes crypto+frame+dns+arq into a full session (still no-I/O): `ClientSession` + `Server`
+(per-ConnectionID). Handshake = long-form Syn (cleartext salt + target payload) under the handshake
+key → server derives keys, replies SynAck. Data = the poll model (query carries one uplink frame or a
+KeepAlive; answer carries one downlink frame). **Verified E2E deterministically: full echo over a
+perfect net AND a 20%-loss/30%-reorder net, plus a manual handshake/uplink/downlink step test and
+garbage/wrong-zone rejection.** 47 crate tests, clippy/fmt clean. Two real bugs found + fixed en
+route: (1) ACK starved downlink data (one frame per answer) → reordered ARQ `poll_transmit` to defer
+standalone ACKs behind data/FIN; (2) the session didn't size ARQ `max_segment` from the MTU math, so
+128-byte segments overflowed the QNAME and `build_query` silently failed — now sized via
+`mtu::max_uplink_payload`/`max_downlink_payload`. **NEXT: M3b** — the tokio I/O wrappers (thin, since
+the session is sans-I/O): a `dns-tunnel-server` bin crate (bind UDP:53/loopback, `Server::on_query`
+loop, TCP egress pumping `take_from_client`/`deliver_to_client`) and the client
+`core/src/transport/dns_tunnel/` (`DnsTunnelTransport: Transport` behind the `dns-tunnel` feature,
+config wiring, a `protected_udp_socket` send/recv + `poll_query`/`on_answer` pump). Gate: a real
+loopback UDP 10 MiB integrity test in authoritative mode. Then M4 (balancer/multipath) + M5.
