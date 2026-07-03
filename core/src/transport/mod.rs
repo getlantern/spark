@@ -717,7 +717,7 @@ fn dns_tunnel_transport(
     cfg: &DnsTunnelConfig,
     protector: Option<SocketProtector>,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
-    let psk = dns_tunnel_core::crypto::decode_psk(&cfg.psk)
+    let server_pub = dns_tunnel_core::crypto::decode_server_pub(&cfg.server_pubkey)
         .map_err(|e| io::Error::other(format!("transport.dns-tunnel: {e}")))?;
     let mut resolvers = cfg.resolvers.clone();
     // Auto-include the OS-configured resolver(s) (default on) — during a shutdown the mandated local
@@ -751,7 +751,7 @@ fn dns_tunnel_transport(
     };
     let t = Arc::new(dns_tunnel::DnsTunnelTransport::new(
         cfg.zone.clone(),
-        psk,
+        server_pub,
         resolvers,
         pool_cfg,
         session,
@@ -777,14 +777,14 @@ mod dns_tunnel_wiring_tests {
     use super::*;
     use crate::config::{DnsTunnelCipher, DnsTunnelCompression, DnsTunnelConfig};
 
-    // 32 zero-ish bytes, base64.
-    const PSK_B64: &str = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
+    // 32 bytes, base64 — the shape of an Ed25519 public key (validity isn't checked until a handshake).
+    const PUBKEY_B64: &str = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
 
     #[test]
     fn builder_accepts_a_valid_config() {
         let cfg = DnsTunnelConfig {
             zone: "t.example.com".into(),
-            psk: PSK_B64.into(),
+            server_pubkey: PUBKEY_B64.into(),
             resolvers: vec!["1.1.1.1".into(), "8.8.8.8:53".into()],
             authoritative: None,
             cipher: DnsTunnelCipher::Aes256Gcm,
@@ -799,7 +799,7 @@ mod dns_tunnel_wiring_tests {
     fn builder_rejects_no_resolvers_and_no_authoritative() {
         let cfg = DnsTunnelConfig {
             zone: "t.example.com".into(),
-            psk: PSK_B64.into(),
+            server_pubkey: PUBKEY_B64.into(),
             resolvers: vec![],
             authoritative: None,
             cipher: DnsTunnelCipher::default(),

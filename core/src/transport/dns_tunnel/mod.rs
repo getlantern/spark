@@ -10,9 +10,10 @@
 //! answers relayed by *any* resolver reassemble into one tunnel — so a blocked / rate-limited /
 //! mid-session-severed resolver never kills the session while one healthy resolver remains.
 //!
-//! **Multiplexing:** many `dial`s share **one** session, pump, UDP socket, and resolver pool. The
-//! first dial establishes the session (its target becomes stream 1, riding the handshake); each later
-//! dial sends the pump an `Open` request, which allocates a new multiplexed stream over the same
+//! **Multiplexing:** many `dial`s share **one** forward-secret session, pump, UDP socket, and resolver
+//! pool. The first dial establishes the session (a cleartext ephemeral↔ephemeral handshake
+//! authenticated by the server's public key) and opens the first stream to its target; each later dial
+//! sends the pump an `Open` request, which allocates a new multiplexed stream over the same
 //! ConnectionID. A tiny per-stream reader task fans the app's uplink bytes into the pump (tagged with
 //! its StreamID), and the pump fans downlink bytes back out to each stream's duplex. When every stream
 //! has been idle-closed for [`IDLE_GRACE_MS`], the pump tears the session down; the next dial rebuilds
@@ -87,7 +88,8 @@ pub struct DnsTunnelTransport {
 
 struct Inner {
     zone: String,
-    psk: Vec<u8>,
+    /// The server's static Ed25519 public key (authenticates the forward-secret handshake).
+    server_pub: [u8; 32],
     /// Resolver specs (authoritative mode = a single `server_ip:port`).
     resolvers: Vec<String>,
     pool_cfg: PoolConfig,
@@ -98,12 +100,12 @@ struct Inner {
 }
 
 impl DnsTunnelTransport {
-    /// Build the transport. `psk` is the already-decoded pre-shared key (≥32 bytes); `resolvers` are
-    /// the recursive resolvers to spray across (for authoritative mode, a single `ip:port`); `cfg`
-    /// carries the cipher + ARQ/poll tuning; `pool_cfg` tunes the balancer.
+    /// Build the transport. `server_pub` is the server's static Ed25519 public key (32 bytes);
+    /// `resolvers` are the recursive resolvers to spray across (for authoritative mode, a single
+    /// `ip:port`); `cfg` carries the cipher + ARQ/poll tuning; `pool_cfg` tunes the balancer.
     pub fn new(
         zone: String,
-        psk: Vec<u8>,
+        server_pub: [u8; 32],
         resolvers: Vec<String>,
         pool_cfg: PoolConfig,
         cfg: session::Config,
@@ -112,7 +114,7 @@ impl DnsTunnelTransport {
         DnsTunnelTransport {
             inner: Arc::new(Inner {
                 zone,
-                psk,
+                server_pub,
                 resolvers,
                 pool_cfg,
                 cfg,
@@ -133,8 +135,13 @@ impl DnsTunnelTransport {
         let i = &self.inner;
         let pool = ResolverPool::parse(&i.resolvers, i.pool_cfg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-        let session = ClientSession::new(&i.psk, &i.zone, &encode_target(&target), i.cfg.clone())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let session = ClientSession::new(
+            &i.server_pub,
+            &i.zone,
+            &encode_target(&target),
+            i.cfg.clone(),
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         // One protector-pinned, *unconnected* UDP socket (so its own packets bypass the tunnel route);
         // the pump `send_to`s the picked resolvers. Family follows a representative resolver.
         let sock = protected_udp_socket(pool.any_addr(), i.protector.as_ref())?;
@@ -460,13 +467,22 @@ async fn run_pump(
 mod tests {
     use super::*;
     use dns_tunnel_core::arq;
+    use dns_tunnel_core::crypto::{server_public_from_pkcs8, ServerStatic};
     use dns_tunnel_core::session::{Config as SessCfg, Server};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// A fresh server identity (PKCS#8 private key) + its 32-byte public key, for tests: the private
+    /// key goes to the in-test server, the public key to the transport.
+    fn keypair() -> (Vec<u8>, [u8; 32]) {
+        let pkcs8 = ServerStatic::generate().unwrap();
+        let pubkey = server_public_from_pkcs8(&pkcs8).unwrap();
+        (pkcs8, pubkey)
+    }
+
     /// A minimal in-test authoritative server: answer tunnel queries and echo every received byte back
     /// (stand-in for the TCP egress, which is the M4c server binary's job).
-    async fn echo_server(udp: UdpSocket, psk: Vec<u8>, zone: String, cfg: SessCfg) {
-        let mut server = Server::new(&psk, &zone, cfg).unwrap();
+    async fn echo_server(udp: UdpSocket, privkey: Vec<u8>, zone: String, cfg: SessCfg) {
+        let mut server = Server::new(&privkey, &zone, cfg).unwrap();
         let start = Instant::now();
         let mut buf = vec![0u8; 2048];
         loop {
@@ -491,17 +507,17 @@ mod tests {
         }
     }
 
-    async fn spawn_echo_server(psk: Vec<u8>, zone: String, cfg: SessCfg) -> SocketAddr {
+    async fn spawn_echo_server(privkey: Vec<u8>, zone: String, cfg: SessCfg) -> SocketAddr {
         let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = udp.local_addr().unwrap();
-        tokio::spawn(echo_server(udp, psk, zone, cfg));
+        tokio::spawn(echo_server(udp, privkey, zone, cfg));
         addr
     }
 
     /// Like `spawn_echo_server`, but records the max downlink segment any session reaches into
     /// `report` (so a test can observe the pump's MTU probe raising it via SetMtu).
     async fn spawn_echo_server_reporting(
-        psk: Vec<u8>,
+        privkey: Vec<u8>,
         zone: String,
         cfg: SessCfg,
         report: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -509,7 +525,7 @@ mod tests {
         let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = udp.local_addr().unwrap();
         tokio::spawn(async move {
-            let mut server = Server::new(&psk, &zone, cfg).unwrap();
+            let mut server = Server::new(&privkey, &zone, cfg).unwrap();
             let start = Instant::now();
             let mut buf = vec![0u8; 4096];
             loop {
@@ -542,7 +558,7 @@ mod tests {
     /// Like `spawn_echo_server`, but records the max number of concurrent sessions (distinct
     /// ConnectionIDs) it ever sees into `max_sessions` — so a test can prove many dials share one.
     async fn spawn_echo_server_counting(
-        psk: Vec<u8>,
+        privkey: Vec<u8>,
         zone: String,
         cfg: SessCfg,
         max_sessions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -550,7 +566,7 @@ mod tests {
         let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = udp.local_addr().unwrap();
         tokio::spawn(async move {
-            let mut server = Server::new(&psk, &zone, cfg).unwrap();
+            let mut server = Server::new(&privkey, &zone, cfg).unwrap();
             let start = Instant::now();
             let mut buf = vec![0u8; 4096];
             loop {
@@ -620,12 +636,12 @@ mod tests {
     #[tokio::test]
     async fn loopback_authoritative_round_trip() {
         // Authoritative mode = a one-entry pool. 512 KiB round-trip through the full stack.
-        let psk = vec![0x11u8; 32];
+        let (privkey, server_pub) = keypair();
         let zone = "t.example.com".to_string();
-        let server = spawn_echo_server(psk.clone(), zone.clone(), cfg()).await;
+        let server = spawn_echo_server(privkey, zone.clone(), cfg()).await;
         let transport = DnsTunnelTransport::new(
             zone,
-            psk,
+            server_pub,
             vec![server.to_string()],
             PoolConfig {
                 duplication: 1,
@@ -641,13 +657,13 @@ mod tests {
     async fn aggregation_survives_a_dead_resolver_via_duplication() {
         // Pool = {live server, dead addr}, duplication 2 → every query is sent to both; the dead path
         // is silently ignored and the transfer completes. Proves multipath tolerance.
-        let psk = vec![0x22u8; 32];
+        let (privkey, server_pub) = keypair();
         let zone = "t.example.com".to_string();
-        let server = spawn_echo_server(psk.clone(), zone.clone(), cfg()).await;
+        let server = spawn_echo_server(privkey, zone.clone(), cfg()).await;
         let dead = dead_addr().await;
         let transport = DnsTunnelTransport::new(
             zone,
-            psk,
+            server_pub,
             vec![server.to_string(), dead.to_string()],
             PoolConfig {
                 duplication: 2,
@@ -664,13 +680,13 @@ mod tests {
         // Pool = {dead (sticky first), live server}, duplication 1 → the first resolver is dead, so the
         // handshake/data time out on it; the balancer disables it and fails over to the live server,
         // and the transfer still completes. Proves per-stream sticky failover end-to-end.
-        let psk = vec![0x33u8; 32];
+        let (privkey, server_pub) = keypair();
         let zone = "t.example.com".to_string();
-        let server = spawn_echo_server(psk.clone(), zone.clone(), cfg()).await;
+        let server = spawn_echo_server(privkey, zone.clone(), cfg()).await;
         let dead = dead_addr().await;
         let transport = DnsTunnelTransport::new(
             zone,
-            psk,
+            server_pub,
             vec![dead.to_string(), server.to_string()],
             PoolConfig {
                 duplication: 1,
@@ -690,14 +706,14 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
-        let psk = vec![0x99u8; 32];
+        let (privkey, server_pub) = keypair();
         let zone = "t.example.com".to_string();
         let report = Arc::new(AtomicUsize::new(0));
         let server =
-            spawn_echo_server_reporting(psk.clone(), zone.clone(), cfg(), report.clone()).await;
+            spawn_echo_server_reporting(privkey, zone.clone(), cfg(), report.clone()).await;
         let transport = DnsTunnelTransport::new(
             zone,
-            psk,
+            server_pub,
             vec![server.to_string()],
             PoolConfig {
                 duplication: 1,
@@ -729,15 +745,14 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
-        let psk = vec![0x5Au8; 32];
+        let (privkey, server_pub) = keypair();
         let zone = "t.example.com".to_string();
         let max_sessions = Arc::new(AtomicUsize::new(0));
         let server =
-            spawn_echo_server_counting(psk.clone(), zone.clone(), cfg(), max_sessions.clone())
-                .await;
+            spawn_echo_server_counting(privkey, zone.clone(), cfg(), max_sessions.clone()).await;
         let transport = DnsTunnelTransport::new(
             zone,
-            psk,
+            server_pub,
             vec![server.to_string()],
             PoolConfig {
                 duplication: 1,
@@ -797,7 +812,7 @@ mod tests {
     /// An authoritative server that, on each opened stream, floods `blob` bytes downlink once (drains
     /// and ignores uplink). Models the browsing shape: a tiny request, a large response.
     async fn spawn_flood_server(
-        psk: Vec<u8>,
+        privkey: Vec<u8>,
         zone: String,
         cfg: SessCfg,
         blob: usize,
@@ -805,7 +820,7 @@ mod tests {
         let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = udp.local_addr().unwrap();
         tokio::spawn(async move {
-            let mut server = Server::new(&psk, &zone, cfg).unwrap();
+            let mut server = Server::new(&privkey, &zone, cfg).unwrap();
             let start = Instant::now();
             let mut buf = vec![0u8; 4096];
             let payload = vec![0xCDu8; blob];
@@ -916,9 +931,9 @@ mod tests {
         c.arq.initial_rto_ms = (round_trip * 4).max(60);
         c.query_timeout_ms = (round_trip * 6).max(150);
 
-        let psk = vec![0x11u8; 32];
+        let (privkey, server_pub) = keypair();
         let zone = "t.example.com".to_string();
-        let server = spawn_flood_server(psk.clone(), zone.clone(), c.clone(), n).await;
+        let server = spawn_flood_server(privkey, zone.clone(), c.clone(), n).await;
         let entry = if rtt_ms > 0 {
             spawn_delay_relay(server, rtt_ms).await.to_string()
         } else {
@@ -926,7 +941,7 @@ mod tests {
         };
         let transport = DnsTunnelTransport::new(
             zone,
-            psk,
+            server_pub,
             vec![entry],
             PoolConfig {
                 duplication: 1,
@@ -988,7 +1003,7 @@ mod tests {
             return;
         };
         let servers: Vec<String> = server.split(',').map(|s| s.trim().to_string()).collect();
-        let psk_b64 = std::env::var("DNS_TUNNEL_PSK").expect("DNS_TUNNEL_PSK");
+        let pubkey_b64 = std::env::var("DNS_TUNNEL_PUBKEY").expect("DNS_TUNNEL_PUBKEY");
         let zone = std::env::var("DNS_TUNNEL_ZONE").unwrap_or_else(|_| "t.example.com".into());
         let target: SocketAddr = std::env::var("DNS_TUNNEL_TARGET")
             .unwrap_or_else(|_| "1.1.1.1:80".into())
@@ -998,14 +1013,15 @@ mod tests {
             std::env::var("DNS_TUNNEL_HTTP_HOST").unwrap_or_else(|_| "one.one.one.one".into());
         let path = std::env::var("DNS_TUNNEL_PATH").unwrap_or_else(|_| "/".into());
 
-        let psk = dns_tunnel_core::crypto::decode_psk(&psk_b64).expect("valid base64 psk");
+        let server_pub = dns_tunnel_core::crypto::decode_server_pub(&pubkey_b64)
+            .expect("valid base64 server pubkey");
         let dup = std::env::var("DNS_TUNNEL_DUP")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1usize);
         let transport = DnsTunnelTransport::new(
             zone,
-            psk,
+            server_pub,
             servers,
             PoolConfig {
                 duplication: dup,

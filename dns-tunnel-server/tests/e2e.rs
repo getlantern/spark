@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use dns_tunnel_core::arq;
+use dns_tunnel_core::crypto::{server_public_from_pkcs8, ServerStatic};
 use dns_tunnel_core::session::{ClientSession, Config};
 use dns_tunnel_server::{serve, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -66,7 +67,8 @@ fn test_cfg() -> Config {
 
 #[tokio::test]
 async fn full_stack_real_tcp_egress_round_trip() {
-    let psk = vec![0x55u8; 32];
+    let pkcs8 = ServerStatic::generate().unwrap();
+    let pubkey = server_public_from_pkcs8(&pkcs8).unwrap();
     let zone = "t.example.com";
 
     let echo = tcp_echo().await;
@@ -78,14 +80,14 @@ async fn full_stack_real_tcp_egress_round_trip() {
         server_udp,
         ServerConfig {
             zone: zone.into(),
-            psk: psk.clone(),
+            privkey: pkcs8.clone(),
             session: test_cfg(),
             idle_timeout_ms: 60_000,
         },
     ));
 
     // Minimal client: drive a ClientSession over a connected UDP socket (authoritative mode).
-    let mut client = ClientSession::new(&psk, zone, &encode_target(&echo), test_cfg()).unwrap();
+    let mut client = ClientSession::new(&pubkey, zone, &encode_target(&echo), test_cfg()).unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     udp.connect(server_addr).await.unwrap();
 

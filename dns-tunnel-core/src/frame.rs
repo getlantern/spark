@@ -3,21 +3,23 @@
 //!
 //! # Wire layout
 //!
-//! A QUIC-style long/short header form keeps the cleartext prefix minimal while letting the server
-//! parse routing fields *before* it has a key:
+//! Three packet forms (first byte). Data is AEAD-sealed; the two handshake packets are cleartext
+//! Diffie-Hellman (there is no shared key until the ephemerals meet — ADR 0011 §2.4, forward-secret
+//! handshake):
 //!
 //! ```text
-//! Short (data / most frames):  FORM_SHORT(1) ‖ ConnectionID(8) ‖ nonce(12) ‖ AEAD(inner)
-//! Long  (SYN / handshake):     FORM_LONG(1)  ‖ ConnectionID(8) ‖ salt(16) ‖ nonce(12) ‖ AEAD(inner)
+//! Data:    FORM_SHORT(1)  ‖ ConnectionID(8) ‖ nonce(12) ‖ AEAD(inner)
+//! Syn:     FORM_SYN(1)    ‖ ConnectionID(8) ‖ client_ephemeral_pub(32)
+//! SynAck:  FORM_SYNACK(1) ‖ ConnectionID(8) ‖ server_ephemeral_pub(32) ‖ Ed25519_sig(64)
 //! ```
 //!
-//! The **ConnectionID is cleartext** so the server can look up (or, on a SYN, create) the session and
-//! its key before decrypting; the **salt is cleartext on the SYN** so the server can run the HKDF key
-//! schedule. Neither is bound as AEAD AAD, and it does not need to be: the session key is
-//! HKDF-derived with the ConnectionID in its `info` (see [`crate::crypto::derive_session_keys`]), so a
-//! ciphertext is already cryptographically bound to its ConnectionID — an attacker cannot move it to a
-//! different id. Tampering the cleartext salt or nonce simply makes [`open_frame`] fail (wrong key /
-//! bad tag). The AEAD tag authenticates the entire inner header + payload.
+//! The **ConnectionID is cleartext** so the server can look up (or, on a Syn, create) the session
+//! before decrypting. The handshake ephemeral public keys are public by nature. The server signs the
+//! transcript (`client_eph ‖ server_eph ‖ ConnectionID`) with its static Ed25519 key so the client
+//! authenticates it (the signature is the anti-MITM guarantee). Session keys derive only from the
+//! ephemeral↔ephemeral shared secret, so they are forward-secret. For a Data frame the AEAD tag
+//! authenticates the entire inner header + payload; the session key is bound to the ConnectionID via
+//! the handshake transcript, so a ciphertext cannot be moved to a different id.
 //!
 //! # Inner (sealed) plaintext
 //!
@@ -32,15 +34,19 @@
 
 use bytes::Bytes;
 
-use crate::crypto::{Aead, CryptoError, CONN_ID_LEN, NONCE_LEN, SALT_LEN, TAG_LEN};
+use crate::crypto::{
+    Aead, CryptoError, CONN_ID_LEN, ED25519_SIG_LEN, NONCE_LEN, TAG_LEN, X25519_PUB_LEN,
+};
 
 /// Current protocol version (inner header byte 0).
 pub const VERSION: u8 = 1;
 
-/// Wire header form: a short header (no salt) — data and most frames.
+/// Wire packet form: an AEAD data frame — `FORM_SHORT ‖ conn_id ‖ nonce ‖ AEAD(inner)`.
 pub const FORM_SHORT: u8 = 0x00;
-/// Wire header form: a long header (carries the cleartext session salt) — the SYN / handshake.
-pub const FORM_LONG: u8 = 0x01;
+/// Wire packet form: the client handshake — `FORM_SYN ‖ conn_id ‖ client_ephemeral_pub(32)`.
+pub const FORM_SYN: u8 = 0x01;
+/// Wire packet form: the server handshake — `FORM_SYNACK ‖ conn_id ‖ server_ephemeral_pub(32) ‖ sig(64)`.
+pub const FORM_SYNACK: u8 = 0x02;
 
 /// `stream_id` field present.
 pub const FLAG_STREAM: u8 = 0b0000_0001;
@@ -238,47 +244,104 @@ impl Frame {
     }
 }
 
-/// The cleartext prefix parsed from a wire packet, plus the sealed ciphertext slice.
+/// A parsed wire packet: the ConnectionID (always cleartext, for routing) plus the form-specific
+/// body. The server/client dispatch on the variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Wire<'a> {
-    /// [`FORM_SHORT`] or [`FORM_LONG`].
-    pub form: u8,
-    /// The session ConnectionID (server routing key).
-    pub conn_id: [u8; CONN_ID_LEN],
-    /// The per-session HKDF salt — `Some` only on a long (SYN) header.
-    pub salt: Option<[u8; SALT_LEN]>,
-    /// The AEAD nonce.
-    pub nonce: [u8; NONCE_LEN],
-    /// The sealed inner frame (ciphertext ‖ tag).
-    pub ciphertext: &'a [u8],
+pub enum Packet<'a> {
+    /// Client handshake: the client's ephemeral X25519 public key.
+    Syn {
+        /// Session ConnectionID.
+        conn_id: [u8; CONN_ID_LEN],
+        /// The client's ephemeral X25519 public key.
+        client_eph: [u8; X25519_PUB_LEN],
+    },
+    /// Server handshake: the server's ephemeral X25519 public key + Ed25519 transcript signature.
+    SynAck {
+        /// Session ConnectionID.
+        conn_id: [u8; CONN_ID_LEN],
+        /// The server's ephemeral X25519 public key.
+        server_eph: [u8; X25519_PUB_LEN],
+        /// Ed25519 signature over the transcript (client_eph ‖ server_eph ‖ conn_id).
+        sig: [u8; ED25519_SIG_LEN],
+    },
+    /// AEAD data frame: the nonce + sealed inner (open with [`open_frame`]).
+    Data {
+        /// Session ConnectionID.
+        conn_id: [u8; CONN_ID_LEN],
+        /// The AEAD nonce.
+        nonce: [u8; NONCE_LEN],
+        /// The sealed inner frame (ciphertext ‖ tag).
+        ciphertext: &'a [u8],
+    },
 }
 
-/// Parse the cleartext wire prefix (no key needed). The server calls this first to route by
-/// ConnectionID (and, on a SYN, to get the salt for the key schedule).
-pub fn parse_wire(buf: &[u8]) -> Result<Wire<'_>, FrameError> {
+impl Packet<'_> {
+    /// The ConnectionID, whichever form this is.
+    pub fn conn_id(&self) -> [u8; CONN_ID_LEN] {
+        match self {
+            Packet::Syn { conn_id, .. }
+            | Packet::SynAck { conn_id, .. }
+            | Packet::Data { conn_id, .. } => *conn_id,
+        }
+    }
+}
+
+/// Parse a wire packet (no key needed). The caller dispatches on the [`Packet`] variant; for `Data`
+/// it then calls [`open_frame`] with the session's direction key.
+pub fn parse_packet(buf: &[u8]) -> Result<Packet<'_>, FrameError> {
     let mut cur = Cursor::new(buf);
     let form = cur.u8()?;
     let conn_id = cur.array::<CONN_ID_LEN>()?;
-    let salt = match form {
-        FORM_SHORT => None,
-        FORM_LONG => Some(cur.array::<SALT_LEN>()?),
-        other => return Err(FrameError::BadForm(other)),
-    };
-    let nonce = cur.array::<NONCE_LEN>()?;
-    let ciphertext = cur.rest();
-    if ciphertext.len() < TAG_LEN {
-        return Err(FrameError::Truncated);
+    match form {
+        FORM_SYN => Ok(Packet::Syn {
+            conn_id,
+            client_eph: cur.array::<X25519_PUB_LEN>()?,
+        }),
+        FORM_SYNACK => Ok(Packet::SynAck {
+            conn_id,
+            server_eph: cur.array::<X25519_PUB_LEN>()?,
+            sig: cur.array::<ED25519_SIG_LEN>()?,
+        }),
+        FORM_SHORT => {
+            let nonce = cur.array::<NONCE_LEN>()?;
+            let ciphertext = cur.rest();
+            if ciphertext.len() < TAG_LEN {
+                return Err(FrameError::Truncated);
+            }
+            Ok(Packet::Data {
+                conn_id,
+                nonce,
+                ciphertext,
+            })
+        }
+        other => Err(FrameError::BadForm(other)),
     }
-    Ok(Wire {
-        form,
-        conn_id,
-        salt,
-        nonce,
-        ciphertext,
-    })
 }
 
-/// Seal `frame` into a short (data) wire packet: `FORM_SHORT ‖ conn_id ‖ nonce ‖ AEAD(inner)`.
+/// Build a client handshake packet: `FORM_SYN ‖ conn_id ‖ client_eph`.
+pub fn build_syn(conn_id: &[u8; CONN_ID_LEN], client_eph: &[u8; X25519_PUB_LEN]) -> Vec<u8> {
+    let mut w = Vec::with_capacity(1 + CONN_ID_LEN + X25519_PUB_LEN);
+    w.push(FORM_SYN);
+    w.extend_from_slice(conn_id);
+    w.extend_from_slice(client_eph);
+    w
+}
+
+/// Build a server handshake packet: `FORM_SYNACK ‖ conn_id ‖ server_eph ‖ sig`.
+pub fn build_synack(
+    conn_id: &[u8; CONN_ID_LEN],
+    server_eph: &[u8; X25519_PUB_LEN],
+    sig: &[u8; ED25519_SIG_LEN],
+) -> Vec<u8> {
+    let mut w = Vec::with_capacity(1 + CONN_ID_LEN + X25519_PUB_LEN + ED25519_SIG_LEN);
+    w.push(FORM_SYNACK);
+    w.extend_from_slice(conn_id);
+    w.extend_from_slice(server_eph);
+    w.extend_from_slice(sig);
+    w
+}
+
+/// Seal `frame` into a data wire packet: `FORM_SHORT ‖ conn_id ‖ nonce ‖ AEAD(inner)`.
 pub fn seal_short(
     aead: &Aead,
     conn_id: &[u8; CONN_ID_LEN],
@@ -295,31 +358,14 @@ pub fn seal_short(
     wire
 }
 
-/// Seal `frame` into a long (SYN) wire packet, carrying the cleartext `salt`:
-/// `FORM_LONG ‖ conn_id ‖ salt ‖ nonce ‖ AEAD(inner)`.
-pub fn seal_long(
+/// Open a `Data` packet's sealed inner frame with `aead` (the session's direction key).
+pub fn open_frame(
     aead: &Aead,
-    conn_id: &[u8; CONN_ID_LEN],
-    salt: &[u8; SALT_LEN],
     nonce: &[u8; NONCE_LEN],
-    frame: &Frame,
-) -> Vec<u8> {
-    let mut ct = frame.encode();
-    aead.seal(nonce, &mut ct);
-    let mut wire = Vec::with_capacity(1 + CONN_ID_LEN + SALT_LEN + NONCE_LEN + ct.len());
-    wire.push(FORM_LONG);
-    wire.extend_from_slice(conn_id);
-    wire.extend_from_slice(salt);
-    wire.extend_from_slice(nonce);
-    wire.extend_from_slice(&ct);
-    wire
-}
-
-/// Open a parsed wire packet with `aead` (the session key for `wire.conn_id`) and decode the inner
-/// frame. `aead` must be keyed by the direction key derived for this session.
-pub fn open_frame(aead: &Aead, wire: &Wire<'_>) -> Result<Frame, FrameError> {
-    let mut ct = wire.ciphertext.to_vec();
-    let plain = aead.open(&wire.nonce, &mut ct)?;
+    ciphertext: &[u8],
+) -> Result<Frame, FrameError> {
+    let mut ct = ciphertext.to_vec();
+    let plain = aead.open(nonce, &mut ct)?;
     Frame::decode(plain)
 }
 
@@ -363,7 +409,7 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{random_conn_id, random_nonce, random_salt, Aead, Cipher};
+    use crate::crypto::{random_conn_id, random_nonce, Aead, Cipher};
 
     fn test_aead() -> Aead {
         Aead::new(Cipher::ChaCha20Poly1305, &[0x5A; 32]).unwrap()
@@ -422,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn short_wire_seal_parse_open_round_trips() {
+    fn data_packet_seal_parse_open_round_trips() {
         let aead = test_aead();
         let conn = random_conn_id().unwrap();
         let nonce = random_nonce().unwrap();
@@ -437,32 +483,47 @@ mod tests {
         let wire = seal_short(&aead, &conn, &nonce, &frame);
         assert_eq!(wire[0], FORM_SHORT);
 
-        let parsed = parse_wire(&wire).unwrap();
-        assert_eq!(parsed.form, FORM_SHORT);
-        assert_eq!(parsed.conn_id, conn);
-        assert_eq!(parsed.salt, None);
-        assert_eq!(parsed.nonce, nonce);
-
-        let opened = open_frame(&aead, &parsed).unwrap();
-        assert_eq!(opened, frame);
+        match parse_packet(&wire).unwrap() {
+            Packet::Data {
+                conn_id,
+                nonce: n,
+                ciphertext,
+            } => {
+                assert_eq!(conn_id, conn);
+                assert_eq!(n, nonce);
+                assert_eq!(open_frame(&aead, &n, ciphertext).unwrap(), frame);
+            }
+            other => panic!("expected Data, got {other:?}"),
+        }
     }
 
     #[test]
-    fn long_wire_carries_salt_and_round_trips() {
-        let aead = test_aead();
+    fn syn_and_synack_round_trip() {
         let conn = random_conn_id().unwrap();
-        let salt = random_salt().unwrap();
-        let nonce = random_nonce().unwrap();
-        let mut frame = Frame::new(Kind::Syn);
-        frame.payload = Bytes::from_static(b"proposed params");
+        let client_eph = [0x11u8; X25519_PUB_LEN];
+        let server_eph = [0x22u8; X25519_PUB_LEN];
+        let sig = [0x33u8; ED25519_SIG_LEN];
 
-        let wire = seal_long(&aead, &conn, &salt, &nonce, &frame);
-        assert_eq!(wire[0], FORM_LONG);
+        let syn = build_syn(&conn, &client_eph);
+        assert_eq!(syn[0], FORM_SYN);
+        assert_eq!(
+            parse_packet(&syn).unwrap(),
+            Packet::Syn {
+                conn_id: conn,
+                client_eph
+            }
+        );
 
-        let parsed = parse_wire(&wire).unwrap();
-        assert_eq!(parsed.salt, Some(salt));
-        assert_eq!(parsed.conn_id, conn);
-        assert_eq!(open_frame(&aead, &parsed).unwrap(), frame);
+        let synack = build_synack(&conn, &server_eph, &sig);
+        assert_eq!(synack[0], FORM_SYNACK);
+        assert_eq!(
+            parse_packet(&synack).unwrap(),
+            Packet::SynAck {
+                conn_id: conn,
+                server_eph,
+                sig
+            }
+        );
     }
 
     #[test]
@@ -481,38 +542,57 @@ mod tests {
         // Flip a ciphertext byte (last byte is in the tag region) → open fails.
         let last = wire.len() - 1;
         wire[last] ^= 0x01;
-        let parsed = parse_wire(&wire).unwrap();
-        assert!(matches!(
-            open_frame(&aead, &parsed),
-            Err(FrameError::Crypto(_))
-        ));
+        if let Packet::Data {
+            nonce, ciphertext, ..
+        } = parse_packet(&wire).unwrap()
+        {
+            assert!(matches!(
+                open_frame(&aead, &nonce, ciphertext),
+                Err(FrameError::Crypto(_))
+            ));
+        } else {
+            panic!("expected Data");
+        }
 
         // Flip a nonce byte → open fails.
         let mut wire2 = seal_short(&aead, &conn, &nonce, &frame);
         wire2[1 + CONN_ID_LEN] ^= 0x01; // first nonce byte (after form + conn_id)
-        let parsed2 = parse_wire(&wire2).unwrap();
-        assert!(matches!(
-            open_frame(&aead, &parsed2),
-            Err(FrameError::Crypto(_))
-        ));
+        if let Packet::Data {
+            nonce, ciphertext, ..
+        } = parse_packet(&wire2).unwrap()
+        {
+            assert!(matches!(
+                open_frame(&aead, &nonce, ciphertext),
+                Err(FrameError::Crypto(_))
+            ));
+        } else {
+            panic!("expected Data");
+        }
     }
 
     #[test]
-    fn parse_wire_rejects_bad_form_and_short_buffers() {
+    fn parse_packet_rejects_bad_form_and_short_buffers() {
         // Unknown form byte.
         let mut buf = vec![0x09];
         buf.extend_from_slice(&[0u8; CONN_ID_LEN + NONCE_LEN + TAG_LEN]);
-        assert!(matches!(parse_wire(&buf), Err(FrameError::BadForm(9))));
+        assert!(matches!(parse_packet(&buf), Err(FrameError::BadForm(9))));
         // Truncated (no room for conn_id).
         assert!(matches!(
-            parse_wire(&[FORM_SHORT, 1, 2, 3]),
+            parse_packet(&[FORM_SHORT, 1, 2, 3]),
             Err(FrameError::Truncated)
         ));
-        // Ciphertext shorter than a tag.
+        // Data ciphertext shorter than a tag.
         let mut short = vec![FORM_SHORT];
         short.extend_from_slice(&[0u8; CONN_ID_LEN + NONCE_LEN]);
         short.extend_from_slice(&[0u8; TAG_LEN - 1]);
-        assert!(matches!(parse_wire(&short), Err(FrameError::Truncated)));
+        assert!(matches!(parse_packet(&short), Err(FrameError::Truncated)));
+        // Syn missing its ephemeral key.
+        let mut syn_short = vec![FORM_SYN];
+        syn_short.extend_from_slice(&[0u8; CONN_ID_LEN]);
+        assert!(matches!(
+            parse_packet(&syn_short),
+            Err(FrameError::Truncated)
+        ));
     }
 
     #[test]
@@ -529,8 +609,11 @@ mod tests {
                 buf.push((state >> 33) as u8);
             }
             let _ = Frame::decode(&buf);
-            if let Ok(w) = parse_wire(&buf) {
-                let _ = open_frame(&aead, &w);
+            if let Ok(Packet::Data {
+                nonce, ciphertext, ..
+            }) = parse_packet(&buf)
+            {
+                let _ = open_frame(&aead, &nonce, ciphertext);
             }
         }
     }

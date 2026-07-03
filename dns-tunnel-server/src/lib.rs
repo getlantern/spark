@@ -28,8 +28,9 @@ type StreamKey = (ConnId, u16);
 pub struct ServerConfig {
     /// The delegated tunnel zone (e.g. `t.example.com`).
     pub zone: String,
-    /// The decoded pre-shared key (≥32 bytes).
-    pub psk: Vec<u8>,
+    /// The server's static Ed25519 private key (PKCS#8 bytes). Its public key is distributed to
+    /// clients; the private key authenticates each forward-secret handshake. Keep it secret.
+    pub privkey: Vec<u8>,
     /// Session/ARQ tuning (must be compatible with clients — cipher, edns size).
     pub session: Config,
     /// Drop a session with no query for this long (ms).
@@ -71,7 +72,7 @@ fn decode_target(b: &[u8]) -> Option<SocketAddr> {
 
 /// Run the server on `udp` until a fatal socket error. Does not return on the happy path.
 pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
-    let mut server = Server::new(&cfg.psk, &cfg.zone, cfg.session)
+    let mut server = Server::new(&cfg.privkey, &cfg.zone, cfg.session)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let start = Instant::now();
     let mut buf = vec![0u8; 2048];

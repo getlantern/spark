@@ -583,9 +583,11 @@ pub struct ShadowsocksConfig {
 pub struct DnsTunnelConfig {
     /// The delegated tunnel zone, e.g. `"t.example.com"`.
     pub zone: String,
-    /// Pre-shared key, base64 (decoded length >= 32 bytes). A proxy secret — privileged store only,
-    /// never echoed over IPC.
-    pub psk: String,
+    /// The server's static Ed25519 **public** key, base64 (from the server's `keygen`). Safe to
+    /// distribute — it is not a secret; the forward-secret handshake authenticates the server with it
+    /// and derives per-session keys from ephemeral↔ephemeral DH (so a leaked config can't decrypt
+    /// traffic).
+    pub server_pubkey: String,
     /// Recursive resolvers to spray queries across: `IP`, `IP:port`, `CIDR`, `CIDR:port`, `[v6]:port`
     /// (CIDRs expand to host IPs). Used in recursive mode.
     #[serde(default)]
@@ -1287,7 +1289,7 @@ password = "c29tZS1iYXNlNjQtcHNr"
         let toml = r#"
 [transport.dns_tunnel]
 zone = "t.example.com"
-psk = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+server_pubkey = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
 resolvers = ["1.1.1.1", "8.8.8.8:53", "9.9.9.0/30"]
 cipher = "aes-256-gcm"
 compression = "lz4"
@@ -1312,7 +1314,7 @@ use_system_resolvers = false
         let toml = r#"
 [transport.dns_tunnel]
 zone = "t.example.com"
-psk = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+server_pubkey = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
 authoritative = "127.0.0.1:5300"
 "#;
         let cfg = Config::from_toml_str(toml).unwrap();
@@ -1349,7 +1351,7 @@ authoritative = "127.0.0.1:5300"
     #[test]
     fn parses_a_dns_tunnel_pool_entry() {
         let c = Config::from_toml_str(
-            "[[transport.servers]]\nkind = \"dns-tunnel\"\nzone = \"t.example.com\"\npsk = \"QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=\"\nresolvers = [\"1.1.1.1\", \"8.8.8.8\"]\n",
+            "[[transport.servers]]\nkind = \"dns-tunnel\"\nzone = \"t.example.com\"\nserver_pubkey = \"QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=\"\nresolvers = [\"1.1.1.1\", \"8.8.8.8\"]\n",
         )
         .unwrap();
         match &c.transport.servers[0].spec {

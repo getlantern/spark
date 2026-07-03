@@ -100,9 +100,36 @@ pub fn decode_psk(b64: &str) -> Result<Vec<u8>, CryptoError> {
     Ok(psk)
 }
 
-/// Standard base64 decode (RFC 4648, `=`-padded). Hand-rolled to avoid a dependency, matching the
-/// repo's hand-rolled-codec convention (cf. `shadowsocks/crypto.rs`).
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
+/// Standard base64 **encode** (RFC 4648, `=`-padded). Hand-rolled to avoid a dependency. Used for
+/// key material (the server keypair, the distributed public key).
+pub fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 0x3f] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 0x3f] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 0x3f] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Standard base64 **decode** (RFC 4648, `=`-padded) into raw bytes.
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),
@@ -222,6 +249,12 @@ impl ServerStatic {
 /// Derive the 32-byte Ed25519 public key from a server PKCS#8 private key (for config/distribution).
 pub fn server_public_from_pkcs8(pkcs8: &[u8]) -> Result<[u8; ED25519_PUB_LEN], CryptoError> {
     Ok(ServerStatic::from_pkcs8(pkcs8)?.public_key())
+}
+
+/// Decode a base64 server public key (as distributed to clients) into its fixed 32-byte array.
+pub fn decode_server_pub(b64: &str) -> Result<[u8; ED25519_PUB_LEN], CryptoError> {
+    let raw = base64_decode(b64).ok_or(CryptoError::BadBase64)?;
+    raw.try_into().map_err(|_| CryptoError::BadKey)
 }
 
 /// Verify a server handshake signature `sig` over `msg` against the server's distributed public key.
@@ -407,6 +440,18 @@ mod tests {
         assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
         assert_eq!(base64_decode("aGVsbG8gd29ybGQ=").unwrap(), b"hello world");
         assert!(base64_decode("").is_none());
+    }
+
+    #[test]
+    fn base64_encode_matches_and_round_trips() {
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        // Round-trips the key material shapes (32-byte pubkey, ~48-byte pkcs8).
+        let pkcs8 = ServerStatic::generate().unwrap();
+        assert_eq!(base64_decode(&base64_encode(&pkcs8)).unwrap(), pkcs8);
+        let pubk = server_public_from_pkcs8(&pkcs8).unwrap();
+        assert_eq!(decode_server_pub(&base64_encode(&pubk)).unwrap(), pubk);
     }
 
     #[test]
