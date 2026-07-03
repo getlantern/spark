@@ -297,7 +297,7 @@ async fn open_udp_proxy(
         match proxy.dial_udp_addr(addr).await {
             Ok(halves) => return Some(halves),
             Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                debug!(domain = %dom, "udp: transport can't carry a domain; resolving client-side");
+                debug!(domain = %dom, "udp: transport can't carry a domain; trying client-side resolution if a resolver is configured");
             }
             Err(e) => {
                 warn!(error = %e, "udp: proxy dial-by-name failed");
@@ -476,5 +476,218 @@ mod tests {
         assert_eq!(reply.payload, b"ping");
         assert_eq!(reply.client_src, client_src);
         assert_eq!(reply.original_dst, echo_addr);
+    }
+
+    // --- Per-flow routing (`open_association` with hooks) ---------------------------------------
+    //
+    // These drive `open_association` directly (no TUN, no reply pump) to assert the smart-routing
+    // decisions and *which* transport gets dialed *with what target*: the encrypted-DNS drop, a
+    // Proxy flow carried to the exit by name, the Unsupported→client-resolve fallback, and a Direct
+    // domain resolved to a real IP. A `RecordingUdp` stands in for each transport and records how it
+    // was dialed; inert sink/source halves are enough since nothing pumps datagrams here.
+
+    use std::net::IpAddr;
+    use std::sync::Mutex;
+
+    use crate::proxy::{DomainRecoverer, FlowResolver, FlowRouter};
+    use crate::transport::{PacketSink, PacketSource};
+
+    /// A `UdpTransport` that records how it was dialed and hands back inert halves. `reject_domain`
+    /// makes `dial_udp_addr` report `Unsupported` for a `Domain` target (a transport that can't carry
+    /// a name), exercising the client-side-resolve fallback.
+    #[derive(Default)]
+    struct RecordingUdp {
+        reject_domain: bool,
+        dial_udp_targets: Mutex<Vec<SocketAddr>>,
+        dial_addr_targets: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl UdpTransport for RecordingUdp {
+        async fn dial_udp(
+            &self,
+            target: SocketAddr,
+        ) -> std::io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            self.dial_udp_targets.lock().unwrap().push(target);
+            Ok((Box::new(NullSink), Box::new(NullSource)))
+        }
+
+        async fn dial_udp_addr(
+            &self,
+            target: Address,
+        ) -> std::io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            self.dial_addr_targets
+                .lock()
+                .unwrap()
+                .push(target.to_string());
+            match target {
+                Address::Ip(sa) => self.dial_udp(sa).await,
+                Address::Domain { host, port } if self.reject_domain => Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!("recording transport can't carry {host}:{port}"),
+                )),
+                Address::Domain { .. } => Ok((Box::new(NullSink), Box::new(NullSource))),
+            }
+        }
+    }
+
+    struct NullSink;
+    #[async_trait::async_trait]
+    impl PacketSink for NullSink {
+        async fn send(&mut self, _payload: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    struct NullSource;
+    #[async_trait::async_trait]
+    impl PacketSource for NullSource {
+        async fn recv(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// A router that returns one fixed decision.
+    struct FixedRouter(Decision);
+    impl FlowRouter for FixedRouter {
+        fn decide(&self, _ip: IpAddr, _domain: Option<&str>) -> Decision {
+            self.0
+        }
+    }
+
+    /// A recoverer that maps every fake IP to one fixed domain.
+    struct FixedRecoverer(&'static str);
+    impl DomainRecoverer for FixedRecoverer {
+        fn recover(&self, _ip: IpAddr) -> Option<String> {
+            Some(self.0.to_string())
+        }
+    }
+
+    /// A resolver that returns one fixed IP.
+    struct FixedResolver(IpAddr);
+    #[async_trait::async_trait]
+    impl FlowResolver for FixedResolver {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<IpAddr>> {
+            Ok(vec![self.0])
+        }
+    }
+
+    fn recs() -> (Arc<RecordingUdp>, Arc<RecordingUdp>) {
+        (
+            Arc::new(RecordingUdp::default()),
+            Arc::new(RecordingUdp::default()),
+        )
+    }
+
+    /// Encrypted DNS (:853) to a public resolver is dropped so the client falls back to plain :53 —
+    /// no association is opened and neither transport is dialed.
+    #[tokio::test]
+    async fn open_association_drops_encrypted_dns() {
+        let (proxy_rec, direct_rec) = recs();
+        let proxy: Arc<dyn UdpTransport> = proxy_rec.clone();
+        let direct: Arc<dyn UdpTransport> = direct_rec.clone();
+        let hooks = RouteHooks {
+            router: Arc::new(FixedRouter(Decision::Proxy)),
+            recoverer: None,
+            direct_resolver: None,
+            proxy_resolver: None,
+        };
+        let dst: SocketAddr = "1.2.3.4:853".parse().unwrap();
+
+        assert!(open_association(&proxy, &direct, Some(&hooks), dst)
+            .await
+            .is_none());
+        assert!(proxy_rec.dial_addr_targets.lock().unwrap().is_empty());
+        assert!(proxy_rec.dial_udp_targets.lock().unwrap().is_empty());
+        assert!(direct_rec.dial_udp_targets.lock().unwrap().is_empty());
+    }
+
+    /// A Proxy flow with a recovered domain is carried to the exit *by name* (`dial_udp_addr` with a
+    /// `Domain`), so the exit resolves it — no client-side DNS.
+    #[tokio::test]
+    async fn open_association_proxies_a_domain_by_name() {
+        let (proxy_rec, direct_rec) = recs();
+        let proxy: Arc<dyn UdpTransport> = proxy_rec.clone();
+        let direct: Arc<dyn UdpTransport> = direct_rec.clone();
+        let hooks = RouteHooks {
+            router: Arc::new(FixedRouter(Decision::Proxy)),
+            recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
+            direct_resolver: None,
+            proxy_resolver: None,
+        };
+        // A fake IP (198.18/15) at :443 — not a DoH host, so not encrypted DNS.
+        let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
+
+        assert!(open_association(&proxy, &direct, Some(&hooks), dst)
+            .await
+            .is_some());
+        assert_eq!(
+            *proxy_rec.dial_addr_targets.lock().unwrap(),
+            vec!["example.com:443".to_string()],
+            "the domain is carried to the exit by name"
+        );
+        assert!(
+            proxy_rec.dial_udp_targets.lock().unwrap().is_empty(),
+            "no client-side resolve when the exit can carry the name"
+        );
+    }
+
+    /// When the proxy transport can't carry a name (`Unsupported`), the flow is resolved client-side
+    /// over the un-poisoned resolver and dialed by the resulting IP.
+    #[tokio::test]
+    async fn open_association_falls_back_to_client_resolve() {
+        let proxy_rec = Arc::new(RecordingUdp {
+            reject_domain: true,
+            ..Default::default()
+        });
+        let direct_rec = Arc::new(RecordingUdp::default());
+        let proxy: Arc<dyn UdpTransport> = proxy_rec.clone();
+        let direct: Arc<dyn UdpTransport> = direct_rec.clone();
+        let resolved: IpAddr = "1.2.3.4".parse().unwrap();
+        let hooks = RouteHooks {
+            router: Arc::new(FixedRouter(Decision::Proxy)),
+            recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
+            direct_resolver: None,
+            proxy_resolver: Some(Arc::new(FixedResolver(resolved))),
+        };
+        let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
+
+        assert!(open_association(&proxy, &direct, Some(&hooks), dst)
+            .await
+            .is_some());
+        assert_eq!(
+            *proxy_rec.dial_udp_targets.lock().unwrap(),
+            vec![SocketAddr::new(resolved, 443)],
+            "falls back to dialing the client-resolved IP on the proxy"
+        );
+    }
+
+    /// A Direct flow behind a fake IP is resolved to a real IP (never dialing the fake IP) and dialed
+    /// on the *direct* transport.
+    #[tokio::test]
+    async fn open_association_resolves_a_direct_domain() {
+        let (proxy_rec, direct_rec) = recs();
+        let proxy: Arc<dyn UdpTransport> = proxy_rec.clone();
+        let direct: Arc<dyn UdpTransport> = direct_rec.clone();
+        let resolved: IpAddr = "5.6.7.8".parse().unwrap();
+        let hooks = RouteHooks {
+            router: Arc::new(FixedRouter(Decision::Direct)),
+            recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
+            direct_resolver: Some(Arc::new(FixedResolver(resolved))),
+            proxy_resolver: None,
+        };
+        let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
+
+        assert!(open_association(&proxy, &direct, Some(&hooks), dst)
+            .await
+            .is_some());
+        assert_eq!(
+            *direct_rec.dial_udp_targets.lock().unwrap(),
+            vec![SocketAddr::new(resolved, 443)],
+            "the direct transport dials the resolved real IP"
+        );
+        assert!(
+            proxy_rec.dial_udp_targets.lock().unwrap().is_empty(),
+            "a Direct flow never touches the proxy transport"
+        );
     }
 }
