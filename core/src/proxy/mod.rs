@@ -83,18 +83,22 @@ pub(crate) fn is_encrypted_dns(dst: SocketAddr, domain: Option<&str>) -> bool {
 
 /// A well-known DoH provider hostname (case- and trailing-dot-insensitive).
 fn is_doh_hostname(host: &str) -> bool {
-    let h = host.trim_end_matches('.').to_ascii_lowercase();
-    matches!(
-        h.as_str(),
-        "dns.google"
-            | "dns64.dns.google"
-            | "cloudflare-dns.com"
-            | "mozilla.cloudflare-dns.com"
-            | "one.one.one.one"
-            | "dns.quad9.net"
-            | "dns.alidns.com"
-            | "doh.opendns.com"
-    )
+    // Allocation-free: this runs on every smart-routed :443 flow, so compare case-insensitively
+    // against the (already-lowercase) known hosts rather than lowercasing into an owned String.
+    const DOH_HOSTS: [&str; 8] = [
+        "dns.google",
+        "dns64.dns.google",
+        "cloudflare-dns.com",
+        "mozilla.cloudflare-dns.com",
+        "one.one.one.one",
+        "dns.quad9.net",
+        "dns.alidns.com",
+        "doh.opendns.com",
+    ];
+    let h = host.trim_end_matches('.');
+    DOH_HOSTS
+        .iter()
+        .any(|candidate| h.eq_ignore_ascii_case(candidate))
 }
 
 /// A well-known public DNS-resolver IP — the endpoints a DoT/DoH client bootstraps to directly.
