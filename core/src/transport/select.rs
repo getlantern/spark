@@ -341,7 +341,7 @@ impl UdpTransport for SelectingTransport {
                 }
                 Err(e) => {
                     self.demote(i);
-                    tracing::debug!(member = i, error = %e, "pool member udp dial_addr failed; failing over");
+                    tracing::debug!(member = i, error = %e, "pool member udp dial_udp_addr failed; failing over");
                 }
             }
         }
