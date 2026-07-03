@@ -2718,6 +2718,28 @@ Sole live server is now **Linode `100186047` @ 45.79.190.108** serving `t.ss7hc6
 re-verified post-deletion). Local key `~/.ssh/spark-dns-tunnel` retained (Linode SSH). Remaining reuse
 to build: `SparkDNSConfig` + genconfig/config-server wiring, and the escalation-tier hook.
 
+**2026-07-03 — DNS-tunnel: forward-secret handshake replaces the PSK (§2.4 done).** Prerequisite for
+client config distribution surfaced a real weakness: distributing a PSK to all clients + no FS meant a
+leaked config could decrypt captured traffic (PSK + cleartext salt → session keys). Fixed by
+implementing the deferred X25519 forward-secret handshake, **ring-only, Design A** (ring's X25519 is
+ephemeral-only → static identity is Ed25519, not X25519): server has a static Ed25519 keypair whose
+**public** key clients hold; per session a cleartext ephemeral↔ephemeral X25519 exchange derives the
+keys and the server signs the transcript (`client_eph ‖ server_eph ‖ conn_id`) for auth. Session keys
+depend only on the ephemerals → FS (static-key or config leak can't decrypt past traffic); client is
+anonymous (dnstt-style). Migrated the whole stack: `crypto` (Ed25519/X25519/HKDF-from-ee, base64
+encode + `decode_server_pub`), `frame` (cleartext Syn/SynAck packet forms + `parse_packet`/`Packet`
+enum, replacing the salt long-form), `session` (handshake state machine; all streams incl. the first
+open post-handshake via short-form Syn; server caches the SynAck to replay on Syn retransmit so
+ephemeral keys don't diverge; +1 RTT to first byte), `dns-tunnel-server` (`keygen` subcommand +
+`serve --privkey-file`), spark `config` (`DnsTunnelConfig.psk` → `server_pubkey`) + transport builder.
+Commits `64ff4bd` (crypto foundation) + `0d34d2a` (migration, BREAKING) + `ea95191` (deploy). 57 core
++ server-e2e + 181 spark-core tests green; clippy/fmt clean; base build unaffected. **Re-keyed +
+redeployed the live Linode server** (`serve --privkey-file`, zone t.ss7hc6jm.io); verified the FS
+handshake live — authoritative (0.21 s) AND recursive through the public-resolver pool (0.46 s), both
+HTTP 301, client authenticating with only the server public key `pBayZhvFX4OMbyVRlgjZ1Yi/goXJuIFgxC71BUBGTPM=`
+(the PSK is gone). Deploy kit updated to keypair/keygen. Considered dep alt B (x25519-dalek, keeps
+1-RTT) — rejected to preserve the ring-only/no-C constraint; A's +1 RTT is one-time per session.
+
 **2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
 loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
 UDP delay relay to inject RTT; knobs `DNS_BENCH_{MIB,RTT_MS,INFLIGHT,WINDOW}`). Findings: the impl's
