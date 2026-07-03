@@ -357,7 +357,7 @@ async fn run_tunnel_data_path(
         None => None,
     };
     // One concrete DirectTransport (one protector), viewed as both a TCP `Transport` (router `Direct`)
-    // and a `UdpTransport` (Direct-routed UDP + the UDP forwarder's fail-open floor).
+    // and a `UdpTransport` (dialed only for `Direct`-routed UDP flows when smart-routing is on).
     let direct = Arc::new(transport::DirectTransport::new(protector));
     let direct_transport: Arc<dyn transport::Transport> = direct.clone();
     let direct_udp: Arc<dyn transport::UdpTransport> = direct;
