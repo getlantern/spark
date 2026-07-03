@@ -2740,6 +2740,20 @@ HTTP 301, client authenticating with only the server public key `pBayZhvFX4OMbyV
 (the PSK is gone). Deploy kit updated to keypair/keygen. Considered dep alt B (x25519-dalek, keeps
 1-RTT) — rejected to preserve the ring-only/no-C constraint; A's +1 RTT is one-time per session.
 
+**2026-07-03 — SparkDNSConfig: client config distribution wired (cross-repo, flashlight).** With FS in
+place, the server public key is safe to distribute, so mirrored dnstt's config pipeline in
+`getlantern/flashlight` (branch `fisk/spark-dns-config`, commit `185532ba7`, NOT pushed): added
+`common.SparkDNSConfig{Zone, ServerPublicKey, Resolvers, Duplication, UseSystemResolvers}` (+
+Set/GetSparkDNSConfig atomic store + Validate) next to `DNSTTConfig`; a `config.Global.SparkDNSConfig`
+field (yaml `sparkdnsconfig`); `genconfig` `--spark-dns-file` → model `sparkDNS` → a `sparkdnsconfig:`
+block in `embeddedconfig/global.yaml.tmpl`; `flashlight.go` pushes the fetched config into the store.
+genconfig test asserts it round-trips into `config.Global.SparkDNSConfig`; `go build ./...` + genconfig
+tests + vet pass (pre-existing unrelated `http_test.go` breakage left alone). **Distribution only** —
+the consumption hook (build the spark transport from the config + slot it into the kindling/radiance
+escalation tier, i.e. `kindling.WithSparkDNS`) is the remaining follow-up, plus the Rust-spark↔Go-client
+bridge it needs. Field shapes mirror the Rust `DnsTunnelConfig` (server_pubkey/resolvers/duplication/
+use_system_resolvers).
+
 **2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
 loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
 UDP delay relay to inject RTT; knobs `DNS_BENCH_{MIB,RTT_MS,INFLIGHT,WINDOW}`). Findings: the impl's
