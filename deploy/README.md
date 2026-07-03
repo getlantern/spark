@@ -8,7 +8,7 @@ delegated authoritative subdomain. The only substantive differences:
 | | dnstt | spark dns-tunnel |
 |---|---|---|
 | binary | `linux-dnstt-server` | `dns-tunnel-server` (static musl) |
-| key | Noise keypair (`server.key`/`.pub`) | one base64 **PSK** |
+| key | Noise keypair (`server.key`/`.pub`) | static **Ed25519** keypair — public key distributed |
 | wire | dnstt (KCP+smux+Noise) | spark's own (ADR 0011) — **not** interop |
 | provider (prod) | OCI | **Linode** |
 | zone | `t.iantem.io` | an **unattributable** domain (e.g. `t.ss7hc6jm.io`) |
@@ -18,7 +18,7 @@ it cannot co-tenant dnstt's `:53`. They coexist fine (dnstt on `t.iantem.io`, sp
 
 ## What to reuse from lantern-cloud
 
-- **Client config distribution.** Add a spark-dns config (zone / PSK / resolvers) alongside
+- **Client config distribution.** Add a spark-dns config (zone / server public key / resolvers) alongside
   `common.DNSTTConfig` and ship it through the same `flashlight/genconfig` → cloud.yaml → config-server
   pipeline; clients already know how to receive a DNS-tunnel config and slot it into the escalation
   tier (`kindling/dnstt`, radiance).
@@ -49,9 +49,13 @@ The Ansible playbook + systemd template here are provider-agnostic and intended 
    t.<domain>          NS   ns-spark.<domain>
    ```
 
-4. **Generate a PSK** and place it for the playbook:
+4. **Generate the server keypair** and place the private key for the playbook (keep the public key
+   for the client config — the private key never leaves the server):
    ```sh
-   openssl rand -base64 32 > deploy/ansible/files/spark-dns.psk   # ship the same value to clients
+   ./deploy/ansible/files/dns-tunnel-server keygen   # (or run the built binary anywhere)
+   #   → prints:  privkey <base64>   /   pubkey <base64>
+   echo '<base64 privkey>' > deploy/ansible/files/spark-dns.privkey
+   #   put the pubkey in each client's DnsTunnelConfig.server_pubkey
    ```
 
 5. **Deploy** (put the IP in `inventory/spark-dns.yaml`, then):
@@ -63,7 +67,7 @@ The Ansible playbook + systemd template here are provider-agnostic and intended 
 6. **Verify** (recursive resolution reaches the server; then a real fetch through the tunnel):
    ```sh
    dig @1.1.1.1 SOA t.<domain>            # expect NOERROR (the QNAME-min / NODATA handling)
-   # client-side: DnsTunnelConfig{ zone=t.<domain>, psk=<same>, resolvers=[public pool] }
+   # client-side: DnsTunnelConfig{ zone=t.<domain>, server_pubkey=<pubkey>, resolvers=[public pool] }
    ```
 
 ## Operational notes
@@ -75,4 +79,7 @@ The Ansible playbook + systemd template here are provider-agnostic and intended 
   often the only one that still forwards DNS during a national shutdown.
 - **Throughput** is throttle-bound recursively (~0.1 Mbit/s via public resolvers; ~10 Mbit/s
   direct-to-server on a non-throttling path). This is the reachability-under-shutdown tier.
-- **Log hygiene**: the server never logs the zone, PSK, target, or resolver IPs.
+- **Forward secrecy**: the server's static key only *authenticates* the handshake (Ed25519
+  signature); per-session keys come from an ephemeral↔ephemeral X25519 exchange, so a compromised
+  static key (or a leaked client config) cannot decrypt past traffic. The client is anonymous.
+- **Log hygiene**: the server never logs the zone, keys, target, or resolver IPs.

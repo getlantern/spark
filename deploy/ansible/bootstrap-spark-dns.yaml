@@ -1,7 +1,7 @@
 # Deploy spark's dns-tunnel-server (ADR 0011) — the clean-slate DNS-tunnel transport, a drop-in
 # modernization of Lantern's dnstt escalation tier. This mirrors
 # getlantern/lantern-cloud `ans/bootstrap-dnstt.yaml` (same shape: a static binary + a systemd unit +
-# a :53→:5300 DNAT), swapping dnstt's Noise keypair for spark's single pre-shared key. It is meant to
+# a :53→:5300 DNAT), swapping dnstt's Noise keypair for spark's static Ed25519 identity. It is meant to
 # be lifted into lantern-cloud/ans/ alongside the dnstt playbook once reviewed.
 #
 # Prereqs:
@@ -12,7 +12,9 @@
 #   - the cross-built static server binary at files/dns-tunnel-server
 #     (`cargo zigbuild --release -p dns-tunnel-server --target x86_64-unknown-linux-musl`;
 #      use aarch64-unknown-linux-musl for ARM hosts). Static musl → distro-agnostic.
-#   - the PSK at files/spark-dns.psk (base64, ≥32 decoded bytes, mode 0600). A proxy secret.
+#   - the server's static private key at files/spark-dns.privkey — the base64 privkey line from
+#     `dns-tunnel-server keygen` (secret; mode 0600). Distribute the matching `pubkey` to clients;
+#     the private key never leaves the server.
 #
 # Run: ansible-playbook -i inventory/spark-dns.yaml bootstrap-spark-dns.yaml -e zone=t.ss7hc6jm.io
 - name: Deploy and start spark dns-tunnel-server
@@ -44,10 +46,10 @@
         mode: "0755"
       notify: Restart spark-dns
 
-    - name: Copy the PSK (proxy secret — root-only)
+    - name: Copy the server private key (secret — root-only)
       copy:
-        src: files/spark-dns.psk
-        dest: /etc/spark-dns/psk
+        src: files/spark-dns.privkey
+        dest: /etc/spark-dns/privkey
         owner: root
         group: root
         mode: "0600"
