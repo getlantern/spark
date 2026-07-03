@@ -5,7 +5,6 @@
 //! hands the stream to the shared [`crate::transport::uot`] framing (verified against `sing/common/uot`).
 
 use std::io;
-use std::net::SocketAddr;
 
 use bytes::BytesMut;
 use tokio::io::AsyncWriteExt;
@@ -18,10 +17,11 @@ use super::Stream;
 
 /// Establish a UoT v2 connected association to `target` over an AnyTLS `stream`: write the magic
 /// address as the stream's SOCKS5 target (so the server treats it as a UDP association), then run the
-/// shared UoT framing (connect request + `[u16 BE len][payload]` datagrams).
+/// shared UoT framing (connect request + `[u16 BE len][payload]` datagrams). `target` may be a
+/// **domain** (ATYP=3) the exit resolves.
 pub async fn associate(
     mut stream: Stream,
-    target: SocketAddr,
+    target: Address,
 ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
     let mut hdr = BytesMut::new();
     Address::Domain {

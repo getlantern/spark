@@ -176,10 +176,18 @@ impl UdpTransport for SamizdatTransport {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        self.dial_udp_addr(Address::Ip(target)).await
+    }
+
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         // UDP-over-stream via sing-box UoT v2 (the same framing AnyTLS uses): open a CONNECT stream
         // whose `:authority` is the UoT magic address, so the (sing-box) server switches that stream
         // into a UDP association, then run the shared UoT framing over the CONNECT body. The magic is
-        // the *destination*, so it rides the authority here rather than in-band (see `transport::uot`).
+        // the *transport* target; the real destination (an IP or a **domain** the exit resolves)
+        // rides in-band in the UoT request (see `transport::uot`).
         let authority = format!("{UOT_MAGIC}:0");
         let conn = self.conn().await?;
         let stream = match conn.connect(&authority).await {

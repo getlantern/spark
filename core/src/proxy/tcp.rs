@@ -74,9 +74,20 @@ async fn forward(
     let domain = hooks
         .and_then(|h| h.recoverer.as_deref())
         .and_then(|r| r.recover(original_dst.ip()));
-    let decision = hooks
-        .map(|h| h.router.decide(original_dst.ip(), domain.as_deref()))
-        .unwrap_or(Decision::Proxy);
+    // With smart-routing/fake-IP active, Reject encrypted DNS to public resolvers (DoT :853, DoH
+    // :443) so the client falls back to plain :53 — which the fake-IP server answers, keeping domains
+    // visible for routing/ad-block (else Private DNS / browser DoH bypasses fake-IP entirely).
+    let enc_dns = hooks.is_some() && super::is_encrypted_dns(original_dst, domain.as_deref());
+    let decision = if enc_dns {
+        Decision::Reject
+    } else {
+        hooks
+            .map(|h| h.router.decide(original_dst.ip(), domain.as_deref()))
+            .unwrap_or(Decision::Proxy)
+    };
+    if enc_dns {
+        debug!(dst = %original_dst, "encrypted DNS to a public resolver — rejecting so DNS falls back to plain :53");
+    }
     debug!(src = %src, dst = %original_dst, domain = domain.as_deref().unwrap_or("-"), ?decision, "tcp flow: routing");
 
     let upstream = match decision {
@@ -192,7 +203,7 @@ async fn dial_proxy(
 /// app asked for via DNS: A→v4, AAAA→v6), falling back to the first result. Avoids, e.g., dialing a v6
 /// address first for a v4 flow when the resolver returns both. (Full cross-family happy-eyeballs is a
 /// future improvement.)
-fn pick_ip(ips: &[IpAddr], want: IpAddr) -> Option<IpAddr> {
+pub(crate) fn pick_ip(ips: &[IpAddr], want: IpAddr) -> Option<IpAddr> {
     ips.iter()
         .copied()
         .find(|ip| ip.is_ipv4() == want.is_ipv4())

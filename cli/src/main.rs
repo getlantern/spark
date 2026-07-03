@@ -210,10 +210,17 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
 
     let idle_timeout = Duration::from_secs(config.udp.idle_timeout_secs);
     if let Some((udp_inbound, udp_reply)) = udp_surface {
+        // The CLI has no smart-routing hooks (proxy everything), so the UDP forwarder never makes a
+        // `Direct` decision and this transport goes unused; it's passed only to satisfy `run_udp`'s
+        // signature (which needs a direct UDP transport for the hooks-enabled `Direct` path).
+        let direct_udp: Arc<dyn transport::UdpTransport> =
+            Arc::new(transport::DirectTransport::default());
         tokio::spawn(proxy::udp::run_udp(
             udp_inbound,
             udp_reply,
             udp_transport,
+            direct_udp,
+            None,
             idle_timeout,
         ));
     }

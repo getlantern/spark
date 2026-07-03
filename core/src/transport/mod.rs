@@ -937,6 +937,25 @@ pub trait UdpTransport: Send + Sync {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)>;
+
+    /// Open a connected UDP association to a target that may be an unresolved **domain** — the
+    /// fake-IP path, where a flow's real destination is a name recovered from its fake IP. The
+    /// default handles only [`Address::Ip`] (delegating to [`dial_udp`](Self::dial_udp)) and rejects
+    /// a domain as `Unsupported`, so the forwarder can tell "this transport can't carry a UDP name"
+    /// from a real dial failure. Transports whose UDP frame carries an address (UoT, hysteria2,
+    /// shadowsocks, wasm, the plain tunnel) override this so the **exit** resolves — no client DNS.
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        match target {
+            Address::Ip(sa) => self.dial_udp(sa).await,
+            Address::Domain { host, port } => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("transport does not support UDP domain targets ({host}:{port})"),
+            )),
+        }
+    }
 }
 
 /// Connects/sends straight to the target with no tunnel — the direct behavior, expressed as

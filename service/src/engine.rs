@@ -121,12 +121,13 @@ impl TunnelEngine for CoreEngine {
                                                  // The service has no smart-routing hooks (that's the fetched-config path); pass `None` so
                                                  // every flow is proxied, plus a direct transport for the (here unused) Direct action.
         let direct_transport = Arc::new(transport::DirectTransport::default());
+        let direct_udp: Arc<dyn transport::UdpTransport> = direct_transport.clone();
         let supervisor = tokio::spawn(async move {
             match udp_surface {
                 Some((udp_inbound, udp_reply)) => {
                     tokio::select! {
                         _ = proxy::tcp::run(stack, tcp_transport, direct_transport, None, metrics) => {}
-                        _ = proxy::udp::run_udp(udp_inbound, udp_reply, udp_transport, idle) => {}
+                        _ = proxy::udp::run_udp(udp_inbound, udp_reply, udp_transport, direct_udp, None, idle) => {}
                     }
                 }
                 None => {

@@ -81,13 +81,21 @@ impl UdpTransport for TunnelClient {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        self.dial_udp_addr(Address::Ip(target)).await
+    }
+
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         // UDP-associate handshake: send the magic sentinel (so the server switches to UDP
         // relay mode without changing the TCP header format), then the real target once
-        // (connect-mode). After that the stream carries `[u16 len][payload]` datagrams.
+        // (connect-mode; an IP or a **domain** the server resolves). After that the stream carries
+        // `[u16 len][payload]` datagrams.
         let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         let mut header = BytesMut::new();
         udp_associate_sentinel().encode(&mut header);
-        Address::Ip(target).encode(&mut header);
+        target.encode(&mut header);
         conn.write_all(&header).await?;
 
         let (read, write) = conn.into_split();

@@ -269,7 +269,15 @@ impl UdpTransport for AnytlsTransport {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        // A UDP association is just another pooled stream, opened to the UoT v2 magic address.
+        self.dial_udp_addr(Address::Ip(target)).await
+    }
+
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        // A UDP association is just another pooled stream, opened to the UoT v2 magic address; the
+        // real destination (IP or a **domain** the exit resolves) rides in-band in the UoT request.
         let session = self.inner.acquire().await?;
         let stream = session.open_stream().await?;
         udp::associate(stream, target).await

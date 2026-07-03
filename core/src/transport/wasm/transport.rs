@@ -146,6 +146,13 @@ impl UdpTransport for WasmTransport {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        self.dial_udp_addr(Address::Ip(target)).await
+    }
+
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         // One transform instance serves both directions; the split halves (which live in different
         // tasks — the netstack send loop and the reply pump) share it behind a Mutex. The transform
@@ -157,10 +164,11 @@ impl UdpTransport for WasmTransport {
         ));
 
         // UDP-associate handshake (obfuscated): the sentinel switches the server to UDP relay mode,
-        // then the real target follows (connect-mode — no per-datagram address after this).
+        // then the real target follows (connect-mode — an IP or a **domain** the exit resolves; no
+        // per-datagram address after this).
         let mut header = BytesMut::new();
         udp_associate_sentinel().encode(&mut header);
-        Address::from(target).encode(&mut header);
+        target.encode(&mut header);
         let header_wire = transform_out(&transform, &header)?;
         conn.write_all(&header_wire).await?;
 
