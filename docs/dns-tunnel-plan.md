@@ -14,7 +14,9 @@ dnstt, or Slipstream. Both ends are ours.
 compression, MTU math), a client transport under `core/src/transport/dns_tunnel/` behind a `dns-tunnel`
 cargo feature (resolver balancer + MTU prober + runtime), and a `dns-tunnel-server` binary
 (authoritative NS + session store + TCP egress). AEAD is ChaCha20-Poly1305 (default) / AES-256-GCM via
-`ring`; key schedule HKDF-SHA256 from a PSK + per-session salt; compression is `lz4_flex` (pure Rust).
+`ring`; **forward-secret** key schedule — HKDF-SHA256 over an ephemeral↔ephemeral X25519 shared secret,
+the server authenticated by its static Ed25519 key (the PSK model was replaced; see ADR 0011 +
+`dns-tunnel-core/src/session.rs`); compression is `lz4_flex` (pure Rust).
 
 **Tech Stack:** Rust, tokio, `ring` (AEAD/HKDF/rand), `lz4_flex` (feature-gated), `bytes`,
 `async-trait`, `tokio-util::codec`. Spec: `docs/dns-tunnel-design.md`. ADR: `docs/adr/0011-dns-tunnel-transport.md`.

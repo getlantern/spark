@@ -74,8 +74,10 @@ implementation, and how far to take v1.
    `flint-shaping`/`flint-tls`) once stable.
 
 4. **Out of scope (v1), explicitly:** UDP-over-tunnel (`UdpTransport` — a later increment; `dial_udp`
-   errors clearly); forward secrecy (v1 is PSK + per-session HKDF salt; an X25519 ephemeral handshake is
-   the documented FS upgrade); DoH/DoT carriers (v1 is UDP:53, the shutdown-relevant path); traffic-shape
+   errors clearly); ~~forward secrecy~~ (**subsequently implemented** — the PSK model was replaced by a
+   forward-secret X25519 ephemeral↔ephemeral handshake authenticated by the server's static Ed25519 key;
+   see the Status line, §2.4, and `dns-tunnel-core/src/session.rs`); DoH/DoT carriers (v1 is UDP:53, the
+   shutdown-relevant path); traffic-shape
    mimicry beyond unique-QNAME cache-busting; and dnstt/Slipstream/MasterDnsVPN wire interop.
 
 ## Consequences

@@ -709,8 +709,9 @@ fn hysteria2_transport(
     ))
 }
 
-/// Build the DNS-tunnel transport (feature `dns-tunnel`, ADR 0011): decode the base64 PSK, map the
-/// config cipher, and build a resolver list (the configured `resolvers`, or the `authoritative`
+/// Build the DNS-tunnel transport (feature `dns-tunnel`, ADR 0011): decode the server's base64 Ed25519
+/// public key (which authenticates the forward-secret handshake), map the config cipher, and build a
+/// resolver list (the configured `resolvers`, or the `authoritative`
 /// address when none are given — authoritative mode). TCP only; `UdpTransport` reports unsupported.
 #[cfg(feature = "dns-tunnel")]
 fn dns_tunnel_transport(

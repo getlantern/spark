@@ -598,7 +598,10 @@ pub struct DnsTunnelConfig {
     /// AEAD cipher.
     #[serde(default)]
     pub cipher: DnsTunnelCipher,
-    /// Payload compression.
+    /// Payload compression. NB: parsed but **not yet applied by the client** — `dns-tunnel-core`
+    /// supports LZ4 frame compression (`FLAG_COMPRESSED`), but the client transport does not yet drive
+    /// it from this setting, so `lz4` is currently inert (a documented follow-up). Kept on the config
+    /// surface so enabling it later is a client-only change.
     #[serde(default)]
     pub compression: DnsTunnelCompression,
     /// How many resolvers each query is sent to (default 1). Higher trades proportional bandwidth for

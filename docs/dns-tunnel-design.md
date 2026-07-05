@@ -60,8 +60,11 @@ aggregation + failover**.
 **Out of scope (v1), explicitly:**
 - **UDP-over-tunnel** (`UdpTransport`). v1 tunnels TCP streams only; the client's `dial_udp` returns a
   clear "unsupported in this build" error. UDP egress is a localized later increment.
-- **Forward secrecy.** v1 is PSK + per-session HKDF salt (per-session key separation, no FS). An
-  optional X25519 handshake is a documented future upgrade (§2.4, §16).
+- ~~**Forward secrecy.**~~ **Implemented** — this v1 deferral was superseded. The PSK model was
+  replaced by a forward-secret handshake: a cleartext ephemeral↔ephemeral **X25519** exchange keyed
+  only by the ephemerals (a later compromise of the static key can't decrypt past traffic), with the
+  server's static **Ed25519** key signing the exchange to authenticate it (Noise-NK-style; clients hold
+  only the server's public key, safe to distribute). See §2.4 and `dns-tunnel-core/src/session.rs`.
 - **DoH/DoT carriers.** v1 is plain UDP:53 to resolvers (the shutdown-relevant path). DoH/DoT are a
   later carrier option (they look like HTTPS to fixed IPs and are easier to block during a shutdown).
 - **Traffic-shape / anti-detection mimicry** beyond unique-QNAME cache-busting (§14). Lower-entropy
