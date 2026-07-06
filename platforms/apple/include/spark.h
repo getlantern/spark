@@ -86,8 +86,8 @@ int32_t spark_select_server(int32_t index);
 
 /* ---- Split-tunnel bypass list ----
  * Update the running tunnel's split-tunnel bypass list live. `json` is a NUL-terminated
- * `{enabled,domains,ips}` payload. Returns 0 if applied, -1 on invalid JSON / no active tunnel.
- * A NULL argument returns -1. */
+ * `{enabled,domains,ips}` payload. Returns 0 if applied; -1 if `json` is NULL, not valid UTF-8,
+ * not valid JSON, or no tunnel is currently active. */
 int32_t spark_set_split_tunnel(const char *json);
 
 #ifdef __cplusplus

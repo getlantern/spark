@@ -41,12 +41,17 @@ fn split_tunnel_path() -> Option<PathBuf> {
     base.map(|b| b.join("org.getlantern.spark").join("split_tunnel.json"))
 }
 
-/// Read the persisted split-tunnel list JSON, or the disabled default if none/unreadable.
+/// Read the persisted split-tunnel list JSON, or the disabled default if the file is missing,
+/// unreadable, or not valid JSON (a corrupted/partially-written file must not propagate garbage to
+/// the UI's `JSON.parse` or to `providerConfiguration`). Default must match spark-core's SplitTunnel
+/// wire format (core/src/split_tunnel.rs).
 pub fn load_split_tunnel() -> String {
-    split_tunnel_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        // Default must match spark-core's SplitTunnel wire format (core/src/split_tunnel.rs).
-        .unwrap_or_else(|| "{\"enabled\":false,\"domains\":[],\"ips\":[]}".to_string())
+    const DEFAULT: &str = "{\"enabled\":false,\"domains\":[],\"ips\":[]}";
+    match split_tunnel_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        // Validate it parses as JSON; core re-validates the exact shape.
+        Some(s) if serde_json::from_str::<serde_json::Value>(&s).is_ok() => s,
+        _ => DEFAULT.to_string(),
+    }
 }
 
 /// Persist the list JSON (creates the directory if needed). Returns an error string on failure.

@@ -78,7 +78,10 @@ fn active_router() -> &'static Mutex<Option<Arc<crate::rules::router::Router>>> 
 
 #[cfg(feature = "smart-routing")]
 fn set_active_router(r: Option<Arc<crate::rules::router::Router>>) {
-    *active_router().lock().unwrap() = r;
+    // Poison-tolerant: this is reached from FFI teardown, so recover the guard from a poisoned
+    // mutex (`into_inner`) rather than panicking and crashing the NE/JNI host. The inner Option is
+    // trivially consistent, so recovering it is safe.
+    *active_router().lock().unwrap_or_else(|e| e.into_inner()) = r;
 }
 
 /// Update the running tunnel's split-tunnel bypass list live (no reconnect). `json` is the
@@ -90,7 +93,14 @@ pub fn set_split_tunnel(json: &str) -> bool {
     let Ok(st) = crate::split_tunnel::parse(json) else {
         return false;
     };
-    match active_router().lock().unwrap().as_ref() {
+    // Clone the Arc out under the lock, then release the mutex before touching the router — so this
+    // mutex is never held across the router's own RwLock. `unwrap_or_else(into_inner)` recovers from
+    // a poisoned mutex instead of panicking: this is FFI-reachable and must not crash the host.
+    let router = active_router()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match router {
         Some(r) => {
             r.set_user_bypass(Some(&st));
             true

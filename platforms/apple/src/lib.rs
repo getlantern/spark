@@ -167,7 +167,8 @@ mod ffi {
     }
 
     /// Update the running tunnel's split-tunnel bypass list live. `json` is a NUL-terminated
-    /// `{enabled,domains,ips}` payload. Returns 0 if applied, -1 on invalid JSON / no active tunnel.
+    /// `{enabled,domains,ips}` payload. Returns 0 if applied; -1 if `json` is null, not valid UTF-8,
+    /// not valid JSON, or no tunnel is currently active.
     ///
     /// # Safety
     /// `json` must be null or a valid NUL-terminated C string.
