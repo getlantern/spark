@@ -211,6 +211,37 @@ impl RuleSet {
             ip_cidr,
         }
     }
+
+    /// A rule-set from the user's split-tunnel bypass list: domains become suffix matches (host +
+    /// subdomains), IPs/CIDRs become `ip_cidr`. Unparseable IP entries are dropped (the UI validates
+    /// on add, so this is belt-and-suspenders).
+    pub fn from_domains_and_ips(domains: &[String], ips: &[String]) -> Self {
+        Self {
+            domain: Vec::new(),
+            domain_suffix: domains.to_vec(),
+            domain_keyword: Vec::new(),
+            ip_cidr: ips.iter().filter_map(|s| parse_ip_or_cidr(s)).collect(),
+        }
+    }
+}
+
+/// Parse a bare IP (`1.2.3.4`, `::1`) or a CIDR (`10.0.0.0/8`) into an [`IpCidr`]. A bare IP gets a
+/// host prefix (/32 or /128). `None` on malformed input or an out-of-range prefix.
+pub(crate) fn parse_ip_or_cidr(s: &str) -> Option<IpCidr> {
+    let s = s.trim();
+    match s.split_once('/') {
+        Some((addr_s, prefix_s)) => {
+            let addr: IpAddr = addr_s.trim().parse().ok()?;
+            let prefix: u8 = prefix_s.trim().parse().ok()?;
+            let max = if addr.is_ipv4() { 32 } else { 128 };
+            (prefix <= max).then_some(IpCidr { addr, prefix })
+        }
+        None => {
+            let addr: IpAddr = s.parse().ok()?;
+            let prefix = if addr.is_ipv4() { 32 } else { 128 };
+            Some(IpCidr { addr, prefix })
+        }
+    }
 }
 
 /// Parse a compiled sing-box `.srs` rule-set into its merged [`RuleSet`].
@@ -925,6 +956,29 @@ mod tests {
         }
         // A pure geoip set has no domain entries.
         assert!(rs.domain.is_empty() && rs.domain_suffix.is_empty());
+    }
+
+    #[test]
+    fn parse_ip_or_cidr_accepts_bare_ip_and_cidr() {
+        assert_eq!(parse_ip_or_cidr("1.2.3.4").unwrap().prefix, 32);
+        assert_eq!(parse_ip_or_cidr("10.0.0.0/8").unwrap().prefix, 8);
+        assert_eq!(parse_ip_or_cidr("::1").unwrap().prefix, 128);
+        assert_eq!(parse_ip_or_cidr("2001:db8::/32").unwrap().prefix, 32);
+        assert!(parse_ip_or_cidr("nope").is_none());
+        assert!(parse_ip_or_cidr("1.2.3.4/40").is_none()); // out of range
+    }
+
+    #[test]
+    fn from_domains_and_ips_fills_suffix_and_cidr() {
+        let rs =
+            RuleSet::from_domains_and_ips(&["google.com".to_string()], &["1.2.3.4".to_string()]);
+        assert_eq!(rs.domain_suffix, vec!["google.com".to_string()]);
+        assert_eq!(rs.ip_cidr.len(), 1);
+        assert!(rs.domain.is_empty() && rs.domain_keyword.is_empty());
+
+        // Unparseable IP entries are silently dropped.
+        let rs2 = RuleSet::from_domains_and_ips(&[], &["not-an-ip".to_string()]);
+        assert!(rs2.ip_cidr.is_empty());
     }
 
     /// Wrap a plaintext rule body in the `.srs` envelope (magic + version + zlib) for tests.
