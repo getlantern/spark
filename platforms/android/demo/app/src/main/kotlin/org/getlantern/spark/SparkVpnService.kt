@@ -158,7 +158,7 @@ class SparkVpnService : VpnService() {
         worker = thread(name = "spark-tunnel") {
             // systemStack = 0 (userspace): the cross-platform default, with no kernel-redirect/gateway
             // setup; production Android may pass 1 to use the kernel "system" stack for throughput.
-            val rc = SparkBridge.nativeRun(fd, MTU, addr, TUN_PREFIX, 0, config, dataDir)
+            val rc = SparkBridge.nativeRun(fd, MTU, addr, TUN_PREFIX, 0, config, dataDir, null)
             Log.i(TAG, "nativeRun returned $rc")
         }
         // Readiness gate (the Android analog of the Apple NE's). A VpnService has no completion

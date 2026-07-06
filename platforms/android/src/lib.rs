@@ -21,12 +21,13 @@
 //       // userspace (smoltcp) stack. config/dataDir carry the data-path choice: a null/empty config
 //       // (or "lantern-api") self-fetches the pool from the Lantern config-new API into dataDir (the
 //       // app files dir); an "IP:port" (IP literal, not a hostname) is a plain relay; any other
-//       // string is a full config.
+//       // string is a full config. splitTunnel is an optional JSON bypass list (null = no bypass).
 //       external fun nativeRun(fd: Int, mtu: Int, addr: Int, prefix: Int, systemStack: Int,
-//                              config: String?, dataDir: String?): Int
+//                              config: String?, dataDir: String?, splitTunnel: String?): Int
 //       external fun nativeStop()
 //       external fun nativeMarkConnecting()           // before the worker; pairs with nativeWaitReady
 //       external fun nativeWaitReady(timeoutMs: Int): Int  // 0 = up, -1 = not ready (stop the VPN)
+//       external fun nativeSetSplitTunnel(json: String): Boolean
 //   }
 #[cfg(target_os = "android")]
 mod jni {
@@ -36,9 +37,10 @@ mod jni {
     use jni::sys::{jboolean, jint};
     use jni::JNIEnv;
 
-    /// `SparkBridge.nativeRun(fd, mtu, addr, prefix, systemStack, config, dataDir)` — adopt the
-    /// `VpnService` TUN `fd` (ownership transferred) and run the tunnel, blocking the calling thread
-    /// until [`nativeStop`] (or the data path exits). Returns 0 on a clean stop, -1 on error.
+    /// `SparkBridge.nativeRun(fd, mtu, addr, prefix, systemStack, config, dataDir, splitTunnel)` —
+    /// adopt the `VpnService` TUN `fd` (ownership transferred) and run the tunnel, blocking the
+    /// calling thread until [`nativeStop`] (or the data path exits). Returns 0 on a clean stop,
+    /// -1 on error.
     ///
     /// `addr` is the tun IPv4 packed big-endian into a `jint`; the system stack binds its kernel
     /// listener there and derives its gateway as `addr + 1` (so `prefix` must include it). `config`
@@ -47,8 +49,10 @@ mod jni {
     /// `config` — or the `"lantern-api"` sentinel — self-fetches the pool from the Lantern config-new
     /// API, caching into `dataDir` (the app files dir); an `IP:port` (IP literal only, not a hostname)
     /// is a plain relay; any other string is a full config. The platform `tun_base` (addr/prefix/system
-    /// stack) always owns the
-    /// tun/stack — Android's `VpnService` already established the interface.
+    /// stack) always owns the tun/stack — Android's `VpnService` already established the interface.
+    ///
+    /// `splitTunnel` is lenient: a null reference or an undecodable string → `None` (no bypass list).
+    /// A bad bypass list must NOT fail the tunnel — traffic continues to flow through the VPN.
     #[no_mangle]
     pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeRun<'local>(
         mut env: JNIEnv<'local>,
@@ -60,6 +64,7 @@ mod jni {
         system_stack: jint,
         config: JString<'local>,
         data_dir: JString<'local>,
+        split_tunnel: JString<'local>,
     ) -> jint {
         crate::logcat::init();
         // `config` is fail-closed: a non-null string that won't decode is a caller error (an explicit
@@ -81,6 +86,9 @@ mod jni {
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
+        // `split_tunnel` is lenient: null or undecodable → None. A bad bypass list must not fail
+        // the tunnel — callers pass null until the Compose UI wires up a real list.
+        let split = read_jstring(&mut env, &split_tunnel).ok().flatten();
         // The platform owns the interface reality: the VpnService addr/prefix + Android's kernel
         // (system) stack. The shared dispatch decides direct / relay / full-config / self-fetch.
         let tun_base = spark_core::fd_tunnel::fd_config(
@@ -94,6 +102,7 @@ mod jni {
             cfg.as_deref(),
             dir.as_deref(),
             tun_base,
+            split.as_deref(),
         )
     }
 
@@ -143,6 +152,21 @@ mod jni {
             Some(index as usize)
         };
         u8::from(spark_core::fd_tunnel::select_server(pin))
+    }
+
+    /// `SparkBridge.nativeSetSplitTunnel(json)` — update the running tunnel's bypass list live.
+    /// Returns true if applied. Lenient: a null or undecodable `json` returns false without
+    /// crashing the tunnel. Mirrors `spark_core::fd_tunnel::set_split_tunnel`.
+    #[no_mangle]
+    pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeSetSplitTunnel<'local>(
+        mut env: JNIEnv<'local>,
+        _obj: JObject<'local>,
+        json: JString<'local>,
+    ) -> jboolean {
+        match read_jstring(&mut env, &json) {
+            Ok(Some(s)) => spark_core::fd_tunnel::set_split_tunnel(&s) as jboolean,
+            _ => 0,
+        }
     }
 
     /// `SparkBridge.nativeMarkConnecting()` — mark the data path *connecting* before the `nativeRun`
