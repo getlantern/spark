@@ -35,9 +35,14 @@ extern "C" {
  * `split_tunnel` is an optional NUL-terminated `{enabled,domains,ips}` JSON payload that
  * initialises the split-tunnel bypass list. NULL disables split-tunneling at startup. A bad
  * or non-UTF-8 value is silently ignored (treated as NULL) — the bypass list is non-critical
- * and must not prevent the tunnel from starting. */
+ * and must not prevent the tunnel from starting.
+ *
+ * `routing_mode` is an optional NUL-terminated "smart"/"full" string that sets the initial
+ * routing mode. NULL defaults to the core's built-in default. A bad or non-UTF-8 value is
+ * silently ignored (treated as NULL) — the routing mode is non-critical and must not prevent
+ * the tunnel from starting. */
 int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char *data_dir,
-                         const char *split_tunnel);
+                         const char *split_tunnel, const char *routing_mode);
 
 /* Signal a running spark_tunnel_run() to stop. */
 void spark_tunnel_stop(void);
@@ -89,6 +94,10 @@ int32_t spark_select_server(int32_t index);
  * `{enabled,domains,ips}` payload. Returns 0 if applied; -1 if `json` is NULL, not valid UTF-8,
  * not valid JSON, or no tunnel is currently active. */
 int32_t spark_set_split_tunnel(const char *json);
+
+/* Update the running tunnel's routing mode live. `mode` is a NUL-terminated "smart"/"full".
+ * Returns 0 if applied; -1 if `mode` is NULL, not valid UTF-8, or no tunnel is active. */
+int32_t spark_set_routing_mode(const char *mode);
 
 #ifdef __cplusplus
 }
