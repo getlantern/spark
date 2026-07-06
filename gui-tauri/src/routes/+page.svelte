@@ -88,9 +88,12 @@
       busy = false;
     }
   }
-  onMount(() => {
+  let splitEnabled = $state(false);
+
+  onMount(async () => {
     refresh();
     poll = setInterval(refresh, 2000);
+    try { splitEnabled = (await backend.getSplitTunnel()).enabled; } catch {}
   });
   onDestroy(() => clearInterval(poll));
 </script>
@@ -183,6 +186,18 @@
           <span class="chev">{@render chevron()}</span>
         </div>
       </div>
+      <div class="divider"></div>
+      <!-- Split Tunneling row -->
+      <button class="tile nav" onclick={() => goto("/split-tunneling")}>
+        <div class="tile-head">
+          <span class="ic">{@render split()}</span>
+          <span class="label">Split Tunneling</span>
+        </div>
+        <div class="tile-body">
+          <span class="value">{splitEnabled ? "Enabled" : "Disabled"}</span>
+          <span class="chev">{@render chevron()}</span>
+        </div>
+      </button>
     </div>
   </div>
 </main>
@@ -201,6 +216,9 @@
 {/snippet}
 {#snippet pin()}
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z"/><circle cx="12" cy="11" r="2.2"/></svg>
+{/snippet}
+{#snippet split()}
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v6a4 4 0 0 0 4 4h8"/><path d="M6 21v-6"/><polyline points="15 9 19 13 15 17"/></svg>
 {/snippet}
 
 <style>
