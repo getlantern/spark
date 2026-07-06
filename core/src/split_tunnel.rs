@@ -74,30 +74,29 @@ pub fn parse(json: &str) -> Result<SplitTunnel, SplitTunnelError> {
 }
 
 /// Normalize one raw entry to a bare host: trim, lowercase, strip a URL scheme, drop any
-/// path/query/fragment (`https://Mail.Example.com/inbox` -> `mail.example.com`).
-/// When no URL scheme is present the slash is preserved so that CIDRs like `10.0.0.0/8`
-/// are not truncated. Also strips a trailing `:port` suffix when there is exactly one colon
-/// (e.g. `example.com:443` -> `example.com`). IPv6 literals have two or more colons and are
-/// left intact so that `is_ip_or_cidr` can parse them correctly.
+/// path/query/fragment (`https://Mail.Example.com/inbox` -> `mail.example.com`,
+/// `example.com/path` -> `example.com`). A bare CIDR's slash is preserved (`10.0.0.0/8`,
+/// `fd00::/8` stay intact) by only stripping a `/…` path when the part before it isn't a bare IP.
+/// Also strips a trailing `:port` suffix when there is exactly one colon (e.g. `example.com:443`
+/// -> `example.com`). IPv6 literals have two or more colons and are left intact so that
+/// `is_ip_or_cidr` can parse them correctly.
 fn normalize_one(entry: &str) -> String {
     let mut e = entry.trim().to_ascii_lowercase();
-    let mut had_scheme = false;
     for scheme in ["https://", "http://"] {
         if let Some(rest) = e.strip_prefix(scheme) {
             e = rest.to_string();
-            had_scheme = true;
             break;
         }
     }
-    if had_scheme {
-        // Strip path/query/fragment that follow the host in a URL.
-        if let Some(idx) = e.find(['/', '?', '#']) {
-            e.truncate(idx);
-        }
-    } else {
-        // No scheme — only strip query/fragment; preserve `/` for CIDR notation.
-        if let Some(idx) = e.find(['?', '#']) {
-            e.truncate(idx);
+    // Strip query/fragment always.
+    if let Some(idx) = e.find(['?', '#']) {
+        e.truncate(idx);
+    }
+    // Strip a path `/…` too — UNLESS the part before the slash is a bare IP, i.e. this is CIDR
+    // notation (`10.0.0.0/8`, `fd00::/8`), which must be preserved for `is_ip_or_cidr`.
+    if let Some(slash) = e.find('/') {
+        if e[..slash].parse::<std::net::IpAddr>().is_err() {
+            e.truncate(slash);
         }
     }
     // Strip a trailing :port on a hostname or IPv4 (exactly one colon). IPv6 literals have >=2
@@ -213,6 +212,19 @@ mod tests {
             out.added_ips,
             vec!["::1".to_string(), "fd00::/8".to_string()]
         );
+        assert!(out.rejected.is_empty());
+    }
+
+    #[test]
+    fn add_entries_strips_bare_host_path_but_keeps_cidr() {
+        let mut st = SplitTunnel::default();
+        // A scheme-less host with a path is normalized to the bare host; a bare CIDR keeps its slash.
+        let out = st.add_entries("example.com/path, foo.com/a/b?q=1, 10.0.0.0/8");
+        assert_eq!(
+            out.added_domains,
+            vec!["example.com".to_string(), "foo.com".to_string()]
+        );
+        assert_eq!(out.added_ips, vec!["10.0.0.0/8".to_string()]);
         assert!(out.rejected.is_empty());
     }
 

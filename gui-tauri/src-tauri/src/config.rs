@@ -12,9 +12,11 @@
 //! would shadow the fetch (every connect must pull the current pool), so the only on-disk config is
 //! the extension's own last-good fetch cache, used solely as an offline fallback.
 //!
-//! This module also owns the on-disk split-tunnel bypass list (`split_tunnel.json`), stored under
-//! `~/Library/Application Support/org.getlantern.spark/`. Unlike the proxy config (which the NE
-//! self-fetches), the split-tunnel list is app-controlled and persists across connections.
+//! This module also owns the on-disk split-tunnel bypass list (`split_tunnel.json`), stored in the
+//! per-OS app config dir under `org.getlantern.spark/` (macOS: `~/Library/Application Support`;
+//! Windows: `%APPDATA%`; other Unix: `$XDG_CONFIG_HOME` or `~/.config`). Unlike the proxy config
+//! (which the NE self-fetches), the split-tunnel list is app-controlled and persists across
+//! connections.
 
 use std::path::PathBuf;
 
@@ -22,18 +24,21 @@ use serde::{Deserialize, Serialize};
 
 // ── Split-tunnel persistence ──────────────────────────────────────────────────
 
-/// Path to the persisted split-tunnel list:
-/// `~/Library/Application Support/org.getlantern.spark/split_tunnel.json`.
-/// Returns `None` if `$HOME` is unset (sandboxed/test environments).
+/// Path to the persisted split-tunnel list: `<app-config-dir>/org.getlantern.spark/split_tunnel.json`.
+/// The app-config dir is resolved per-OS with no extra crate — macOS is the shipping desktop target,
+/// but the Tauri commands (and their non-macOS `spark_set_split_tunnel` stub) compile and persist on
+/// Windows/Linux too. Returns `None` when the OS's config-dir env var is unset (sandboxed/test envs).
 fn split_tunnel_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("org.getlantern.spark")
-            .join("split_tunnel.json"),
-    )
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Library").join("Application Support"));
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    base.map(|b| b.join("org.getlantern.spark").join("split_tunnel.json"))
 }
 
 /// Read the persisted split-tunnel list JSON, or the disabled default if none/unreadable.
@@ -46,7 +51,7 @@ pub fn load_split_tunnel() -> String {
 
 /// Persist the list JSON (creates the directory if needed). Returns an error string on failure.
 pub fn save_split_tunnel(json: &str) -> Result<(), String> {
-    let p = split_tunnel_path().ok_or("no config dir: HOME is unset")?;
+    let p = split_tunnel_path().ok_or("no app config dir (config-dir env var unset)")?;
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
