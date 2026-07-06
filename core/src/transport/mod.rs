@@ -268,7 +268,9 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         ServerSpec::Wasm(c) => format!("wasm {}", c.server),
         ServerSpec::Tunnel(c) => format!("tunnel {}", c.server),
         // Log hygiene: never surface the tunnel zone/resolvers — just the resolver count.
-        ServerSpec::DnsTunnel(c) => format!("dns-tunnel ({} resolvers)", c.resolvers.len()),
+        ServerSpec::DnsTunnel(c) => {
+            format!("dns-tunnel ({} configured resolvers)", c.resolvers.len())
+        }
     }
 }
 

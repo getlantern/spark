@@ -63,9 +63,11 @@ const FLAG_KNOWN: u8 = FLAG_STREAM | FLAG_SEQ | FLAG_FRAGMENT | FLAG_COMPRESSED;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
-    /// Session open (long form; carries the salt + proposed params in the payload).
+    /// Stream open (sealed; payload carries the SOCKS-style target). NB: the *session* handshake is the
+    /// cleartext `FORM_SYN`/`FORM_SYNACK` wire packets above — this inner kind opens a stream over an
+    /// already-established session.
     Syn = 1,
-    /// Session open acknowledgement (accepted params + cookie in the payload).
+    /// Stream-open acknowledgement (per-stream; StreamID echoed).
     SynAck = 2,
     /// Stream data (carries `seq`).
     Data = 3,

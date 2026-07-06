@@ -387,7 +387,7 @@ fn parse_spec(spec: &str, max_hosts: usize) -> Result<Vec<SocketAddr>, PoolError
         }
         let count = 1u64 << (32 - prefix);
         let base_u = u32::from(base) & (!0u32).checked_shl(32 - prefix).unwrap_or(0);
-        let n = (count as usize).min(max_hosts);
+        let n = count.min(max_hosts as u64) as usize;
         let mut out = Vec::with_capacity(n);
         for i in 0..n as u64 {
             let ip = Ipv4Addr::from(base_u.wrapping_add(i as u32));

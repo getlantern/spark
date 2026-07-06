@@ -2,7 +2,7 @@
 //! (downlink) given the tunnel zone and the negotiated EDNS0 UDP size. Pure arithmetic; the actual
 //! per-resolver probing that *uses* these bounds lives in the client (M4).
 
-use crate::crypto::{CONN_ID_LEN, NONCE_LEN, SALT_LEN, TAG_LEN};
+use crate::crypto::{CONN_ID_LEN, NONCE_LEN, TAG_LEN};
 
 /// RFC 1035 maximum encoded name length.
 pub const MAX_NAME_LEN: usize = 255;
@@ -28,14 +28,16 @@ pub fn max_uplink_wire_bytes(zone_wire_len: usize) -> usize {
     base32_capacity_bytes(max_base32_chars(budget))
 }
 
-/// Fixed per-packet wire overhead (cleartext prefix + AEAD tag). The long form (SYN) includes the salt.
-pub const fn wire_overhead(long: bool) -> usize {
-    FORM_LEN + CONN_ID_LEN + (if long { SALT_LEN } else { 0 }) + NONCE_LEN + TAG_LEN
+/// Fixed per-packet wire overhead on a data frame: cleartext form byte + ConnectionID + nonce + AEAD
+/// tag. (The forward-secret handshake packets — cleartext `FORM_SYN`/`FORM_SYNACK` — are sized
+/// separately and carry no salt.)
+pub const fn wire_overhead() -> usize {
+    FORM_LEN + CONN_ID_LEN + NONCE_LEN + TAG_LEN
 }
 
 /// Max uplink *payload* bytes, given the zone size, the inner frame header length, and the header form.
-pub fn max_uplink_payload(zone_wire_len: usize, header_len: usize, long: bool) -> usize {
-    max_uplink_wire_bytes(zone_wire_len).saturating_sub(wire_overhead(long) + header_len)
+pub fn max_uplink_payload(zone_wire_len: usize, header_len: usize) -> usize {
+    max_uplink_wire_bytes(zone_wire_len).saturating_sub(wire_overhead() + header_len)
 }
 
 /// Approximate DNS response envelope overhead: header + echoed question + answer RR header + OPT.
@@ -57,7 +59,7 @@ pub fn max_downlink_wire_bytes(edns_udp: usize, question_wire_len: usize) -> usi
 /// Max downlink *payload* bytes (short form downstream; no salt).
 pub fn max_downlink_payload(edns_udp: usize, question_wire_len: usize, header_len: usize) -> usize {
     max_downlink_wire_bytes(edns_udp, question_wire_len)
-        .saturating_sub(wire_overhead(false) + header_len)
+        .saturating_sub(wire_overhead() + header_len)
 }
 
 #[cfg(test)]
@@ -115,11 +117,9 @@ mod tests {
         let zone = Name::parse("t.example.com").unwrap();
         let zl = zone.wire_len();
         let wire = max_uplink_wire_bytes(zl);
-        // Short form, a 3-byte minimal inner header.
-        let payload = max_uplink_payload(zl, 3, false);
-        assert_eq!(payload, wire - wire_overhead(false) - 3);
-        // The long (SYN) form leaves less room (carries the 16-byte salt).
-        assert!(max_uplink_payload(zl, 3, true) < payload);
+        // A 3-byte minimal inner header.
+        let payload = max_uplink_payload(zl, 3);
+        assert_eq!(payload, wire - wire_overhead() - 3);
     }
 
     #[test]

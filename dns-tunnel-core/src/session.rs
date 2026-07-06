@@ -54,7 +54,7 @@ const FRAME_HEADER_MAX: usize = 16;
 /// into the QNAME. Sizing the ARQ to this is essential — an oversized segment would make the DNS
 /// query exceed the 255-byte name limit and never go out.
 fn uplink_segment(zone: &Name) -> usize {
-    mtu::max_uplink_payload(zone.wire_len(), FRAME_HEADER_MAX, false).max(1)
+    mtu::max_uplink_payload(zone.wire_len(), FRAME_HEADER_MAX).max(1)
 }
 
 /// Max downlink ARQ segment: payload bytes that fit in a TXT answer, using the worst-case echoed

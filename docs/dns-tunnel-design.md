@@ -311,7 +311,7 @@ Feature gate: a new `dns-tunnel` cargo feature pulling `dep:dns-tunnel-core` + `
 pub struct DnsTunnelConfig {
     /// The delegated tunnel zone, e.g. "t.example.com".
     pub zone: String,
-    /// The server's static Ed25519 public key, hex-encoded (32 bytes). Not a secret — safe to
+    /// The server's static Ed25519 public key, base64 (decodes to 32 bytes). Not a secret — safe to
     /// distribute; it authenticates the server in the forward-secret handshake (§2.4).
     pub server_pubkey: String,
     /// Recursive resolvers: IP, IP:port, CIDR, CIDR:port, [v6]:port. CIDRs expand. (Recursive mode.)
@@ -330,7 +330,7 @@ pub struct DnsTunnelConfig {
   `dns_tunnel: Option<DnsTunnelConfig>`.
 - `bootstrap::resolve_endpoints`: DNS-tunnel has **no SNI** (like Shadowsocks) — push a `None` SNI slot;
   resolver IPs are literals (no resolution); `authoritative` (if set) resolves like any endpoint.
-- Config validation: `server_pubkey` hex-decodes to 32 B (Ed25519); `zone` is a valid DNS name; ≥1 resolver **or**
+- Config validation: `server_pubkey` base64-decodes to 32 B (Ed25519); `zone` is a valid DNS name; ≥1 resolver **or**
   `authoritative` set — else a clear build-time error.
 
 ---
