@@ -325,24 +325,34 @@ pub mod ne_spike {
                 unsafe {
                     proto.setProviderBundleIdentifier(Some(&NSString::from_str(TUNNEL_SYSEXT_ID)));
                     proto.setServerAddress(Some(ns_string!("Spark")));
-                    // Always include splitTunnel in providerConfiguration so the NE can
-                    // apply the user's bypass list on every connect. Also include the
-                    // optional dev-override config when present.
+                    // Always include splitTunnel and routingMode in providerConfiguration so
+                    // the NE can apply the user's bypass list and routing mode on every
+                    // connect. Also include the optional dev-override config when present.
                     // providerConfiguration is NSDictionary<NSString, AnyObject>; upcast
                     // each NSString value (NSString → NSObject → AnyObject).
                     let split_tunnel_json = crate::config::load_split_tunnel();
                     let st_val: Retained<AnyObject> = NSString::from_str(&split_tunnel_json)
                         .into_super()
                         .into_super();
+                    let routing_mode = crate::config::load_routing_mode();
+                    let rm_val: Retained<AnyObject> =
+                        NSString::from_str(&routing_mode).into_super().into_super();
                     let dict = if let Some(ref c) = config {
                         let cfg_val: Retained<AnyObject> =
                             NSString::from_str(c).into_super().into_super();
                         NSDictionary::from_retained_objects(
-                            &[ns_string!("config"), ns_string!("splitTunnel")],
-                            &[cfg_val, st_val],
+                            &[
+                                ns_string!("config"),
+                                ns_string!("splitTunnel"),
+                                ns_string!("routingMode"),
+                            ],
+                            &[cfg_val, st_val, rm_val],
                         )
                     } else {
-                        NSDictionary::from_retained_objects(&[ns_string!("splitTunnel")], &[st_val])
+                        NSDictionary::from_retained_objects(
+                            &[ns_string!("splitTunnel"), ns_string!("routingMode")],
+                            &[st_val, rm_val],
+                        )
                     };
                     proto.setProviderConfiguration(Some(&dict));
                     mgr.setProtocolConfiguration(Some(&proto));
@@ -724,6 +734,40 @@ fn spark_set_split_tunnel(json: String) -> Result<(), String> {
     config::save_split_tunnel(&json)
 }
 
+// Routing mode: get/set. The mode (`"smart"` / `"full"`) is persisted to
+// org.getlantern.spark/routing_mode.txt and injected into the NE at connect via
+// providerConfiguration["routingMode"]. When connected, `spark_set_routing_mode` also
+// pushes the new mode live via the NE control channel (best-effort; errors are silently
+// discarded so a temporarily-down channel never blocks the UI save).
+
+#[tauri::command]
+fn spark_get_routing_mode() -> Result<String, String> {
+    Ok(config::load_routing_mode())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command(async)]
+fn spark_set_routing_mode(mode: String) -> Result<(), String> {
+    config::save_routing_mode(&mode)?;
+    // Best-effort live push: only send when the tunnel is actually up.
+    let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
+    if ne_spike::ui_state(raw) == "connected" {
+        let msg = serde_json::json!({"cmd": "routingMode", "mode": mode}).to_string();
+        if let Err(e) = ne_spike::send_provider_message(msg) {
+            ne_spike::ne_debug(&format!(
+                "routing-mode live push failed (persisted; applies next connect): {e}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn spark_set_routing_mode(mode: String) -> Result<(), String> {
+    config::save_routing_mode(&mode)
+}
+
 // U1b-2a: the UI now drives a real SparkBackend command surface — `spark_status`
 // reads the live NE connection state; `spark_connect`/`spark_disconnect` resolve
 // config and report honest "pending" until the U1b-2b write path lands. (The U1a
@@ -739,7 +783,9 @@ pub fn run() {
             spark_servers,
             spark_select_server,
             spark_get_split_tunnel,
-            spark_set_split_tunnel
+            spark_set_split_tunnel,
+            spark_get_routing_mode,
+            spark_set_routing_mode
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
