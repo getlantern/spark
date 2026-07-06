@@ -1,0 +1,8 @@
+# nextest configuration for CI.
+#
+# Per-test timeout: the whole suite runs in a few seconds on macOS/Linux CI, so any single test still
+# running after 2×60s is stuck (e.g. a loopback/network integration test that hangs on Windows). Mark
+# it slow at 60s and TERMINATE it at 120s so the job fails fast and *names* the offending test, instead
+# of stalling the runner for many minutes.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 2 }

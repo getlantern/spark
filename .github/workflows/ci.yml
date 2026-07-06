@@ -34,8 +34,18 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - name: Test
-        run: cargo test --workspace --all-features
+        # nextest enforces a per-test timeout (.config/nextest.toml), so a hung test (e.g. a
+        # loopback/network test that blocks on Windows) fails fast and is *named* rather than stalling
+        # the whole job for many minutes. Respects `#[ignore]` (the live_* tests) like `cargo test`.
+        run: cargo nextest run --workspace --all-features
+      - name: Doctests
+        # nextest does not run doctests; run them separately to keep doc-example coverage.
+        run: cargo test --workspace --all-features --doc
 
   # Belt-and-suspenders compile check per desktop target (default features + `-D warnings`),
   # complementing the per-OS `test` jobs (which run `--all-features`). Each target is checked on a
