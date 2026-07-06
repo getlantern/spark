@@ -46,10 +46,10 @@ impl Router {
                 RuleSet::from_domains_and_ips(&s.domains, &s.ips),
             )])
         });
-        match self.user_bypass.write() {
-            Ok(mut guard) => *guard = matcher,
-            Err(_) => warn!("rules: user_bypass lock poisoned; split-tunnel update dropped"),
-        }
+        // Recover from a poisoned lock (`into_inner`) and apply the update rather than dropping it —
+        // the inner Option is trivially consistent, and a poisoning event must not silently freeze or
+        // disable split-tunnel bypass.
+        *self.user_bypass.write().unwrap_or_else(|e| e.into_inner()) = matcher;
     }
 
     /// Build a router from the parsed [`SmartRoutingConfig`]. `load` supplies each rule-set's raw
@@ -103,7 +103,11 @@ impl Router {
     /// is `Some` once the fake-IP DNS layer recovers it (M4); at L3 it is `None`, so only IP/CIDR
     /// rules (base or bypass) can match.
     pub fn decide(&self, ip: IpAddr, domain: Option<&str>) -> Action {
-        if let Ok(guard) = self.user_bypass.read() {
+        // Recover from a poisoned lock (`into_inner`) rather than silently skipping the bypass — the
+        // inner matcher is always consistent, so a poisoning event must not quietly disable
+        // split-tunnel bypass (and this per-flow path must not log-spam on every call).
+        {
+            let guard = self.user_bypass.read().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = guard.as_ref() {
                 if m.lookup(domain, ip).is_some() {
                     return Action::Direct;

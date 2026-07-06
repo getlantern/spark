@@ -5,7 +5,9 @@
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
-  let st = $state<SplitTunnel>({ enabled: true, domains: [], ips: [] });
+  // Fail-safe default: if getSplitTunnel() fails on mount, don't persist enabled:true (which would
+  // route traffic around the VPN unintentionally). The real state is loaded in onMount.
+  let st = $state<SplitTunnel>({ enabled: false, domains: [], ips: [] });
   let entry = $state("");
   let snack = $state<string | null>(null);
   let snackTimer: ReturnType<typeof setTimeout> | undefined;

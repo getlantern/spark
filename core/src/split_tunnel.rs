@@ -112,13 +112,16 @@ fn normalize_one(entry: &str) -> String {
     e.trim().to_string()
 }
 
-/// A minimal hostname sanity check (not full RFC): at least one dot, only letters/digits/`-`/`.`,
-/// no leading/trailing/adjacent dots. Keeps obvious junk ("not a domain") out of the list.
+/// A minimal hostname sanity check (not full RFC): at least one dot, at least one ASCII letter,
+/// only letters/digits/`-`/`.`, no leading/trailing/adjacent dots. The letter requirement rejects
+/// numeric-only dotted junk like `999.999.999.999` (which isn't a valid IP either), keeping the
+/// bypass list sane and consistent with the desktop UI's classifier.
 fn is_plausible_hostname(h: &str) -> bool {
     !h.starts_with('.')
         && !h.ends_with('.')
         && !h.contains("..")
         && h.contains('.')
+        && h.chars().any(|c| c.is_ascii_alphabetic())
         && h.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
 }
@@ -226,6 +229,16 @@ mod tests {
         );
         assert_eq!(out.added_ips, vec!["10.0.0.0/8".to_string()]);
         assert!(out.rejected.is_empty());
+    }
+
+    #[test]
+    fn add_entries_rejects_numeric_only_dotted_junk() {
+        let mut st = SplitTunnel::default();
+        // 999.999.999.999 is neither a valid IP (octets > 255) nor a plausible hostname (no letter).
+        let out = st.add_entries("999.999.999.999, 1.2.3.4");
+        assert_eq!(out.rejected, vec!["999.999.999.999".to_string()]);
+        assert_eq!(out.added_ips, vec!["1.2.3.4".to_string()]);
+        assert!(out.added_domains.is_empty());
     }
 
     #[test]
