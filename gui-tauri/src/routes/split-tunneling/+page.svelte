@@ -100,7 +100,7 @@
   .toggle-row { justify-content: space-between; cursor: default; }
   .ic { font-size: 20px; width: 24px; text-align: center; }
   .switch {
-    width: 46px; height: 28px; border-radius: 999px; border: none; background: #c8ccce;
+    width: 46px; height: 28px; border-radius: 999px; border: none; background: var(--switch-off);
     position: relative; cursor: pointer; transition: background 0.15s ease; flex-shrink: 0;
   }
   .switch.on { background: var(--brand, #1f9d55); }
