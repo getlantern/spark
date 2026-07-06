@@ -256,9 +256,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // {enabled,domains,ips} JSON string. Missing list → "{}" (disabled / empty policy).
             // Trim + treat an empty/whitespace list as "{}" so both this live-update path and the
             // startup providerConfiguration path map "no list" the same way.
-            let listJson = (obj["list"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .flatMap { $0.isEmpty ? nil : $0 } ?? "{}"
+            let trimmed = (obj["list"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let listJson = trimmed.isEmpty ? "{}" : trimmed
             let rc = listJson.withCString { spark_set_split_tunnel($0) }
             log.notice("handleAppMessage: splitTunnel rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
