@@ -155,7 +155,7 @@ impl SplitTunnel {
             if host.is_empty() {
                 continue; // an empty field (trailing comma / whitespace) is not a rejection
             }
-            if crate::rules::srs::parse_ip_or_cidr(&host).is_some() {
+            if is_ip_or_cidr(&host) {
                 if !self.ips.iter().any(|e| e == &host) {
                     self.ips.push(host.clone());
                     out.added_ips.push(host);
@@ -203,12 +203,31 @@ fn is_plausible_hostname(h: &str) -> bool {
         && h.contains('.')
         && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
 }
+
+/// Whether `s` is a bare IP or a CIDR (`a.b.c.d/len`). Validated with `std::net` locally so this
+/// always-compiled module does NOT depend on the `smart-routing`-gated rules engine (which has its
+/// own `parse_ip_or_cidr` for building the matcher). Classification only — the router re-parses.
+fn is_ip_or_cidr(s: &str) -> bool {
+    use std::net::IpAddr;
+    match s.split_once('/') {
+        Some((addr, prefix)) => match addr.trim().parse::<IpAddr>() {
+            Ok(ip) => prefix
+                .trim()
+                .parse::<u8>()
+                .is_ok_and(|p| p <= if ip.is_ipv4() { 32 } else { 128 }),
+            Err(_) => false,
+        },
+        None => s.parse::<IpAddr>().is_ok(),
+    }
+}
 ```
+
+> **Note:** `is_ip_or_cidr` is local to `split_tunnel.rs` on purpose — `split_tunnel` is compiled in every build, but `crate::rules::srs` (and its `parse_ip_or_cidr`) only exist under the `smart-routing` feature. Do NOT call `srs::parse_ip_or_cidr` from here or the base build breaks.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cargo test -p spark-core --lib split_tunnel`
-Expected: PASS (5 tests). (Depends on Task A2's `parse_ip_or_cidr`; if A2 isn't done yet, do A2 first — they're a pair. Recommended order: A2 then A1's Step 4/5.)
+Expected: PASS (5 tests). This runs with **no features** — `split_tunnel` must compile in the base build, so it validates IPs locally (`is_ip_or_cidr`) and does NOT reference the `smart-routing`-gated `rules` module.
 
 - [ ] **Step 6: Commit**
 
