@@ -136,13 +136,17 @@ variable-ize hardcoded colors), `src/lib/spark_backend.ts` + `tauri_backend.ts` 
 `SparkBridge.kt`, `platforms/apple/Sources/SparkNE/PacketTunnelProvider.swift`,
 `gui-tauri/src-tauri/src/{lib.rs,config.rs}`.
 
-## Phasing (may ship as 1–2 PRs)
+## Phasing (single PR — internal build order)
+
+Ships as **one PR**. The phases below are the build/commit order within it, not separate PRs:
 
 - **Phase A — Visual foundation (pure frontend):** theming (dark), SPARK rebrand, Home Pro redesign,
-  split-tunnel exact-match + variable-ize. Independently shippable + verifiable via `npm run dev`
-  (both themes) and the DMG.
-- **Phase B — Routing Mode:** the `/routing` screen + the backend mode slice. Heavier (cross-layer);
-  candidate for its own PR after Phase A lands.
+  split-tunnel exact-match + variable-ize. Verifiable standalone via `npm run dev` (both themes).
+- **Phase B — Routing Mode:** the `/routing` screen + the cross-layer backend mode slice (Router
+  mode → fd_tunnel handle → FFI → NE → Tauri → seam). Built on top of Phase A.
+
+The whole-workspace gate + a fresh notarized DMG run at the end validate the combined result before
+review.
 
 ## Verification
 
