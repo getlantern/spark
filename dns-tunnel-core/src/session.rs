@@ -393,7 +393,7 @@ impl ClientSession {
         let mut syn = Frame::new(Kind::Syn);
         syn.stream_id = Some(sid);
         syn.payload = target;
-        let wire = frame::seal_short(up, &self.conn_id, &nonce, &syn);
+        let wire = frame::seal_short(up, &self.conn_id, &nonce, &syn).ok()?;
         if let Some(s) = self.streams.get_mut(&sid) {
             s.last_open_ms = Some(now);
         }
@@ -455,7 +455,7 @@ impl ClientSession {
             let nonce = crypto::random_nonce().ok()?;
             (
                 f.stream_id,
-                frame::seal_short(up, &self.conn_id, &nonce, &f),
+                frame::seal_short(up, &self.conn_id, &nonce, &f).ok()?,
             )
         } else if self.any_stream_alive() {
             // Idle keepalive: poll the server for downlink data (and any pending stream SynAck).
@@ -463,7 +463,7 @@ impl ClientSession {
             let nonce = crypto::random_nonce().ok()?;
             (
                 None,
-                frame::seal_short(up, &self.conn_id, &nonce, &Frame::new(Kind::KeepAlive)),
+                frame::seal_short(up, &self.conn_id, &nonce, &Frame::new(Kind::KeepAlive)).ok()?,
             )
         } else {
             return None;
@@ -574,7 +574,7 @@ impl ClientSession {
         let nonce = crypto::random_nonce().ok()?;
         let mut f = Frame::new(Kind::MtuProbe);
         f.payload = Bytes::copy_from_slice(&target.to_be_bytes());
-        let wire = frame::seal_short(up, &self.conn_id, &nonce, &f);
+        let wire = frame::seal_short(up, &self.conn_id, &nonce, &f).ok()?;
         dns::build_query(self.next_txn(), &wire, &self.zone, self.cfg.edns_udp).ok()
     }
 
@@ -585,7 +585,7 @@ impl ClientSession {
         let nonce = crypto::random_nonce().ok()?;
         let mut f = Frame::new(Kind::SetMtu);
         f.payload = Bytes::copy_from_slice(&size.to_be_bytes());
-        let wire = frame::seal_short(up, &self.conn_id, &nonce, &f);
+        let wire = frame::seal_short(up, &self.conn_id, &nonce, &f).ok()?;
         dns::build_query(self.next_txn(), &wire, &self.zone, self.cfg.edns_udp).ok()
     }
 
@@ -886,7 +886,7 @@ impl Server {
                     resp.payload = Bytes::from(payload);
                     let sess = self.sessions.get(conn_id)?;
                     let nonce = crypto::random_nonce().ok()?;
-                    let out = frame::seal_short(&sess.down, conn_id, &nonce, &resp);
+                    let out = frame::seal_short(&sess.down, conn_id, &nonce, &resp).ok()?;
                     return dns::build_answer(query, &out, self.cfg.edns_udp).ok();
                 }
                 Kind::SetMtu => {
@@ -913,7 +913,7 @@ impl Server {
                         let mut ack = Frame::new(Kind::SynAck);
                         ack.stream_id = Some(sid);
                         let nonce = crypto::random_nonce().ok()?;
-                        let out = frame::seal_short(&sess.down, conn_id, &nonce, &ack);
+                        let out = frame::seal_short(&sess.down, conn_id, &nonce, &ack).ok()?;
                         return dns::build_answer(query, &out, self.cfg.edns_udp).ok();
                     }
                 }
@@ -938,7 +938,7 @@ impl Server {
         let downlink = match sess.poll_downlink(now) {
             Some(f) => {
                 let nonce = crypto::random_nonce().ok()?;
-                frame::seal_short(&sess.down, conn_id, &nonce, &f)
+                frame::seal_short(&sess.down, conn_id, &nonce, &f).ok()?
             }
             None => Vec::new(),
         };

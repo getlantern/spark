@@ -349,15 +349,15 @@ pub fn seal_short(
     conn_id: &[u8; CONN_ID_LEN],
     nonce: &[u8; NONCE_LEN],
     frame: &Frame,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, crate::crypto::CryptoError> {
     let mut ct = frame.encode();
-    aead.seal(nonce, &mut ct);
+    aead.seal(nonce, &mut ct)?;
     let mut wire = Vec::with_capacity(1 + CONN_ID_LEN + NONCE_LEN + ct.len());
     wire.push(FORM_SHORT);
     wire.extend_from_slice(conn_id);
     wire.extend_from_slice(nonce);
     wire.extend_from_slice(&ct);
-    wire
+    Ok(wire)
 }
 
 /// Open a `Data` packet's sealed inner frame with `aead` (the session's direction key).
@@ -482,7 +482,7 @@ mod tests {
             comp_algo: None,
             payload: Bytes::from_static(b"payload bytes"),
         };
-        let wire = seal_short(&aead, &conn, &nonce, &frame);
+        let wire = seal_short(&aead, &conn, &nonce, &frame).unwrap();
         assert_eq!(wire[0], FORM_SHORT);
 
         match parse_packet(&wire).unwrap() {
@@ -539,7 +539,7 @@ mod tests {
             f.payload = Bytes::from_static(b"abcd");
             f
         };
-        let mut wire = seal_short(&aead, &conn, &nonce, &frame);
+        let mut wire = seal_short(&aead, &conn, &nonce, &frame).unwrap();
 
         // Flip a ciphertext byte (last byte is in the tag region) → open fails.
         let last = wire.len() - 1;
@@ -557,7 +557,7 @@ mod tests {
         }
 
         // Flip a nonce byte → open fails.
-        let mut wire2 = seal_short(&aead, &conn, &nonce, &frame);
+        let mut wire2 = seal_short(&aead, &conn, &nonce, &frame).unwrap();
         wire2[1 + CONN_ID_LEN] ^= 0x01; // first nonce byte (after form + conn_id)
         if let Packet::Data {
             nonce, ciphertext, ..

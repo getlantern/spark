@@ -60,6 +60,9 @@ pub enum CryptoError {
     /// AEAD key setup failed (should be unreachable for a 32-byte key).
     #[error("AEAD key setup failed")]
     KeySetup,
+    /// AEAD seal failed (should be unreachable for a valid key + unique 12-byte nonce).
+    #[error("AEAD seal failed")]
+    Seal,
     /// The secure RNG failed to produce bytes.
     #[error("secure RNG failure")]
     Rng,
@@ -358,15 +361,17 @@ impl Aead {
 
     /// Seal in place with empty AAD: `buf` becomes ciphertext ‖ 16-byte tag. Nonce uniqueness is the
     /// caller's contract (a fresh random nonce per message).
-    pub fn seal(&self, nonce: &[u8; NONCE_LEN], buf: &mut Vec<u8>) {
-        // Infallible for a valid key/nonce (mirrors the in-repo shadowsocks idiom); documented so.
+    pub fn seal(&self, nonce: &[u8; NONCE_LEN], buf: &mut Vec<u8>) -> Result<(), CryptoError> {
+        // In practice unreachable for a valid key + 12-byte nonce, but return `Result` rather than
+        // panicking — mirrors the in-repo shadowsocks `Aead::seal`, and keeps the data path free of
+        // `expect` (CLAUDE.md). Callers map a seal error to "drop this packet".
         self.0
             .seal_in_place_append_tag(
                 aead::Nonce::assume_unique_for_key(*nonce),
                 aead::Aad::empty(),
                 buf,
             )
-            .expect("ring seal is infallible for a valid key and nonce");
+            .map_err(|_| CryptoError::Seal)
     }
 
     /// Open in place with empty AAD: `buf` is ciphertext ‖ tag; returns the plaintext slice.
@@ -495,7 +500,7 @@ mod tests {
             let nonce = [1u8; NONCE_LEN];
             let plain = b"the quick brown fox".to_vec();
             let mut buf = plain.clone();
-            aead.seal(&nonce, &mut buf);
+            aead.seal(&nonce, &mut buf).unwrap();
             assert_eq!(buf.len(), plain.len() + TAG_LEN);
             let opened = aead.open(&nonce, &mut buf).unwrap();
             assert_eq!(opened, &plain[..]);
@@ -508,7 +513,7 @@ mod tests {
         let aead = Aead::new(Cipher::ChaCha20Poly1305, &key).unwrap();
         let nonce = [2u8; NONCE_LEN];
         let mut buf = b"secret".to_vec();
-        aead.seal(&nonce, &mut buf);
+        aead.seal(&nonce, &mut buf).unwrap();
 
         // Flip a ciphertext byte → auth failure.
         let mut tampered = buf.clone();
@@ -537,7 +542,7 @@ mod tests {
         let up = Aead::new(Cipher::ChaCha20Poly1305, &keys.up).unwrap();
         let nonce = random_nonce().unwrap();
         let mut buf = b"uplink frame".to_vec();
-        up.seal(&nonce, &mut buf);
+        up.seal(&nonce, &mut buf).unwrap();
         assert_eq!(up.open(&nonce, &mut buf).unwrap(), b"uplink frame");
     }
 
@@ -573,7 +578,7 @@ mod tests {
         let up_s = Aead::new(Cipher::ChaCha20Poly1305, &ks.up).unwrap();
         let nonce = random_nonce().unwrap();
         let mut buf = b"forward-secret uplink".to_vec();
-        up_c.seal(&nonce, &mut buf);
+        up_c.seal(&nonce, &mut buf).unwrap();
         assert_eq!(
             up_s.open(&nonce, &mut buf).unwrap(),
             b"forward-secret uplink"
