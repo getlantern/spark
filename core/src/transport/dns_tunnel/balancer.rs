@@ -332,6 +332,10 @@ pub fn system_resolvers() -> Vec<String> {
 /// Parse `nameserver` lines from `resolv.conf` content into pool specs (`ip:53`; IPv6 bracketed as
 /// `[ip]:53` so [`parse_spec`] accepts it). Comments (`#`/`;`) and non-`nameserver` directives are
 /// skipped, as are unparseable addresses.
+// Pure parser, but only *called* from the `#[cfg(unix)]` arm of `system_resolvers` (its unit test
+// exercises it on every platform). Allow it to be unused off-Unix so `clippy -D warnings` (which
+// implies `-D dead-code`) stays green on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn parse_resolv_conf(contents: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in contents.lines() {
