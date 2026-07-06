@@ -688,9 +688,10 @@ fn spark_select_server(_index: i32) -> Result<(), String> {
     Err("server selection unsupported on this platform".to_owned())
 }
 
-// Split-tunnel bypass list: get/set. The list is persisted to
-// ~/Library/Application Support/org.getlantern.spark/split_tunnel.json and
-// injected into the NE at connect via providerConfiguration["splitTunnel"].
+// Split-tunnel bypass list: get/set. The list is persisted to a per-OS app config dir (macOS
+// ~/Library/Application Support, Windows %APPDATA%, other Unix $XDG_CONFIG_HOME/~/.config) under
+// org.getlantern.spark/split_tunnel.json and injected into the NE at connect via
+// providerConfiguration["splitTunnel"].
 // When connected, `spark_set_split_tunnel` also pushes the new list live via
 // the NE control channel (best-effort; errors are silently discarded so a
 // temporarily-down channel never blocks the UI save).

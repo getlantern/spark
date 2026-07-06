@@ -69,13 +69,19 @@ pub fn load_split_tunnel() -> String {
         .unwrap_or_else(default)
 }
 
-/// Persist the list JSON (creates the directory if needed). Returns an error string on failure.
+/// Persist the list, creating the directory if needed. Validates + canonicalizes to the
+/// `{enabled,domains,ips}` shape first (mirroring [`load_split_tunnel`]) and returns an error on
+/// invalid/wrong-shape input — so a bad caller surfaces a save failure to the UI rather than writing
+/// garbage that a later `load_split_tunnel` would silently discard (losing the user's list).
 pub fn save_split_tunnel(json: &str) -> Result<(), String> {
+    let shape: SplitTunnelShape =
+        serde_json::from_str(json).map_err(|e| format!("invalid split-tunnel JSON: {e}"))?;
+    let canonical = serde_json::to_string(&shape).map_err(|e| e.to_string())?;
     let p = split_tunnel_path().ok_or("no app config dir (config-dir env var unset)")?;
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&p, json).map_err(|e| e.to_string())
+    std::fs::write(&p, canonical).map_err(|e| e.to_string())
 }
 
 /// One server for the selection UI. Serializes to the camelCase shape the TS `ServerInfo` expects,

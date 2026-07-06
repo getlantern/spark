@@ -89,11 +89,23 @@
     }
   }
   let splitEnabled = $state(false);
+  // Best-effort refresh of the Home row's split-tunnel state; polled alongside status so the row
+  // doesn't go stale after the list is toggled/edited elsewhere in the app.
+  async function loadSplit() {
+    try {
+      splitEnabled = (await backend.getSplitTunnel()).enabled;
+    } catch {
+      /* leave the last-known value */
+    }
+  }
 
-  onMount(async () => {
+  onMount(() => {
     refresh();
-    poll = setInterval(refresh, 2000);
-    try { splitEnabled = (await backend.getSplitTunnel()).enabled; } catch {}
+    loadSplit();
+    poll = setInterval(() => {
+      refresh();
+      loadSplit();
+    }, 2000);
   });
   onDestroy(() => clearInterval(poll));
 </script>
