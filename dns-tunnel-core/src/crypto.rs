@@ -1,11 +1,15 @@
-//! Crypto for the DNS-tunnel core (ADR 0011 §2.4): base64 PSK decode, the HKDF-SHA256 per-session
-//! key schedule, `ring` AEAD wrappers, and secure-random helpers.
+//! Crypto for the DNS-tunnel core (ADR 0011 §2.4): the server's static Ed25519 identity, the
+//! forward-secret X25519 handshake, the HKDF-SHA256 per-session key schedule, `ring` AEAD wrappers,
+//! and secure-random helpers.
 //!
 //! AEAD is ChaCha20-Poly1305 (default) or AES-256-GCM — both 32-byte key, 12-byte nonce, 16-byte tag.
-//! Keys are derived per session: `PRK = HKDF-Extract(salt = session_salt, ikm = PSK)`, then
+//! Keys are derived per session from the **ephemeral↔ephemeral X25519 shared secret** (not a PSK):
+//! `PRK = HKDF-Extract(ikm = X25519(client_eph, server_eph))`, then
 //! `HKDF-Expand(PRK, info = "spark-dns-tunnel v1 " ‖ <role> ‖ ConnectionID)` yields independent
-//! upload / download / handshake keys and a key-commitment value. Per-session key separation keeps
-//! the random-nonce birthday bound *per session*, not global.
+//! upload / download keys. The server's static Ed25519 key only *authenticates* the handshake (it
+//! signs the transcript) — it never derives session keys, so a later static-key compromise cannot
+//! decrypt past traffic (forward secrecy). Per-session key separation keeps the random-nonce birthday
+//! bound *per session*, not global.
 //!
 //! The `ring` idioms here mirror the (live-gated) in-repo uses: `hkdf` from
 //! `core/src/transport/samizdat/auth.rs` and `aead::LessSafeKey` from

@@ -41,7 +41,8 @@ pub struct ServerConfig {
 enum Egress {
     /// Bytes read from the target TCP socket (to deliver to the client as downlink).
     Data(Vec<u8>),
-    /// The target closed or the connect failed — tear the session down.
+    /// The target closed or the connect failed — close (FIN) the affected stream so the client sees
+    /// EOF; the session and its other streams live on.
     Eof,
 }
 

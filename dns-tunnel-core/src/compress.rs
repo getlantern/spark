@@ -44,7 +44,11 @@ pub fn decompress(algo: u8, data: &[u8]) -> Result<Vec<u8>, CompressError> {
         ALGO_NONE => Ok(data.to_vec()),
         ALGO_LZ4 => {
             // Reject a forged size prefix before `lz4_flex` allocates it (anti-bomb).
-            let prefix: [u8; 4] = data.get(..4).ok_or(CompressError::Lz4)?.try_into().unwrap();
+            let prefix: [u8; 4] = data
+                .get(..4)
+                .ok_or(CompressError::Lz4)?
+                .try_into()
+                .map_err(|_| CompressError::Lz4)?;
             let claimed = u32::from_le_bytes(prefix) as usize;
             if claimed > MAX_DECOMPRESSED {
                 return Err(CompressError::TooLarge(claimed));
