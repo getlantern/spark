@@ -24,9 +24,12 @@ use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
 use crate::config::{
-    AnytlsConfig, Config, FrontedMeekConfig, Hysteria2Config, SamizdatConfig, ShadowsocksConfig,
-    WasmConfig,
+    AnytlsConfig, Config, DnsTunnelConfig, FrontedMeekConfig, Hysteria2Config, SamizdatConfig,
+    ShadowsocksConfig, WasmConfig,
 };
+// Only the cipher-mapping helper (feature-gated) needs this; keep it out of the base build.
+#[cfg(feature = "dns-tunnel")]
+use crate::config::DnsTunnelCipher;
 use crate::net::SocketProtector;
 use crate::BoxedStream;
 use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
@@ -67,6 +70,11 @@ pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
 /// genome + a boring-realized JA4 fidelity score vs the anchor. The full loop is server-side.
 pub mod discovery;
+/// DNS-tunnel transport (ADR 0011): a clean-slate DNS-tunnelling protocol that aggregates over many
+/// recursive resolvers. Behind the `dns-tunnel` feature so the base build pulls neither
+/// `dns-tunnel-core` nor its `lz4_flex`.
+#[cfg(feature = "dns-tunnel")]
+pub mod dns_tunnel;
 /// Domain-fronted meek polling transport (Shir-o-Khorshid CDN-fronting, no MITM).
 /// Behind the `fronted-meek` feature so the base build pulls neither flint-fronted
 /// nor its boring dial path. See docs/fronted-meek-design.md.
@@ -167,6 +175,7 @@ pub(crate) fn build_one(
         ServerSpec::Samizdat(cfg) => samizdat_transport(cfg, protector.cloned(), wire.clone()),
         ServerSpec::Shadowsocks(cfg) => shadowsocks_transport(cfg, protector.cloned()),
         ServerSpec::Hysteria2(cfg) => hysteria2_transport(cfg, protector.cloned()),
+        ServerSpec::DnsTunnel(cfg) => dns_tunnel_transport(cfg, protector.cloned()),
         ServerSpec::FrontedMeek(cfg) => fronted_meek_transport(cfg),
         ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
         ServerSpec::Tunnel(cfg) => {
@@ -233,6 +242,7 @@ fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
         ServerSpec::FrontedMeek(_) => "meek",
         ServerSpec::Wasm(_) => "wasm",
         ServerSpec::Tunnel(_) => "tunnel",
+        ServerSpec::DnsTunnel(_) => "dns-tunnel",
     }
 }
 
@@ -257,6 +267,10 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         ),
         ServerSpec::Wasm(c) => format!("wasm {}", c.server),
         ServerSpec::Tunnel(c) => format!("tunnel {}", c.server),
+        // Log hygiene: never surface the tunnel zone/resolvers — just the resolver count.
+        ServerSpec::DnsTunnel(c) => {
+            format!("dns-tunnel ({} configured resolvers)", c.resolvers.len())
+        }
     }
 }
 
@@ -383,6 +397,12 @@ pub fn from_config_with_control(
     // `server` tunnel. Not TLS, so no shaping plan. Not a pool, so no control handle.
     if let Some(hy2) = &config.transport.hysteria2 {
         let (tcp, udp) = hysteria2_transport(hy2, protector)?;
+        return Ok((tcp, udp, None));
+    }
+    // DNS-tunnel (ADR 0011) — the shutdown escalation tier. Like the others, takes precedence over the
+    // plain `server` tunnel. Not TLS (no shaping plan); not a pool (no control handle).
+    if let Some(dt) = &config.transport.dns_tunnel {
+        let (tcp, udp) = dns_tunnel_transport(dt, protector)?;
         return Ok((tcp, udp, None));
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
@@ -689,6 +709,111 @@ fn hysteria2_transport(
     Err(io::Error::other(
         "transport.hysteria2 is configured but spark was built without the `hysteria2` feature",
     ))
+}
+
+/// Build the DNS-tunnel transport (feature `dns-tunnel`, ADR 0011): decode the server's base64 Ed25519
+/// public key (which authenticates the forward-secret handshake), map the config cipher, and build a
+/// resolver list (the configured `resolvers`, or the `authoritative`
+/// address when none are given — authoritative mode). TCP only; `UdpTransport` reports unsupported.
+#[cfg(feature = "dns-tunnel")]
+fn dns_tunnel_transport(
+    cfg: &DnsTunnelConfig,
+    protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let server_pub = dns_tunnel_core::crypto::decode_server_pub(&cfg.server_pubkey)
+        .map_err(|e| io::Error::other(format!("transport.dns-tunnel: {e}")))?;
+    let mut resolvers = cfg.resolvers.clone();
+    // Auto-include the OS-configured resolver(s) (default on) — during a shutdown the mandated local
+    // resolver is often the only one that still forwards DNS. Recursive mode only (authoritative mode
+    // dials the server directly). Log hygiene: never log the discovered IPs.
+    if cfg.authoritative.is_none() && cfg.use_system_resolvers.unwrap_or(true) {
+        resolvers.extend(dns_tunnel::balancer::system_resolvers());
+    }
+    if resolvers.is_empty() {
+        if let Some(auth) = &cfg.authoritative {
+            resolvers.push(auth.socket_addr()?.to_string());
+        }
+    }
+    if resolvers.is_empty() {
+        return Err(io::Error::other(
+            "transport.dns-tunnel: set `resolvers`, `authoritative`, or enable system resolvers",
+        ));
+    }
+    let cipher = match cfg.cipher {
+        DnsTunnelCipher::ChaCha20Poly1305 => dns_tunnel_core::crypto::Cipher::ChaCha20Poly1305,
+        DnsTunnelCipher::Aes256Gcm => dns_tunnel_core::crypto::Cipher::Aes256Gcm,
+    };
+    let session = dns_tunnel_core::session::Config {
+        cipher,
+        ..Default::default()
+    };
+    let pool_cfg = dns_tunnel::balancer::PoolConfig {
+        // ≥1; higher = delivery probability + fast working-subset discovery under a shutdown.
+        duplication: cfg.duplication.unwrap_or(1).max(1),
+        ..Default::default()
+    };
+    let t = Arc::new(dns_tunnel::DnsTunnelTransport::new(
+        cfg.zone.clone(),
+        server_pub,
+        resolvers,
+        pool_cfg,
+        session,
+        protector,
+    ));
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `dns-tunnel` feature, a configured DNS-tunnel transport is a hard error (mirrors
+/// anytls/shadowsocks/hysteria2/wasm).
+#[cfg(not(feature = "dns-tunnel"))]
+fn dns_tunnel_transport(
+    _cfg: &DnsTunnelConfig,
+    _protector: Option<SocketProtector>,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.dns-tunnel is configured but spark was built without the `dns-tunnel` feature",
+    ))
+}
+
+#[cfg(all(test, feature = "dns-tunnel"))]
+mod dns_tunnel_wiring_tests {
+    use super::*;
+    use crate::config::{DnsTunnelCipher, DnsTunnelCompression, DnsTunnelConfig};
+
+    // 32 bytes, base64 — the shape of an Ed25519 public key (validity isn't checked until a handshake).
+    const PUBKEY_B64: &str = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
+
+    #[test]
+    fn builder_accepts_a_valid_config() {
+        let cfg = DnsTunnelConfig {
+            zone: "t.example.com".into(),
+            server_pubkey: PUBKEY_B64.into(),
+            resolvers: vec!["1.1.1.1".into(), "8.8.8.8:53".into()],
+            authoritative: None,
+            cipher: DnsTunnelCipher::Aes256Gcm,
+            compression: DnsTunnelCompression::Off,
+            duplication: Some(3),
+            use_system_resolvers: Some(false),
+        };
+        assert!(dns_tunnel_transport(&cfg, None).is_ok());
+    }
+
+    #[test]
+    fn builder_rejects_no_resolvers_and_no_authoritative() {
+        let cfg = DnsTunnelConfig {
+            zone: "t.example.com".into(),
+            server_pubkey: PUBKEY_B64.into(),
+            resolvers: vec![],
+            authoritative: None,
+            cipher: DnsTunnelCipher::default(),
+            compression: DnsTunnelCompression::default(),
+            duplication: None,
+            // Deterministic: don't pull in this machine's /etc/resolv.conf, so the empty-pool error
+            // path is what's exercised.
+            use_system_resolvers: Some(false),
+        };
+        assert!(dns_tunnel_transport(&cfg, None).is_err());
+    }
 }
 
 /// Build the domain-fronted meek polling transport (feature `fronted-meek`).

@@ -196,6 +196,13 @@ pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver)
     if let Some(hy2) = config.transport.hysteria2.as_mut() {
         entries.push((&mut hy2.server, Some(&mut hy2.sni)));
     }
+    if let Some(dt) = config.transport.dns_tunnel.as_mut() {
+        // DNS-tunnel resolvers are IP literals (parsed by the balancer); only the optional
+        // `authoritative` endpoint may be a hostname. No SNI (not TLS).
+        if let Some(auth) = dt.authoritative.as_mut() {
+            entries.push((auth, None));
+        }
+    }
     for entry in config.transport.servers.iter_mut() {
         match &mut entry.spec {
             crate::config::ServerSpec::Anytls(c) => entries.push((&mut c.server, Some(&mut c.sni))),
@@ -209,6 +216,11 @@ pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver)
             crate::config::ServerSpec::Tunnel(c) => entries.push((&mut c.server, Some(&mut c.sni))),
             crate::config::ServerSpec::Wasm(_) => {} // wasm.server is a SocketAddr, never a hostname
             crate::config::ServerSpec::FrontedMeek(_) => {} // self-bootstrapping; no server host to resolve
+            crate::config::ServerSpec::DnsTunnel(c) => {
+                if let Some(auth) = c.authoritative.as_mut() {
+                    entries.push((auth, None)); // resolvers are IP literals; no SNI
+                }
+            }
         }
     }
     for (ep, sni) in entries {

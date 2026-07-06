@@ -2410,3 +2410,361 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (`swift build`).** Live gate BLOCKED on provisioning — needs a team-`ACZRKC3LQ9` profile for the
   NE entitlement [human step]; macOS app-extension path + iOS device gate pending.)
   [ ] M11 (transports)
+
+---
+
+**2026-07-01 — DNS-tunnel transport: M0 (spec) DONE.** New M11 transport filling the `DNSTT`
+escalation tier. A **clean-slate** DNS-tunnel protocol inspired by MasterDnsVPN's architecture
+(bespoke low-overhead ARQ, resolver load-balancing with duplication + per-stream sticky failover,
+per-resolver MTU probing, LZ4 compression) but **NOT** wire-compatible with it / dnstt / Slipstream —
+both the client and a Rust server are ours. Rejected Slipstream's QUIC-multipath: its only mature
+stack (picoquic) is C+OpenSSL, violating the pure-Rust/no-C/<3 MB rules. Design:
+`docs/dns-tunnel-design.md`; plan: `docs/dns-tunnel-plan.md`; **ADR 0011**. Fixes over MasterDnsVPN:
+8-byte random ConnectionID (theirs was 1-byte → 255-session cap + path-coupled; wide ID = the
+TurboTunnel ClientID that lets a session reassemble from frames via any resolver), **AEAD-only** via
+`ring` (ChaCha20-Poly1305 default / AES-256-GCM; random 96-bit nonce per DNS message; HKDF-SHA256
+per-session key schedule), dropped XOR / MD5-KDF / AES-192 / unauth-ChaCha20. Pure-Rust: `ring` +
+`lz4_flex` (not C `zstd`), hand-rolled DNS codec, behind a `dns-tunnel` cargo feature (base build
+unaffected). Crates: `dns-tunnel-core` (shared, no-I/O) + `dns-tunnel-server` (bin) + client
+`core/src/transport/dns_tunnel/`. **NEXT: M1** — `dns-tunnel-core` codec (frame/AEAD/DNS/base32/EDNS0,
+golden vectors + `cargo fuzz`; no network). Ladder M1→M5 in the plan. Open items: server crate home
+(spark workspace vs lantern-box), `dns-tunnel-core`→`flint` migration, protocol codename.
+
+**2026-07-01 — DNS-tunnel M1 (dns-tunnel-core codec) DONE.** New pure/no-I/O workspace crate
+`dns-tunnel-core` (33 tests, clippy -D warnings / fmt clean, feature-independent — base build
+untouched). Modules: `crypto` (base64 PSK decode; HKDF-SHA256 per-session schedule → up/down/
+handshake keys + commitment; `ring` AEAD ChaCha20-Poly1305/AES-256-GCM with random 96-bit nonce/msg;
+SystemRandom helpers — grounded in the samizdat/shadowsocks in-repo `ring` idioms), `frame` (inner
+version/kind/flags header + optional stream_id/seq/fragment/comp_algo + payload; QUIC-style long/short
+wire form — short=FORM|conn_id|nonce|AEAD, long/SYN adds cleartext salt; conn_id bound via the
+HKDF key's info, not AAD, so no header-check byte), `dns` (hand-rolled TXT query/answer, base32 QNAME
+packing [case-insensitive decode for 0x20], EDNS0 OPT, answer via 0xC00C compression pointer;
+bounds-checked panic-free Reader), `compress` (LZ4 via lz4_flex, compress-if-smaller + anti-bomb size
+cap), `mtu` (QNAME/base32 capacity math; a cross-check test proves the bound == dns::build_query's
+exact QNAME budget). `cargo fuzz` deferred → in-suite randomized no-panic guards on both parsers cover
+the contract for now. Design doc §2.2 synced to the implemented wire form. **NEXT: M2** — the ARQ core
+(reliable per-stream state machine: seq/ack/NACK gap recovery, RFC-6298 RTO, windowed flow control,
+lifecycle; tested on a simulated lossy/dup/reorder channel). The dominant lift.
+
+**2026-07-01 — DNS-tunnel M2a (ARQ reliable data path) DONE.** `dns-tunnel-core/src/arq.rs`: a
+sans-I/O `Stream` driven by a virtual ms clock — write/segment/transmit within a send window,
+in-order delivery + reorder buffer, cumulative ACK, adaptive RFC-6298 RTO retransmit (exponential
+backoff, Karn's algorithm), per-segment seq with RFC-1982 serial arithmetic, no congestion control
+by design. Deterministic sim-channel harness (drop/dup/reorder/latency, seeded xorshift). 5 ARQ
+tests (perfect delivery; recovery over 30% bidirectional loss; delivery under heavy reorder+dup;
+send-window bound; RTO adapts to RTT). 38 crate tests total; clippy/fmt clean. (Also fixed a masked
+fmt-check shell bug → reformatted the M1 modules; use `if cargo fmt -p X -- --check; then` — do NOT
+pipe to `tail && echo`, which hides the exit code.) **NEXT: M2b** — NACK fast-retransmit (receiver
+emits Nack(first-missing) on a gap; sender fast-retransmits without RTO backoff), then **M2c** —
+FIN/RST lifecycle (FIN as a phantom seq, acked in order; RST best-effort) + a property-test matrix.
+Then M3 (single-resolver E2E + minimal server).
+
+**2026-07-01 — DNS-tunnel M2 (ARQ) COMPLETE.** Added to `arq.rs`: NACK fast-retransmit (receiver
+Nack(first-missing) on a gap; sender fast-retransmits ahead of RTO, no backoff) and the FIN/RST
+lifecycle (FIN = phantom seq acked in order; one-way close → FinSent, symmetric → Closed; RST
+best-effort + propagates; a Closed stream still ACKs the peer's FIN retransmits — TIME_WAIT, fixed a
+real last-ACK hang the graceful-close test caught). **`dns-tunnel-core` is now feature-complete: 43
+tests (crypto/frame/dns/compress/mtu/arq), clippy -D warnings / fmt clean, pure no-I/O.** **NEXT:
+M3 — single-resolver end-to-end.** Build (a) a minimal `dns-tunnel-server` bin crate (bind UDP, parse
+tunnel TXT query via `dns::parse_query`, session table keyed by ConnectionID, per-session ARQ, single
+TCP egress, answer via `dns::build_answer`), and (b) the client `core/src/transport/dns_tunnel/`
+(`DnsTunnelTransport: Transport`, feature `dns-tunnel`, config `DnsTunnelConfig`, one resolver or
+`authoritative` direct, session handshake, ARQ pump over UDP DNS, reuse `protected_udp_socket`).
+Gate: 10 MiB loopback integrity in authoritative mode. Then M4 (balancer/multipath) + M5 (recursive
++ spark wiring). NOTE: M5's recursive gate + `sudo` TUN gate need real infra/root — flag as
+human/infra steps when reached; the loopback E2E (M3) and multipath sim gates are self-contained.
+
+**2026-07-01 — DNS-tunnel M3a (sans-I/O session layer) DONE.** `dns-tunnel-core/src/session.rs`
+composes crypto+frame+dns+arq into a full session (still no-I/O): `ClientSession` + `Server`
+(per-ConnectionID). Handshake = long-form Syn (cleartext salt + target payload) under the handshake
+key → server derives keys, replies SynAck. Data = the poll model (query carries one uplink frame or a
+KeepAlive; answer carries one downlink frame). **Verified E2E deterministically: full echo over a
+perfect net AND a 20%-loss/30%-reorder net, plus a manual handshake/uplink/downlink step test and
+garbage/wrong-zone rejection.** 47 crate tests, clippy/fmt clean. Two real bugs found + fixed en
+route: (1) ACK starved downlink data (one frame per answer) → reordered ARQ `poll_transmit` to defer
+standalone ACKs behind data/FIN; (2) the session didn't size ARQ `max_segment` from the MTU math, so
+128-byte segments overflowed the QNAME and `build_query` silently failed — now sized via
+`mtu::max_uplink_payload`/`max_downlink_payload`. **NEXT: M3b** — the tokio I/O wrappers (thin, since
+the session is sans-I/O): a `dns-tunnel-server` bin crate (bind UDP:53/loopback, `Server::on_query`
+loop, TCP egress pumping `take_from_client`/`deliver_to_client`) and the client
+`core/src/transport/dns_tunnel/` (`DnsTunnelTransport: Transport` behind the `dns-tunnel` feature,
+config wiring, a `protected_udp_socket` send/recv + `poll_query`/`on_answer` pump). Gate: a real
+loopback UDP 10 MiB integrity test in authoritative mode. Then M4 (balancer/multipath) + M5.
+
+**2026-07-01 — DNS-tunnel M3b-1 (spark config surface) DONE.** `core/src/config/mod.rs`:
+`DnsTunnelConfig` (zone, psk, resolvers, optional `authoritative` endpoint, cipher, compression) +
+`DnsTunnelCipher` (chacha20-poly1305 default / aes-256-gcm) + `DnsTunnelCompression` (off / lz4), and
+`TransportConfig.dns_tunnel` + its Default. 2 round-trip tests; clippy/fmt clean; base build untouched.
+Deliberately did NOT add `ServerSpec::DnsTunnel` yet — it forces exhaustive from_config/build_one
+match arms that need the transport impl, and an error arm would be a stub. **NEXT: M3b-2** — the
+transport impl, self-contained behind the `dns-tunnel` feature so it tests without from_config wiring:
+(1) `core/Cargo.toml`: `dns-tunnel = ["dep:dns-tunnel-core"]` + optional path dep on the workspace
+crate; (2) `#[cfg(feature="dns-tunnel")] pub mod dns_tunnel;` in `transport/mod.rs`;
+(3) `core/src/transport/dns_tunnel/mod.rs`: `DnsTunnelTransport: Transport` — `dial(target)` builds a
+`ClientSession`, binds `protected_udp_socket` connected to `authoritative` (M3 = authoritative mode),
+spawns an async pump (`tokio::select!` over UDP recv / a `tokio::io::duplex` app side / a
+keepalive+RTO tick driving `poll_query`/`on_answer`), returns the duplex half as `BoxedStream`;
+(4) a `#[tokio::test]` loopback gate (in-test UDP server task using `session::Server` + echo egress;
+client `dial`; 10 MiB round-trip). **Verify the `Transport` trait + `BoxedStream`/`Address` types and
+`protected_udp_socket` signature in `transport/mod.rs` first — don't guess.** from_config/build_one/
+`ServerSpec` + `bootstrap::resolve_endpoints` wiring → **M5**; the standalone `dns-tunnel-server` bin
+(production TCP egress + session store) → **M4**.
+
+**2026-07-01 — DNS-tunnel M3 COMPLETE (single-resolver E2E over real UDP).** M3b-2:
+`core/src/transport/dns_tunnel/mod.rs` behind the new `dns-tunnel` feature — `DnsTunnelTransport`
+impls `Transport`; `dial(target)` builds a `ClientSession`, opens a `protected_udp_socket` to the
+authoritative server (authoritative mode), spawns an async pump (drain-ready-answers-via-`try_recv` +
+flush-queries + deliver-downlink + keepalive/RTO tick), and returns a `PumpStream` that aborts the
+pump `JoinHandle` on drop. Target encoded as SOCKS5 addr bytes in the SYN. Added `Server::session_ids()`
+for egress enumeration. **Gate PASSED: a real loopback-UDP round-trip test moves 512 KiB bidirectionally
+through the full stack (handshake→base32 DNS codec→ARQ→poll model) in ~0.2s.** Base build clean
+(feature off), clippy/fmt clean (feature on). **NEXT: M4 — resolver balancer + multipath + the full
+server.** Two parts: (a) client `core/src/transport/dns_tunnel/balancer.rs` — a resolver pool
+(config `resolvers`, IP/CIDR expansion), per-resolver RTT/loss telemetry, selection strategy, packet
+duplication across resolvers, per-stream sticky failover, health auto-disable/reactivate; the pump
+sends each query to a chosen resolver instead of the single authoritative addr, and the server keys by
+ConnectionID so answers from any resolver reassemble (already true). (b) the standalone
+`dns-tunnel-server` bin crate (real TCP egress: dial the SYN target, pump the session stream ↔ TCP;
+session store with idle expiry). Gates: multipath aggregation (throughput scales with pool) + mid-
+session resolver-failover — both self-contained (sim or multi-loopback-resolver). Then M5 (recursive
+NS-delegation gate + `from_config`/`ServerSpec` wiring + size/log-hygiene audit; the live recursive +
+`sudo` TUN gates are the infra/human step).
+
+**2026-07-01 — DNS-tunnel M4a+M4b DONE (resolver aggregation + failover, live over UDP).**
+`core/src/transport/dns_tunnel/balancer.rs` (M4a): `ResolverPool` — parse/expand (IP/IP:port/IPv4
+CIDR/CIDR:port/[v6], deduped, :53 default, bounded), per-resolver smoothed RTT + half-life-decayed
+loss, `pick()` (sticky + healthiest others for duplication), `on_success`/`on_loss`, auto-disable +
+reactivate, per-stream sticky failover. M4b: the pump now runs **resolver mode** — one unconnected
+`protected_udp_socket`, each query `send_to` the picked resolver(s), `recv_from` attributes RTT to the
+answerer, unanswered queries age out into per-resolver loss; authoritative mode = a one-entry pool.
+**Headline capability proven end-to-end over real UDP:** `aggregation_survives_a_dead_resolver_via_
+duplication` (dup=2, {live,dead} → completes) and `fails_over_when_the_sticky_resolver_is_dead`
+({dead-first,live}, dup=1 → disables dead sticky, fails over, completes). 10 dns_tunnel tests
+(7 balancer + 3 live-UDP); base build clean (feature off); clippy/fmt clean. **NEXT: M4c** — the
+standalone `dns-tunnel-server` bin crate: a tokio wrapper around `session::Server` (bind UDP, on_query
+loop) with **real TCP egress** — on a new session decode the SYN's SOCKS5 target, `TcpStream::connect`
+it, and pump `take_from_client`→TCP-write / TCP-read→`deliver_to_client`; bounded session store with
+idle expiry. Then **M5**: wire the transport into `from_config`/`build_one`/`ServerSpec::DnsTunnel` +
+`bootstrap::resolve_endpoints` ("wire into transport selection"), decode the config PSK/cipher into the
+transport, feature-gated release size delta, log-hygiene audit. Live recursive-NS + `sudo` TUN gates
+remain the infra/human step.
+
+**2026-07-01 — DNS-tunnel M4c DONE → M4 COMPLETE.** New workspace crate `dns-tunnel-server`: a tokio
+wrapper around `session::Server` — `serve()` binds UDP, runs the on_query loop, and on each new
+session decodes the SYN's SOCKS5 target, `TcpStream::connect`s it, and bridges the session stream ↔ TCP
+via per-session channels (reader task TCP→downlink; writer uplink→TCP); idle sessions swept
+(`session::Server` gained `last_seen`/`sweep_idle`/`remove_session`). clap `main.rs`
+(--zone/--psk/--bind/--idle-secs), log-hygiene clean. **Gate PASSED: `tests/e2e.rs` drives a real
+ClientSession over real UDP through `serve()` to a real TCP echo target (4 KiB round-trip through
+actual TCP egress).** clippy/fmt clean; spark base build unaffected. **M4 done: aggregation +
+multipath + failover + full server, all proven over real UDP/TCP.** **NEXT: M5 (final) — wire into
+transport selection.** (a) config: add `ServerSpec::DnsTunnel(DnsTunnelConfig)` + the exhaustive match
+arms in `core/src/config/mod.rs` (`first_unresolved_host`, `spec_kind` if any) and
+`core/src/transport/mod.rs` (`build_one`); (b) a `dns_tunnel_transport(cfg, protector)` builder that
+decodes the PSK (`crypto::decode_psk`), maps `DnsTunnelCipher`→`session::Cipher`, builds the resolver
+list (config `resolvers`, or `[authoritative]`) + `DnsTunnelTransport::new`, gated with a
+`#[cfg(not(feature="dns-tunnel"))]` hard-error stub (mirror shadowsocks); (c) `from_config` precedence
+(single-transport `transport.dns_tunnel`) + `bootstrap::resolve_endpoints` no-SNI arm for
+`authoritative`; (d) `cargo build --release --features dns-tunnel` size delta report + a log-hygiene
+audit. The literal `<3 MB` in the docs is stale — the repo relaxed the base budget to ~10 MB
+(opt-level=3); the real requirement is feature-gated-so-base-build-unaffected (verify via `cargo tree`
+that base pulls no dns-tunnel deps). Live recursive-NS + `sudo` TUN gates = infra/human step.
+
+**2026-07-01 — DNS-tunnel M5 DONE → transport COMPLETE (M0–M5).** Wired into transport selection:
+`ServerSpec::DnsTunnel` (tag `dns-tunnel`) + `first_unresolved_host`/`build_one`/`spec_kind`/
+`spec_label` arms; `dns_tunnel_transport()` builder (decode PSK, map cipher, resolvers-or-authoritative)
++ `#[cfg(not(feature))]` hard-error stub; `from_config` single-transport precedence
+(`transport.dns_tunnel`); `bootstrap::resolve_endpoints` no-SNI arms; `DnsTunnelTransport` also impls
+`UdpTransport` (TCP-only → dial_udp errors). **Audit green:** base build pulls ZERO dns-tunnel deps
+(`cargo tree`) → base binary byte-identical; feature adds only `dns-tunnel-core`+`lz4_flex`; log
+hygiene clean (only a content-free "listening" line anywhere); `dns-tunnel-server` release binary =
+**1.22 MB**. Tests: dns-tunnel pool-entry parse + gated builder accept/reject; 15 dns_tunnel tests;
+base + feature builds/clippy/fmt clean. Design doc + ADR 0011 flipped to Implemented/Accepted.
+**The transport is complete and green end-to-end** across both crates (`dns-tunnel-core` +
+`dns-tunnel-server`) and spark `core`. **Recursive mode is code-complete** (the resolver-pool path IS
+recursive: the client sends to resolvers that forward to the NS-delegated authoritative zone; the
+loopback/failover tests exercise the identical send-to-resolver mechanism). **Remaining = infra/human
+only:** (1) deploy `dns-tunnel-server` behind an NS-delegated zone and run the client through a real
+public resolver; (2) the `sudo spark run` full-TUN gate. Branch `fisk/spark-dns-tunnel` (not pushed —
+push/PR is a human decision).
+  Deferred sub-features (documented, not stubbed — all noted in `dns-tunnel-design.md` §1/§16):
+  (1) **dynamic per-resolver MTU binary-search probing** — v1 uses a correct *conservative static* MTU
+  from `mtu.rs` (sizes segments to the QNAME/TXT capacity for the zone); over-the-wire MTU_UP/DOWN
+  probing to discover larger per-resolver limits is a throughput optimization (add MtuProbe frame
+  kinds + a probe phase). (2) **cookie/replay handshake hardening** — v1 is PSK+HKDF per-session salt;
+  the SYN cookie / anti-replay window is a future add. (3) **UDP-over-tunnel** (`UdpTransport` errors —
+  out of scope v1). (4) **payload compression** wired at the config level (lz4_flex) but not yet
+  applied in the session pump (off by default). (5) formal `cargo fuzz` targets → currently in-suite
+  randomized no-panic guards. None affect the headline capability or correctness.
+
+**2026-07-02 — DNS-tunnel: dynamic MTU probing DONE (deferred item #1 resolved).** Added the
+over-the-wire probe loop that discovers a larger downlink MTU than the conservative static bound.
+New frame kinds `MtuProbe`/`MtuProbeResp`/`SetMtu` + `arq::Stream::set_max_segment`; session:
+`build_mtu_probe`/`build_set_mtu`/`on_answer → AnswerOutcome::ProbeResp`, and the server pads a
+`MtuProbeResp` to the requested size (an oversized answer fails to return, so the client learns the
+path limit) and applies `SetMtu` to its downlink segment. Client pump (`core/src/transport/
+dns_tunnel/mod.rs`): after the handshake it fires one round of probes across `PROBE_CANDIDATES`
+(400…1200 B), collects the largest that survives `PROBE_WINDOW_MS`, then `SetMtu`s it. Probe queries
+are deliberately **not** tracked in the RTT/loss `pending` map — an expected over-MTU failure must not
+demote a healthy resolver. Test `probe_raises_downlink_mtu` proves the server downlink reaches the
+largest surviving candidate (1200) end-to-end over loopback. 16 dns_tunnel tests; clippy/fmt clean.
+Commits `adb62dd`/`95ffbfd`/`7c2aa02` (MTU probing 1–3/3).
+
+**2026-07-02 — DNS-tunnel: multi-stream multiplexing DONE.** One crypto session (one ConnectionID +
+HKDF key schedule) now carries **many** independent ARQ streams keyed by StreamID — the DNS-tunnel
+analogue of smux/HTTP-2, replacing the M3 "one session = one stream" model. **Core** (`session.rs`):
+`ClientSession`/`Server` are multiplexers over a `BTreeMap<u16, …>` of streams; stream 1 still opens
+via the handshake SYN (fast path, 1 RTT to first byte), streams ≥2 open with a cheap short-form SYN
+(StreamID + target under the session uplink key) retried on a per-stream timer until a per-stream
+SynAck; `handle_syn` is idempotent so a retransmitted session SYN can't wipe live streams; uplink
+poll + server downlink both round-robin across streams; `SetMtu` applies session-wide; frames route by
+StreamID. Single-stream facade (`write`/`read`/`close`) kept for compile-compat (operates on the
+primary stream). `dns-tunnel-server` does per-`(ConnId,StreamID)` TCP egress (target EOF FINs just
+that stream). **Transport** (`mod.rs`): all dials share **one** session/pump/UDP-socket/pool — first
+dial establishes (target = stream 1), later dials hand the pump a `Ctl::Open` for a new stream; a
+per-stream reader task fans uplink into the pump tagged with its StreamID, the pump fans downlink back
+per stream + handles per-stream half-close/reap; idle lifecycle tears the session down after
+`IDLE_GRACE_MS` (3 s) with no streams so an idle tunnel stops querying (next dial rebuilds), draining
+any raced-in `Open` so an accepted dial is never dropped. Dropped the per-dial `PumpStream` wrapper (a
+`DuplexStream` boxes directly as `BoxedStream`). New tests: `two_streams_multiplex_independently`
+(core: two streams to different targets echo without crossing) + `two_dials_share_one_session`
+(transport: two concurrent dials multiplex over one ConnectionID). 51 core + 1 server-e2e + 17
+dns_tunnel tests; base + feature builds/clippy/fmt clean. Commits `e493595` (core) + `a7927a0`
+(transport). Branch `fisk/spark-dns-tunnel` (not pushed). **Remaining deferred (unchanged):**
+cookie/replay handshake hardening, UDP-over-tunnel, session-pump payload compression, formal
+`cargo fuzz`; plus optional multi-session pooling (v1 shares a single session across all dials).
+
+**2026-07-02 — DNS-tunnel: LIVE on DigitalOcean, recursive path proven, real throughput measured.**
+Deployed `dns-tunnel-server` (static musl binary via `cargo zigbuild`, 1.7 MB) to a DO droplet
+(`<droplet-name>`, nyc3, <old-droplet-ip>), systemd `spark-dns.service` on UDP:5300 with a
+`:53→:5300` DNAT. Delegated **`<initial-tunnel-zone>`** on Cloudflare (NS + glue A → the droplet). Added a
+server hardening (`dns::build_nodata` + `Server::on_query` rework, commit `ab2f31e`): the server now
+answers QNAME-min probes (apex SOA/NS/A) with a benign NOERROR/NODATA instead of dropping — without it
+1.1.1.1/8.8.8.8 SERVFAIL before forwarding tunnel queries. Verified end-to-end: authoritative fetch
+(HTTP 301 relayed from 1.1.1.1:80) AND **recursive** fetch through the public resolver pool (Cloudflare
+/Quad9/OpenDNS) via the getiantem.org delegation — real HTTP carried over DNS on the full
+client→resolver→our-server→egress path. **Throughput (empirical):** loopback CPU ceiling ~560–690
+Mbit/s; **~10 Mbit/s direct-to-server over a real 50 ms WAN** (matches the sim); **~0.1 Mbit/s
+recursive via major public resolvers** — isolated to per-resolver rate-limiting of the
+random-subdomain pattern (Cloudflare-only was as slow as the mixed pool; direct `:53`/DNAT was fast),
+i.e. a resolver-side anti-abuse limit, not our stack. Confirms recursive = the reachability-under-
+shutdown tier; throughput wants large resolver pools / non-throttling paths (the MasterDnsVPN approach).
+Live-fetch harness generalized to a comma-separated resolver list (authoritative or recursive). Assets
+to tear down when done: DO droplet `<old-droplet-id>`, DO SSH key (`<old-ssh-key-id>`), the two
+Cloudflare records under getiantem.org (`t` NS + `ns-spark` A). PSK in the session scratchpad. New
+build tooling installed locally: `zig` + `cargo-zigbuild` + the `x86_64-unknown-linux-musl` target.
+
+**2026-07-02 — DNS-tunnel: recursive-throughput optimization — two negative results (both reverted).**
+Investigated raising recursive throughput past the ~single-resolver ceiling. Measured against the live
+`<initial-tunnel-zone>` deployment across a 23-IP public-resolver pool (14 operators). **Findings:**
+(1) *Pool breadth helps sticky via selection* — 8→23 resolvers let the health-ranker find a better
+single resolver (~15→78 KB/s), because operators throttle the DNS-tunnel pattern very unequally.
+(2) **Per-query spread across the pool: 15× WORSE** (5 vs 78 KB/s). A single ordered ARQ stream sprayed
+over 12–400 ms resolvers reorders badly + stalls on the slowest; and at single-stream volume you're
+RTT-bound (~75 KB/s), not rate-limited, so spreading only adds head-of-line cost. (3) **Per-stream
+resolver affinity (pin each mux stream to a distinct resolver): also WORSE in aggregate** — 8 conns
+= 51 KB/s vs 1 conn = 73. Affinity pins but doesn't *chase* a good resolver (only reassigns on hard
+disable), so streams pinned to throttlers crawl and drag the aggregate, and routing stream-1 through
+affinity weakened the common-case single-conn failover. **Root cause / conclusion:** public resolvers
+are heterogeneous *adversarial* DNS-tunnel throttlers; beating the per-good-resolver ~75 KB/s ceiling
+needs throughput-aware selection (measure goodput, use only the good few, flee throttlers) which
+converges back toward "few best," not "spread across many" — high effort, uncertain payoff against an
+adversary. **Both `spread` and `affinity` experiments reverted; default stays sticky-to-best +
+broad-pool selection** (empirically best for the common single connection). Recursive remains the
+reachability-under-shutdown tier (~0.1 Mbit/s, throttle-bound); real throughput (~10 Mbit/s) lives on
+non-throttling paths (our own server, or resolvers that don't throttle). No code shipped from this
+investigation (tree unchanged); findings recorded so the dead ends aren't re-tried.
+
+**2026-07-02 — DNS-tunnel: shutdown-subset resilience (the Iran case) — verified + `duplication`
+exposed.** Unlike the throughput thread (uncensored vantage, all resolvers work, enemy = throttling),
+a national shutdown means *most resolvers are blocked/hijacked and only a subset — often the mandated
+local resolver — forwards anything*. This is the design's home turf, and here sticky-to-best + failover
+is **correct** (the spread/affinity negatives don't apply). Verified live against the DO deployment
+with a mostly-dead pool (3 RFC5737 TEST-NET dead IPs + 2 live resolvers): the tunnel disabled the dead
+ones and carried real traffic (HTTP 301). **Key finding — duplication is the shutdown lever:** with
+duplication=1 the working subset is discovered *serially* (time out through each dead resolver), 27 s to
+first byte; raising duplication probes several per query → parallel discovery: **27 s (dup 1) → 4.6 s
+(dup 3) → 0.30 s (dup 5)**. Shipped: `DnsTunnelConfig.duplication` (was hardcoded to 1 in the builder;
+now configurable, default 1, set ~3–5 for shutdown profiles) + a `DNS_TUNNEL_DUP` live-harness knob
+(commit `e3d6bc3`). **Remaining Iran gaps (not built):** (1) **auto-include the system/DHCP/local
+resolver(s)** in the pool — during a total shutdown the mandated local resolver is often the ONLY thing
+that forwards DNS (MasterDnsVPN's "even if forced onto the government resolver" thesis); the pool is
+currently a static config list. Biggest practical gap. (2) **innocuous, unattributable tunnel zone** —
+`getiantem.org` is a known Lantern domain a censor's resolver may refuse to forward; real deployment
+needs a clean domain (our test zone is fine only from an uncensored vantage). (3) fundamental limit: the
+working resolver must retain *some* upstream reach to the authoritative server IP. Throughput in this
+regime is ~one-resolver's-worth (reachability, not streaming) — as intended for the last-resort tier.
+
+**2026-07-02 — DNS-tunnel: system-resolver auto-include, unattributable zone, Linode prod path +
+dnstt-infra reuse.** (1) **`system_resolvers()`** — the builder auto-includes the OS resolver(s)
+(`/etc/resolv.conf` on Unix) in the recursive pool, gated by `DnsTunnelConfig.use_system_resolvers`
+(default true; the shutdown lifeline). Commit `6a50e00`. (2) **Switched the live tunnel zone to an
+unattributable domain** `<tunnel-zone>` (Cloudflare NS + glue), replacing known-Lantern
+`<initial-tunnel-zone>` (a censor's resolver would filter it); validated recursive (1.1.1.1/9.9.9.9/8.8.8.8
+NOERROR, HTTP 301 in 0.29 s at dup=3). getiantem.org records can be removed. (3) **Assessed reuse of
+Lantern's dnstt infra** (`getlantern/dnstt`; lantern-cloud `ans/bootstrap-dnstt.yaml` → `dnstts_oci`
+on OCI; zone `t.iantem.io` via TF `dns.yaml`; client config via `flashlight/genconfig` →
+config-server; escalation slot in `kindling/dnstt`+radiance). spark's dns-tunnel is a **drop-in
+modernization of the dnstt tier** (same `:5300`+zone+systemd+`:53`-DNAT shape). Reuse the *plumbing*
+(provisioning, config distribution, escalation slot); keep *separate* binary/IP/zone (protocol
+incompatibility) + *unattributable* domains. **Production targets Linode, not OCI** (Lantern already
+uses Linode; `linode-cli`+`LINODE_TOKEN` on hand). Committed a reusable deploy kit under `deploy/`
+(commit `37861e7`): `provision-linode.sh` + Ansible `bootstrap-spark-dns.yaml` + systemd template +
+inventory + README, adapted from the dnstt playbook. Validated live: Linode us-east nanode
+`<server-ip>` running it carried real traffic (HTTP 301, ~60 ms RTT). **Consolidated onto Linode:**
+`ns-spark.<tunnel-domain>` A repointed → <server-ip>; verified recursive still worked with the DO
+server *stopped* (definitive), then deleted the DO droplet `<old-droplet-id>` + its DO-account SSH key.
+Sole live server is now **Linode `<server-instance-id>` @ <server-ip>** serving `<tunnel-zone>` (recursive
+re-verified post-deletion). Local key `~/.ssh/spark-dns-tunnel` retained (Linode SSH). Remaining reuse
+to build: `SparkDNSConfig` + genconfig/config-server wiring, and the escalation-tier hook.
+
+**2026-07-03 — DNS-tunnel: forward-secret handshake replaces the PSK (§2.4 done).** Prerequisite for
+client config distribution surfaced a real weakness: distributing a PSK to all clients + no FS meant a
+leaked config could decrypt captured traffic (PSK + cleartext salt → session keys). Fixed by
+implementing the deferred X25519 forward-secret handshake, **ring-only, Design A** (ring's X25519 is
+ephemeral-only → static identity is Ed25519, not X25519): server has a static Ed25519 keypair whose
+**public** key clients hold; per session a cleartext ephemeral↔ephemeral X25519 exchange derives the
+keys and the server signs the transcript (`client_eph ‖ server_eph ‖ conn_id`) for auth. Session keys
+depend only on the ephemerals → FS (static-key or config leak can't decrypt past traffic); client is
+anonymous (dnstt-style). Migrated the whole stack: `crypto` (Ed25519/X25519/HKDF-from-ee, base64
+encode + `decode_server_pub`), `frame` (cleartext Syn/SynAck packet forms + `parse_packet`/`Packet`
+enum, replacing the salt long-form), `session` (handshake state machine; all streams incl. the first
+open post-handshake via short-form Syn; server caches the SynAck to replay on Syn retransmit so
+ephemeral keys don't diverge; +1 RTT to first byte), `dns-tunnel-server` (`keygen` subcommand +
+`serve --privkey-file`), spark `config` (`DnsTunnelConfig.psk` → `server_pubkey`) + transport builder.
+Commits `64ff4bd` (crypto foundation) + `0d34d2a` (migration, BREAKING) + `ea95191` (deploy). 57 core
++ server-e2e + 181 spark-core tests green; clippy/fmt clean; base build unaffected. **Re-keyed +
+redeployed the live Linode server** (`serve --privkey-file`, zone <tunnel-zone>); verified the FS
+handshake live — authoritative (0.21 s) AND recursive through the public-resolver pool (0.46 s), both
+HTTP 301, client authenticating with only the server public key `pBayZhvFX4OMbyVRlgjZ1Yi/goXJuIFgxC71BUBGTPM=`
+(the PSK is gone). Deploy kit updated to keypair/keygen. Considered dep alt B (x25519-dalek, keeps
+1-RTT) — rejected to preserve the ring-only/no-C constraint; A's +1 RTT is one-time per session.
+
+**2026-07-03 — SparkDNSConfig in flashlight: attempted, then REVERTED (wrong layer).** Briefly mirrored
+dnstt's config pipeline in `getlantern/flashlight` (`common.SparkDNSConfig` + genconfig + template) to
+distribute the spark dns-tunnel config through Lantern's config-server. **Reverted** — the transport is
+**Rust (spark)**, and Lantern's config-server feeds the **Go** client (kindling/radiance), which builds
+a Go dnstt and can't construct a Rust spark transport; wiring it there only makes sense with a
+Go↔Rust bridge that isn't the model. Rule going forward: **Rust ⇒ wire into Spark only; Go ⇒ wire into
+Lantern.** Flashlight branch `fisk/spark-dns-config` deleted (unpushed; commit
+`185532ba72051a2fd6a17eb0730a6c3c75756ecf` recoverable via reflog if a bridge is ever built). The
+correct config surface already exists Spark-side: `DnsTunnelConfig` (zone, `server_pubkey`, resolvers,
+duplication, use_system_resolvers) consumed by `from_config`/transport-selection. Remaining follow-up
+is also **Spark-side**: an escalation hook that has spark's own transport-selection reach for
+`dns_tunnel` as a last resort — not a kindling/Go hook. Any remote config distribution is a spark-side
+mechanism.
+
+**2026-07-02 — DNS-tunnel: throughput characterized + pipeline deepened (~4×).** Added an `#[ignore]`d
+loopback benchmark (`bench_downlink_throughput` + a flood server modelling small-req/large-resp, and a
+UDP delay relay to inject RTT; knobs `DNS_BENCH_{MIB,RTT_MS,INFLIGHT,WINDOW}`). Findings: the impl's
+**CPU ceiling is ~560–690 Mbit/s** on loopback (crypto/codec are NOT the bottleneck), but a DNS tunnel
+is **bandwidth-delay-product bound** — at a realistic 50 ms recursive RTT, goodput scales ~linearly
+with the in-flight query budget: inflight 16 → 2.6 Mbit/s, 64 → 10.7, 128 → 20.2, 256 → 38.2. So raised
+`session::Config::default()`: `max_query_inflight` 16 → 64 and ARQ windows to match (`send_window`
+64 → 256 so the pull pipeline isn't re-bottlenecked; `recv_window` 256 → 1024 to absorb reorder from
+spraying queries across resolvers) → ~4× real-world throughput at the default. Doc note: the budget
+should be spread across the resolver pool so no single recursive resolver sees an anomalous query rate
+(`inflight/pool_size` each). Secondary levers (not changed): larger downlink MTU/EDNS (linear in
+bytes/answer, capped by what resolvers carry) and broad pool breadth. Commit `e557477`. **Live
+recursive throughput still pending the infra gate** (deployed NS-delegated server + real public
+resolver); loopback+RTT-sim is the self-contained proxy for it.

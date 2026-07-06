@@ -343,6 +343,10 @@ pub struct TransportConfig {
     /// QUIC, optionally obfuscated with Salamander+Gecko. Requires the `hysteria2` build feature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hysteria2: Option<Hysteria2Config>,
+    /// DNS-tunnel transport (ADR 0011): when set, flows tunnel over DNS, aggregating over recursive
+    /// resolvers. Requires the `dns-tunnel` build feature (else `from_config` errors).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_tunnel: Option<DnsTunnelConfig>,
     /// Domain-fronted meek polling transport: tunnels through a CDN edge
     /// (Akamai/CloudFront/Aliyun) to Lantern's meek-server via the Shir-o-Khorshid
     /// CDN-fronting model (no MITM). Self-bootstrapping — discovers working edges
@@ -380,6 +384,7 @@ impl Default for TransportConfig {
             samizdat: None,
             shadowsocks: None,
             hysteria2: None,
+            dns_tunnel: None,
             fronted_meek: None,
             shaping: ShapingConfig::default(),
             servers: Vec::new(),
@@ -570,6 +575,75 @@ pub struct ShadowsocksConfig {
     pub password: String,
 }
 
+/// DNS-tunnel transport configuration (ADR 0011). A clean-slate DNS-tunnelling protocol that
+/// aggregates over many recursive resolvers for shutdown resilience. Requires the `dns-tunnel` build
+/// feature (else `from_config` errors). See `docs/dns-tunnel-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsTunnelConfig {
+    /// The delegated tunnel zone, e.g. `"t.example.com"`.
+    pub zone: String,
+    /// The server's static Ed25519 **public** key, base64 (from the server's `keygen`). Safe to
+    /// distribute — it is not a secret; the forward-secret handshake authenticates the server with it
+    /// and derives per-session keys from ephemeral↔ephemeral DH (so a leaked config can't decrypt
+    /// traffic).
+    pub server_pubkey: String,
+    /// Recursive resolvers to spray queries across: `IP`, `IP:port`, `CIDR`, `CIDR:port`, `[v6]:port`
+    /// (CIDRs expand to host IPs). Used in recursive mode.
+    #[serde(default)]
+    pub resolvers: Vec<String>,
+    /// Optional: dial the authoritative server directly (authoritative mode / testing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoritative: Option<Endpoint>,
+    /// AEAD cipher.
+    #[serde(default)]
+    pub cipher: DnsTunnelCipher,
+    /// Payload compression. NB: parsed but **not yet applied by the client** — `dns-tunnel-core`
+    /// supports LZ4 frame compression (`FLAG_COMPRESSED`), but the client transport does not yet drive
+    /// it from this setting, so `lz4` is currently inert (a documented follow-up). Kept on the config
+    /// surface so enabling it later is a client-only change.
+    #[serde(default)]
+    pub compression: DnsTunnelCompression,
+    /// How many resolvers each query is sent to (default 1). Higher trades proportional bandwidth for
+    /// delivery probability on lossy paths **and fast discovery of the working subset when most
+    /// resolvers are blocked** — e.g. a national shutdown. Measured against a mostly-dead pool,
+    /// time-to-first-byte was 27 s at 1 vs 0.3 s at 5 (serial failover → parallel probing). Set ~3–5
+    /// for shutdown / last-resort profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplication: Option<usize>,
+    /// Auto-include the OS-configured resolver(s) (`/etc/resolv.conf` on Unix) in the recursive pool.
+    /// Default **true**: during a national shutdown the mandated local/ISP resolver is often the only
+    /// one that still forwards DNS, so it's the lifeline. Ignored in authoritative mode. Set false to
+    /// use only the configured `resolvers` (e.g. to avoid routing tunnel queries through the ISP's
+    /// resolver when public resolvers are reachable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_system_resolvers: Option<bool>,
+}
+
+/// The AEAD cipher for the DNS-tunnel transport (ADR 0011).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+pub enum DnsTunnelCipher {
+    /// ChaCha20-Poly1305 (default; constant-time in software, no AES-NI dependency).
+    #[default]
+    #[serde(rename = "chacha20-poly1305")]
+    ChaCha20Poly1305,
+    /// AES-256-GCM.
+    #[serde(rename = "aes-256-gcm")]
+    Aes256Gcm,
+}
+
+/// Payload compression for the DNS-tunnel transport (ADR 0011).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+pub enum DnsTunnelCompression {
+    /// No compression (default).
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    /// LZ4 via the pure-Rust `lz4_flex`.
+    #[serde(rename = "lz4")]
+    Lz4,
+}
+
 /// Hysteria 2 transport configuration (ADR 0010). A QUIC client interoperable with apernet/hysteria.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -671,6 +745,9 @@ pub enum ServerSpec {
     /// `fronted-meek` alias keeps any native-TOML pools written under the pre-rename tag deserializable.
     #[serde(rename = "meek", alias = "fronted-meek")]
     FrontedMeek(FrontedMeekConfig),
+    /// DNS-tunnel (ADR 0011).
+    #[serde(rename = "dns-tunnel")]
+    DnsTunnel(DnsTunnelConfig),
 }
 
 /// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
@@ -810,6 +887,12 @@ impl Config {
             self.transport.samizdat.as_ref().map(|c| &c.server),
             self.transport.shadowsocks.as_ref().map(|c| &c.server),
             self.transport.hysteria2.as_ref().map(|c| &c.server),
+            // DNS-tunnel: the resolvers are IP literals (parsed by the balancer); only the optional
+            // `authoritative` endpoint can be a hostname needing resolution.
+            self.transport
+                .dns_tunnel
+                .as_ref()
+                .and_then(|c| c.authoritative.as_ref()),
         ];
         let pool = self.transport.servers.iter().filter_map(|e| match &e.spec {
             ServerSpec::Anytls(c) => Some(&c.server),
@@ -819,6 +902,7 @@ impl Config {
             ServerSpec::Hysteria2(c) => Some(&c.server),
             ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
             ServerSpec::FrontedMeek(_) => None, // self-bootstrapping; no server host to resolve
+            ServerSpec::DnsTunnel(c) => c.authoritative.as_ref(), // resolvers are IP literals
         });
         singles
             .into_iter()
@@ -898,6 +982,7 @@ mod tests {
                     samizdat: None,
                     shadowsocks: None,
                     hysteria2: None,
+                    dns_tunnel: None,
                     fronted_meek: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
@@ -1203,6 +1288,55 @@ password = "c29tZS1iYXNlNjQtcHNr"
     }
 
     #[test]
+    fn dns_tunnel_config_round_trips_through_toml() {
+        let toml = r#"
+[transport.dns_tunnel]
+zone = "t.example.com"
+server_pubkey = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+resolvers = ["1.1.1.1", "8.8.8.8:53", "9.9.9.0/30"]
+cipher = "aes-256-gcm"
+compression = "lz4"
+duplication = 3
+use_system_resolvers = false
+"#;
+        let cfg = Config::from_toml_str(toml).unwrap();
+        let dt = cfg.transport.dns_tunnel.clone().unwrap();
+        assert_eq!(dt.zone, "t.example.com");
+        assert_eq!(dt.resolvers.len(), 3);
+        assert_eq!(dt.cipher, DnsTunnelCipher::Aes256Gcm);
+        assert_eq!(dt.compression, DnsTunnelCompression::Lz4);
+        assert_eq!(dt.duplication, Some(3));
+        assert_eq!(dt.use_system_resolvers, Some(false));
+        assert!(dt.authoritative.is_none());
+        let out = cfg.to_toml_string().unwrap();
+        assert!(out.contains("aes-256-gcm"));
+    }
+
+    #[test]
+    fn dns_tunnel_config_defaults_cipher_and_compression() {
+        let toml = r#"
+[transport.dns_tunnel]
+zone = "t.example.com"
+server_pubkey = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+authoritative = "127.0.0.1:5300"
+"#;
+        let cfg = Config::from_toml_str(toml).unwrap();
+        let dt = cfg.transport.dns_tunnel.clone().unwrap();
+        assert_eq!(
+            dt.cipher,
+            DnsTunnelCipher::ChaCha20Poly1305,
+            "default cipher"
+        );
+        assert_eq!(
+            dt.compression,
+            DnsTunnelCompression::Off,
+            "default: no compression"
+        );
+        assert!(dt.resolvers.is_empty());
+        assert!(dt.authoritative.is_some());
+    }
+
+    #[test]
     fn parses_a_shadowsocks_pool_entry() {
         let c = Config::from_toml_str(
             "[transport]\ncallback_url = \"http://127.0.0.1/ok\"\n\n[[transport.servers]]\nkind = \"shadowsocks\"\nserver = \"1.2.3.4:8388\"\nmethod = \"2022-blake3-aes-128-gcm\"\npassword = \"MTIzNDU2Nzg5MDEyMzQ1Ng==\"\n",
@@ -1214,6 +1348,21 @@ password = "c29tZS1iYXNlNjQtcHNr"
                 assert_eq!(ss.server, "1.2.3.4:8388".parse().unwrap());
             }
             other => panic!("expected a shadowsocks pool entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_a_dns_tunnel_pool_entry() {
+        let c = Config::from_toml_str(
+            "[[transport.servers]]\nkind = \"dns-tunnel\"\nzone = \"t.example.com\"\nserver_pubkey = \"QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=\"\nresolvers = [\"1.1.1.1\", \"8.8.8.8\"]\n",
+        )
+        .unwrap();
+        match &c.transport.servers[0].spec {
+            ServerSpec::DnsTunnel(dt) => {
+                assert_eq!(dt.zone, "t.example.com");
+                assert_eq!(dt.resolvers.len(), 2);
+            }
+            other => panic!("expected a dns-tunnel pool entry, got {other:?}"),
         }
     }
 

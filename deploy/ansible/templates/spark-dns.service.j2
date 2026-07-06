@@ -1,0 +1,21 @@
+[Unit]
+Description=spark dns-tunnel-server (ADR 0011)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=RUST_LOG=info
+# The static Ed25519 private key is read from a root-only file at start. Its public key is what
+# clients hold; forward secrecy comes from a per-session ephemeral exchange (ADR 0011 §2.4).
+# Log hygiene: the server emits only a content-free "listening" line — never the zone, key, or IPs.
+ExecStart=/usr/local/bin/dns-tunnel-server serve --zone {{ zone }} --privkey-file /etc/spark-dns/privkey --bind {{ bind }} --idle-secs {{ idle_secs }}
+Restart=always
+RestartSec=2
+# Light hardening (the process only needs the UDP socket + the private-key file).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/spark-dns
+
+[Install]
+WantedBy=multi-user.target
