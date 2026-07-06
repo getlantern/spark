@@ -50,6 +50,8 @@ export interface SparkBackend {
   selectServer(index: number | null): Promise<void>;
   getSplitTunnel(): Promise<SplitTunnel>;
   setSplitTunnel(st: SplitTunnel): Promise<void>;
+  getRoutingMode(): Promise<"smart" | "full">;
+  setRoutingMode(mode: "smart" | "full"): Promise<void>;
 }
 
 // MockBackend simulates the service for U0: connect → connecting → (≈900ms) →
@@ -118,4 +120,7 @@ export class MockBackend implements SparkBackend {
   private split: SplitTunnel = { enabled: false, domains: [], ips: [] };
   async getSplitTunnel(): Promise<SplitTunnel> { return structuredClone(this.split); }
   async setSplitTunnel(st: SplitTunnel): Promise<void> { this.split = structuredClone(st); }
+  private routingMode: "smart" | "full" = "smart";
+  async getRoutingMode(): Promise<"smart" | "full"> { return this.routingMode; }
+  async setRoutingMode(mode: "smart" | "full"): Promise<void> { this.routingMode = mode; }
 }

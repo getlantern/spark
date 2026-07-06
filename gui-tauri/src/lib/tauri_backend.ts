@@ -31,6 +31,12 @@ export class TauriBackend implements SparkBackend {
   async setSplitTunnel(st: SplitTunnel): Promise<void> {
     await invoke("spark_set_split_tunnel", { json: JSON.stringify(st) });
   }
+  async getRoutingMode(): Promise<"smart" | "full"> {
+    return (await invoke<string>("spark_get_routing_mode")) as "smart" | "full";
+  }
+  async setRoutingMode(mode: "smart" | "full"): Promise<void> {
+    await invoke("spark_set_routing_mode", { mode });
+  }
 }
 
 // True when running inside the Tauri webview (vs a plain browser at `npm run dev`).
