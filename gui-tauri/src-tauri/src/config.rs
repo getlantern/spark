@@ -11,8 +11,47 @@
 //! Note there is intentionally no persistent on-disk config file here anymore: a stale local file
 //! would shadow the fetch (every connect must pull the current pool), so the only on-disk config is
 //! the extension's own last-good fetch cache, used solely as an offline fallback.
+//!
+//! This module also owns the on-disk split-tunnel bypass list (`split_tunnel.json`), stored under
+//! `~/Library/Application Support/org.getlantern.spark/`. Unlike the proxy config (which the NE
+//! self-fetches), the split-tunnel list is app-controlled and persists across connections.
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+// ── Split-tunnel persistence ──────────────────────────────────────────────────
+
+/// Path to the persisted split-tunnel list:
+/// `~/Library/Application Support/org.getlantern.spark/split_tunnel.json`.
+/// Returns `None` if `$HOME` is unset (sandboxed/test environments).
+fn split_tunnel_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("org.getlantern.spark")
+            .join("split_tunnel.json"),
+    )
+}
+
+/// Read the persisted split-tunnel list JSON, or the disabled default if none/unreadable.
+pub fn load_split_tunnel() -> String {
+    split_tunnel_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        // Default must match spark-core's SplitTunnel wire format (core/src/split_tunnel.rs).
+        .unwrap_or_else(|| "{\"enabled\":false,\"domains\":[],\"ips\":[]}".to_string())
+}
+
+/// Persist the list JSON (creates the directory if needed). Returns an error string on failure.
+pub fn save_split_tunnel(json: &str) -> Result<(), String> {
+    let p = split_tunnel_path().ok_or("no config dir: HOME is unset")?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, json).map_err(|e| e.to_string())
+}
 
 /// One server for the selection UI. Serializes to the camelCase shape the TS `ServerInfo` expects,
 /// and deserializes the live pool JSON from the NE channel (`spark_servers_json`) — so the same type
