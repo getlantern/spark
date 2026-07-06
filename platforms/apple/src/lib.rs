@@ -51,12 +51,14 @@ mod ffi {
     /// # Safety
     /// `config` must be null or a valid NUL-terminated C string for the duration of this call.
     /// `data_dir` must be null or a valid NUL-terminated C string for the duration of this call.
+    /// `split_tunnel` must be null or a valid NUL-terminated C string for the duration of this call.
     #[no_mangle]
     pub unsafe extern "C" fn spark_tunnel_run(
         fd: c_int,
         mtu: c_int,
         config: *const c_char,
         data_dir: *const c_char,
+        split_tunnel: *const c_char,
     ) -> c_int {
         // Resolve the config string (a null pointer means "no explicit config"). A *non-null* pointer
         // that isn't valid UTF-8 is a caller error — an explicit config was provided but is garbage —
@@ -90,6 +92,15 @@ mod ffi {
                 .map(std::path::PathBuf::from)
         };
 
+        // The bypass list is optional and non-critical — invalid UTF-8 is treated as absent
+        // rather than failing the tunnel, since a bad bypass list should never block the VPN.
+        // SAFETY: caller contract — `split_tunnel` is null or a valid NUL-terminated C string.
+        let split: Option<&str> = if split_tunnel.is_null() {
+            None
+        } else {
+            unsafe { CStr::from_ptr(split_tunnel) }.to_str().ok()
+        };
+
         // The shared, cross-platform policy home (the Apple C-ABI + Android JNI call it today; the
         // desktop service is a documented follow-up): direct / plain relay / full config / daemon
         // self-fetch, decided in core. The NE always owns a *userspace* utun (the kernel `system`
@@ -100,6 +111,7 @@ mod ffi {
             cfg,
             dir.as_deref(),
             Config::default(),
+            split,
         )
     }
 
@@ -152,6 +164,22 @@ mod ffi {
         CString::new(json)
             .map(|c| c.into_raw())
             .unwrap_or(ptr::null_mut())
+    }
+
+    /// Update the running tunnel's split-tunnel bypass list live. `json` is a NUL-terminated
+    /// `{enabled,domains,ips}` payload. Returns 0 if applied, -1 on invalid JSON / no active tunnel.
+    ///
+    /// # Safety
+    /// `json` must be null or a valid NUL-terminated C string.
+    #[no_mangle]
+    pub unsafe extern "C" fn spark_set_split_tunnel(json: *const c_char) -> c_int {
+        if json.is_null() {
+            return -1;
+        }
+        match unsafe { CStr::from_ptr(json) }.to_str() {
+            Ok(s) if spark_core::fd_tunnel::set_split_tunnel(s) => 0,
+            _ => -1,
+        }
     }
 
     /// Free a string returned by [`spark_servers_json`].
