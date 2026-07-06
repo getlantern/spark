@@ -15,19 +15,38 @@
   // Displayed rows: domains then ips, stable order.
   const rows = $derived([...st.domains, ...st.ips]);
 
+  // A bare IPv4 (octets bounded 0-255) / IPv6 address, no CIDR suffix. Kept in step with core's
+  // is_ip_or_cidr so the client doesn't report "added" for entries core will drop.
+  const isV4 = (a: string): boolean =>
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(a) && a.split(".").every((o) => Number(o) <= 255);
+  const isV6 = (a: string): boolean => a.includes(":") && /^[0-9a-f:]+$/.test(a);
+
   function normalize(raw: string): string {
-    const e = raw.trim().toLowerCase().replace(/^https?:\/\//, "");
-    const cut = e.search(/[/?#]/);
-    let host = cut >= 0 ? e.slice(0, cut) : e;
+    let e = raw.trim().toLowerCase().replace(/^https?:\/\//, "");
+    // Strip query/fragment always.
+    const qf = e.search(/[?#]/);
+    if (qf >= 0) e = e.slice(0, qf);
+    // Strip a path `/…` unless the part before it is a bare IP — then it's a CIDR (10.0.0.0/8),
+    // which we preserve (matches core's normalize_one).
+    const slash = e.indexOf("/");
+    if (slash >= 0 && !isV4(e.slice(0, slash)) && !isV6(e.slice(0, slash))) e = e.slice(0, slash);
     // Strip a :port on a hostname/IPv4 (single colon); IPv6 literals have >=2 colons.
-    if ((host.match(/:/g) || []).length === 1) host = host.replace(/:\d+$/, "");
-    return host.trim();
+    if ((e.match(/:/g) || []).length === 1) e = e.replace(/:\d+$/, "");
+    return e.trim();
   }
   function classify(h: string): "domain" | "ip" | null {
     if (!h) return null;
-    // IPv4 / IPv6 / CIDR (loose; the Rust core re-validates authoritatively).
-    if (/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(h) || (h.includes(":") && /^[0-9a-f:]+(\/\d{1,3})?$/.test(h))) return "ip";
-    if (/^[a-z0-9.-]+$/.test(h) && h.includes(".") && !h.startsWith(".") && !h.endsWith(".") && !h.includes("..")) return "domain";
+    const slash = h.indexOf("/");
+    const addr = slash >= 0 ? h.slice(0, slash) : h;
+    const prefix = slash >= 0 ? h.slice(slash + 1) : null;
+    // A CIDR prefix (if present) must be numeric and in range for the family (v4 ≤ 32, v6 ≤ 128).
+    const prefixOk = (max: number) => prefix === null || (/^\d{1,3}$/.test(prefix) && Number(prefix) <= max);
+    if (isV4(addr)) return prefixOk(32) ? "ip" : null;
+    if (isV6(addr)) return prefixOk(128) ? "ip" : null;
+    // Domain: valid label chars, has a dot AND at least one letter (rejects numeric junk like
+    // 999.999.999.999), no leading/trailing/adjacent dots.
+    if (/^[a-z0-9.-]+$/.test(h) && /[a-z]/.test(h) && h.includes(".") && !h.startsWith(".") && !h.endsWith(".") && !h.includes(".."))
+      return "domain";
     return null;
   }
 
