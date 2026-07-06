@@ -27,12 +27,14 @@ server-fetched config.
 
 ## Why this fits the existing engine
 
-`core/src/rules/router.rs` already decides per flow from an ordered
-`Vec<(Action, RuleSet)>` (index 0 = highest precedence), and `Matcher` already does
-reversed-label **suffix** matching (`example.com` ⇒ `example.com` + `*.example.com`) plus
-CIDR matching. `proxy::RouteHooks`/`Router` already take a recovered `domain`. So adding a
-user bypass list is: build one extra highest-precedence `(Action::Direct, RuleSet)` from
-the user's domains/IPs and prepend it. No new matching machinery.
+`core/src/rules/router.rs` already decides per flow from a compiled `Matcher`, and
+`Matcher` already does reversed-label **suffix** matching (`example.com` ⇒ `example.com` +
+`*.example.com`) plus CIDR matching. `proxy::RouteHooks`/`Router` already take a recovered
+`domain`. Because the user bypass is (a) always `Direct` and (b) absolute (wins over
+everything, including ad-block Reject — Decision 1), we model it as a **small, separate,
+live-swappable matcher checked first**, in front of the immutable base matcher built from
+the fetched rules. This makes **live reload cheap**: an edit rebuilds only the handful of
+user entries, never the large fetched matcher. No new matching machinery.
 
 The catch (must handle): `fd_tunnel::setup_routing_and_udp` only builds the router +
 fake-IP DNS when `sr.rule_sets` **or** `sr.inline_ip_rules` is non-empty
@@ -65,16 +67,35 @@ carries no rules.
 **Injection, not a shared file.** On macOS the UI process and the NE system extension are
 separate processes with separate containers, so a `dataDir` file the UI writes is not
 readable by the extension without an app-group container. To stay symmetric and
-app-group-independent, the UI **passes the bypass list to core at connect**:
+app-group-independent, the UI **passes the bypass list to core at connect** and **pushes
+live updates while connected**:
+
+*At connect (initial list):*
 - macOS: a new `providerConfiguration["splitTunnel"]` key (sibling to `["config"]`),
   read by the Swift NE and forwarded to the C-ABI entrypoint.
-- Android: a new argument to `SparkBridge.nativeRun(...)` forwarded to the JNI shim
-  (the VpnService shares the app process, so a file would also work — but we keep the
-  injection path identical to macOS for one code path).
+- Android: a new argument to `SparkBridge.nativeRun(...)` forwarded to the JNI shim.
+
+*While connected (live reload):* the running core exposes a runtime control handle
+registered at connect — mirroring the existing `set_pool`/`PoolControl` +
+`fd_tunnel::select_server` pattern — reachable via an FFI `spark_set_split_tunnel(json)`:
+- macOS: the app sends the updated list via `NETunnelProviderSession.sendProviderMessage`;
+  the NE's `handleAppMessage` decodes it and calls the C-ABI `spark_set_split_tunnel`.
+- Android: the VpnService shares the app process, so the Compose app calls
+  `SparkBridge.nativeSetSplitTunnel(json)` (JNI) directly on the running service.
+
+Core applies the update by rebuilding only the small user-bypass matcher and swapping it
+(see Core changes) — no reconnect, no fetched-matcher rebuild.
+
+**Activation caveat:** live reload updates an *already-active* router. The router/fake-IP
+path is built at connect only when there are fetched rules **or** a non-empty initial
+bypass list (see below). In the shipping product the fetched config always carries
+smart-routing rules (ad-block etc.), so the path is always active and live enable/disable
+works. Edge case (no fetched rules **and** an empty initial list, e.g. a bare dev config):
+enabling split tunneling then needs a reconnect. Not a production path.
 
 Each platform **persists** its own copy locally (Tauri store; Android DataStore/file) so
-the list survives restarts and is available to show in the UI while disconnected. The
-**format is shared** (defined in core) so both platforms serialize the same JSON.
+the list survives restarts and is shown in the UI while disconnected. The **format is
+shared** (defined in core) so both platforms serialize the same JSON.
 
 ## Data model
 
@@ -115,25 +136,43 @@ even in non-routing builds):
 (fills `domain_suffix` + `ip_cidr`, other vecs empty). `RuleSet::ip_only` already exists as
 the pattern to follow.
 
-**`core/src/rules/router.rs`** — extend the builder:
-`Router::build(sr, user_bypass: Option<&SplitTunnel>, load)`. When `user_bypass` is
-`Some(st)` and `st.enabled` and non-empty, **prepend** `(Action::Direct,
-RuleSet::from_domains_and_ips(&st.domains, &st.ips))` as entry 0 (highest precedence).
-Existing callers pass `None`.
+**`core/src/rules/router.rs`** — restructure `Router` for a live-swappable bypass:
+```rust
+pub struct Router {
+    base: Matcher,                          // fetched rules, immutable
+    user_bypass: RwLock<Option<Matcher>>,   // small; None = disabled/empty
+}
+```
+- `decide(ip, domain)`: if the `user_bypass` matcher (read lock) matches → `Direct`;
+  otherwise `base.lookup(...).unwrap_or(Proxy)`. Checking bypass first makes it absolute
+  (wins over ad-block Reject — Decision 1). `decide` is per-flow-open and synchronous, so
+  a `std::sync::RwLock` read is fine (no new dep, no lock held across `.await`).
+- `Router::build(sr, initial_bypass: Option<&SplitTunnel>, load)` builds `base` from the
+  fetched rules (as today) and seeds `user_bypass` via `set_user_bypass`.
+- `set_user_bypass(&self, st: Option<&SplitTunnel>)`: if `st.enabled` and non-empty, build
+  a one-entry matcher `Matcher::build([(Direct, RuleSet::from_domains_and_ips(...))])` and
+  store `Some`; else store `None`. This is the live-reload entry point (only the small
+  matcher is rebuilt).
 
 **`core/src/fd_tunnel.rs`** — `run_fd_dispatch` gains an optional split-tunnel JSON param;
 parse to `SplitTunnel`. `setup_routing_and_udp`:
 - activation condition becomes: build the router/fake-IP path if
   `!sr.rule_sets.is_empty() || !sr.inline_ip_rules.is_empty() ||
-   user_bypass.map_or(false, |s| s.enabled && !s.is_empty())`.
-- pass `user_bypass` into `Router::build`.
+   initial_bypass.map_or(false, |s| s.enabled && !s.is_empty())`.
+- pass `initial_bypass` into `Router::build`.
+- **register a runtime control handle** for live reload: keep the `Arc<Router>` in a
+  process global set at connect and cleared at teardown (mirror the existing `set_pool` in
+  `fd_tunnel`), so the FFI update entrypoint can reach the running router. Guard the
+  edge case where no router was built (return a "reconnect needed" status).
 
 **FFI surface** (thin, per platform):
-- Apple C-ABI (`platforms/apple/src/lib.rs`): the tunnel entrypoint gains an optional
-  split-tunnel string arg; forwarded to `run_fd_dispatch`.
-- Android JNI (`platforms/android/src/lib.rs`): `nativeRun(...)` gains a `splitTunnel:
-  String?` arg; forwarded likewise.
-- The CLI `spark run` path is unaffected (passes `None`).
+- Apple C-ABI (`platforms/apple/src/lib.rs`): (a) the tunnel entrypoint gains an optional
+  split-tunnel string arg forwarded to `run_fd_dispatch`; (b) a new
+  `spark_set_split_tunnel(json: *const c_char) -> i32` that parses + calls
+  `router.set_user_bypass` on the registered handle.
+- Android JNI (`platforms/android/src/lib.rs`): (a) `nativeRun(...)` gains a
+  `splitTunnel: String?` arg; (b) a new `nativeSetSplitTunnel(json: String)`.
+- The CLI `spark run` path is unaffected (passes `None`; no live handle).
 
 ## UI — desktop (Tauri/Svelte, v1)
 
@@ -155,16 +194,21 @@ abstraction with `MockBackend` for `npm run dev` and `TauriBackend` over `invoke
 - **Backend seam**: extend `SparkBackend` with
   `getSplitTunnel(): Promise<SplitTunnel>` / `setSplitTunnel(st): Promise<void>`.
   `MockBackend` stores in-memory; `TauriBackend` calls new Tauri commands
-  `spark_get_split_tunnel` / `spark_set_split_tunnel` (persist to the app store; inject via
-  `providerConfiguration["splitTunnel"]` at `spark_connect`).
+  `spark_get_split_tunnel` / `spark_set_split_tunnel`. `set` always **persists** to the app
+  store (so it's injected via `providerConfiguration["splitTunnel"]` on the next
+  `spark_connect`) and, **if connected, pushes it live** via
+  `NETunnelProviderSession.sendProviderMessage` → NE `handleAppMessage` →
+  `spark_set_split_tunnel`. So edits apply immediately when connected and are remembered
+  when not.
 
 ## UI — Android (Compose, fast-follow)
 
 Same three screens in `platforms/android/demo/app/.../ui/`, reusing the identical core
 JSON format and the same activation/injection path. `SparkBridge.nativeRun` gains the
-`splitTunnel` arg; the app persists the list (DataStore) and passes it on connect. This is
-scoped as a **fast-follow** after the desktop UI + core land, since the core (the hard,
-shared part) is already done by then.
+`splitTunnel` arg (initial list on connect); `SparkBridge.nativeSetSplitTunnel(json)` does
+the live update while connected (same JNI the service already exposes). The app persists
+the list (DataStore). Scoped as a **fast-follow** after the desktop UI + core land, since
+the core (the hard, shared part) is already done by then.
 
 ## Decisions (defaults chosen; flagged for review)
 
@@ -175,9 +219,10 @@ shared part) is already done by then.
 2. **Domain match includes subdomains** (`google.com` ⇒ `mail.google.com`). Matches user
    expectation for "bypass google.com".
 3. **Toggle off preserves the list**, just stops applying it.
-4. **Changes apply on (re)connect** (no live router swap in v1 — consistent with the
-   existing "no live router swap in v1" note in `fd_tunnel`). The UI persists immediately;
-   if connected, show a subtle "reconnect to apply" hint. Live reload is deferred.
+4. **Changes apply live while connected** (Decision confirmed). Editing the list swaps the
+   small user-bypass matcher in the running router via the control handle + FFI — no
+   reconnect. The initial list is also injected at connect. (Only exception is the non-
+   production edge case of a router that was never built — see Activation caveat.)
 5. **Injection at connect** (providerConfiguration / nativeRun arg), not a shared
    `dataDir` file — avoids the macOS app-group requirement and keeps one code path.
 
@@ -188,7 +233,6 @@ shared part) is already done by then.
 - Curated **default lists** ("one active default list with N sites").
 - The separate **Routing Mode** (Smart Routing / Full Tunnel) screen and the full
   home-screen redesign to match Figma.
-- Live (connected) reload of the bypass list.
 
 ## Testing
 
@@ -200,12 +244,17 @@ shared part) is already done by then.
   - `normalize`/`add_entries`: comma-split, URL→host strip, lowercase, dedupe, invalid
     entries rejected with report;
   - `parse` round-trips the JSON; disabled or empty list ⇒ router/fake-IP **not** forced on
-    when no fetched rules; enabled non-empty ⇒ forced on.
+    when no fetched rules; enabled non-empty ⇒ forced on;
+  - **live reload**: `set_user_bypass` on a built `Router` changes a domain's decision from
+    Proxy→Direct (and back to Proxy when the entry is removed / disabled) without rebuilding
+    or altering the base matcher (assert base decisions for other domains are unchanged).
 - **Whole-workspace gate** after core API changes (cli + service + platforms compile):
   `cargo clippy --workspace --all-targets --all-features -D warnings`, `cargo fmt`.
 - **Desktop manual**: `npm run dev` (MockBackend) drives the three screens + snackbar;
   then the notarized DMG path to verify a bypassed domain actually goes Direct on device
-  (e.g. `whatismyipaddress.com` bypassed shows the real IP while tunnel is up).
+  (e.g. `whatismyipaddress.com` bypassed shows the real IP while tunnel is up), and that
+  adding/removing it **while connected** flips the result **without reconnecting** (live
+  reload).
 - **Android**: fast-follow; validate on the Redmi that a bypassed domain egresses direct.
 
 ## Files
@@ -215,18 +264,24 @@ shared part) is already done by then.
 `core/src/rules/router.rs` (`build` takes user bypass), `core/src/fd_tunnel.rs`
 (`run_fd_dispatch` + `setup_routing_and_udp` activation & wiring), `core/src/lib.rs`
 (export `split_tunnel`).
-**Modify (FFI):** `platforms/apple/src/lib.rs`, `platforms/android/src/lib.rs`.
+**Modify (FFI / core rust):** `platforms/apple/src/lib.rs` (connect arg +
+`spark_set_split_tunnel`), `platforms/android/src/lib.rs` (`nativeRun` arg +
+`nativeSetSplitTunnel`).
+**Modify (macOS NE, Swift):** `platforms/apple/Sources/SparkNE/PacketTunnelProvider.swift`
+— read `providerConfiguration["splitTunnel"]` at start; `handleAppMessage` → the C-ABI
+`spark_set_split_tunnel`.
 **Add (desktop UI):** `gui-tauri/src/routes/split-tunneling/+page.svelte`,
 `gui-tauri/src/routes/split-tunneling/websites/+page.svelte`.
 **Modify (desktop UI):** `gui-tauri/src/routes/+page.svelte` (Split Tunneling row),
 `gui-tauri/src/lib/spark_backend.ts` (+ Mock), `gui-tauri/src/lib/tauri_backend.ts`,
 `gui-tauri/src-tauri/src/lib.rs` (commands + inject at connect),
 `gui-tauri/src-tauri/src/config.rs` (splitTunnel resolution).
-**Fast-follow (Android UI):** `platforms/android/demo/app/.../ui/*`, `SparkBridge.kt`,
-`VpnController.kt`, `SparkVpnService.kt`.
+**Fast-follow (Android UI):** `platforms/android/demo/app/.../ui/*`, `SparkBridge.kt`
+(`nativeRun` arg + `nativeSetSplitTunnel`), `VpnController.kt`, `SparkVpnService.kt`.
 
-## Open questions for review
+## Resolved decisions (previously open)
 
-- Precedence over ad-block (Decision 1): keep user-bypass absolute, or let ad-block Reject
-  still win?
-- "Reconnect to apply" acceptable for v1, or is live reload needed before shipping?
+- **Precedence over ad-block:** user-bypass is **absolute** — a bypassed domain goes Direct
+  even if an ad-block rule-set would Reject it (checked first in `decide`).
+- **Apply timing:** **live reload** while connected (no reconnect), via the runtime control
+  handle + `spark_set_split_tunnel` FFI.
