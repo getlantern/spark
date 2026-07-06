@@ -65,15 +65,17 @@ PSK. Redact by default (CLAUDE.md / GOAL.md).
 - [x] `docs/dns-tunnel-design.md` — the wire/crypto/ARQ/balancer/DNS/MTU spec (the gate).
 - [x] `docs/dns-tunnel-plan.md` — this plan.
 - [x] `docs/adr/0011-dns-tunnel-transport.md` — the decision record.
-- [ ] Update `docs/STATE.md` (position + this transport's sub-milestones under M11).
+- [x] Update `docs/STATE.md` (position + this transport's sub-milestones under M11).
 - **Gate:** docs reviewed; the protocol is fully specified before any code.
 
 ## M1 — `dns-tunnel-core` codec (no network)
 Tasks (TDD each; commit per task):
 1. Workspace wiring: add `dns-tunnel-core` member + `lz4_flex` workspace dep; empty crate builds.
-2. `crypto.rs`: base64 PSK decode + length check; HKDF-SHA256 key schedule (upload/download/handshake
-   labels + commitment); `Aead` wrapper (ChaCha20-Poly1305 + AES-256-GCM via `ring::aead::LessSafeKey`);
-   `SystemRandom` nonce/ID/salt helpers. KATs + seal/open round-trip + tamper-reject.
+2. `crypto.rs`: forward-secret handshake — per-session X25519 ephemerals + a static Ed25519 server
+   identity (verify the `SynAck` transcript signature); HKDF-SHA256 session-key schedule
+   (upload/download labels) over the ephemeral↔ephemeral shared secret; `Aead` wrapper
+   (ChaCha20-Poly1305 + AES-256-GCM via `ring::aead::LessSafeKey`); `SystemRandom` nonce/ID/ephemeral
+   helpers. KATs + seal/open round-trip + tamper-reject + signature-verify.
 3. `frame.rs`: header (version/flags/ConnectionID/StreamID/Seq/Frag/Comp) encode+decode; header check;
    `seal_frame`/`open_frame` (nonce ‖ ciphertext ‖ tag). Round-trip + malformed-reject tests.
 4. `dns.rs`: build TXT query (QNAME base32 labels ≤63, total ≤253, EDNS0 OPT); parse; build/parse TXT

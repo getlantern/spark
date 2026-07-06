@@ -18,10 +18,10 @@ it cannot co-tenant dnstt's `:53`. They coexist fine (dnstt on `t.iantem.io`, sp
 
 ## What to reuse from lantern-cloud
 
-- **Client config distribution.** Add a spark-dns config (zone / server public key / resolvers) alongside
-  `common.DNSTTConfig` and ship it through the same `flashlight/genconfig` → cloud.yaml → config-server
-  pipeline; clients already know how to receive a DNS-tunnel config and slot it into the escalation
-  tier (`kindling/dnstt`, radiance).
+- **Client config distribution.** Surface a spark-dns config (zone / server public key / resolvers) to
+  clients **Spark-side** and slot it into the escalation tier. (An earlier flashlight-side
+  `SparkDNSConfig` — `genconfig` → cloud.yaml → config-server, alongside `common.DNSTTConfig` — was
+  reverted; distribution stays in Spark, not flashlight.)
 - **The escalation slot + tuned resolver list** in the client.
 - **Hardening tasks** (e.g. the dnstt CVE-mitigation playbook).
 

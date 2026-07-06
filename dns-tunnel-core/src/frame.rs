@@ -125,7 +125,7 @@ pub enum FrameError {
     /// An undefined flag bit was set.
     #[error("unknown header flags {0:#010b}")]
     UnknownFlags(u8),
-    /// The wire form byte is neither [`FORM_SHORT`] nor [`FORM_LONG`].
+    /// The wire form byte is not one of [`FORM_SHORT`], [`FORM_SYN`], or [`FORM_SYNACK`].
     #[error("bad wire form {0}")]
     BadForm(u8),
     /// AEAD open failed.

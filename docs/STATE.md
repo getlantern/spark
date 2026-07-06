@@ -2636,8 +2636,8 @@ cookie/replay handshake hardening, UDP-over-tunnel, session-pump payload compres
 
 **2026-07-02 — DNS-tunnel: LIVE on DigitalOcean, recursive path proven, real throughput measured.**
 Deployed `dns-tunnel-server` (static musl binary via `cargo zigbuild`, 1.7 MB) to a DO droplet
-(`spark-dns-tunnel-test`, nyc3, 138.197.105.130), systemd `spark-dns.service` on UDP:5300 with a
-`:53→:5300` DNAT. Delegated **`t.getiantem.org`** on Cloudflare (NS + glue A → the droplet). Added a
+(`<droplet-name>`, nyc3, <old-droplet-ip>), systemd `spark-dns.service` on UDP:5300 with a
+`:53→:5300` DNAT. Delegated **`<initial-tunnel-zone>`** on Cloudflare (NS + glue A → the droplet). Added a
 server hardening (`dns::build_nodata` + `Server::on_query` rework, commit `ab2f31e`): the server now
 answers QNAME-min probes (apex SOA/NS/A) with a benign NOERROR/NODATA instead of dropping — without it
 1.1.1.1/8.8.8.8 SERVFAIL before forwarding tunnel queries. Verified end-to-end: authoritative fetch
@@ -2650,13 +2650,13 @@ random-subdomain pattern (Cloudflare-only was as slow as the mixed pool; direct 
 i.e. a resolver-side anti-abuse limit, not our stack. Confirms recursive = the reachability-under-
 shutdown tier; throughput wants large resolver pools / non-throttling paths (the MasterDnsVPN approach).
 Live-fetch harness generalized to a comma-separated resolver list (authoritative or recursive). Assets
-to tear down when done: DO droplet `581811126`, DO SSH key `spark-dns-tunnel` (`57517210`), the two
+to tear down when done: DO droplet `<old-droplet-id>`, DO SSH key (`<old-ssh-key-id>`), the two
 Cloudflare records under getiantem.org (`t` NS + `ns-spark` A). PSK in the session scratchpad. New
 build tooling installed locally: `zig` + `cargo-zigbuild` + the `x86_64-unknown-linux-musl` target.
 
 **2026-07-02 — DNS-tunnel: recursive-throughput optimization — two negative results (both reverted).**
 Investigated raising recursive throughput past the ~single-resolver ceiling. Measured against the live
-`t.getiantem.org` deployment across a 23-IP public-resolver pool (14 operators). **Findings:**
+`<initial-tunnel-zone>` deployment across a 23-IP public-resolver pool (14 operators). **Findings:**
 (1) *Pool breadth helps sticky via selection* — 8→23 resolvers let the health-ranker find a better
 single resolver (~15→78 KB/s), because operators throttle the DNS-tunnel pattern very unequally.
 (2) **Per-query spread across the pool: 15× WORSE** (5 vs 78 KB/s). A single ordered ARQ stream sprayed
@@ -2699,8 +2699,8 @@ regime is ~one-resolver's-worth (reachability, not streaming) — as intended fo
 dnstt-infra reuse.** (1) **`system_resolvers()`** — the builder auto-includes the OS resolver(s)
 (`/etc/resolv.conf` on Unix) in the recursive pool, gated by `DnsTunnelConfig.use_system_resolvers`
 (default true; the shutdown lifeline). Commit `6a50e00`. (2) **Switched the live tunnel zone to an
-unattributable domain** `t.ss7hc6jm.io` (Cloudflare NS + glue), replacing known-Lantern
-`t.getiantem.org` (a censor's resolver would filter it); validated recursive (1.1.1.1/9.9.9.9/8.8.8.8
+unattributable domain** `<tunnel-zone>` (Cloudflare NS + glue), replacing known-Lantern
+`<initial-tunnel-zone>` (a censor's resolver would filter it); validated recursive (1.1.1.1/9.9.9.9/8.8.8.8
 NOERROR, HTTP 301 in 0.29 s at dup=3). getiantem.org records can be removed. (3) **Assessed reuse of
 Lantern's dnstt infra** (`getlantern/dnstt`; lantern-cloud `ans/bootstrap-dnstt.yaml` → `dnstts_oci`
 on OCI; zone `t.iantem.io` via TF `dns.yaml`; client config via `flashlight/genconfig` →
@@ -2711,10 +2711,10 @@ incompatibility) + *unattributable* domains. **Production targets Linode, not OC
 uses Linode; `linode-cli`+`LINODE_TOKEN` on hand). Committed a reusable deploy kit under `deploy/`
 (commit `37861e7`): `provision-linode.sh` + Ansible `bootstrap-spark-dns.yaml` + systemd template +
 inventory + README, adapted from the dnstt playbook. Validated live: Linode us-east nanode
-`45.79.190.108` running it carried real traffic (HTTP 301, ~60 ms RTT). **Consolidated onto Linode:**
-`ns-spark.ss7hc6jm.io` A repointed → 45.79.190.108; verified recursive still worked with the DO
-server *stopped* (definitive), then deleted the DO droplet `581811126` + its DO-account SSH key.
-Sole live server is now **Linode `100186047` @ 45.79.190.108** serving `t.ss7hc6jm.io` (recursive
+`<server-ip>` running it carried real traffic (HTTP 301, ~60 ms RTT). **Consolidated onto Linode:**
+`ns-spark.<tunnel-domain>` A repointed → <server-ip>; verified recursive still worked with the DO
+server *stopped* (definitive), then deleted the DO droplet `<old-droplet-id>` + its DO-account SSH key.
+Sole live server is now **Linode `<server-instance-id>` @ <server-ip>** serving `<tunnel-zone>` (recursive
 re-verified post-deletion). Local key `~/.ssh/spark-dns-tunnel` retained (Linode SSH). Remaining reuse
 to build: `SparkDNSConfig` + genconfig/config-server wiring, and the escalation-tier hook.
 
@@ -2734,7 +2734,7 @@ ephemeral keys don't diverge; +1 RTT to first byte), `dns-tunnel-server` (`keyge
 `serve --privkey-file`), spark `config` (`DnsTunnelConfig.psk` → `server_pubkey`) + transport builder.
 Commits `64ff4bd` (crypto foundation) + `0d34d2a` (migration, BREAKING) + `ea95191` (deploy). 57 core
 + server-e2e + 181 spark-core tests green; clippy/fmt clean; base build unaffected. **Re-keyed +
-redeployed the live Linode server** (`serve --privkey-file`, zone t.ss7hc6jm.io); verified the FS
+redeployed the live Linode server** (`serve --privkey-file`, zone <tunnel-zone>); verified the FS
 handshake live — authoritative (0.21 s) AND recursive through the public-resolver pool (0.46 s), both
 HTTP 301, client authenticating with only the server public key `pBayZhvFX4OMbyVRlgjZ1Yi/goXJuIFgxC71BUBGTPM=`
 (the PSK is gone). Deploy kit updated to keypair/keygen. Considered dep alt B (x25519-dalek, keeps

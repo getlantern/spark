@@ -107,18 +107,21 @@ The **wire** layout uses a QUIC-style long/short header form so the server can p
 *before* it has a key:
 
 ```
-Short (data / most frames):  FORM_SHORT(1) ‖ ConnectionID(8) ‖ nonce(12) ‖ AEAD(inner)
-Long  (SYN / handshake):     FORM_LONG(1)  ‖ ConnectionID(8) ‖ salt(16) ‖ nonce(12) ‖ AEAD(inner)
+Data (most frames): FORM_SHORT(1)  ‖ ConnectionID(8) ‖ nonce(12) ‖ AEAD(inner)
+Handshake — client: FORM_SYN(1)    ‖ ConnectionID(8) ‖ client_ephemeral_pub(32)
+Handshake — server: FORM_SYNACK(1) ‖ ConnectionID(8) ‖ server_ephemeral_pub(32) ‖ Ed25519_sig(64)
 ```
 
 The whole wire packet is then base32-encoded into the QNAME (uplink) or placed raw in TXT RDATA
-(downlink). The **ConnectionID and (on the SYN) the salt are cleartext** — the server needs them to
-route to / create the session and run the key schedule before it can decrypt. Neither is bound as
-AEAD AAD, and it does not need to be: the session key is HKDF-derived with the ConnectionID in its
-`info` (§2.4), so a ciphertext is already cryptographically bound to its ConnectionID; tampering the
-cleartext salt/nonce merely makes `open` fail. The AEAD tag authenticates the whole inner header +
-payload, so **no separate header-check byte is needed** (unlike MasterDnsVPN, which had unauthenticated
-modes). We keep MasterDnsVPN's low-overhead spirit but widen the identifiers for correctness:
+(downlink). The **`FORM_SYN`/`FORM_SYNACK` handshake packets are cleartext** — they carry the ephemeral
+X25519 public keys (and, on the `SynAck`, the server's Ed25519 signature) that a session needs before
+any key exists to decrypt under. On **data** frames the **ConnectionID and nonce are cleartext** — the
+server needs the ConnectionID to route to the session and the nonce to `open` the AEAD. Neither is
+bound as AEAD AAD, and it does not need to be: the session key is HKDF-derived with the ConnectionID in
+its `info` (§2.4), so a ciphertext is already cryptographically bound to its ConnectionID; tampering the
+cleartext nonce merely makes `open` fail. The AEAD tag authenticates the whole inner header + payload,
+so **no separate header-check byte is needed** (unlike MasterDnsVPN, which had unauthenticated modes).
+We keep MasterDnsVPN's low-overhead spirit but widen the identifiers for correctness:
 
 **ConnectionID is 8 random bytes, not 1.** MasterDnsVPN's 1-byte SessionID capped a server at 255
 concurrent sessions and tied identity to one path. A wide random ID (a) removes the cap, (b) is the
@@ -127,37 +130,42 @@ resolver / any source address, and (c) is unguessable. The server keys its sessi
 
 ### 2.3 Session handshake & stream open
 ```
-Client → SYN (long)     : ConnectionID + cleartext salt; payload = stream 1's SOCKS-style target
-Server → SYN-ACK        : (handshake key) establishes the session AND opens stream 1
-Client → SYN (short)    : per-stream, StreamID + target — opens streams ≥ 2 over the live session
-Server → SYN-ACK (short): per-stream open ack (session downlink key), StreamID echoed
+Client → Syn            : FORM_SYN    ‖ ConnectionID ‖ client_ephemeral_pub                 (cleartext)
+Server → SynAck         : FORM_SYNACK ‖ ConnectionID ‖ server_ephemeral_pub ‖ Ed25519_sig   (cleartext)
+Client → Syn    (short) : per-stream, StreamID + SOCKS-style target — sealed under the session uplink key
+Server → SynAck (short) : per-stream open ack, StreamID echoed
 ```
-The long-form `SYN` is AEAD-sealed under the PSK-derived handshake key, so only PSK holders produce a
-valid first frame — this is the auth. The server replies only after a valid `SYN` opens (unauthenticated
-garbage to :53 is dropped as ordinary malformed DNS). **Implemented (2026-07-02):** the session and
-streams are decoupled — one crypto session (one ConnectionID + key schedule) multiplexes **many** ARQ
-streams keyed by StreamID. Stream 1's target rides the handshake `SYN` (1 RTT to first byte); further
-streams open with a cheap short-form `SYN` under the session uplink key, retried on a per-stream timer
-until the server returns a short-form `SYN-ACK`. A retransmitted session `SYN` is idempotent (never
-wipes live streams). *Deferred (§16):* the anti-spoof **cookie** and per-connection **verify token**
-(v1 relies on PSK-authenticated frames + the idle sweep).
+The handshake is a **forward-secret, anonymous-client (Noise-NK-style) X25519 exchange — not PSK auth**.
+The client sends a cleartext ephemeral public key; the server replies with its own ephemeral public key
+plus an **Ed25519 signature over the transcript** (`client_eph ‖ server_eph ‖ ConnectionID`, under a
+domain-separation context). The client verifies that signature against the server's static Ed25519
+public key it already holds — so the **server is authenticated** (anti-MITM) while the **client stays
+anonymous** (anyone with the server's public key can connect). Unauthenticated garbage to :53 is dropped
+as ordinary malformed DNS. Session and streams are decoupled — one crypto session (one ConnectionID +
+key schedule) multiplexes **many** ARQ streams keyed by StreamID. Unlike the old PSK design, **no stream
+rides the handshake**: every stream — the first (`PRIMARY_STREAM_ID = 1`) included — opens *after* the
+session is established with a cheap short-form `Syn` (StreamID + target, sealed under the session uplink
+key), retried on a per-stream timer until the server returns a short-form `SynAck`. A retransmitted
+session `Syn` is idempotent (never wipes live streams). *Deferred (§16):* an anti-spoof cookie /
+SYN-flood mitigation (v1 relies on the cheap DH exchange + the idle sweep).
 
 ### 2.4 Crypto & key schedule
-- **PSK** (config; base64, ≥32 bytes). Fixed shared secret; the server auto-generates one if absent.
-- **Per-session salt**: 16 random bytes chosen by the client, sent in the clear in the `SYN` DNS
-  message prefix (before the sealed frame). Key: `K = HKDF-SHA256(ikm = PSK, salt = session_salt,
-  info = "spark-dns-tunnel v1 " ‖ ConnectionID)`. Separate `info` labels derive independent
-  upload/download keys and the handshake key.
+- **Server static identity**: an **Ed25519** keypair. The server holds the private key; the config
+  distributes only the **public** key (safe to publish — it is not a shared secret). It authenticates
+  the server in the handshake (§2.3) and is *never* used to derive session keys.
+- **Forward-secret session keys**: each session runs a fresh **X25519 ephemeral↔ephemeral** exchange
+  (client and server each generate a per-session ephemeral). The session key is
+  `K = HKDF-SHA256(ikm = X25519(client_eph, server_eph), info = "spark-dns-tunnel v1 " ‖ ConnectionID)`,
+  derived from the **ephemerals only** — so a later compromise of the static Ed25519 key cannot decrypt
+  past traffic (**forward secrecy**). Separate `info` labels derive independent upload/download keys.
 - **AEAD**: default **ChaCha20-Poly1305** (constant-time in software → mobile-friendly, no AES-NI
   dependency), optional **AES-256-GCM** (both via `ring::aead`). **Random 96-bit nonce per DNS
   message**, carried in the frame — the DNS carrier reorders/drops/duplicates, so a counter nonce
   would desync; per-message random nonce is the correct datagram construction. Per-session key
   separation (above) keeps the random-nonce birthday bound (~2³² messages) *per session*, not global.
-- **Key commitment**: prepend a commitment tag (`HKDF(... info="commit")[..16]`) to the first frame to
-  avoid AEAD partitioning-oracle ambiguity. (Cheap; only on `SYN`/`SYN-ACK`.)
 - **Dropped from MasterDnsVPN**: XOR / none / MD5-KDF / AES-192 / unauthenticated ChaCha20. AEAD only.
-- **Future (out of scope v1)**: an X25519 ephemeral handshake for forward secrecy, layered under the
-  same framing (§16).
+- **Superseded**: the pre-2026-07 PSK + per-session-salt HKDF model — replaced by the forward-secret
+  handshake above, so there is no longer a shared secret to distribute or to leak.
 
 ---
 
@@ -262,7 +270,7 @@ machinery. Not TLS → no ClientHello / `WirePlan`.
 |---|---|
 | Protected UDP dial (bypass tunnel route) | `transport::protected_udp_socket`, `SocketProtector` |
 | AEAD + HKDF | `ring::aead` + `ring::hkdf` (already in base) |
-| Secure random (nonces, ConnectionID, salt) | `ring::rand::SystemRandom` (no new `rand` dep) |
+| Secure random (nonces, ConnectionID, ephemerals) | `ring::rand::SystemRandom` (no new `rand` dep) |
 | Config gating + `from_config` precedence + feature stub | `transport/mod.rs`, `config/mod.rs` |
 | Pool membership (latency selection) | `ServerSpec::DnsTunnel` → `build_one` arm |
 | Startup name resolution | `bootstrap::resolve_endpoints` (no-SNI slot, like Shadowsocks) |
@@ -303,8 +311,9 @@ Feature gate: a new `dns-tunnel` cargo feature pulling `dep:dns-tunnel-core` + `
 pub struct DnsTunnelConfig {
     /// The delegated tunnel zone, e.g. "t.example.com".
     pub zone: String,
-    /// Pre-shared key, base64 (decoded ≥ 32 bytes). Proxy secret — privileged store only, never over IPC.
-    pub psk: String,
+    /// The server's static Ed25519 public key, hex-encoded (32 bytes). Not a secret — safe to
+    /// distribute; it authenticates the server in the forward-secret handshake (§2.4).
+    pub server_pubkey: String,
     /// Recursive resolvers: IP, IP:port, CIDR, CIDR:port, [v6]:port. CIDRs expand. (Recursive mode.)
     pub resolvers: Vec<String>,
     /// Optional: dial the authoritative server directly (authoritative mode / testing).
@@ -321,7 +330,7 @@ pub struct DnsTunnelConfig {
   `dns_tunnel: Option<DnsTunnelConfig>`.
 - `bootstrap::resolve_endpoints`: DNS-tunnel has **no SNI** (like Shadowsocks) — push a `None` SNI slot;
   resolver IPs are literals (no resolution); `authoritative` (if set) resolves like any endpoint.
-- Config validation: PSK base64-decodes to ≥32 B; `zone` is a valid DNS name; ≥1 resolver **or**
+- Config validation: `server_pubkey` hex-decodes to 32 B (Ed25519); `zone` is a valid DNS name; ≥1 resolver **or**
   `authoritative` set — else a clear build-time error.
 
 ---
@@ -356,7 +365,7 @@ sequenceDiagram
     participant S as dns-tunnel-server
 
     Net->>T: dial(target)
-    T->>B: ensure session (ConnectionID, salt)
+    T->>B: ensure session (ConnectionID, ephemeral handshake)
     B->>R: TXT SYN query base32(nonce ‖ sealed SYN).t.zone
     R->>S: forward *.t.zone
     S-->>R: TXT RDATA sealed SYN-ACK cookie + policy
@@ -386,7 +395,7 @@ sequenceDiagram
 6. **Multipath gate**: N resolvers configured; block/kill one mid-transfer; assert failover + sustained
    flow (this is the differentiator, so it gets its own gate).
 7. **Full `sudo spark run` TUN gate**: curl through TUN → netstack → DnsTunnelTransport → resolver →
-   server → internet; **log-hygiene clean** (no resolver IPs, no zone, no PSK in logs).
+   server → internet; **log-hygiene clean** (no resolver IPs, no zone, no key material in logs).
 8. **Workspace sweep**: build/clippy `-D warnings`/fmt clean **with and without** the `dns-tunnel`
    feature; base build pulls neither `dns-tunnel-core` nor `lz4_flex`. Report release binary size delta.
 
@@ -427,7 +436,7 @@ query-timing shaping (possibly via `flint-shaping`) can raise the detection bar;
   cosmetic open item.
 - **Default cipher.** ChaCha20-Poly1305 chosen for mobile/software constant-time; revisit if AES-NI
   targets dominate.
-- **Forward secrecy.** PSK+HKDF v1; X25519 ephemeral handshake is the documented FS upgrade.
+- **Forward secrecy.** Implemented — X25519 ephemeral↔ephemeral handshake, the server authenticated by its static Ed25519 key (§2.3–2.4).
 - **No congestion control** is intentional (§3) — validate under many parallel resolvers that window +
   duplication + resolver limits don't cause self-inflicted loss storms; add pacing if needed.
 - **dnstt-interop mode** (reuse the volunteer dnstt server fleet on shutdown days) — a separate

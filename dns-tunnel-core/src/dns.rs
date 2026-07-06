@@ -231,11 +231,15 @@ pub fn parse_query(buf: &[u8], zone: &Name) -> Result<Query, DnsError> {
 pub fn build_answer(request: &[u8], downlink: &[u8], edns_udp: u16) -> Result<Vec<u8>, DnsError> {
     let qend = question_end(request)?;
     let txn_id = u16::from_be_bytes([request[0], request[1]]);
+    let req_flags = u16::from_be_bytes([request[2], request[3]]);
 
     let mut msg = Vec::with_capacity(qend + 16 + downlink.len() + 11);
-    // Header: id echoed; flags QR=1, RD=1, RA=1 (0x8180); QD=1, AN=1, NS=0, AR=1.
+    // Header: id echoed; flags QR=1, AA=1 (we are authoritative for the zone — same as `build_nodata`,
+    // so a QNAME-minimizing resolver sees consistent authority across the SOA probe and the tunnel
+    // answer; AA=0 here could read as a lame/non-authoritative reply and not be relayed), RA=0
+    // (authoritative-only — no recursion offered), RD copied from the query; QD=1, AN=1, NS=0, AR=1.
     msg.extend_from_slice(&txn_id.to_be_bytes());
-    msg.extend_from_slice(&[0x81, 0x80]);
+    msg.extend_from_slice(&(0x8400 | (req_flags & 0x0100)).to_be_bytes());
     msg.extend_from_slice(&1u16.to_be_bytes());
     msg.extend_from_slice(&1u16.to_be_bytes());
     msg.extend_from_slice(&0u16.to_be_bytes());
@@ -533,8 +537,9 @@ mod tests {
         let parsed = parse_answer(&a).unwrap();
         assert_eq!(parsed.txn_id, 0x1234);
         assert_eq!(parsed.data, downlink);
-        // Response bit set.
-        assert_eq!(a[2] & 0x80, 0x80);
+        // Response bit + AA set (authoritative answer — consistent with build_nodata).
+        assert_eq!(a[2] & 0x80, 0x80, "QR set");
+        assert_eq!(a[2] & 0x04, 0x04, "AA set");
     }
 
     #[test]

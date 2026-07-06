@@ -990,7 +990,7 @@ mod tests {
 
     /// Live end-to-end fetch through a **deployed** server (authoritative mode over the real WAN):
     /// dials a real target *through* the tunnel and does an HTTP GET. Env: `DNS_TUNNEL_SERVER=ip:port`
-    /// (required — else the test skips), `DNS_TUNNEL_PSK=<base64>`, `DNS_TUNNEL_ZONE`,
+    /// (required — else the test skips), `DNS_TUNNEL_PUBKEY=<hex Ed25519>`, `DNS_TUNNEL_ZONE`,
     /// `DNS_TUNNEL_TARGET=ip:port` (default `1.1.1.1:80`), `DNS_TUNNEL_HTTP_HOST` (Host header,
     /// default `one.one.one.one`), `DNS_TUNNEL_PATH` (default `/`). Prints status + bytes + throughput.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
