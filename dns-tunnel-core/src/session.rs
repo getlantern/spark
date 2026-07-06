@@ -713,6 +713,17 @@ impl Server {
             .unwrap_or_default()
     }
 
+    /// In-order bytes reassembled from the client but not yet taken (peek; does **not** consume).
+    /// Lets a caller decide whether to `take_from_client` — e.g. only when a downstream egress queue
+    /// has room — without draining the ARQ delivery buffer if it can't yet hand the bytes off.
+    pub fn readable_from_client(&self, conn_id: &ConnId, sid: u16) -> usize {
+        self.sessions
+            .get(conn_id)
+            .and_then(|s| s.streams.get(&sid))
+            .map(|st| st.stream.readable())
+            .unwrap_or(0)
+    }
+
     /// Gracefully close a stream (e.g. its target closed) — flushes queued downlink, then FINs.
     pub fn close_stream(&mut self, conn_id: &ConnId, sid: u16) {
         if let Some(st) = self

@@ -70,6 +70,12 @@ fn decode_target(b: &[u8]) -> Option<SocketAddr> {
     }
 }
 
+/// Cap on a single stream's reassembled-but-undeliverable uplink backlog. If a stream's TCP target is
+/// wedged and its egress queue stays full past this, the stream is torn down to bound memory — the ARQ
+/// does not backpressure the client on unread bytes (see `Server::readable_from_client`). Generous: a
+/// DNS tunnel moves only KB/s, so hitting this means one stream has been stuck a long time, not a hot path.
+const MAX_STREAM_BACKLOG: usize = 256 * 1024;
+
 /// Run the server on `udp` until a fatal socket error. Does not return on the happy path.
 pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
     let mut server = Server::new(&cfg.privkey, &cfg.zone, cfg.session)
@@ -103,15 +109,33 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
                         }
                     }
                     for sid in server.streams_of(&id) {
-                        let up = server.take_from_client(&id, sid);
-                        if !up.is_empty() {
-                            // `send().await` applies backpressure (no data loss). A slow target can
-                            // stall the loop for other streams — acceptable for v1; fairness later.
-                            if let Some(h) = egress.get(&(id, sid)) {
-                                if h.tx.send(up.to_vec()).await.is_err() {
-                                    drop_stream(&mut server, &mut egress, (id, sid));
+                        let pending = server.readable_from_client(&id, sid);
+                        if pending == 0 {
+                            continue; // nothing to push this round
+                        }
+                        // Decide with a short-lived borrow of `egress`, then release it before any
+                        // `drop_stream` (which needs `&mut egress`). Never `send().await`: awaiting a
+                        // full egress channel would stall the whole UDP loop — every other session's
+                        // queries/answers — behind one slow or stuck TCP target.
+                        let should_drop = match egress.get(&(id, sid)) {
+                            None => continue,
+                            Some(h) => match h.tx.try_reserve() {
+                                // Room in the queue: consume the ARQ bytes only now that we can hand
+                                // them off (infallible), so a full channel never loses data.
+                                Ok(permit) => {
+                                    permit.send(server.take_from_client(&id, sid).to_vec());
+                                    continue;
                                 }
-                            }
+                                // Jammed. Leaving bytes unread does not backpressure the client (the
+                                // ARQ advances on reassembly, not on read — see `readable_from_client`),
+                                // so tear the stream down once its undeliverable backlog passes the cap:
+                                // bounds memory without touching the session's other streams.
+                                Err(mpsc::error::TrySendError::Full(())) => pending > MAX_STREAM_BACKLOG,
+                                Err(mpsc::error::TrySendError::Closed(())) => true,
+                            },
+                        };
+                        if should_drop {
+                            drop_stream(&mut server, &mut egress, (id, sid));
                         }
                     }
                 }
