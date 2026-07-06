@@ -126,22 +126,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 .containerURL(forSecurityApplicationGroupIdentifier: "group.org.getlantern.spark")?
                 .appendingPathComponent("config", isDirectory: true).path
 
+            // Read the optional split-tunnel JSON from providerConfiguration["splitTunnel"].
+            // Trimmed for the same reason as `config` above; nil/empty → NULL (no split-tunnel).
+            let splitTunnel = (provider?["splitTunnel"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
             // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C strings
             // alive for the whole blocking call (it returns only when the tunnel stops).
-            let worker = Thread { [mtu = self.mtu, log = self.log, config, dataDir] in
-                // Thread the optional app-group data dir through as the 4th C-ABI arg (nil if absent).
-                func runNative(_ cfg: UnsafePointer<CChar>?) -> Int32 {
+            let worker = Thread { [mtu = self.mtu, log = self.log, config, dataDir, splitTunnel] in
+                // Thread the optional data-dir and split-tunnel JSON through as the 4th/5th C-ABI
+                // args (nil if absent). Nested helpers keep each optional's withCString scope live.
+                func runNative(_ cfg: UnsafePointer<CChar>?, _ st: UnsafePointer<CChar>?) -> Int32 {
                     if let dataDir {
-                        return dataDir.withCString { spark_tunnel_run(fd, Int32(mtu), cfg, $0) }
+                        return dataDir.withCString { spark_tunnel_run(fd, Int32(mtu), cfg, $0, st) }
                     }
-                    return spark_tunnel_run(fd, Int32(mtu), cfg, nil)
+                    return spark_tunnel_run(fd, Int32(mtu), cfg, nil, st)
+                }
+                func runWithSplitTunnel(_ cfg: UnsafePointer<CChar>?) -> Int32 {
+                    if let splitTunnel, !splitTunnel.isEmpty {
+                        return splitTunnel.withCString { runNative(cfg, $0) }
+                    }
+                    return runNative(cfg, nil)
                 }
                 let rc: Int32
                 if let config, !config.isEmpty {
-                    rc = config.withCString { runNative($0) }
+                    rc = config.withCString { runWithSplitTunnel($0) }
                 } else {
-                    rc = runNative(nil)
+                    rc = runWithSplitTunnel(nil)
                 }
                 log.notice("spark_tunnel_run returned \(rc)")
             }
@@ -238,6 +250,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let index = (obj["index"] as? Int).flatMap { Int32(exactly: $0) } ?? -1
             let rc = spark_select_server(index)
             log.notice("handleAppMessage: select index=\(index) rc=\(rc)")
+            completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
+        case "splitTunnel":
+            // The app sends {"cmd":"splitTunnel","list":"<json>"} where <json> is the
+            // {enabled,domains,ips} JSON string. Missing list → "{}" (disabled / empty policy).
+            // Trim + treat an empty/whitespace list as "{}" so both this live-update path and the
+            // startup providerConfiguration path map "no list" the same way.
+            let listJson = (obj["list"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .flatMap { $0.isEmpty ? nil : $0 } ?? "{}"
+            let rc = listJson.withCString { spark_set_split_tunnel($0) }
+            log.notice("handleAppMessage: splitTunnel rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
         default:
             log.error("handleAppMessage: unknown cmd \(cmd)")

@@ -67,6 +67,54 @@ fn current_pool() -> Option<Arc<dyn transport::PoolControl>> {
     pool().lock().unwrap().clone()
 }
 
+/// The running tunnel's router, registered at connect so the live split-tunnel update
+/// ([`set_split_tunnel`]) can reach it, and cleared on teardown. One tunnel per process (like the
+/// pool handle), so a single global suffices.
+#[cfg(feature = "smart-routing")]
+fn active_router() -> &'static Mutex<Option<Arc<crate::rules::router::Router>>> {
+    static R: OnceLock<Mutex<Option<Arc<crate::rules::router::Router>>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(feature = "smart-routing")]
+fn set_active_router(r: Option<Arc<crate::rules::router::Router>>) {
+    // Poison-tolerant: this is reached from FFI teardown, so recover the guard from a poisoned
+    // mutex (`into_inner`) rather than panicking and crashing the NE/JNI host. The inner Option is
+    // trivially consistent, so recovering it is safe.
+    *active_router().lock().unwrap_or_else(|e| e.into_inner()) = r;
+}
+
+/// Update the running tunnel's split-tunnel bypass list live (no reconnect). `json` is the
+/// `{enabled,domains,ips}` payload. Returns `true` if applied, `false` if the JSON was invalid or no
+/// router is active (not connected, or connected with no smart-routing path). Called across the
+/// platform FFI (Apple C-ABI / Android JNI).
+#[cfg(feature = "smart-routing")]
+pub fn set_split_tunnel(json: &str) -> bool {
+    let Ok(st) = crate::split_tunnel::parse(json) else {
+        return false;
+    };
+    // Clone the Arc out under the lock, then release the mutex before touching the router — so this
+    // mutex is never held across the router's own RwLock. `unwrap_or_else(into_inner)` recovers from
+    // a poisoned mutex instead of panicking: this is FFI-reachable and must not crash the host.
+    let router = active_router()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match router {
+        Some(r) => {
+            r.set_user_bypass(Some(&st));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Without `smart-routing`, live split-tunnel updates are unsupported.
+#[cfg(not(feature = "smart-routing"))]
+pub fn set_split_tunnel(_json: &str) -> bool {
+    false
+}
+
 /// Readiness of the current tunnel's data path, for the platform shim to gate "connected" on. The NE
 /// runs one tunnel per process, so a single global suffices. The shim calls [`mark_connecting`]
 /// **synchronously** before starting the worker thread (a race-free baseline so [`wait_ready`] on
@@ -201,6 +249,7 @@ pub fn run_fd_dispatch(
     config: Option<&str>,
     data_dir: Option<&std::path::Path>,
     tun_base: Config,
+    split_tunnel: Option<&str>,
 ) -> i32 {
     // A null/absent config string is "no explicit config"; trim so " " / "\n" count as empty too.
     let cfg_str = config.map(str::trim).unwrap_or("");
@@ -221,7 +270,7 @@ pub fn run_fd_dispatch(
     #[cfg(feature = "config-fetch")]
     if cfg_str.is_empty() || cfg_str == "lantern-api" {
         return match data_dir {
-            Some(d) => run_fd_lantern_api(fd, mtu, d.to_path_buf(), tun_base),
+            Some(d) => run_fd_lantern_api(fd, mtu, d.to_path_buf(), tun_base, split_tunnel),
             None => {
                 // fetch mode needs a data dir to cache device_id + config; close the (transferred)
                 // fd, unblock any `wait_ready` waiter, and fail the connect.
@@ -243,7 +292,7 @@ pub fn run_fd_dispatch(
     // An explicit config (or, without `config-fetch`, empty = direct). The platform's `tun_base`
     // always supplies the tun/stack; the string supplies the transport.
     match explicit_config(cfg_str, &tun_base) {
-        Some(config) => run_fd(fd, mtu, config),
+        Some(config) => run_fd_with_split_tunnel(fd, mtu, config, split_tunnel),
         None => {
             // Unparseable config: close the (transferred) fd, unblock any waiter, and fail.
             abandon_fd(fd);
@@ -281,7 +330,14 @@ fn explicit_config(s: &str, tun_base: &Config) -> Option<Config> {
 /// `0` on a clean stop, `-1` on error. This is the single home of the `Result` → status-code
 /// convention; the shims differ only in how they marshal their platform's args into this call.
 pub fn run_fd(fd: i32, mtu: u16, config: Config) -> i32 {
-    match run_tunnel_with_config(fd, mtu, config) {
+    run_fd_with_split_tunnel(fd, mtu, config, None)
+}
+
+/// Like [`run_fd`] but also applies an initial split-tunnel bypass list (`split_tunnel` is the raw
+/// JSON `{enabled,domains,ips}` payload). The list seeds the router immediately at connect, before
+/// any flow is accepted. `None` or an invalid JSON string are both treated as no bypass list.
+fn run_fd_with_split_tunnel(fd: i32, mtu: u16, config: Config, split_tunnel: Option<&str>) -> i32 {
+    match run_tunnel_with_config(fd, mtu, config, split_tunnel) {
         Ok(()) => 0,
         Err(e) => {
             warn!(error = %e, "tunnel exited with error");
@@ -296,16 +352,31 @@ pub fn run_fd(fd: i32, mtu: u16, config: Config) -> i32 {
 /// binds its listener to (the userspace stack ignores it); `mtu` is applied to the adopted fd
 /// (`config.tun.mtu` is unused on the fd path). Returns once torn down. The FFI shims go through
 /// [`run_fd`] (which adds the shared status-code convention); call this directly from Rust.
-pub fn run_tunnel_with_config(fd: i32, mtu: u16, config: Config) -> std::io::Result<()> {
+///
+/// `split_tunnel` is the raw JSON `{enabled,domains,ips}` payload to apply as the initial user
+/// bypass list; `None` means no bypass list. This seeds the router at connect; live updates use
+/// [`set_split_tunnel`] after the tunnel is up.
+pub fn run_tunnel_with_config(
+    fd: i32,
+    mtu: u16,
+    config: Config,
+    split_tunnel: Option<&str>,
+) -> std::io::Result<()> {
     // A private stop signal registered for the no-arg `stop` (the shim entry); behavior is identical
     // to the former single global signal for the one-tunnel-per-process shim case.
-    run_with_handle(fd, mtu, config, Arc::new(Notify::new()))
+    run_with_handle(fd, mtu, config, split_tunnel, Arc::new(Notify::new()))
 }
 
 /// The shared implementation: run the tunnel until `stop` is signalled (by [`stop`] or a
 /// [`TunnelHandle`]) or the data path exits, registering `stop` for its lifetime so the no-arg
 /// [`stop`] can find it.
-fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std::io::Result<()> {
+fn run_with_handle(
+    fd: i32,
+    mtu: u16,
+    config: Config,
+    split_tunnel: Option<&str>,
+    stop: Arc<Notify>,
+) -> std::io::Result<()> {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -320,10 +391,19 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
     };
     register(&stop);
     let waiter = Arc::clone(&stop);
-    let result = runtime.block_on(run_tunnel_data_path(fd, mtu, config, None, &waiter));
+    let result = runtime.block_on(run_tunnel_data_path(
+        fd,
+        mtu,
+        config,
+        None,
+        split_tunnel,
+        &waiter,
+    ));
     deregister(&stop);
     // Drop the pool control handle for this (now torn-down) tunnel so the FFI reports no active pool.
     set_pool(None);
+    #[cfg(feature = "smart-routing")]
+    set_active_router(None);
     set_ready(Readiness::Down);
     result
 }
@@ -333,11 +413,14 @@ fn run_with_handle(fd: i32, mtu: u16, config: Config, stop: Arc<Notify>) -> std:
 /// the accept loop exits. `data_dir` is the per-platform cache dir (Apple app-group container, Android
 /// app files dir) the smart-routing loader reads rule-set `.srs` from (`<data_dir>/rulesets/`); `None`
 /// (e.g. the desktop `spawn_tunnel` path) means no on-disk rule-sets — inline IP rules still apply.
+/// `split_tunnel` is the raw JSON `{enabled,domains,ips}` payload to apply as the initial user bypass
+/// list; `None` means no bypass list.
 async fn run_tunnel_data_path(
     fd: i32,
     mtu: u16,
     mut config: Config,
     data_dir: Option<&std::path::Path>,
+    split_tunnel: Option<&str>,
     waiter: &Notify,
 ) -> std::io::Result<()> {
     crate::resolve_bootstrap(&mut config).await?;
@@ -370,6 +453,7 @@ async fn run_tunnel_data_path(
     let hooks = setup_routing_and_udp(
         &config,
         data_dir,
+        split_tunnel,
         udp_surface,
         udp_transport,
         direct_udp,
@@ -418,14 +502,20 @@ const RULESET_REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 3600);
 fn setup_routing_and_udp(
     config: &Config,
     data_dir: Option<&std::path::Path>,
+    split_tunnel: Option<&str>,
     udp_surface: Option<netstack::UdpSurface>,
     udp_transport: Arc<dyn transport::UdpTransport>,
     direct_udp: Arc<dyn transport::UdpTransport>,
     idle: Duration,
 ) -> Option<Arc<proxy::RouteHooks>> {
     let sr = &config.smart_routing;
-    let (hooks, dns_server) = if sr.rule_sets.is_empty() && sr.inline_ip_rules.is_empty() {
-        (None, None) // no rules — no fake-IP DNS; proxy everything (today's path)
+    // The user's split-tunnel bypass list (a per-device pref injected at connect), if any.
+    let user_bypass = split_tunnel
+        .and_then(|j| crate::split_tunnel::parse(j).ok())
+        .filter(|s| s.enabled && !s.is_empty());
+    let has_rules = !sr.rule_sets.is_empty() || !sr.inline_ip_rules.is_empty();
+    let (hooks, dns_server) = if !has_rules && user_bypass.is_none() {
+        (None, None) // no fetched rules and no bypass — proxy everything (today's path)
     } else {
         let router = crate::rules::router::Router::build(sr, |r| {
             // Go through the shared, tag-sanitizing cache_path so a fetched tag can't traverse out of
@@ -433,12 +523,15 @@ fn setup_routing_and_udp(
             let dir = data_dir?;
             std::fs::read(crate::rules::ruleset::cache_path(dir, &r.tag)).ok()
         });
+        router.set_user_bypass(user_bypass.as_ref());
+        let router = Arc::new(router);
+        set_active_router(Some(router.clone()));
         // One pool: the DNS server allocates on query, the recoverer recovers on connect.
         let pool = dns::server::shared_pool(FAKEIP_TTL, FAKEIP_CAP);
         // Per-action resolvers from the config's `options.dns`: `dns_local` (direct, best-local) for
         // the Direct action, `dns_remote` + the resilient pool for the Proxy client-side fallback.
         let hooks = Arc::new(proxy::RouteHooks {
-            router: Arc::new(router),
+            router: router as Arc<dyn proxy::FlowRouter>,
             recoverer: Some(Arc::new(dns::server::FakeIpRecoverer::new(pool.clone()))),
             direct_resolver: dns::resolver::direct_resolver(&config.dns),
             proxy_resolver: dns::resolver::proxy_resolver(&config.dns),
@@ -447,6 +540,9 @@ fn setup_routing_and_udp(
         info!(
             rule_sets = sr.rule_sets.len(),
             inline_ip_rules = sr.inline_ip_rules.len(),
+            user_bypass = user_bypass
+                .as_ref()
+                .map_or(0, |s| s.domains.len() + s.ips.len()),
             "smart-routing: fake-IP DNS + per-flow route hooks active"
         );
         (Some(hooks), Some(dns_server))
@@ -493,6 +589,7 @@ fn setup_routing_and_udp(
 fn setup_routing_and_udp(
     _config: &Config,
     _data_dir: Option<&std::path::Path>,
+    _split_tunnel: Option<&str>,
     udp_surface: Option<netstack::UdpSurface>,
     udp_transport: Arc<dyn transport::UdpTransport>,
     direct_udp: Arc<dyn transport::UdpTransport>,
@@ -548,12 +645,15 @@ async fn dns_intercept(
 /// per-platform cache dir (Apple app-group container, Android app files dir). `tun_base` supplies the
 /// platform's `tun`/stack — the fetched `config_raw.json` is a server pool with no meaningful tun
 /// section, so the platform owns the interface reality (Apple = userspace, Android = system stack).
+/// `split_tunnel` is the raw JSON `{enabled,domains,ips}` payload to apply as the initial user bypass
+/// list; `None` means no bypass list.
 #[cfg(feature = "config-fetch")]
 pub fn run_fd_lantern_api(
     fd: i32,
     mtu: u16,
     data_dir: std::path::PathBuf,
     tun_base: Config,
+    split_tunnel: Option<&str>,
 ) -> i32 {
     use crate::config::fetch::{self, FetchEnv};
 
@@ -663,10 +763,12 @@ pub fn run_fd_lantern_api(
                 None => warn!("rule-set refresh skipped: embedded fronted config failed to parse"),
             }
         }
-        run_tunnel_data_path(fd, mtu, config, Some(data_dir.as_path()), &waiter).await
+        run_tunnel_data_path(fd, mtu, config, Some(data_dir.as_path()), split_tunnel, &waiter).await
     });
     deregister(&stop);
     set_pool(None);
+    #[cfg(feature = "smart-routing")]
+    set_active_router(None);
     set_ready(Readiness::Down);
     match result {
         Ok(()) => 0,
@@ -684,6 +786,10 @@ pub fn stop() {
     for stop in registry().lock().unwrap().iter() {
         stop.notify_waiters();
     }
+    // Clear the live router handle so set_split_tunnel no-ops immediately after stop() is called,
+    // even before the tunnel thread's own teardown runs set_active_router(None).
+    #[cfg(feature = "smart-routing")]
+    set_active_router(None);
 }
 
 /// A handle to a tunnel started by [`spawn_tunnel`]: stop it via [`TunnelHandle::stop`] (or by
@@ -716,7 +822,10 @@ pub fn spawn_tunnel(fd: i32, mtu: u16, config: Config) -> TunnelHandle {
     let stop = Arc::new(Notify::new());
     let stop_thread = Arc::clone(&stop);
     std::thread::spawn(move || {
-        if let Err(e) = run_with_handle(fd, mtu, config, stop_thread) {
+        // `None` split-tunnel: the in-process/desktop-service embedder path doesn't plumb a
+        // user bypass list yet (only the mobile/C-ABI `run_fd_dispatch` path does). Add a
+        // `split_tunnel` slot to `TunnelHandle` if this path ever needs it.
+        if let Err(e) = run_with_handle(fd, mtu, config, None, stop_thread) {
             warn!(error = %e, "spawned tunnel exited with error");
         }
     });
@@ -763,7 +872,7 @@ mod tests {
             let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
             assert!(fd >= 0, "open /dev/null for the dispatch fail-closed check");
             assert_eq!(
-                run_fd_dispatch(fd, 1500, None, None, Config::default()),
+                run_fd_dispatch(fd, 1500, None, None, Config::default(), None),
                 -1,
                 "self-fetch with no data_dir must fail closed"
             );

@@ -11,8 +11,78 @@
 //! Note there is intentionally no persistent on-disk config file here anymore: a stale local file
 //! would shadow the fetch (every connect must pull the current pool), so the only on-disk config is
 //! the extension's own last-good fetch cache, used solely as an offline fallback.
+//!
+//! This module also owns the on-disk split-tunnel bypass list (`split_tunnel.json`), stored in the
+//! per-OS app config dir under `org.getlantern.spark/` (macOS: `~/Library/Application Support`;
+//! Windows: `%APPDATA%`; other Unix: `$XDG_CONFIG_HOME` or `~/.config`). Unlike the proxy config
+//! (which the NE self-fetches), the split-tunnel list is app-controlled and persists across
+//! connections.
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+// ── Split-tunnel persistence ──────────────────────────────────────────────────
+
+/// Path to the persisted split-tunnel list: `<app-config-dir>/org.getlantern.spark/split_tunnel.json`.
+/// The app-config dir is resolved per-OS with no extra crate — macOS is the shipping desktop target,
+/// but the Tauri commands (and their non-macOS `spark_set_split_tunnel` stub) compile and persist on
+/// Windows/Linux too. Returns `None` when the OS's config-dir env var is unset (sandboxed/test envs).
+fn split_tunnel_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Library").join("Application Support"));
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    base.map(|b| b.join("org.getlantern.spark").join("split_tunnel.json"))
+}
+
+/// The split-tunnel list shape, mirroring spark-core's `SplitTunnel` (core/src/split_tunnel.rs).
+/// Used only to validate + canonicalize the on-disk file on load; `#[serde(default)]` tolerates
+/// missing fields, and deserializing rejects non-object JSON (`[]`, `null`, scalars).
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct SplitTunnelShape {
+    enabled: bool,
+    domains: Vec<String>,
+    ips: Vec<String>,
+}
+
+/// Read the persisted split-tunnel list, re-serialized to the canonical `{enabled,domains,ips}`
+/// shape, or the disabled default if the file is missing, unreadable, or doesn't deserialize into
+/// that shape (a corrupted/partial file, or valid-but-wrong JSON like `[]`/`null`, must not reach
+/// the UI's `JSON.parse` — which would crash on `st.domains.length` — or `providerConfiguration`).
+pub fn load_split_tunnel() -> String {
+    fn default() -> String {
+        "{\"enabled\":false,\"domains\":[],\"ips\":[]}".to_string()
+    }
+    split_tunnel_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<SplitTunnelShape>(&s).ok())
+        // Re-serialize the validated shape so the returned string is always canonical (missing
+        // fields filled, unknown fields dropped). Core re-validates the exact contents.
+        .and_then(|shape| serde_json::to_string(&shape).ok())
+        .unwrap_or_else(default)
+}
+
+/// Persist the list, creating the directory if needed. Validates + canonicalizes to the
+/// `{enabled,domains,ips}` shape first (mirroring [`load_split_tunnel`]) and returns an error on
+/// invalid/wrong-shape input — so a bad caller surfaces a save failure to the UI rather than writing
+/// garbage that a later `load_split_tunnel` would silently discard (losing the user's list).
+pub fn save_split_tunnel(json: &str) -> Result<(), String> {
+    let shape: SplitTunnelShape =
+        serde_json::from_str(json).map_err(|e| format!("invalid split-tunnel JSON: {e}"))?;
+    let canonical = serde_json::to_string(&shape).map_err(|e| e.to_string())?;
+    let p = split_tunnel_path().ok_or("no app config dir (config-dir env var unset)")?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, canonical).map_err(|e| e.to_string())
+}
 
 /// One server for the selection UI. Serializes to the camelCase shape the TS `ServerInfo` expects,
 /// and deserializes the live pool JSON from the NE channel (`spark_servers_json`) — so the same type

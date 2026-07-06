@@ -7,6 +7,7 @@
 //! match falls back to [`Action::Proxy`] — the config's `route.final` (the bandit pool).
 
 use std::net::IpAddr;
+use std::sync::RwLock;
 
 use tracing::warn;
 
@@ -15,16 +16,40 @@ use super::srs::{parse, IpCidr, RuleSet};
 use super::Action;
 use crate::config::{RouteAction, RuleSetRef, SmartRoutingConfig};
 
-/// Decides the [`Action`] for each flow from the compiled rule matcher.
+/// Decides the [`Action`] for each flow: a small, live-swappable user **bypass** matcher checked
+/// first (any match => `Direct`, absolute), then the immutable base matcher from the fetched rules.
 pub struct Router {
-    matcher: Matcher,
+    base: Matcher,
+    /// The user's split-tunnel bypass, compiled to its own tiny matcher; `None` = disabled/empty.
+    /// Swapped live via [`set_user_bypass`](Router::set_user_bypass). Read per flow-open (not per
+    /// packet) and never held across `.await`, so a plain `RwLock` is fine.
+    user_bypass: RwLock<Option<Matcher>>,
 }
 
 impl Router {
-    /// Wrap a compiled [`Matcher`] (built by the caller from the parsed rule-sets, in descending
-    /// precedence order).
-    pub fn new(matcher: Matcher) -> Self {
-        Self { matcher }
+    /// Wrap a compiled base [`Matcher`] (built from the fetched rule-sets). The user bypass starts
+    /// empty; seed it with [`set_user_bypass`](Router::set_user_bypass).
+    pub fn new(base: Matcher) -> Self {
+        Self {
+            base,
+            user_bypass: RwLock::new(None),
+        }
+    }
+
+    /// Replace the live user-bypass matcher. `Some(st)` with `st.enabled` and non-empty compiles a
+    /// one-entry Direct matcher from its domains/IPs; anything else clears it. This is the live-reload
+    /// entry point — only this tiny matcher is rebuilt; the base matcher is untouched.
+    pub fn set_user_bypass(&self, st: Option<&crate::split_tunnel::SplitTunnel>) {
+        let matcher = st.filter(|s| s.enabled && !s.is_empty()).map(|s| {
+            Matcher::build(vec![(
+                Action::Direct,
+                RuleSet::from_domains_and_ips(&s.domains, &s.ips),
+            )])
+        });
+        // Recover from a poisoned lock (`into_inner`) and apply the update rather than dropping it —
+        // the inner Option is trivially consistent, and a poisoning event must not silently freeze or
+        // disable split-tunnel bypass.
+        *self.user_bypass.write().unwrap_or_else(|e| e.into_inner()) = matcher;
     }
 
     /// Build a router from the parsed [`SmartRoutingConfig`]. `load` supplies each rule-set's raw
@@ -73,10 +98,23 @@ impl Router {
         Router::new(Matcher::build(entries))
     }
 
-    /// The action for a flow. `domain` is `Some` once the fake-IP DNS layer has recovered it
-    /// (M4); at L3 it is `None`, so only IP/CIDR rules can match. An unmatched flow is proxied.
+    /// The action for a flow. The live user **bypass** wins (absolute) — any match => `Direct`;
+    /// otherwise the base rules decide, and an unmatched flow is proxied (`route.final`). `domain`
+    /// is `Some` once the fake-IP DNS layer recovers it (M4); at L3 it is `None`, so only IP/CIDR
+    /// rules (base or bypass) can match.
     pub fn decide(&self, ip: IpAddr, domain: Option<&str>) -> Action {
-        self.matcher.lookup(domain, ip).unwrap_or(Action::Proxy)
+        // Recover from a poisoned lock (`into_inner`) rather than silently skipping the bypass — the
+        // inner matcher is always consistent, so a poisoning event must not quietly disable
+        // split-tunnel bypass (and this per-flow path must not log-spam on every call).
+        {
+            let guard = self.user_bypass.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(m) = guard.as_ref() {
+                if m.lookup(domain, ip).is_some() {
+                    return Action::Direct;
+                }
+            }
+        }
+        self.base.lookup(domain, ip).unwrap_or(Action::Proxy)
     }
 }
 
@@ -233,6 +271,97 @@ mod tests {
         assert_eq!(r.decide("9.9.9.9".parse().unwrap(), None), Action::Direct);
         // unlisted → Proxy.
         assert_eq!(r.decide(ip, Some("nope-unlisted.test")), Action::Proxy);
+    }
+
+    #[test]
+    fn user_bypass_forces_direct_and_beats_reject() {
+        use crate::split_tunnel::SplitTunnel;
+        let r = router(); // has doubleclick.net at Reject (ad_block)
+                          // Before: an ad domain is Reject.
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            Action::Reject
+        );
+        // Add it to the bypass list -> Direct (absolute, wins over Reject).
+        r.set_user_bypass(Some(&SplitTunnel {
+            enabled: true,
+            domains: vec!["doubleclick.net".into()],
+            ips: vec![],
+        }));
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            Action::Direct
+        );
+        // Subdomain of a bypass entry also Direct.
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("ads.doubleclick.net")),
+            Action::Direct
+        );
+        // A non-bypassed domain still follows base rules.
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            Action::Direct
+        ); // base
+           // Removing the bypass restores base behavior.
+        r.set_user_bypass(None);
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            Action::Reject
+        );
+    }
+
+    #[test]
+    fn user_bypass_ignored_when_disabled_or_empty() {
+        use crate::split_tunnel::SplitTunnel;
+        let r = router();
+        r.set_user_bypass(Some(&SplitTunnel {
+            enabled: false,
+            domains: vec!["doubleclick.net".into()],
+            ips: vec![],
+        }));
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            Action::Reject
+        );
+        r.set_user_bypass(Some(&SplitTunnel {
+            enabled: true,
+            domains: vec![],
+            ips: vec![],
+        }));
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            Action::Reject
+        );
+    }
+
+    #[test]
+    fn user_bypass_matches_ip() {
+        use crate::split_tunnel::SplitTunnel;
+        let r = router();
+        r.set_user_bypass(Some(&SplitTunnel {
+            enabled: true,
+            domains: vec![],
+            ips: vec!["203.0.113.7".into()],
+        }));
+        assert_eq!(
+            r.decide("203.0.113.7".parse().unwrap(), None),
+            Action::Direct
+        );
+    }
+
+    #[test]
+    fn user_bypass_matches_cidr_range() {
+        use crate::split_tunnel::SplitTunnel;
+        let r = router();
+        r.set_user_bypass(Some(&SplitTunnel {
+            enabled: true,
+            domains: vec![],
+            ips: vec!["10.0.0.0/8".into()],
+        }));
+        // An address inside the bypassed CIDR routes Direct.
+        assert_eq!(r.decide("10.1.2.3".parse().unwrap(), None), Action::Direct);
+        // An address outside it follows base rules (unlisted => Proxy).
+        assert_eq!(r.decide("192.0.2.1".parse().unwrap(), None), Action::Proxy);
     }
 
     #[test]

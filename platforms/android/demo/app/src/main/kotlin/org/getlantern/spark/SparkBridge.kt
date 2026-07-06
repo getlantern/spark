@@ -24,6 +24,9 @@ object SparkBridge {
      * config-new API, caching device_id + the fetched config into [dataDir] (the app files dir);
      * an "IP:port" (IP literal, not a hostname) is a plain relay; any other string is a full config
      * (TOML or config_raw.json).
+     *
+     * [splitTunnel] is an optional JSON bypass list. Null means no split-tunneling (all traffic
+     * tunnelled). A bad/undecodable value is treated leniently — it does NOT fail the tunnel.
      */
     external fun nativeRun(
         fd: Int,
@@ -33,6 +36,7 @@ object SparkBridge {
         systemStack: Int,
         config: String?,
         dataDir: String?,
+        splitTunnel: String?,
     ): Int
 
     /** Signal a running [nativeRun] to stop. */
@@ -57,4 +61,8 @@ object SparkBridge {
     /** Pin which pool member new flows dial: [index] >= 0 pins it, [index] < 0 = auto (fastest).
      *  Returns true if applied (false if out of range / no active pool). */
     external fun nativeSelectServer(index: Int): Boolean
+
+    /** Update the running tunnel's split-tunnel bypass list live. Returns true if applied.
+     *  The [json] format matches the core's SplitTunnel JSON schema. */
+    external fun nativeSetSplitTunnel(json: String): Boolean
 }

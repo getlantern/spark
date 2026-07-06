@@ -34,6 +34,12 @@ export interface ServerInfo {
   isCurrent: boolean;
 }
 
+export interface SplitTunnel {
+  enabled: boolean;
+  domains: string[];
+  ips: string[];
+}
+
 export interface SparkBackend {
   status(): Promise<SparkStatus>;
   connect(): Promise<void>;
@@ -42,6 +48,8 @@ export interface SparkBackend {
   servers(): Promise<ServerInfo[]>;
   /** Pin a server by index, or pass null for auto (fastest). */
   selectServer(index: number | null): Promise<void>;
+  getSplitTunnel(): Promise<SplitTunnel>;
+  setSplitTunnel(st: SplitTunnel): Promise<void>;
 }
 
 // MockBackend simulates the service for U0: connect → connecting → (≈900ms) →
@@ -106,4 +114,8 @@ export class MockBackend implements SparkBackend {
   async selectServer(index: number | null): Promise<void> {
     this.pinned = index;
   }
+
+  private split: SplitTunnel = { enabled: false, domains: [], ips: [] };
+  async getSplitTunnel(): Promise<SplitTunnel> { return structuredClone(this.split); }
+  async setSplitTunnel(st: SplitTunnel): Promise<void> { this.split = structuredClone(st); }
 }

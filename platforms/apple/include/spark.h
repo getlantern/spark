@@ -30,8 +30,14 @@ extern "C" {
  * explicit string -- other than the reserved "lantern-api" sentinel above -- that is neither an
  * IP:port nor a valid TOML/config_raw.json config returns -1.
  *
- * `data_dir` must be NULL or a valid NUL-terminated C string for the duration of this call. */
-int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char *data_dir);
+ * `data_dir` must be NULL or a valid NUL-terminated C string for the duration of this call.
+ *
+ * `split_tunnel` is an optional NUL-terminated `{enabled,domains,ips}` JSON payload that
+ * initialises the split-tunnel bypass list. NULL disables split-tunneling at startup. A bad
+ * or non-UTF-8 value is silently ignored (treated as NULL) — the bypass list is non-critical
+ * and must not prevent the tunnel from starting. */
+int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char *data_dir,
+                         const char *split_tunnel);
 
 /* Signal a running spark_tunnel_run() to stop. */
 void spark_tunnel_stop(void);
@@ -77,6 +83,12 @@ void spark_string_free(char *s);
  * ranking); index < 0 selects auto (latency-ranked). Affects new flows only. Returns 0 on success,
  * -1 if no server pool is active. */
 int32_t spark_select_server(int32_t index);
+
+/* ---- Split-tunnel bypass list ----
+ * Update the running tunnel's split-tunnel bypass list live. `json` is a NUL-terminated
+ * `{enabled,domains,ips}` payload. Returns 0 if applied; -1 if `json` is NULL, not valid UTF-8,
+ * not valid JSON, or no tunnel is currently active. */
+int32_t spark_set_split_tunnel(const char *json);
 
 #ifdef __cplusplus
 }

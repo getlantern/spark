@@ -6,7 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { ServerInfo, SparkBackend, SparkStatus } from "./spark_backend";
+import type { ServerInfo, SparkBackend, SparkStatus, SplitTunnel } from "./spark_backend";
 
 export class TauriBackend implements SparkBackend {
   async status(): Promise<SparkStatus> {
@@ -24,6 +24,12 @@ export class TauriBackend implements SparkBackend {
   async selectServer(index: number | null): Promise<void> {
     // The Rust command takes a plain i32; -1 means auto (the pool has no negative indices).
     await invoke("spark_select_server", { index: index ?? -1 });
+  }
+  async getSplitTunnel(): Promise<SplitTunnel> {
+    return JSON.parse(await invoke<string>("spark_get_split_tunnel"));
+  }
+  async setSplitTunnel(st: SplitTunnel): Promise<void> {
+    await invoke("spark_set_split_tunnel", { json: JSON.stringify(st) });
   }
 }
 
