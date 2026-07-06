@@ -322,6 +322,12 @@ async fn run_pump(
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                // Windows surfaces an ICMP port/host-unreachable from a dead resolver as
+                // `ConnectionReset` on the *next* recv on this shared socket (Unix silently drops
+                // it). It's a stale per-datagram error, not a socket failure — skip it and keep
+                // draining so one dead resolver can't kill the pump or starve the live resolver's
+                // replies. Failover then happens the same way it does on Unix: via RTO on `pending`.
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => continue,
                 Err(_) => return,
             }
         }
