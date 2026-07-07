@@ -257,28 +257,29 @@
   /* Hero with the toggle vertically centered above the card */
   .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
 
-  /* VPNSwitch — 150×80 track, 60px knob, 80px travel. */
+  /* VPNSwitch — 140×70 track, 60px knob, 5px inset, 70px travel (Flutter vpn_switch.dart:
+     indicatorSize 60 + spacing 10 + wrapper padding 5 ⇒ symmetric 5px gaps both ends). */
   .track {
     position: relative;
-    width: 150px; height: 80px;
+    width: 140px; height: 70px;
     border: none; padding: 0; cursor: pointer;
-    border-radius: 40px;
+    border-radius: 35px;
     background: var(--off);
     transition: background 0.32s ease;
   }
   .track.on { background: var(--brand); }
   .knob {
-    position: absolute; top: 10px; left: 10px;
+    position: absolute; top: 5px; left: 5px;
     width: 60px; height: 60px; border-radius: 50%;
     background: var(--knob);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
     transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
   }
-  .track.on .knob { transform: translateX(80px); }
-  /* Spinner replaces the knob while (dis)connecting: 44px ring centered in 80px track. */
+  .track.on .knob { transform: translateX(70px); }
+  /* Spinner replaces the knob while (dis)connecting: 44px ring (8px stroke) centered in 70px track. */
   .spinner {
     box-sizing: border-box;
-    position: absolute; top: 18px; left: 18px;
+    position: absolute; top: 13px; left: 13px;
     width: 44px; height: 44px; border-radius: 50%;
     border: 8px solid rgba(255, 255, 255, 0.35);
     border-top-color: var(--knob);
