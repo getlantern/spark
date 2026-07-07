@@ -55,6 +55,14 @@ class SparkVpnService : VpnService() {
             stopTunnel()
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_APPLY_APPS) {
+            // Live-apply a changed exclusion set: rebuild the tunnel off the main thread (restartTunnel
+            // blocks on nativeStop+join). Only meaningful while running; no-op otherwise.
+            if (worker != null) {
+                thread(name = "spark-apply-apps") { applyExcludedAppsLive() }
+            }
+            return START_STICKY
+        }
         // Optional explicit config (IP:port / TOML / config_raw.json) from the launching Intent,
         // trimmed and normalized to null when blank so the mode log + the value handed to native match
         // the core (which trims and treats "" as "no config"). Absent/blank → null → self-fetch.
@@ -131,10 +139,14 @@ class SparkVpnService : VpnService() {
             .addAddress(TUN_ADDR6, TUN_PREFIX6) // in-tunnel client v6 address (ULA)
             .addRoute("::", 0) // capture all IPv6 (fail-closed if the core can't proxy v6)
             .addDnsServer("8.8.8.8")
-        try {
-            builder.addDisallowedApplication(packageName)
-        } catch (e: Exception) {
-            Log.e(TAG, "addDisallowedApplication failed", e)
+        // Always exclude ourselves (loop avoidance) + the user's chosen apps (split tunneling).
+        // A package that isn't installed throws NameNotFoundException — skip it, don't fail the tunnel.
+        for (pkg in listOf(packageName) + loadExcludedApps()) {
+            try {
+                builder.addDisallowedApplication(pkg)
+            } catch (e: Exception) {
+                Log.w(TAG, "addDisallowedApplication($pkg) skipped: ${e.message}")
+            }
         }
 
         val pfd = builder.establish()
@@ -217,6 +229,13 @@ class SparkVpnService : VpnService() {
         runCatching { File(filesDir, "routing_mode.txt").readText().trim() }
             .getOrNull()
             ?.takeIf { it == "smart" || it == "full" }
+
+    /** Read persisted excluded-app packages (`<filesDir>/excluded_apps.json`); empty on any error. */
+    private fun loadExcludedApps(): List<String> =
+        runCatching {
+            val arr = org.json.JSONArray(File(filesDir, "excluded_apps.json").readText())
+            (0 until arr.length()).map { arr.getString(it) }.filter { it.isNotBlank() }
+        }.getOrDefault(emptyList())
 
     /** Human-readable description of a network for the debug logs: handle, interface, transports. */
     private fun netDesc(cm: ConnectivityManager, network: Network?): String {
@@ -319,6 +338,14 @@ class SparkVpnService : VpnService() {
      * can't deadlock. Clearing `worker` BEFORE calling startTunnel is what lets the restart past
      * startTunnel's `if (worker != null) return` guard.
      */
+    /** Rebuild the tunnel with the freshly-persisted exclusion set. Reuses restartTunnel's machinery
+     *  (nativeStop → new establish() → nativeRun), so the VpnService stays authorized — no re-consent,
+     *  no VPN-off flicker; only in-flight connections reset. Runs off the main thread. */
+    private fun applyExcludedAppsLive() {
+        Log.i(TAG, "applyExcludedAppsLive: rebuilding tunnel with new exclusion set")
+        restartTunnel()
+    }
+
     @Synchronized
     private fun restartTunnel() {
         // A network callback can be queued/in-flight when the service stops (quitSafely() drains the
@@ -379,6 +406,9 @@ class SparkVpnService : VpnService() {
         private const val CHANNEL_ID = "spark_vpn" // foreground-service notification channel (API 26+)
         private const val NOTIF_ID = 1 // ongoing foreground notification id
         const val ACTION_STOP = "org.getlantern.spark.STOP"
+
+        /** Rebuild the running tunnel with the latest excluded-apps set (live, no reconnect). */
+        const val ACTION_APPLY_APPS = "org.getlantern.spark.APPLY_APPS"
 
         /** Optional Intent string extra: an explicit config (IP:port / TOML / config_raw.json; the
          *  relay override is an IP literal, not a hostname). Absent → self-fetch from config-new. */
