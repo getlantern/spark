@@ -3,6 +3,7 @@
   import { goto } from "$app/navigation";
   import { MockBackend, type SparkBackend, type InstalledApp } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
+  import Spinner from "$lib/Spinner.svelte";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -53,7 +54,7 @@
     <div class="header">Apps bypassing the VPN ({excluded.size}):</div>
     <div class="card">
       {#if loading}
-        <div class="row empty">Loading apps…</div>
+        <div class="loading"><Spinner /></div>
       {:else if filtered.length === 0}
         <div class="row empty">{query.trim() ? "No matching apps" : "No apps found"}</div>
       {:else}
@@ -122,6 +123,7 @@
   .addrow { display: flex; align-items: center; gap: 12px; }
   .input { flex: 1; height: 48px; border: 1px solid var(--border); border-radius: 12px; padding: 0 14px; font-family: var(--font); font-size: 15px; background: var(--surface); color: var(--text-primary); }
   .row.empty { color: var(--text-tertiary); }
+  .loading { display: flex; justify-content: center; align-items: center; padding: 48px 0; }
 
   .icon { width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; object-fit: cover; }
   .icon.placeholder { background: var(--pill-bg); border: 1px solid var(--border); }
