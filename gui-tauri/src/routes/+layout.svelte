@@ -65,6 +65,14 @@
       --pill-bg: rgba(255, 255, 255, 0.08);
     }
   }
+  /* border-box everywhere: rows use `width: 100%` + padding, and under the default content-box
+     that overflows the card by the padding (32px), whose `overflow: hidden` then clips the
+     right-edge control (the split-tunnel toggle, routing radios, etc.). */
+  :global(*),
+  :global(*::before),
+  :global(*::after) {
+    box-sizing: border-box;
+  }
   :global(html),
   :global(body) {
     margin: 0;
