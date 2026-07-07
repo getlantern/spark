@@ -1,11 +1,17 @@
+use std::path::PathBuf;
+
 use crate::control::TunnelControl;
 use crate::models::{ServerInfo, Status};
 
 // ── macOS: AppleControl (cross-process NE). ───────────────────────────────────
-// STUB for now — the ne_spike migration is a later task.
+// STUB for connect/disconnect/status/servers/select_server — the ne_spike migration is a
+// later task.  get/set_split_tunnel and get/set_routing_mode are REAL: they delegate to
+// crate::persist using the platform-provided base dir.
 
 #[cfg(target_os = "macos")]
-pub(crate) struct AppleControl;
+pub(crate) struct AppleControl {
+    pub(crate) base: PathBuf,
+}
 
 #[cfg(target_os = "macos")]
 impl TunnelControl for AppleControl {
@@ -34,26 +40,28 @@ impl TunnelControl for AppleControl {
     }
 
     fn get_split_tunnel(&self) -> crate::Result<String> {
-        Ok("{\"enabled\":false,\"domains\":[],\"ips\":[]}".into())
+        Ok(crate::persist::load_split_tunnel(&self.base))
     }
 
-    fn set_split_tunnel(&self, _json: &str) -> crate::Result<()> {
-        Err(crate::Error::NoTunnel)
+    fn set_split_tunnel(&self, json: &str) -> crate::Result<()> {
+        crate::persist::save_split_tunnel(&self.base, json)
     }
 
     fn get_routing_mode(&self) -> crate::Result<String> {
-        Ok("smart".into())
+        Ok(crate::persist::load_routing_mode(&self.base))
     }
 
-    fn set_routing_mode(&self, _mode: &str) -> crate::Result<()> {
-        Err(crate::Error::NoTunnel)
+    fn set_routing_mode(&self, mode: &str) -> crate::Result<()> {
+        crate::persist::save_routing_mode(&self.base, mode)
     }
 }
 
 // ── Windows/Linux: ServiceControl over spark-ipc — future. ───────────────────
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
-pub(crate) struct ServiceControl;
+pub(crate) struct ServiceControl {
+    pub(crate) base: PathBuf,
+}
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 impl TunnelControl for ServiceControl {
@@ -88,22 +96,18 @@ impl TunnelControl for ServiceControl {
     }
 
     fn get_split_tunnel(&self) -> crate::Result<String> {
-        Ok("{\"enabled\":false,\"domains\":[],\"ips\":[]}".into())
+        Ok(crate::persist::load_split_tunnel(&self.base))
     }
 
-    fn set_split_tunnel(&self, _json: &str) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
-        ))
+    fn set_split_tunnel(&self, json: &str) -> crate::Result<()> {
+        crate::persist::save_split_tunnel(&self.base, json)
     }
 
     fn get_routing_mode(&self) -> crate::Result<String> {
-        Ok("smart".into())
+        Ok(crate::persist::load_routing_mode(&self.base))
     }
 
-    fn set_routing_mode(&self, _mode: &str) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
-        ))
+    fn set_routing_mode(&self, mode: &str) -> crate::Result<()> {
+        crate::persist::save_routing_mode(&self.base, mode)
     }
 }

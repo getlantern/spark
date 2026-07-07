@@ -2,6 +2,7 @@ mod commands;
 mod control;
 mod error;
 mod models;
+pub(crate) mod persist;
 
 #[cfg(not(target_os = "android"))]
 mod desktop;
@@ -19,24 +20,40 @@ use tauri::{
 };
 
 mod platform {
-    use tauri::{AppHandle, Runtime};
+    use tauri::{AppHandle, Manager, Runtime};
 
     pub(crate) fn control<R: Runtime>(
-        _app: &AppHandle<R>,
+        app: &AppHandle<R>,
     ) -> crate::Result<Box<dyn crate::TunnelControl>> {
+        // Resolve the platform-provided config dir once and pass it into the control struct.
+        // On macOS this is `~/Library/Application Support/org.getlantern.spark`, which is the
+        // same directory that `gui-tauri/src-tauri/src/config.rs::config_dir()` produces —
+        // so the plugin reads/writes the same files as the existing app.
+        //
+        // Tauri 2's `app_config_dir()` resolves to `config_dir()/${bundle_identifier}` (see
+        // tauri-2.x/src/path/desktop.rs), so the identifier is already embedded in the path.
+        // No manual join of "org.getlantern.spark" is needed.
+        #[cfg(not(target_os = "android"))]
+        let base = app
+            .path()
+            .app_config_dir()
+            .map_err(|e| crate::Error::Platform(format!("no app config dir: {e}")))?;
+
         #[cfg(target_os = "macos")]
         {
-            Ok(Box::new(crate::desktop::AppleControl))
+            Ok(Box::new(crate::desktop::AppleControl { base }))
         }
 
         #[cfg(target_os = "android")]
         {
+            // Android: base dir comes from Kotlin in a later task; stub for now.
+            let _ = app; // suppress unused warning
             Ok(Box::new(crate::mobile::AndroidControl))
         }
 
         #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
         {
-            Ok(Box::new(crate::desktop::ServiceControl))
+            Ok(Box::new(crate::desktop::ServiceControl { base }))
         }
     }
 }
