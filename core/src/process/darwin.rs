@@ -231,8 +231,13 @@ fn exe_path(pid: u32) -> Option<String> {
     if n <= 0 {
         return None;
     }
-    buf.truncate(n as usize);
-    String::from_utf8(buf).ok()
+    // `proc_pidpath` writes a NUL-terminated path and returns its length. Defensively cut at the
+    // first NUL within the returned range (in case the count ever includes the terminator), then
+    // decode lossily — macOS paths are effectively always UTF-8, but don't drop a valid path (which
+    // `String::from_utf8` would) on the off chance one isn't, since it feeds later path matching.
+    let len = n as usize;
+    let end = buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
 }
 
 #[cfg(test)]
