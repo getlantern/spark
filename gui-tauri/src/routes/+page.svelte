@@ -12,7 +12,6 @@
   let status = $state<SparkStatus>({
     state: "disconnected",
     protocol: "AnyTLS",
-    routing: "Full tunnel",
     failOpen: false,
   });
   let busy = $state(false);
@@ -31,7 +30,7 @@
       : servers.find((s) => s.isCurrent),
   );
 
-  // Capitalized status value, matching Lantern's VpnStatus row (vpnStatus.name.capitalize).
+  // Capitalized status value, matching the VpnStatus row (vpnStatus.name.capitalize).
   const statusValue = $derived(
     status.state === "connected" ? "Connected"
     : status.state === "connecting" ? "Connecting"
@@ -99,30 +98,37 @@
     }
   }
 
+  let routingMode = $state<"smart" | "full">("smart");
+  async function loadRouting() {
+    try { routingMode = await backend.getRoutingMode(); } catch { /* keep last */ }
+  }
+  const routingModeLabel = $derived(routingMode === "full" ? "Full Tunnel" : "Smart Routing");
+
   onMount(() => {
     refresh();
     loadSplit();
+    loadRouting();
     poll = setInterval(() => {
       refresh();
       loadSplit();
+      loadRouting();
     }, 2000);
   });
   onDestroy(() => clearInterval(poll));
 </script>
 
 <main class="app">
-  <!-- AppBar: leading menu + wordmark, hairline divider + soft elevation (Lantern Home AppBar). -->
+  <!-- AppBar: menu · SPARK wordmark · account avatar. -->
   <header class="appbar">
-    <button class="iconbtn" aria-label="Menu">
-      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-    </button>
-    <span class="wordmark">Spark</span>
+    <button class="iconbtn" aria-label="Menu">{@render menu()}</button>
+    <span class="wordmark">SPARK</span>
+    <button class="iconbtn" aria-label="Account">{@render account()}</button>
   </header>
 
   <div class="body">
     <section class="hero">
       <!-- VPNSwitch: rounded track (brand when connected, grey otherwise), white knob that slides
-           right on connect, spinner while transitioning. Mirrors Lantern's VPNSwitch. -->
+           right on connect, spinner while transitioning. -->
       <button
         class="track"
         class:on={connected}
@@ -143,7 +149,7 @@
       {/if}
     </section>
 
-    <!-- Settings card: white, 16-radius, Lantern's teal elevation shadow. -->
+    <!-- Settings card: white, 16-radius, teal elevation shadow. -->
     <div class="card">
       <!-- VPN status row -->
       <div class="tile">
@@ -157,7 +163,7 @@
         </div>
       </div>
       <div class="divider"></div>
-      <!-- Smart-location row (Lantern location_setting.dart) → server selection screen -->
+      <!-- Smart-location row → server selection screen -->
       <button class="tile nav" onclick={() => goto("/servers")}>
         <div class="tile-head">
           <span class="ic">
@@ -175,29 +181,17 @@
         {/if}
       </button>
       <div class="divider"></div>
-      <!-- Protocol row -->
-      <div class="tile">
-        <div class="tile-head">
-          <span class="ic">{@render lock()}</span>
-          <span class="label">Protocol</span>
-        </div>
-        <div class="tile-body">
-          <span class="value">{status.protocol}</span>
-          <span class="chev">{@render chevron()}</span>
-        </div>
-      </div>
-      <div class="divider"></div>
-      <!-- Routing row -->
-      <div class="tile">
+      <!-- Routing Mode row → /routing -->
+      <button class="tile nav" onclick={() => goto("/routing")}>
         <div class="tile-head">
           <span class="ic">{@render route()}</span>
-          <span class="label">Routing</span>
+          <span class="label">Routing Mode</span>
         </div>
         <div class="tile-body">
-          <span class="value">{status.routing}</span>
+          <span class="value">{routingModeLabel}</span>
           <span class="chev">{@render chevron()}</span>
         </div>
-      </div>
+      </button>
       <div class="divider"></div>
       <!-- Split Tunneling row -->
       <button class="tile nav" onclick={() => goto("/split-tunneling")}>
@@ -214,11 +208,14 @@
   </div>
 </main>
 
+{#snippet menu()}
+  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+{/snippet}
+{#snippet account()}
+  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="10" r="3"/><path d="M6.5 19a5.5 5.5 0 0 1 11 0"/></svg>
+{/snippet}
 {#snippet globe()}
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg>
-{/snippet}
-{#snippet lock()}
-  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="11" width="15" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
 {/snippet}
 {#snippet route()}
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M8.5 19H14a4 4 0 0 0 0-8H10a4 4 0 0 1 0-8h5.5"/></svg>
@@ -243,7 +240,7 @@
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    gap: 6px;
+    justify-content: space-between;
     padding: 0 10px;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
@@ -253,40 +250,35 @@
     width: 40px; height: 40px; border: none; background: none; cursor: pointer;
     display: grid; place-items: center; color: var(--text-tertiary); border-radius: 8px;
   }
-  .wordmark { font-size: 22px; font-weight: 700; letter-spacing: -0.2px; color: var(--text-primary); }
+  .wordmark { font-size: 20px; font-weight: 700; letter-spacing: 1.5px; color: var(--text-primary); }
 
   .body { flex: 1; display: flex; flex-direction: column; padding: 0 16px; min-height: 0; }
 
   /* Hero with the toggle vertically centered above the card */
   .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
 
-  /* VPNSwitch — animated_toggle_switch geometry: indicator 60, spacing 10,
-     wrapper padding 5 ⇒ track 140×70 (2·60 + 10 + 2·5), knob travel 70 (60 + 10).
-     Matches getlantern/lantern vpn_switch.dart (desktop height 70). */
+  /* VPNSwitch — 150×80 track, 60px knob, 80px travel. */
   .track {
     position: relative;
-    width: 140px; height: 70px;
+    width: 150px; height: 80px;
     border: none; padding: 0; cursor: pointer;
-    border-radius: 35px;
+    border-radius: 40px;
     background: var(--off);
     transition: background 0.32s ease;
   }
   .track.on { background: var(--brand); }
   .knob {
-    position: absolute; top: 5px; left: 5px;
+    position: absolute; top: 10px; left: 10px;
     width: 60px; height: 60px; border-radius: 50%;
     background: var(--knob);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
     transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
   }
-  .track.on .knob { transform: translateX(70px); }
-  /* Spinner replaces the knob while (dis)connecting: CircularProgressIndicator
-     strokeWidth 8 inside the 60px indicator with padding 8 ⇒ 44px ring. */
+  .track.on .knob { transform: translateX(80px); }
+  /* Spinner replaces the knob while (dis)connecting: 44px ring centered in 80px track. */
   .spinner {
-    /* border-box so the 8px border doesn't inflate the 44px box past the 60px
-       knob slot (content-box would render 60px at offset 13 → off-center). */
     box-sizing: border-box;
-    position: absolute; top: 13px; left: 13px;
+    position: absolute; top: 18px; left: 18px;
     width: 44px; height: 44px; border-radius: 50%;
     border: 8px solid rgba(255, 255, 255, 0.35);
     border-top-color: var(--knob);
@@ -309,16 +301,16 @@
     flex-shrink: 0;
   }
   .tile { padding: 10px 16px; }
-  /* The Smart-location tile is a full-width button (navigates to /servers). */
+  /* Nav tiles are full-width buttons (navigate to sub-routes). */
   .tile.nav {
     display: block; width: 100%; text-align: left; border: none; cursor: pointer;
     background: none; font-family: var(--font);
   }
-  .tile.nav:hover { background: rgba(0, 0, 0, 0.02); }
+  .tile.nav:hover { background: var(--hover); }
   .tile-head { display: flex; align-items: center; gap: 8px; }
   .ic { width: 24px; display: inline-flex; justify-content: center; color: var(--text-secondary); }
   .emoji { font-size: 18px; line-height: 1; }
-  .label { font-size: 14px; font-weight: 400; color: var(--text-secondary); }
+  .label { font-size: 14px; font-weight: 500; color: var(--text-tertiary); }
   .tile-body { display: flex; align-items: center; gap: 6px; padding-left: 32px; margin-top: 2px; }
   .value { flex: 1; font-size: 16px; font-weight: 600; color: var(--text-primary); }
   .value.ok { color: var(--success); }

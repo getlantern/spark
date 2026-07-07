@@ -130,24 +130,35 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // Trimmed for the same reason as `config` above; nil/empty → NULL (no split-tunnel).
             let splitTunnel = (provider?["splitTunnel"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Read the optional routing mode from providerConfiguration["routingMode"] ("smart"/"full").
+            // Trimmed like the others; nil/empty → NULL (the core's default routing mode).
+            let routingMode = (provider?["routingMode"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
             // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C strings
             // alive for the whole blocking call (it returns only when the tunnel stops).
-            let worker = Thread { [mtu = self.mtu, log = self.log, config, dataDir, splitTunnel] in
-                // Thread the optional data-dir and split-tunnel JSON through as the 4th/5th C-ABI
-                // args (nil if absent). Nested helpers keep each optional's withCString scope live.
-                func runNative(_ cfg: UnsafePointer<CChar>?, _ st: UnsafePointer<CChar>?) -> Int32 {
+            let worker = Thread { [mtu = self.mtu, log = self.log, config, dataDir, splitTunnel, routingMode] in
+                // Thread the optional data-dir, split-tunnel JSON, and routing mode through as the
+                // 4th/5th/6th C-ABI args (nil if absent). Nested helpers keep each optional's
+                // withCString scope live.
+                func runNative(_ cfg: UnsafePointer<CChar>?, _ st: UnsafePointer<CChar>?, _ rm: UnsafePointer<CChar>?) -> Int32 {
                     if let dataDir {
-                        return dataDir.withCString { spark_tunnel_run(fd, Int32(mtu), cfg, $0, st) }
+                        return dataDir.withCString { spark_tunnel_run(fd, Int32(mtu), cfg, $0, st, rm) }
                     }
-                    return spark_tunnel_run(fd, Int32(mtu), cfg, nil, st)
+                    return spark_tunnel_run(fd, Int32(mtu), cfg, nil, st, rm)
+                }
+                func runWithRoutingMode(_ cfg: UnsafePointer<CChar>?, _ st: UnsafePointer<CChar>?) -> Int32 {
+                    if let routingMode, !routingMode.isEmpty {
+                        return routingMode.withCString { runNative(cfg, st, $0) }
+                    }
+                    return runNative(cfg, st, nil)
                 }
                 func runWithSplitTunnel(_ cfg: UnsafePointer<CChar>?) -> Int32 {
                     if let splitTunnel, !splitTunnel.isEmpty {
-                        return splitTunnel.withCString { runNative(cfg, $0) }
+                        return splitTunnel.withCString { runWithRoutingMode(cfg, $0) }
                     }
-                    return runNative(cfg, nil)
+                    return runWithRoutingMode(cfg, nil)
                 }
                 let rc: Int32
                 if let config, !config.isEmpty {
@@ -260,6 +271,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let listJson = trimmed.isEmpty ? "{}" : trimmed
             let rc = listJson.withCString { spark_set_split_tunnel($0) }
             log.notice("handleAppMessage: splitTunnel rc=\(rc)")
+            completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
+        case "routingMode":
+            // The app sends {"cmd":"routingMode","mode":"smart"|"full"}. Missing mode → "smart" (default).
+            let mode = (obj["mode"] as? String) ?? "smart"
+            let rc = mode.withCString { spark_set_routing_mode($0) }
+            log.notice("handleAppMessage: routingMode rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
         default:
             log.error("handleAppMessage: unknown cmd \(cmd)")

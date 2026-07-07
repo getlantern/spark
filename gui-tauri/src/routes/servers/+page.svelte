@@ -207,7 +207,7 @@
     background: none; border: none; cursor: pointer; font-family: var(--font); text-align: left;
     transition: background 0.12s ease;
   }
-  .row:hover { background: rgba(0, 0, 0, 0.02); }
+  .row:hover { background: var(--hover); }
   .row.sel { background: rgba(0, 189, 214, 0.08); }
   .row.city { padding-left: 53px; }
   .meta { flex: 1; min-width: 0; }

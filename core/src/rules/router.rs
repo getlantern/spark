@@ -24,6 +24,9 @@ pub struct Router {
     /// Swapped live via [`set_user_bypass`](Router::set_user_bypass). Read per flow-open (not per
     /// packet) and never held across `.await`, so a plain `RwLock` is fine.
     user_bypass: RwLock<Option<Matcher>>,
+    /// The routing mode. Full = suppress base Direct/Proxy and proxy everything not user-bypassed
+    /// (ad-block Reject still honored). Swapped live like `user_bypass`.
+    mode: RwLock<crate::routing_mode::RoutingMode>,
 }
 
 impl Router {
@@ -33,6 +36,7 @@ impl Router {
         Self {
             base,
             user_bypass: RwLock::new(None),
+            mode: RwLock::new(crate::routing_mode::RoutingMode::default()),
         }
     }
 
@@ -50,6 +54,11 @@ impl Router {
         // the inner Option is trivially consistent, and a poisoning event must not silently freeze or
         // disable split-tunnel bypass.
         *self.user_bypass.write().unwrap_or_else(|e| e.into_inner()) = matcher;
+    }
+
+    /// Set the routing mode live (poison-tolerant recovery, like `set_user_bypass`).
+    pub fn set_mode(&self, mode: crate::routing_mode::RoutingMode) {
+        *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
     }
 
     /// Build a router from the parsed [`SmartRoutingConfig`]. `load` supplies each rule-set's raw
@@ -114,7 +123,15 @@ impl Router {
                 }
             }
         }
-        self.base.lookup(domain, ip).unwrap_or(Action::Proxy)
+        let full = matches!(
+            *self.mode.read().unwrap_or_else(|e| e.into_inner()),
+            crate::routing_mode::RoutingMode::Full
+        );
+        match self.base.lookup(domain, ip) {
+            Some(Action::Reject) => Action::Reject, // ad-block always wins
+            Some(a) if !full => a,                  // Smart: base decides
+            _ => Action::Proxy,                     // Full (or unmatched) → Proxy
+        }
     }
 }
 
@@ -380,6 +397,41 @@ mod tests {
         assert_eq!(
             r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
             Action::Proxy
+        );
+    }
+
+    #[test]
+    fn full_tunnel_forces_proxy_but_keeps_reject_and_bypass() {
+        use crate::routing_mode::RoutingMode;
+        use crate::split_tunnel::SplitTunnel;
+        let r = router(); // doubleclick.net → Reject; app.discord.com → Direct (base)
+        r.set_mode(RoutingMode::Full);
+        // A base-Direct domain is forced to Proxy in Full Tunnel.
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            Action::Proxy
+        );
+        // Ad-block Reject still applies.
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            Action::Reject
+        );
+        // Split-tunnel bypass still routes Direct even in Full Tunnel.
+        r.set_user_bypass(Some(&SplitTunnel {
+            enabled: true,
+            domains: vec!["app.discord.com".into()],
+            ips: vec![],
+        }));
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            Action::Direct
+        );
+        // Back to Smart → base rules again (bypass cleared).
+        r.set_user_bypass(None);
+        r.set_mode(RoutingMode::Smart);
+        assert_eq!(
+            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            Action::Direct
         );
     }
 }

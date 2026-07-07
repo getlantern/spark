@@ -164,5 +164,5 @@
   .addbtn { border: none; background: none; color: var(--brand); font-weight: 700; font-size: 15px; cursor: pointer; text-decoration: underline; padding: 8px; }
   .row .x { border: none; background: none; color: var(--text-tertiary); font-size: 16px; cursor: pointer; padding: 6px; }
   .row.empty { color: var(--text-tertiary); }
-  .snack { position: fixed; left: 16px; right: 16px; bottom: 20px; background: #23282b; color: #fff; padding: 12px 16px; border-radius: 10px; font-size: 14px; text-align: center; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+  .snack { position: fixed; left: 16px; right: 16px; bottom: 20px; background: var(--snack-bg); color: #fff; padding: 12px 16px; border-radius: 10px; font-size: 14px; text-align: center; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
 </style>

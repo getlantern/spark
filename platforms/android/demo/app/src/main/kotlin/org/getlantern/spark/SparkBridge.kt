@@ -27,6 +27,9 @@ object SparkBridge {
      *
      * [splitTunnel] is an optional JSON bypass list. Null means no split-tunneling (all traffic
      * tunnelled). A bad/undecodable value is treated leniently — it does NOT fail the tunnel.
+     *
+     * [routingMode] is an optional routing mode string. Null means the default routing mode.
+     * A bad/undecodable value is treated leniently — it does NOT fail the tunnel.
      */
     external fun nativeRun(
         fd: Int,
@@ -37,6 +40,7 @@ object SparkBridge {
         config: String?,
         dataDir: String?,
         splitTunnel: String?,
+        routingMode: String?,
     ): Int
 
     /** Signal a running [nativeRun] to stop. */
@@ -65,4 +69,8 @@ object SparkBridge {
     /** Update the running tunnel's split-tunnel bypass list live. Returns true if applied.
      *  The [json] format matches the core's SplitTunnel JSON schema. */
     external fun nativeSetSplitTunnel(json: String): Boolean
+
+    /** Update the running tunnel's routing mode live. Returns true if applied.
+     *  The [mode] format matches the core's RoutingMode string schema. */
+    external fun nativeSetRoutingMode(mode: String): Boolean
 }

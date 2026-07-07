@@ -3,7 +3,8 @@
 //!
 //! The Swift provider resolves the `utun` file descriptor (KVC `socket.fileDescriptor` → a
 //! public-symbol fd-scan fallback — the WireGuard/sing-box/Mullvad/Proton/lantern technique) and
-//! calls `spark_tunnel_run(fd, mtu, config, data_dir)`; `spark_tunnel_stop()` on teardown. Packets never cross the
+//! calls `spark_tunnel_run(fd, mtu, config, data_dir, split_tunnel, routing_mode)`; `spark_tunnel_stop()` on
+//! teardown. Packets never cross the
 //! FFI — Rust owns the fd and runs the whole netstack ([`spark_core::fd_tunnel`]), so the C ABI
 //! is control-only (mirroring the Android JNI). One core surface, two thin platform adapters.
 //!
@@ -52,6 +53,7 @@ mod ffi {
     /// `config` must be null or a valid NUL-terminated C string for the duration of this call.
     /// `data_dir` must be null or a valid NUL-terminated C string for the duration of this call.
     /// `split_tunnel` must be null or a valid NUL-terminated C string for the duration of this call.
+    /// `routing_mode` must be null or a valid NUL-terminated C string for the duration of this call.
     #[no_mangle]
     pub unsafe extern "C" fn spark_tunnel_run(
         fd: c_int,
@@ -59,6 +61,7 @@ mod ffi {
         config: *const c_char,
         data_dir: *const c_char,
         split_tunnel: *const c_char,
+        routing_mode: *const c_char,
     ) -> c_int {
         // Resolve the config string (a null pointer means "no explicit config"). A *non-null* pointer
         // that isn't valid UTF-8 is a caller error — an explicit config was provided but is garbage —
@@ -101,6 +104,15 @@ mod ffi {
             unsafe { CStr::from_ptr(split_tunnel) }.to_str().ok()
         };
 
+        // The routing mode is optional and non-critical — null or invalid UTF-8 is treated as
+        // absent rather than failing the tunnel, since a bad mode must not block the VPN.
+        // SAFETY: caller contract — `routing_mode` is null or a valid NUL-terminated C string.
+        let mode: Option<&str> = if routing_mode.is_null() {
+            None
+        } else {
+            unsafe { CStr::from_ptr(routing_mode) }.to_str().ok()
+        };
+
         // The shared, cross-platform policy home (the Apple C-ABI + Android JNI call it today; the
         // desktop service is a documented follow-up): direct / plain relay / full config / daemon
         // self-fetch, decided in core. The NE always owns a *userspace* utun (the kernel `system`
@@ -112,6 +124,7 @@ mod ffi {
             dir.as_deref(),
             Config::default(),
             split,
+            mode,
         )
     }
 
@@ -168,7 +181,8 @@ mod ffi {
 
     /// Update the running tunnel's split-tunnel bypass list live. `json` is a NUL-terminated
     /// `{enabled,domains,ips}` payload. Returns 0 if applied; -1 if `json` is null, not valid UTF-8,
-    /// not valid JSON, or no tunnel is currently active.
+    /// not valid JSON, or there is no active router to update (no tunnel running, or a tunnel running
+    /// without smart-routing — e.g. a plain relay/proxy path has no router).
     ///
     /// # Safety
     /// `json` must be null or a valid NUL-terminated C string.
@@ -179,6 +193,24 @@ mod ffi {
         }
         match unsafe { CStr::from_ptr(json) }.to_str() {
             Ok(s) if spark_core::fd_tunnel::set_split_tunnel(s) => 0,
+            _ => -1,
+        }
+    }
+
+    /// Update the running tunnel's routing mode live. `mode` is a NUL-terminated `"smart"`/`"full"`.
+    /// Returns 0 if applied; -1 if `mode` is null, not valid UTF-8, or there is no active router to
+    /// update (no tunnel running, or a tunnel running without smart-routing — e.g. a plain
+    /// relay/proxy path has no router).
+    ///
+    /// # Safety
+    /// `mode` must be null or a valid NUL-terminated C string.
+    #[no_mangle]
+    pub unsafe extern "C" fn spark_set_routing_mode(mode: *const c_char) -> c_int {
+        if mode.is_null() {
+            return -1;
+        }
+        match unsafe { CStr::from_ptr(mode) }.to_str() {
+            Ok(s) if spark_core::fd_tunnel::set_routing_mode(s) => 0,
             _ => -1,
         }
     }

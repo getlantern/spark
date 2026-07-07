@@ -74,7 +74,7 @@
     background: none; border: none; cursor: pointer; font-family: var(--font); text-align: left;
     transition: background 0.12s ease;
   }
-  .row:hover { background: rgba(0, 0, 0, 0.02); }
+  .row:hover { background: var(--hover); }
   .meta { flex: 1; min-width: 0; }
   .name {
     font-size: 15px; font-weight: 600; color: var(--text-primary);
@@ -87,7 +87,7 @@
 
   .pill {
     font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; white-space: nowrap;
-    color: var(--text-secondary); background: rgba(0, 0, 0, 0.06);
+    color: var(--text-secondary); background: var(--pill-bg);
   }
 
   .chev {
@@ -100,7 +100,7 @@
   .toggle-row { justify-content: space-between; cursor: default; }
   .ic { font-size: 20px; width: 24px; text-align: center; }
   .switch {
-    width: 46px; height: 28px; border-radius: 999px; border: none; background: #c8ccce;
+    width: 46px; height: 28px; border-radius: 999px; border: none; background: var(--switch-off);
     position: relative; cursor: pointer; transition: background 0.15s ease; flex-shrink: 0;
   }
   .switch.on { background: var(--brand, #1f9d55); }

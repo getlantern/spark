@@ -24,6 +24,7 @@ pub mod packet;
 pub mod proxy;
 pub mod redact;
 pub mod routing;
+pub mod routing_mode;
 pub mod split_tunnel;
 pub mod transport;
 pub mod tun;

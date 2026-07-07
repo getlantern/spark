@@ -12,23 +12,22 @@
 //! would shadow the fetch (every connect must pull the current pool), so the only on-disk config is
 //! the extension's own last-good fetch cache, used solely as an offline fallback.
 //!
-//! This module also owns the on-disk split-tunnel bypass list (`split_tunnel.json`), stored in the
-//! per-OS app config dir under `org.getlantern.spark/` (macOS: `~/Library/Application Support`;
-//! Windows: `%APPDATA%`; other Unix: `$XDG_CONFIG_HOME` or `~/.config`). Unlike the proxy config
-//! (which the NE self-fetches), the split-tunnel list is app-controlled and persists across
-//! connections.
+//! This module also owns the on-disk split-tunnel bypass list (`split_tunnel.json`) and the
+//! routing-mode setting (`routing_mode.txt`), stored in the per-OS app config dir under
+//! `org.getlantern.spark/` (macOS: `~/Library/Application Support`; Windows: `%APPDATA%`;
+//! other Unix: `$XDG_CONFIG_HOME` or `~/.config`). Unlike the proxy config (which the NE
+//! self-fetches), these are app-controlled and persist across connections.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-// ── Split-tunnel persistence ──────────────────────────────────────────────────
+// ── Shared config-dir helper ──────────────────────────────────────────────────
 
-/// Path to the persisted split-tunnel list: `<app-config-dir>/org.getlantern.spark/split_tunnel.json`.
-/// The app-config dir is resolved per-OS with no extra crate — macOS is the shipping desktop target,
-/// but the Tauri commands (and their non-macOS `spark_set_split_tunnel` stub) compile and persist on
-/// Windows/Linux too. Returns `None` when the OS's config-dir env var is unset (sandboxed/test envs).
-fn split_tunnel_path() -> Option<PathBuf> {
+/// The per-OS app config dir base: `<app-config-dir>/org.getlantern.spark/`. macOS
+/// `~/Library/Application Support`; Windows `%APPDATA%`; other Unix `$XDG_CONFIG_HOME` or
+/// `~/.config`. `None` when the OS's config-dir env var is unset (sandboxed/test envs).
+fn config_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let base = std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join("Library").join("Application Support"));
@@ -38,7 +37,15 @@ fn split_tunnel_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
-    base.map(|b| b.join("org.getlantern.spark").join("split_tunnel.json"))
+    base.map(|b| b.join("org.getlantern.spark"))
+}
+
+// ── Split-tunnel persistence ──────────────────────────────────────────────────
+
+/// Path to the persisted split-tunnel list: `<app-config-dir>/org.getlantern.spark/split_tunnel.json`.
+/// Returns `None` when the OS's config-dir env var is unset (sandboxed/test envs).
+fn split_tunnel_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("split_tunnel.json"))
 }
 
 /// The split-tunnel list shape, mirroring spark-core's `SplitTunnel` (core/src/split_tunnel.rs).
@@ -82,6 +89,39 @@ pub fn save_split_tunnel(json: &str) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     std::fs::write(&p, canonical).map_err(|e| e.to_string())
+}
+
+// ── Routing-mode persistence ──────────────────────────────────────────────────
+
+/// Path to the persisted routing mode: `<app-config-dir>/org.getlantern.spark/routing_mode.txt`.
+fn routing_mode_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("routing_mode.txt"))
+}
+
+/// Read the persisted routing mode (`"smart"`/`"full"`), defaulting to `"smart"` if the file is
+/// missing, unreadable, or holds anything other than exactly `"smart"`/`"full"` (trimmed).
+pub fn load_routing_mode() -> String {
+    routing_mode_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| s == "smart" || s == "full")
+        .unwrap_or_else(|| "smart".to_string())
+}
+
+/// Persist the routing mode, creating the dir if needed. Rejects any value other than
+/// `"smart"`/`"full"` (trimmed) so the UI surfaces a save failure rather than writing garbage.
+pub fn save_routing_mode(mode: &str) -> Result<(), String> {
+    let m = mode.trim();
+    if m != "smart" && m != "full" {
+        return Err(format!(
+            "invalid routing mode: {mode:?} (expected \"smart\" or \"full\")"
+        ));
+    }
+    let p = routing_mode_path().ok_or("no app config dir (config-dir env var unset)")?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, m).map_err(|e| e.to_string())
 }
 
 /// One server for the selection UI. Serializes to the camelCase shape the TS `ServerInfo` expects,
@@ -186,7 +226,24 @@ fn resolve_with(baked: Option<String>, proxy: Option<String>) -> Option<String> 
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_with, ServerInfo};
+    use super::{resolve_with, save_routing_mode, ServerInfo};
+
+    #[test]
+    fn routing_mode_rejects_invalid_values() {
+        // Validation must reject garbage values without touching the filesystem.
+        assert!(
+            save_routing_mode("bogus").is_err(),
+            "save_routing_mode must reject values other than smart/full"
+        );
+        assert!(
+            save_routing_mode("").is_err(),
+            "save_routing_mode must reject empty string"
+        );
+        assert!(
+            save_routing_mode("Smart").is_err(),
+            "save_routing_mode must reject wrong case"
+        );
+    }
 
     // The live snapshot JSON (core `snapshot_to_json`) carries `protocol`; ServerInfo must keep it
     // through the deserialize → reserialize hop to the frontend (it was silently dropped before).
