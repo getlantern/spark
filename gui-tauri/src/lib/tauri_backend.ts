@@ -7,7 +7,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { ServerInfo, SparkBackend, SparkStatus, SplitTunnel } from "./spark_backend";
+import type { InstalledApp, ServerInfo, SparkBackend, SparkStatus, SplitTunnel } from "./spark_backend";
 
 export class TauriBackend implements SparkBackend {
   async status(): Promise<SparkStatus> {
@@ -40,6 +40,15 @@ export class TauriBackend implements SparkBackend {
   }
   async setRoutingMode(mode: "smart" | "full"): Promise<void> {
     await invoke("plugin:spark-vpn|set_routing_mode", { mode });
+  }
+  async listInstalledApps(): Promise<InstalledApp[]> {
+    return JSON.parse(await invoke<string>("plugin:spark-vpn|list_installed_apps")) as InstalledApp[];
+  }
+  async getExcludedApps(): Promise<string[]> {
+    return JSON.parse(await invoke<string>("plugin:spark-vpn|get_excluded_apps")) as string[];
+  }
+  async setExcludedApps(ids: string[]): Promise<void> {
+    await invoke("plugin:spark-vpn|set_excluded_apps", { json: JSON.stringify(ids) });
   }
 }
 
