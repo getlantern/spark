@@ -222,7 +222,8 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // Enumeration rasterizes a PNG icon per launchable app (~100 apps → ~1s), so cache the result
         // to disk. Stale-while-revalidate: serve the cache instantly if present, then refresh it in
         // the background so newly installed / removed apps appear on the next open. First run (no
-        // cache) enumerates synchronously, caches, and returns.
+        // cache) enumerates on a background coroutine (never blocking the caller), caches, then
+        // resolves — the launch-time pre-warm usually fills the cache before the picker is opened.
         val cached = runCatching { installedAppsCacheFile().readText() }
             .getOrNull()?.takeIf { it.isNotBlank() }
         if (cached != null) {
@@ -417,15 +418,17 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
         runCatching { excludedAppsFile().readText() }.getOrNull()
             ?.let { canonicalizeExcludedApps(it) } ?: "[]"
 
-    /** Validate + canonicalize to a JSON array of non-blank strings; null on parse error. */
+    /** Validate + canonicalize to a JSON array of non-blank, **deduplicated** strings (insertion
+     *  order preserved); null on parse error. Deduping keeps the persisted file stable and avoids
+     *  redundant addDisallowedApplication() calls if the UI sends the same id more than once. */
     private fun canonicalizeExcludedApps(raw: String): String? = runCatching {
         val arr = org.json.JSONArray(raw)
-        val out = org.json.JSONArray()
+        val seen = LinkedHashSet<String>()
         for (i in 0 until arr.length()) {
             val s = arr.optString(i).trim()
-            if (s.isNotEmpty()) out.put(s)
+            if (s.isNotEmpty()) seen.add(s)
         }
-        out.toString()
+        org.json.JSONArray(seen.toList()).toString()
     }.getOrNull()
 
     /**

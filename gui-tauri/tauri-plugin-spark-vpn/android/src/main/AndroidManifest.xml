@@ -1,16 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Required by ConnectivityManager.registerDefaultNetworkCallback (the reconnect watcher). -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Enumerate installed apps for the split-tunnel "exclude apps" picker (Android 11+ hides
-         other packages otherwise). Justified for a VPN app offering per-app tunneling. -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission" />
+    <!-- The split-tunnel "exclude apps" picker enumerates *launchable* apps only. On Android 11+
+         other packages are hidden by default; this <queries> scoped to the launcher intent makes
+         exactly that set visible (queryIntentActivities + loadLabel/loadIcon) — avoiding the
+         policy-restricted QUERY_ALL_PACKAGES permission (which risks Play review rejection). -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application>
         <!-- The VpnService must require BIND_VPN_SERVICE and advertise the VpnService action.
