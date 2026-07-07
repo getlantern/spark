@@ -56,9 +56,18 @@ export interface SparkBackend {
 // connected, disconnect → disconnected. The screen polls status() on an
 // interval, exactly as it will against the real service, so swapping in the
 // TauriBackend at U1 changes nothing in the UI.
+// Dev-only shared state: every route constructs its own `new MockBackend()`, so per-instance fields
+// wouldn't survive navigation in `npm run dev` (a mode chosen on /routing wouldn't show on Home).
+// Module scope makes all mock instances share it; the real TauriBackend persists to disk / the NE.
+const mockState: {
+  state: ConnState;
+  timer: ReturnType<typeof setTimeout> | null;
+  pinned: number | null;
+  split: SplitTunnel;
+  routingMode: "smart" | "full";
+} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart" };
+
 export class MockBackend implements SparkBackend {
-  private state: ConnState = "disconnected";
-  private timer: ReturnType<typeof setTimeout> | null = null;
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
   // fully usable at `npm run dev`; the TauriBackend reads the real pool over the NE channel.
   private readonly pool: ServerInfo[] = [
@@ -69,12 +78,11 @@ export class MockBackend implements SparkBackend {
     { index: 4, name: "sgp1", country: "Singapore", countryCode: "SG", city: "Singapore", protocol: "samizdat", latencyMs: 189, healthy: true, isCurrent: false },
     { index: 5, name: "blr1", country: "India", countryCode: "IN", city: "Bangalore", protocol: "anytls", latencyMs: 212, healthy: true, isCurrent: false },
   ];
-  // Manual pin; null = auto (fastest healthy member is current).
-  private pinned: number | null = null;
+  // Manual pin (null = auto, fastest healthy member) lives in the shared mockState.
 
   async status(): Promise<SparkStatus> {
     return {
-      state: this.state,
+      state: mockState.state,
       protocol: "AnyTLS",
       // No real direct-fallback signal yet, so don't derive it from connection state.
       failOpen: false,
@@ -82,18 +90,18 @@ export class MockBackend implements SparkBackend {
   }
 
   async connect(): Promise<void> {
-    if (this.timer) clearTimeout(this.timer);
-    this.state = "connecting";
-    this.timer = setTimeout(() => {
-      this.state = "connected";
-      this.timer = null;
+    if (mockState.timer) clearTimeout(mockState.timer);
+    mockState.state = "connecting";
+    mockState.timer = setTimeout(() => {
+      mockState.state = "connected";
+      mockState.timer = null;
     }, 900);
   }
 
   async disconnect(): Promise<void> {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    this.state = "disconnected";
+    if (mockState.timer) clearTimeout(mockState.timer);
+    mockState.timer = null;
+    mockState.state = "disconnected";
   }
 
   async servers(): Promise<ServerInfo[]> {
@@ -106,18 +114,16 @@ export class MockBackend implements SparkBackend {
           : best,
       -1,
     );
-    const current = this.pinned ?? fastest;
+    const current = mockState.pinned ?? fastest;
     return this.pool.map((s) => ({ ...s, isCurrent: s.index === current }));
   }
 
   async selectServer(index: number | null): Promise<void> {
-    this.pinned = index;
+    mockState.pinned = index;
   }
 
-  private split: SplitTunnel = { enabled: false, domains: [], ips: [] };
-  async getSplitTunnel(): Promise<SplitTunnel> { return structuredClone(this.split); }
-  async setSplitTunnel(st: SplitTunnel): Promise<void> { this.split = structuredClone(st); }
-  private routingMode: "smart" | "full" = "smart";
-  async getRoutingMode(): Promise<"smart" | "full"> { return this.routingMode; }
-  async setRoutingMode(mode: "smart" | "full"): Promise<void> { this.routingMode = mode; }
+  async getSplitTunnel(): Promise<SplitTunnel> { return structuredClone(mockState.split); }
+  async setSplitTunnel(st: SplitTunnel): Promise<void> { mockState.split = structuredClone(st); }
+  async getRoutingMode(): Promise<"smart" | "full"> { return mockState.routingMode; }
+  async setRoutingMode(mode: "smart" | "full"): Promise<void> { mockState.routingMode = mode; }
 }
