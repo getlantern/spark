@@ -48,9 +48,15 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
     // Process-lived scope for the readiness wait; SupervisorJob so one failure can't cancel siblings.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // Held across the VPN-consent activity-result round-trip: connect() launches the consent Intent
-    // and returns; onConsentResult() finishes the flow with this Invoke.
-    private var pendingConnect: Invoke? = null
+    // Re-entrancy guard for the whole connect flow (consent round-trip + readiness wait). A second
+    // connect() while one is in flight is rejected, so an Invoke can never be dropped/overwritten.
+    @Volatile private var connecting = false
+
+    /** Terminal for a connect: clear the in-flight guard, then resolve (error == null) or reject. */
+    private fun finishConnect(invoke: Invoke, error: String?) {
+        connecting = false
+        if (error == null) invoke.resolve() else invoke.reject(error)
+    }
 
     // ── connect / disconnect ────────────────────────────────────────────────────
 
@@ -61,17 +67,23 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
      */
     @Command
     fun connect(invoke: Invoke) {
+        // Only one connect may be in flight (through consent + readiness). A second tap while the
+        // consent dialog or readiness wait is pending would otherwise overwrite/drop the first Invoke.
+        if (connecting) {
+            invoke.reject("a connect is already in progress")
+            return
+        }
+        connecting = true
         // prepare() returns null when consent is already granted, or an Intent to request it. A
         // *thrown* exception is a real failure — reject rather than mistaking it for "granted".
         val consent = try {
             VpnService.prepare(activity)
         } catch (e: Exception) {
-            invoke.reject("VPN prepare failed: ${e.message}")
+            finishConnect(invoke, "VPN prepare failed: ${e.message}")
             return
         }
         if (consent != null) {
-            // Async: hold the Invoke, resolve/reject in onConsentResult.
-            pendingConnect = invoke
+            // Async: resolve/reject in onConsentResult (Tauri passes the Invoke to the callback).
             startActivityForResult(invoke, consent, "onConsentResult")
             return
         }
@@ -82,11 +94,10 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
     /** Activity-result callback for the VpnService consent dialog. */
     @ActivityCallback
     fun onConsentResult(invoke: Invoke, result: ActivityResult) {
-        pendingConnect = null
         if (result.resultCode == Activity.RESULT_OK) {
             proceedConnect(invoke)
         } else {
-            invoke.reject("VPN consent was not granted")
+            finishConnect(invoke, "VPN consent was not granted")
         }
     }
 
@@ -127,9 +138,9 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
                 SparkState.state.first { it == VpnState.CONNECTED || it == VpnState.FAILED }
             }
             when (terminal) {
-                VpnState.CONNECTED -> invoke.resolve()
-                VpnState.FAILED -> invoke.reject("tunnel did not become ready")
-                else -> invoke.reject("timed out waiting for tunnel to become ready")
+                VpnState.CONNECTED -> finishConnect(invoke, null)
+                VpnState.FAILED -> finishConnect(invoke, "tunnel did not become ready")
+                else -> finishConnect(invoke, "timed out waiting for tunnel to become ready")
             }
         }
     }
@@ -153,7 +164,7 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
         val state = when (SparkState.state.value) {
             VpnState.CONNECTED -> "connected"
             VpnState.CONNECTING -> "connecting"
-            VpnState.FAILED -> "disconnected"
+            VpnState.FAILED -> "failed"
             VpnState.DISCONNECTED -> "disconnected"
         }
         val ret = JSObject()
