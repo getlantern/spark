@@ -52,6 +52,17 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
     // connect() while one is in flight is rejected, so an Invoke can never be dropped/overwritten.
     @Volatile private var connecting = false
 
+    init {
+        // Pre-warm the installed-apps catalog in the background at launch so the split-tunnel picker
+        // opens instantly the FIRST time too (enumeration rasterizes an icon per app, ~1s). No-op if
+        // the cache already exists; listInstalledApps' stale-while-revalidate keeps it fresh after.
+        scope.launch {
+            if (!installedAppsCacheFile().exists()) {
+                runCatching { writeInstalledAppsCache(enumerateInstalledApps()) }
+            }
+        }
+    }
+
     /** Terminal for a connect: clear the in-flight guard, then resolve (error == null) or reject. */
     private fun finishConnect(invoke: Invoke, error: String?) {
         connecting = false
@@ -208,30 +219,65 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
      */
     @Command
     fun listInstalledApps(invoke: Invoke) {
-        scope.launch {
-            val pm = activity.packageManager
-            val out = org.json.JSONArray()
-            // Launchable apps only (have a launcher entry) — the useful, user-recognizable set.
-            val launch = android.content.Intent(android.content.Intent.ACTION_MAIN)
-                .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-            val resolved = pm.queryIntentActivities(launch, 0)
-            val seen = HashSet<String>()
-            for (ri in resolved) {
-                val pkg = ri.activityInfo.packageName
-                if (pkg == activity.packageName || !seen.add(pkg)) continue
-                val label = ri.loadLabel(pm).toString()
-                val icon = runCatching { drawableToPngDataUrl(ri.loadIcon(pm)) }.getOrNull()
-                out.put(
-                    org.json.JSONObject()
-                        .put("id", pkg)
-                        .put("name", label)
-                        .put("icon", icon ?: org.json.JSONObject.NULL),
-                )
-            }
+        // Enumeration rasterizes a PNG icon per launchable app (~100 apps → ~1s), so cache the result
+        // to disk. Stale-while-revalidate: serve the cache instantly if present, then refresh it in
+        // the background so newly installed / removed apps appear on the next open. First run (no
+        // cache) enumerates synchronously, caches, and returns.
+        val cached = runCatching { installedAppsCacheFile().readText() }
+            .getOrNull()?.takeIf { it.isNotBlank() }
+        if (cached != null) {
             val ret = JSObject()
-            ret.put("value", out.toString())
+            ret.put("value", cached)
+            invoke.resolve(ret)
+            scope.launch { runCatching { writeInstalledAppsCache(enumerateInstalledApps()) } }
+            return
+        }
+        scope.launch {
+            val json = enumerateInstalledApps()
+            runCatching { writeInstalledAppsCache(json) }
+            val ret = JSObject()
+            ret.put("value", json)
             invoke.resolve(ret)
         }
+    }
+
+    private fun installedAppsCacheFile(): File = File(activity.filesDir, "installed_apps_cache.json")
+
+    /** Atomically replace the installed-apps cache (temp-file + rename) so a concurrent reader in the
+     *  stale-while-revalidate path can't observe a half-written file. */
+    private fun writeInstalledAppsCache(json: String) {
+        val f = installedAppsCacheFile()
+        val tmp = File(f.parentFile, "${f.name}.tmp")
+        tmp.writeText(json)
+        if (!tmp.renameTo(f)) f.writeText(json) // fallback if atomic rename is unavailable
+    }
+
+    /**
+     * Enumerate launchable apps as a JSON array string of `{id,name,icon}` (id = package name, icon =
+     * a `data:image/png;base64,…` URL or null). Excludes our own package. Slow (rasterizes each icon)
+     * — callers cache the result via [writeInstalledAppsCache].
+     */
+    private fun enumerateInstalledApps(): String {
+        val pm = activity.packageManager
+        val out = org.json.JSONArray()
+        // Launchable apps only (have a launcher entry) — the useful, user-recognizable set.
+        val launch = android.content.Intent(android.content.Intent.ACTION_MAIN)
+            .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+        val resolved = pm.queryIntentActivities(launch, 0)
+        val seen = HashSet<String>()
+        for (ri in resolved) {
+            val pkg = ri.activityInfo.packageName
+            if (pkg == activity.packageName || !seen.add(pkg)) continue
+            val label = ri.loadLabel(pm).toString()
+            val icon = runCatching { drawableToPngDataUrl(ri.loadIcon(pm)) }.getOrNull()
+            out.put(
+                org.json.JSONObject()
+                    .put("id", pkg)
+                    .put("name", label)
+                    .put("icon", icon ?: org.json.JSONObject.NULL),
+            )
+        }
+        return out.toString()
     }
 
     /** Rasterize a (possibly adaptive) launcher drawable to a small PNG data-URL for the web UI. */
