@@ -32,7 +32,10 @@ export class TauriBackend implements SparkBackend {
     await invoke("spark_set_split_tunnel", { json: JSON.stringify(st) });
   }
   async getRoutingMode(): Promise<"smart" | "full"> {
-    return (await invoke<string>("spark_get_routing_mode")) as "smart" | "full";
+    // Coerce rather than cast: an unexpected value (corrupt file, older backend) falls back to the
+    // known-safe default, matching the Rust load_routing_mode() which also defaults to "smart".
+    const mode = await invoke<string>("spark_get_routing_mode");
+    return mode === "full" ? "full" : "smart";
   }
   async setRoutingMode(mode: "smart" | "full"): Promise<void> {
     await invoke("spark_set_routing_mode", { mode });
