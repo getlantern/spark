@@ -8,6 +8,9 @@ const COMMANDS: &[&str] = &[
     "set_split_tunnel",
     "get_routing_mode",
     "set_routing_mode",
+    "list_installed_apps",
+    "get_excluded_apps",
+    "set_excluded_apps",
 ];
 
 fn main() {

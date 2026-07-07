@@ -12,4 +12,7 @@ permissions = [
   "allow-set-split-tunnel",
   "allow-get-routing-mode",
   "allow-set-routing-mode",
+  "allow-list-installed-apps",
+  "allow-get-excluded-apps",
+  "allow-set-excluded-apps",
 ]

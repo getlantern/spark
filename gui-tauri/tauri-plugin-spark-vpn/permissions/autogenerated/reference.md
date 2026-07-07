@@ -13,6 +13,9 @@ Allows all spark-vpn tunnel-control commands.
 - `allow-set-split-tunnel`
 - `allow-get-routing-mode`
 - `allow-set-routing-mode`
+- `allow-list-installed-apps`
+- `allow-get-excluded-apps`
+- `allow-set-excluded-apps`
 
 ## Permission Table
 
@@ -78,6 +81,32 @@ Denies the disconnect command without any pre-configured scope.
 <tr>
 <td>
 
+`spark-vpn:allow-get-excluded-apps`
+
+</td>
+<td>
+
+Enables the get_excluded_apps command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-get-excluded-apps`
+
+</td>
+<td>
+
+Denies the get_excluded_apps command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `spark-vpn:allow-get-routing-mode`
 
 </td>
@@ -130,6 +159,32 @@ Denies the get_split_tunnel command without any pre-configured scope.
 <tr>
 <td>
 
+`spark-vpn:allow-list-installed-apps`
+
+</td>
+<td>
+
+Enables the list_installed_apps command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-list-installed-apps`
+
+</td>
+<td>
+
+Denies the list_installed_apps command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `spark-vpn:allow-select-server`
 
 </td>
@@ -175,6 +230,32 @@ Enables the servers command without any pre-configured scope.
 <td>
 
 Denies the servers command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-set-excluded-apps`
+
+</td>
+<td>
+
+Enables the set_excluded_apps command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-set-excluded-apps`
+
+</td>
+<td>
+
+Denies the set_excluded_apps command without any pre-configured scope.
 
 </td>
 </tr>

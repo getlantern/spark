@@ -14,8 +14,11 @@
 //                      `Vec<ServerInfo>` ("[]" before connect).
 //   - getSplitTunnel → Kotlin resolves `{value: <jsonString>}`   → return `value`.
 //   - getRoutingMode → Kotlin resolves `{value: <modeString>}`   → return `value`.
+//   - listInstalledApps/getExcludedApps → Kotlin resolves `{value: <jsonArrayString>}` → return
+//                      `value`.
 //   - selectServer   → Kotlin resolves `{ok: bool}`              → deserialize (ok ignored → ()).
-//   - connect/disconnect/setSplitTunnel/setRoutingMode → Kotlin resolves unit (`null`).
+//   - connect/disconnect/setSplitTunnel/setRoutingMode/setExcludedApps → Kotlin resolves unit
+//     (`null`).
 
 #[cfg(target_os = "android")]
 use crate::control::TunnelControl;
@@ -127,5 +130,20 @@ impl<R: Runtime> TunnelControl for AndroidControl<R> {
 
     fn set_routing_mode(&self, mode: &str) -> crate::Result<()> {
         self.call::<()>("setRoutingMode", ModeArg { mode })
+    }
+
+    fn list_installed_apps(&self) -> crate::Result<String> {
+        // Kotlin resolves `{value: <jsonArrayString>}`; return the inner array string.
+        let wrapped: ValueString = self.call("listInstalledApps", ())?;
+        Ok(wrapped.value)
+    }
+
+    fn get_excluded_apps(&self) -> crate::Result<String> {
+        let wrapped: ValueString = self.call("getExcludedApps", ())?;
+        Ok(wrapped.value)
+    }
+
+    fn set_excluded_apps(&self, json: &str) -> crate::Result<()> {
+        self.call::<()>("setExcludedApps", JsonArg { json })
     }
 }

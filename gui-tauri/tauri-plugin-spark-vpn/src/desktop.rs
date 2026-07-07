@@ -768,6 +768,19 @@ impl TunnelControl for AppleControl {
         }
         Ok(())
     }
+
+    // App split tunneling is Android-only for now; the macOS backend lands in a later phase (P3).
+    fn list_installed_apps(&self) -> crate::Result<String> {
+        Ok("[]".to_string())
+    }
+
+    fn get_excluded_apps(&self) -> crate::Result<String> {
+        Ok("[]".to_string())
+    }
+
+    fn set_excluded_apps(&self, _json: &str) -> crate::Result<()> {
+        Ok(())
+    }
 }
 
 // ── Windows/Linux: ServiceControl over spark-ipc — future. ───────────────────
@@ -823,5 +836,18 @@ impl TunnelControl for ServiceControl {
 
     fn set_routing_mode(&self, mode: &str) -> crate::Result<()> {
         crate::persist::save_routing_mode(&self.base, mode)
+    }
+
+    // App split tunneling is Android-only for now; the desktop backend lands in a later phase.
+    fn list_installed_apps(&self) -> crate::Result<String> {
+        Ok("[]".to_string())
+    }
+
+    fn get_excluded_apps(&self) -> crate::Result<String> {
+        Ok("[]".to_string())
+    }
+
+    fn set_excluded_apps(&self, _json: &str) -> crate::Result<()> {
+        Ok(())
     }
 }
