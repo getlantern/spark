@@ -2,6 +2,11 @@ mod commands;
 mod control;
 mod error;
 mod models;
+
+// Durable settings persistence is used only by the desktop control (AppleControl/ServiceControl).
+// On Android, persistence lives behind the JNI core (P3.2), so gate the module the same as desktop
+// to avoid dead-code warnings on the android target.
+#[cfg(not(target_os = "android"))]
 pub(crate) mod persist;
 
 #[cfg(not(target_os = "android"))]
@@ -19,6 +24,9 @@ use tauri::{
     Manager, Runtime,
 };
 
+// Desktop control construction. On Android the control is built in `init`'s setup from the
+// registered plugin handle (which is not available here), so this module is desktop-only.
+#[cfg(not(target_os = "android"))]
 mod platform {
     use tauri::{AppHandle, Manager, Runtime};
 
@@ -33,7 +41,6 @@ mod platform {
         // Tauri 2's `app_config_dir()` resolves to `config_dir()/${bundle_identifier}` (see
         // tauri-2.x/src/path/desktop.rs), so the identifier is already embedded in the path.
         // No manual join of "org.getlantern.spark" is needed.
-        #[cfg(not(target_os = "android"))]
         let base = app
             .path()
             .app_config_dir()
@@ -44,14 +51,7 @@ mod platform {
             Ok(Box::new(crate::desktop::AppleControl { base }))
         }
 
-        #[cfg(target_os = "android")]
-        {
-            // Android: base dir comes from Kotlin in a later task; stub for now.
-            let _ = app; // suppress unused warning
-            Ok(Box::new(crate::mobile::AndroidControl))
-        }
-
-        #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+        #[cfg(not(target_os = "macos"))]
         {
             Ok(Box::new(crate::desktop::ServiceControl { base }))
         }
@@ -74,8 +74,22 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::set_routing_mode,
         ])
         .setup(|app, _api| {
-            let ctl = platform::control(app)?;
-            app.manage(ctl);
+            #[cfg(target_os = "android")]
+            {
+                // Register the Kotlin plugin (SparkVpnPlugin, package org.getlantern.spark.vpn) and
+                // wrap its handle in the AndroidControl seam. The JNI/run_mobile_plugin calls are
+                // wired in P3.2.
+                let handle =
+                    _api.register_android_plugin("org.getlantern.spark.vpn", "SparkVpnPlugin")?;
+                let ctl: Box<dyn crate::TunnelControl> =
+                    Box::new(crate::mobile::AndroidControl::new(handle));
+                app.manage(ctl);
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                let ctl = platform::control(app)?;
+                app.manage(ctl);
+            }
             Ok(())
         })
         .build()
