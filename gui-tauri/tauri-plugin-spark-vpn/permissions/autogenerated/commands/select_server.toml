@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-select-server"
+description = "Enables the select_server command without any pre-configured scope."
+commands.allow = ["select_server"]
+
+[[permission]]
+identifier = "deny-select-server"
+description = "Denies the select_server command without any pre-configured scope."
+commands.deny = ["select_server"]

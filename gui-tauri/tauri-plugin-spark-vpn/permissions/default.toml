@@ -1,0 +1,15 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Allows all spark-vpn tunnel-control commands."
+permissions = [
+  "allow-connect",
+  "allow-disconnect",
+  "allow-status",
+  "allow-servers",
+  "allow-select-server",
+  "allow-get-split-tunnel",
+  "allow-set-split-tunnel",
+  "allow-get-routing-mode",
+  "allow-set-routing-mode",
+]

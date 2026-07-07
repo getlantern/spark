@@ -83,4 +83,16 @@
     -webkit-font-smoothing: antialiased;
     user-select: none;
   }
+  /* Edge-to-edge safe areas. On Android 15 (and iOS notch devices) the WebView draws behind
+     the status bar + camera cutout + nav bar, so the app-bar collided with the system clock and
+     notch. Every route's root is `.app` (height:100vh, full-bleed); inset it by the safe area so
+     the chrome clears the system UI. `:global(*)` already sets box-sizing:border-box, so this
+     padding subtracts from the 100vh rather than overflowing. env() needs viewport-fit=cover
+     (app.html); on desktop/non-notched screens every inset resolves to 0 → no visual change. */
+  :global(.app) {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
 </style>

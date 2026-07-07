@@ -3,7 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- viewport-fit=cover populates env(safe-area-inset-*) on notched/edge-to-edge devices
+         (Android 15 draws behind the status bar + camera cutout by default; iOS notch). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Spark</title>
     %sveltekit.head%
   </head>
