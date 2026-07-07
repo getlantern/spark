@@ -5,8 +5,11 @@ data path on a TUN fd the OS hands it. There is **no privileged-daemon split** o
 `VpnService` runs in-process, same uid), so only `spark-core` ships here — not
 `spark-service`/`spark-ipc`.
 
-`demo/` is the standalone Android app — a polished Jetpack Compose VPN client (en/ru/fa with full
-RTL, no settings screen) that drives the library.
+> **`demo/` retired (2026-07-07):** the standalone Jetpack-Compose demo was **superseded by
+> Tauri-on-Android** (ADR 0008 — one Tauri/SvelteKit UI for desktop + mobile). Its VpnService Kotlin
+> was migrated into `gui-tauri/tauri-plugin-spark-vpn/android/`, and `libspark_android.so` is now built
+> into the Tauri Android app by that plugin's `cargoNdkBuild` Gradle task. This `spark-android` JNI
+> crate (`src/lib.rs`) is unchanged and remains the tunnel data path.
 
 ## Architecture
 
@@ -63,15 +66,14 @@ rustup target add aarch64-linux-android x86_64-linux-android
 `$ANDROID_HOME/ndk/28.2.13676358`. The task fails fast with a clear message if the NDK dir is
 missing.
 
-**Build & test** — all Gradle commands run from `platforms/android/demo`:
+**Build & test** — the JNI lib is built into the Tauri Android app via the plugin's `cargoNdkBuild`:
 
 ```bash
-cd platforms/android/demo
-./gradlew :app:assembleDebug        # builds the .so + the APK
-./gradlew :app:testDebugUnitTest    # unit tests (parseServers JSON parsing)
+cd gui-tauri
+npx tauri android build --debug --apk --target aarch64   # builds libspark_android.so + the APK
 ```
 
-The first build is slow (~80 s — it compiles the core for two ABIs); after that, Kotlin-only edits
+The first build is slow (it compiles the core for the ABI); after that, Kotlin/JS-only edits
 are fast (`cargoNdkBuild` stays `UP-TO-DATE`). If you build from Android Studio and the task fails
 with "no such command: ndk", Studio didn't inherit your shell `PATH` — launch it from a terminal or
 add `~/.cargo/bin` to its environment.

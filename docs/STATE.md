@@ -2376,6 +2376,19 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (the noq swap). All feature combos build/clippy/test clean; base build stays rustls/ring-only. Design: `docs/hysteria2-design.md` (status flipped to Accepted); decision:
   **ADR 0010**.
 
+- 2026-07-07 (Tauri-on-Android — one UI for desktop + mobile; branch `fisk/tauri-android`): promoted the
+  Tauri/SvelteKit UI (`gui-tauri/`) to Android per ADR 0008 by extracting all VPN control into a new
+  cross-platform plugin **`gui-tauri/tauri-plugin-spark-vpn`** behind a `TunnelControl` trait: `AppleControl`
+  (cross-process NE = the **relocated `ne_spike`**, macOS untouched-behaviour, no-regression DMG gate passed),
+  `AndroidControl` (in-process VpnService + JNI via `run_mobile_plugin`), `ServiceControl` (Win/Linux stub over
+  `ipc`/`service`, deferred), iOS stub (deferred, reuses AppleControl). App crate is now UI-shell-only; frontend
+  invokes `plugin:spark-vpn|*` uniformly (MockBackend/screens unchanged). **Android emulator end-to-end PASSED**:
+  tap-connect → VPN consent (activity-result) → POST_NOTIFICATIONS → foreground VpnService → `nativeRun` →
+  self-fetch pool (real server U.S.A.–Ashburn) → smart-routing rulesets fetched over h2 → Connected; disconnect
+  tears down clean. Fixed a shipped split-tunnel toggle clip (border-box, PR #51). **`platforms/android/demo`
+  RETIRED** (Kotlin migrated into the plugin). PR #51 (Figma UI + Routing Mode) merged to `main` first.
+  Spec/plan/goal: `docs/superpowers/{specs,plans}/2026-07-06-tauri-android*.md`.
+
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
 - [x] U1 (NE Model A — **DONE + PROVEN e2e 2026-06-21**: U1a/U1b/U1b-1/U1b-2a/U1b-4 + U1b-2b connect/disconnect + U1b-2b-ii OSSystemExtensionRequest activation; live test through a remote DO relay showed real TCP+UDP traffic egressing via the tunnel. Notarized DMG carries the Lantern-matched UI.)
