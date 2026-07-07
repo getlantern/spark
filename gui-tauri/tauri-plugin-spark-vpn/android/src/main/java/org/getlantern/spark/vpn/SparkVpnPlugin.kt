@@ -61,7 +61,14 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
      */
     @Command
     fun connect(invoke: Invoke) {
-        val consent = runCatching { VpnService.prepare(activity) }.getOrNull()
+        // prepare() returns null when consent is already granted, or an Intent to request it. A
+        // *thrown* exception is a real failure — reject rather than mistaking it for "granted".
+        val consent = try {
+            VpnService.prepare(activity)
+        } catch (e: Exception) {
+            invoke.reject("VPN prepare failed: ${e.message}")
+            return
+        }
         if (consent != null) {
             // Async: hold the Invoke, resolve/reject in onConsentResult.
             pendingConnect = invoke
@@ -254,10 +261,22 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun routingModeFile(): File = File(activity.filesDir, "routing_mode.txt")
 
-    /** Read the persisted split-tunnel list, or the disabled default if missing/unreadable. */
-    private fun loadSplitTunnel(): String =
-        runCatching { splitTunnelFile().readText() }.getOrNull()?.takeIf { it.isNotBlank() }
-            ?: SPLIT_TUNNEL_DEFAULT
+    /**
+     * Read the persisted split-tunnel list, validated + canonicalized to `{enabled,domains,ips}`.
+     * Falls back to the disabled default on any missing/unreadable/parse/shape error — mirrors the
+     * desktop `persist.rs` so a corrupt/partial file can never reach the UI's `JSON.parse`
+     * (which assumes `domains`/`ips` are arrays).
+     */
+    private fun loadSplitTunnel(): String = runCatching {
+        val o = org.json.JSONObject(splitTunnelFile().readText())
+        val domains = o.optJSONArray("domains") ?: org.json.JSONArray()
+        val ips = o.optJSONArray("ips") ?: org.json.JSONArray()
+        org.json.JSONObject()
+            .put("enabled", o.optBoolean("enabled", false))
+            .put("domains", org.json.JSONArray((0 until domains.length()).map { domains.getString(it) }))
+            .put("ips", org.json.JSONArray((0 until ips.length()).map { ips.getString(it) }))
+            .toString()
+    }.getOrDefault(SPLIT_TUNNEL_DEFAULT)
 
     /** Read the persisted routing mode, or "smart" if missing/unreadable/invalid. */
     private fun loadRoutingMode(): String {
