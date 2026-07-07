@@ -107,8 +107,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp(name: &str) -> PathBuf {
+        // Per-process subdir so concurrent test processes / leftover state can't interfere.
         std::env::temp_dir()
-            .join("tauri-plugin-spark-vpn-tests")
+            .join(format!(
+                "tauri-plugin-spark-vpn-tests-{}",
+                std::process::id()
+            ))
             .join(name)
     }
 

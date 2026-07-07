@@ -217,14 +217,21 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun setSplitTunnel(invoke: Invoke) {
         val args = invoke.parseArgs(JsonArgs::class.java)
+        // Validate + canonicalize first (mirrors desktop save_split_tunnel): reject wrong-shape input
+        // rather than writing garbage that a later load would silently discard (losing the user's list).
+        val canonical = canonicalizeSplitTunnel(args.json)
+        if (canonical == null) {
+            invoke.reject("invalid split-tunnel JSON")
+            return
+        }
         try {
-            splitTunnelFile().writeText(args.json)
+            splitTunnelFile().writeText(canonical)
         } catch (e: Exception) {
             invoke.reject("failed to persist split-tunnel: ${e.message}")
             return
         }
         if (SparkState.state.value == VpnState.CONNECTED) {
-            runCatching { SparkBridge.nativeSetSplitTunnel(args.json) }
+            runCatching { SparkBridge.nativeSetSplitTunnel(canonical) }
                 .onFailure { Log.w(TAG, "nativeSetSplitTunnel failed", it) }
         }
         invoke.resolve()
@@ -273,13 +280,13 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
     private fun routingModeFile(): File = File(activity.filesDir, "routing_mode.txt")
 
     /**
-     * Read the persisted split-tunnel list, validated + canonicalized to `{enabled,domains,ips}`.
-     * Falls back to the disabled default on any missing/unreadable/parse/shape error — mirrors the
-     * desktop `persist.rs` so a corrupt/partial file can never reach the UI's `JSON.parse`
-     * (which assumes `domains`/`ips` are arrays).
+     * Validate + canonicalize a split-tunnel JSON string to the `{enabled,domains,ips}` shape;
+     * returns null on any parse/shape error. Shared by [loadSplitTunnel] (→ default on null) and
+     * [setSplitTunnel] (→ reject on null), mirroring the desktop `persist.rs` so neither the on-disk
+     * file nor the UI's `JSON.parse` (which assumes `domains`/`ips` are arrays) ever sees garbage.
      */
-    private fun loadSplitTunnel(): String = runCatching {
-        val o = org.json.JSONObject(splitTunnelFile().readText())
+    private fun canonicalizeSplitTunnel(raw: String): String? = runCatching {
+        val o = org.json.JSONObject(raw)
         val domains = o.optJSONArray("domains") ?: org.json.JSONArray()
         val ips = o.optJSONArray("ips") ?: org.json.JSONArray()
         org.json.JSONObject()
@@ -287,7 +294,12 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
             .put("domains", org.json.JSONArray((0 until domains.length()).map { domains.getString(it) }))
             .put("ips", org.json.JSONArray((0 until ips.length()).map { ips.getString(it) }))
             .toString()
-    }.getOrDefault(SPLIT_TUNNEL_DEFAULT)
+    }.getOrNull()
+
+    /** Read the persisted split-tunnel list, canonicalized; the disabled default if missing/invalid. */
+    private fun loadSplitTunnel(): String =
+        runCatching { splitTunnelFile().readText() }.getOrNull()
+            ?.let { canonicalizeSplitTunnel(it) } ?: SPLIT_TUNNEL_DEFAULT
 
     /** Read the persisted routing mode, or "smart" if missing/unreadable/invalid. */
     private fun loadRoutingMode(): String {
