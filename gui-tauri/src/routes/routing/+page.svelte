@@ -66,7 +66,7 @@
     background: none; border: none; cursor: pointer; font-family: var(--font); text-align: left;
     transition: background 0.12s ease;
   }
-  .row:hover { background: rgba(0, 0, 0, 0.02); }
+  .row:hover { background: var(--hover); }
   .meta { flex: 1; min-width: 0; }
   .name {
     font-size: 15px; font-weight: 600; color: var(--text-primary);

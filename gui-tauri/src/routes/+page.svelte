@@ -307,7 +307,7 @@
     display: block; width: 100%; text-align: left; border: none; cursor: pointer;
     background: none; font-family: var(--font);
   }
-  .tile.nav:hover { background: rgba(0, 0, 0, 0.02); }
+  .tile.nav:hover { background: var(--hover); }
   .tile-head { display: flex; align-items: center; gap: 8px; }
   .ic { width: 24px; display: inline-flex; justify-content: center; color: var(--text-secondary); }
   .emoji { font-size: 18px; line-height: 1; }

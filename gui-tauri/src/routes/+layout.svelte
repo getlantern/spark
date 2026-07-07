@@ -36,6 +36,8 @@
     --lat-slow: #c98a00;
     --snack-bg: #23282b;      /* toast background (dark on light) */
     --switch-off: #c8ccce;    /* small toggle track, off (split-tunnel screen) */
+    --hover: rgba(0, 0, 0, 0.02);   /* row/tile hover tint */
+    --pill-bg: rgba(0, 0, 0, 0.06); /* count-pill background */
     --font: "Urbanist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   @media (prefers-color-scheme: dark) {
@@ -58,6 +60,9 @@
       --lat-slow: #e0a52a;
       --snack-bg: #2e3439;
       --switch-off: #4b5056;
+      /* Light-on-dark tints — a black overlay is invisible on the dark surface. */
+      --hover: rgba(255, 255, 255, 0.04);
+      --pill-bg: rgba(255, 255, 255, 0.08);
     }
   }
   :global(html),
