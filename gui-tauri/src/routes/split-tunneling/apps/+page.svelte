@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { MockBackend, type SparkBackend, type InstalledApp } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
@@ -11,6 +11,15 @@
   let excluded = $state<Set<string>>(new Set());
   let loading = $state(true);
   let query = $state("");
+  let snack = $state<string | null>(null);
+  let snackTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function showSnack(msg: string) {
+    snack = msg;
+    clearTimeout(snackTimer);
+    snackTimer = setTimeout(() => (snack = null), 2500);
+  }
+  onDestroy(() => clearTimeout(snackTimer));
 
   onMount(async () => {
     try {
@@ -23,11 +32,17 @@
 
   // Reassign a NEW Set each toggle so the $state proxy re-renders (mutating in place wouldn't).
   async function toggle(id: string) {
+    const prev = excluded;
     const next = new Set(excluded);
     if (next.has(id)) next.delete(id);
     else next.add(id);
-    excluded = next;
-    try { await backend.setExcludedApps([...next]); } catch {}
+    excluded = next; // optimistic
+    try {
+      await backend.setExcludedApps([...next]);
+    } catch {
+      excluded = prev; // revert so the toggle reflects the actual persisted state
+      showSnack("Couldn't update excluded apps");
+    }
   }
 
   const filtered = $derived(
@@ -80,6 +95,7 @@
       {/if}
     </div>
   </div>
+  {#if snack}<div class="snack">{snack}</div>{/if}
 </main>
 
 <style>
@@ -124,6 +140,7 @@
   .input { flex: 1; height: 48px; border: 1px solid var(--border); border-radius: 12px; padding: 0 14px; font-family: var(--font); font-size: 15px; background: var(--surface); color: var(--text-primary); }
   .row.empty { color: var(--text-tertiary); }
   .loading { display: flex; justify-content: center; align-items: center; padding: 48px 0; }
+  .snack { position: fixed; left: 16px; right: 16px; bottom: 20px; background: var(--snack-bg); color: #fff; padding: 12px 16px; border-radius: 10px; font-size: 14px; text-align: center; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
 
   .icon { width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; object-fit: cover; }
   .icon.placeholder { background: var(--pill-bg); border: 1px solid var(--border); }
