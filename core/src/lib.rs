@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod net;
 pub mod netstack;
 pub mod packet;
+pub mod process;
 pub mod proxy;
 pub mod redact;
 pub mod routing;
