@@ -199,6 +199,55 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(ret)
     }
 
+    // ── installed apps (split-tunnel picker) ───────────────────────────────────────
+
+    /**
+     * Enumerate launchable, non-system-critical apps for the exclude picker. Returns
+     * `{value: "<jsonArray>"}` where each element is `{id, name, icon}` (id = package name,
+     * icon = a `data:image/png;base64,…` URL). Excludes our own package (already tunnel-excluded).
+     */
+    @Command
+    fun listInstalledApps(invoke: Invoke) {
+        scope.launch {
+            val pm = activity.packageManager
+            val out = org.json.JSONArray()
+            // Launchable apps only (have a launcher entry) — the useful, user-recognizable set.
+            val launch = android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+            val resolved = pm.queryIntentActivities(launch, 0)
+            val seen = HashSet<String>()
+            for (ri in resolved) {
+                val pkg = ri.activityInfo.packageName
+                if (pkg == activity.packageName || !seen.add(pkg)) continue
+                val label = ri.loadLabel(pm).toString()
+                val icon = runCatching { drawableToPngDataUrl(ri.loadIcon(pm)) }.getOrNull()
+                out.put(
+                    org.json.JSONObject()
+                        .put("id", pkg)
+                        .put("name", label)
+                        .put("icon", icon ?: org.json.JSONObject.NULL),
+                )
+            }
+            val ret = JSObject()
+            ret.put("value", out.toString())
+            invoke.resolve(ret)
+        }
+    }
+
+    /** Rasterize a (possibly adaptive) launcher drawable to a small PNG data-URL for the web UI. */
+    private fun drawableToPngDataUrl(d: android.graphics.drawable.Drawable): String {
+        val size = 96
+        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        d.setBounds(0, 0, size, size)
+        d.draw(canvas)
+        val baos = java.io.ByteArrayOutputStream()
+        bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, baos)
+        bmp.recycle()
+        val b64 = android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.NO_WRAP)
+        return "data:image/png;base64,$b64"
+    }
+
     // ── split tunnel ──────────────────────────────────────────────────────────────
 
     /** Read `<filesDir>/split_tunnel.json`, resolving `{value: <jsonString>}` (default disabled). */
@@ -233,6 +282,42 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
         if (SparkState.state.value == VpnState.CONNECTED) {
             runCatching { SparkBridge.nativeSetSplitTunnel(canonical) }
                 .onFailure { Log.w(TAG, "nativeSetSplitTunnel failed", it) }
+        }
+        invoke.resolve()
+    }
+
+    // ── excluded apps (app split tunneling) ───────────────────────────────────────
+
+    /** Read `<filesDir>/excluded_apps.json`, resolving `{value: "<jsonArray>"}` (default "[]"). */
+    @Command
+    fun getExcludedApps(invoke: Invoke) {
+        val ret = JSObject()
+        ret.put("value", loadExcludedApps())
+        invoke.resolve(ret)
+    }
+
+    /**
+     * Persist the excluded-app package list to `<filesDir>/excluded_apps.json` and, if the tunnel is
+     * up, apply it live by rebuilding the VpnService (new `addDisallowedApplication` set) — no
+     * reconnect / re-consent. See [SparkVpnService.ACTION_APPLY_APPS].
+     */
+    @Command
+    fun setExcludedApps(invoke: Invoke) {
+        val args = invoke.parseArgs(JsonArgs::class.java)
+        val canonical = canonicalizeExcludedApps(args.json)
+        if (canonical == null) {
+            invoke.reject("invalid excluded-apps JSON")
+            return
+        }
+        try {
+            excludedAppsFile().writeText(canonical)
+        } catch (e: Exception) {
+            invoke.reject("failed to persist excluded apps: ${e.message}")
+            return
+        }
+        if (SparkState.state.value == VpnState.CONNECTED) {
+            runCatching { VpnController.applyExcludedApps(activity) }
+                .onFailure { Log.w(TAG, "applyExcludedApps failed", it) }
         }
         invoke.resolve()
     }
@@ -278,6 +363,24 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
     private fun splitTunnelFile(): File = File(activity.filesDir, "split_tunnel.json")
 
     private fun routingModeFile(): File = File(activity.filesDir, "routing_mode.txt")
+
+    private fun excludedAppsFile(): File = File(activity.filesDir, "excluded_apps.json")
+
+    /** Read the persisted excluded-app package list (a JSON string array); [] if missing/invalid. */
+    private fun loadExcludedApps(): String =
+        runCatching { excludedAppsFile().readText() }.getOrNull()
+            ?.let { canonicalizeExcludedApps(it) } ?: "[]"
+
+    /** Validate + canonicalize to a JSON array of non-blank strings; null on parse error. */
+    private fun canonicalizeExcludedApps(raw: String): String? = runCatching {
+        val arr = org.json.JSONArray(raw)
+        val out = org.json.JSONArray()
+        for (i in 0 until arr.length()) {
+            val s = arr.optString(i).trim()
+            if (s.isNotEmpty()) out.put(s)
+        }
+        out.toString()
+    }.getOrNull()
 
     /**
      * Validate + canonicalize a split-tunnel JSON string to the `{enabled,domains,ips}` shape;
