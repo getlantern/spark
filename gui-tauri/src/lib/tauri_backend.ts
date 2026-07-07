@@ -1,8 +1,9 @@
-// The real backend: drives the Rust command surface (spark_status /
-// spark_connect / spark_disconnect) over Tauri's invoke(). status() reflects the
-// live NE connection state; connect()/disconnect() drive the real NE write path
-// (NETunnelProviderManager save/load/start/stop). Same SparkBackend shape as
-// MockBackend, so the UI is unchanged.
+// The real backend: drives the tauri-plugin-spark-vpn command surface
+// (plugin:spark-vpn|status / |connect / |disconnect …) over Tauri's invoke().
+// status() reflects the live tunnel connection state; connect()/disconnect() drive
+// the real write path (on macOS, the plugin's NETunnelProviderManager
+// save/load/start/stop). Same SparkBackend shape as MockBackend, so the UI is
+// unchanged.
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -10,35 +11,35 @@ import type { ServerInfo, SparkBackend, SparkStatus, SplitTunnel } from "./spark
 
 export class TauriBackend implements SparkBackend {
   async status(): Promise<SparkStatus> {
-    return await invoke<SparkStatus>("spark_status");
+    return await invoke<SparkStatus>("plugin:spark-vpn|status");
   }
   async connect(): Promise<void> {
-    await invoke("spark_connect");
+    await invoke("plugin:spark-vpn|connect");
   }
   async disconnect(): Promise<void> {
-    await invoke("spark_disconnect");
+    await invoke("plugin:spark-vpn|disconnect");
   }
   async servers(): Promise<ServerInfo[]> {
-    return await invoke<ServerInfo[]>("spark_servers");
+    return await invoke<ServerInfo[]>("plugin:spark-vpn|servers");
   }
   async selectServer(index: number | null): Promise<void> {
-    // The Rust command takes a plain i32; -1 means auto (the pool has no negative indices).
-    await invoke("spark_select_server", { index: index ?? -1 });
+    // The plugin command takes a plain i32; -1 means auto (the pool has no negative indices).
+    await invoke("plugin:spark-vpn|select_server", { index: index ?? -1 });
   }
   async getSplitTunnel(): Promise<SplitTunnel> {
-    return JSON.parse(await invoke<string>("spark_get_split_tunnel"));
+    return JSON.parse(await invoke<string>("plugin:spark-vpn|get_split_tunnel"));
   }
   async setSplitTunnel(st: SplitTunnel): Promise<void> {
-    await invoke("spark_set_split_tunnel", { json: JSON.stringify(st) });
+    await invoke("plugin:spark-vpn|set_split_tunnel", { json: JSON.stringify(st) });
   }
   async getRoutingMode(): Promise<"smart" | "full"> {
     // Coerce rather than cast: an unexpected value (corrupt file, older backend) falls back to the
-    // known-safe default, matching the Rust load_routing_mode() which also defaults to "smart".
-    const mode = await invoke<string>("spark_get_routing_mode");
+    // known-safe default, matching the Rust get_routing_mode() which also defaults to "smart".
+    const mode = await invoke<string>("plugin:spark-vpn|get_routing_mode");
     return mode === "full" ? "full" : "smart";
   }
   async setRoutingMode(mode: "smart" | "full"): Promise<void> {
-    await invoke("spark_set_routing_mode", { mode });
+    await invoke("plugin:spark-vpn|set_routing_mode", { mode });
   }
 }
 
