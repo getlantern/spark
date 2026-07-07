@@ -12,7 +12,6 @@
   let status = $state<SparkStatus>({
     state: "disconnected",
     protocol: "AnyTLS",
-    routing: "Full tunnel",
     failOpen: false,
   });
   let busy = $state(false);

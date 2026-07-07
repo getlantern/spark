@@ -24,13 +24,13 @@
   </header>
 
   <div class="scroll">
-    <div class="card">
-      <button class="row" onclick={() => choose("smart")}>
+    <div class="card" role="radiogroup" aria-label="Routing mode">
+      <button class="row" role="radio" aria-checked={mode === "smart"} onclick={() => choose("smart")}>
         <div class="meta"><div class="name">Smart Routing</div><div class="sub">Rule-based routing optimized for your region</div></div>
         <span class="radio" class:on={mode === "smart"} aria-hidden="true"></span>
       </button>
       <div class="divider"></div>
-      <button class="row" onclick={() => choose("full")}>
+      <button class="row" role="radio" aria-checked={mode === "full"} onclick={() => choose("full")}>
         <div class="meta"><div class="name">Full Tunnel</div><div class="sub">Routes all traffic through VPN</div></div>
         <span class="radio" class:on={mode === "full"} aria-hidden="true"></span>
       </button>

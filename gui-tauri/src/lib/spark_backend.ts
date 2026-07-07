@@ -9,8 +9,6 @@ export interface SparkStatus {
   state: ConnState;
   /** Active transport, e.g. "AnyTLS". */
   protocol: string;
-  /** Routing mode, e.g. "Full tunnel". */
-  routing: string;
   /** True while the tunnel fails open (traffic flows unprotected if it drops). */
   failOpen: boolean;
 }
@@ -78,7 +76,6 @@ export class MockBackend implements SparkBackend {
     return {
       state: this.state,
       protocol: "AnyTLS",
-      routing: "Full tunnel",
       // No real direct-fallback signal yet, so don't derive it from connection state.
       failOpen: false,
     };
