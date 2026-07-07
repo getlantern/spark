@@ -77,6 +77,11 @@ class SparkVpnPlugin(private val activity: Activity): Plugin(activity) {
   `Java_org_getlantern_spark_SparkBridge_*` live in `platforms/android/src/lib.rs` (unchanged).
 - So on Android the plugin's Kotlin loads `libspark_android.so` (built by cargo-ndk into jniLibs) and
   JNIs it IN-PROCESS. **Decision (P0.3): keep `libspark_android.so` as the tunnel artifact.**
+  **P0.3 confirmed (2026-07-07):** `cargo ndk -t arm64-v8a build -p spark-android` → valid ELF aarch64
+  `libspark_android.so` with all JNI symbols exported (`Java_org_getlantern_spark_SparkBridge_native{Run,
+  Servers,SetRoutingMode,SetSplitTunnel}`, `llvm-nm -D`). In-process native execution in the Tauri
+  process is already proven (P0.2 ran `libgui_tauri_lib.so` live); the demo proved this exact JNI on
+  Android. Full in-process load+call is wired for real at P3.2.
 - NDK 28+ → 16KB-page bundles auto-generated (we have NDK 28.2) — no extra rustflags needed.
 
 ## TO VERIFY at P3.2 (not covered by these guides — the consent gate)
