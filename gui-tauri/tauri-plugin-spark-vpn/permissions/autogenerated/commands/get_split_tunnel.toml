@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-get-split-tunnel"
+description = "Enables the get_split_tunnel command without any pre-configured scope."
+commands.allow = ["get_split_tunnel"]
+
+[[permission]]
+identifier = "deny-get-split-tunnel"
+description = "Denies the get_split_tunnel command without any pre-configured scope."
+commands.deny = ["get_split_tunnel"]

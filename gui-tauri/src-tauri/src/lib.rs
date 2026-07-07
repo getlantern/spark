@@ -773,6 +773,7 @@ fn spark_set_routing_mode(mode: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_spark_vpn::init())
         .invoke_handler(tauri::generate_handler![
             spark_status,
             spark_connect,

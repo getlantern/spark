@@ -1408,6 +1408,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tauri-plugin-spark-vpn",
  "toml 0.8.2",
 ]
 
@@ -3468,6 +3469,24 @@ dependencies = [
  "url",
  "windows",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-spark-vpn"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "dispatch2",
+ "jni",
+ "objc2",
+ "objc2-foundation",
+ "objc2-network-extension",
+ "objc2-system-extensions",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
