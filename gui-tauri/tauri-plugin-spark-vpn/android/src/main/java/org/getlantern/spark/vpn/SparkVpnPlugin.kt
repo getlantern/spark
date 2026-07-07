@@ -250,7 +250,27 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
         val f = installedAppsCacheFile()
         val tmp = File(f.parentFile, "${f.name}.tmp")
         tmp.writeText(json)
-        if (!tmp.renameTo(f)) f.writeText(json) // fallback if atomic rename is unavailable
+        // Atomically replace so a concurrent stale-while-revalidate reader never sees a half-written
+        // file. On API 26+ use Files.move(ATOMIC_MOVE, REPLACE_EXISTING). On 21–25 File.renameTo maps
+        // to POSIX rename(2), which atomically replaces an existing destination on the same filesystem
+        // (the general-JVM "renameTo fails if dest exists" caveat doesn't apply on Android/Linux).
+        // Only if both fail do we fall back to a direct (non-atomic) write.
+        val replaced = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching {
+                java.nio.file.Files.move(
+                    tmp.toPath(),
+                    f.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                )
+            }.isSuccess
+        } else {
+            tmp.renameTo(f)
+        }
+        if (!replaced) {
+            tmp.delete()
+            f.writeText(json)
+        }
     }
 
     /**

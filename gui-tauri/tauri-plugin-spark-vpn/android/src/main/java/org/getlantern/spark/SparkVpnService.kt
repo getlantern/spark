@@ -63,8 +63,10 @@ class SparkVpnService : VpnService() {
         if (intent?.action == ACTION_APPLY_APPS) {
             // Live-apply a changed exclusion set. Debounced onto one long-lived thread so a burst of
             // picker toggles coalesces into a single rebuild (restartTunnel reads the latest
-            // excluded_apps.json at establish time). Only meaningful while running; no-op otherwise.
-            if (worker != null) scheduleApply()
+            // excluded_apps.json at establish time). If the tunnel isn't running there's nothing to
+            // apply — don't keep an idle service sticky.
+            if (worker == null) return START_NOT_STICKY
+            scheduleApply()
             return START_STICKY
         }
         // Optional explicit config (IP:port / TOML / config_raw.json) from the launching Intent,
