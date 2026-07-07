@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
@@ -147,18 +148,24 @@ class SparkVpnService : VpnService() {
         // The tun IPv4 packed big-endian into an Int, matching addAddress above (native rebuilds it
         // via Ipv4Addr::from(addr as u32)).
         val addr = TUN_ADDR.split(".").fold(0) { acc, oct -> (acc shl 8) or oct.toInt() }
-        // The app files dir is the self-fetch cache (device_id + the fetched config_raw.json).
-        val dataDir = filesDir.absolutePath
+        // The self-fetch cache (device_id + the fetched config_raw.json) lives in a `config/`
+        // subdir of filesDir, kept distinct from the plugin's durable-settings files at the filesDir
+        // root (split_tunnel.json / routing_mode.txt).
+        val dataDir = File(filesDir, "config").apply { mkdirs() }.absolutePath
+        // Durable settings persisted by SparkVpnPlugin. Passed to native so the tunnel starts with
+        // the user's saved split-tunnel + routing mode; null means "no override" (leniently handled).
+        val splitTunnel = loadSplitTunnel()
+        val routingMode = loadRoutingMode()
         // The "lantern-api" sentinel is non-empty but still means self-fetch (like null/empty).
         val mode = if (config.isNullOrEmpty() || config == "lantern-api") "self-fetch" else "explicit-config"
-        Log.i(TAG, "tunnel established; handing fd=$fd to native (mtu=$MTU, mode=$mode)")
+        Log.i(TAG, "tunnel established; handing fd=$fd to native (mtu=$MTU, mode=$mode, routing=$routingMode)")
         // Mark connecting BEFORE starting the worker so the readiness waiter below can't observe a
         // stale ready/down state from a prior connect.
         SparkBridge.nativeMarkConnecting()
         worker = thread(name = "spark-tunnel") {
             // systemStack = 0 (userspace): the cross-platform default, with no kernel-redirect/gateway
             // setup; production Android may pass 1 to use the kernel "system" stack for throughput.
-            val rc = SparkBridge.nativeRun(fd, MTU, addr, TUN_PREFIX, 0, config, dataDir, null, null)
+            val rc = SparkBridge.nativeRun(fd, MTU, addr, TUN_PREFIX, 0, config, dataDir, splitTunnel, routingMode)
             Log.i(TAG, "nativeRun returned $rc")
         }
         // Readiness gate (the Android analog of the Apple NE's). A VpnService has no completion
@@ -191,6 +198,25 @@ class SparkVpnService : VpnService() {
         // the tunnel and re-promoted the foreground service above.
         if (netCallback == null) registerNetworkWatcher()
     }
+
+    /**
+     * Read the persisted split-tunnel list from `<filesDir>/split_tunnel.json` (written by
+     * SparkVpnPlugin). Returns null when the file is missing/blank so native treats it as "no
+     * split-tunnel". A bad value is handled leniently by native (it never fails the tunnel).
+     */
+    private fun loadSplitTunnel(): String? =
+        runCatching { File(filesDir, "split_tunnel.json").readText() }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+
+    /**
+     * Read the persisted routing mode from `<filesDir>/routing_mode.txt` (written by SparkVpnPlugin).
+     * Returns "smart"/"full" when valid, else null (native uses its default routing mode).
+     */
+    private fun loadRoutingMode(): String? =
+        runCatching { File(filesDir, "routing_mode.txt").readText().trim() }
+            .getOrNull()
+            ?.takeIf { it == "smart" || it == "full" }
 
     /** Human-readable description of a network for the debug logs: handle, interface, transports. */
     private fun netDesc(cm: ConnectivityManager, network: Network?): String {
