@@ -15,6 +15,10 @@ tauri = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Parse the resolved config.toml dev override for the static server list (servers_from_config).
+# Used only on macOS (cfg-gated in desktop.rs) but listed as a non-platform dep to avoid
+# a conditional dep block; it's a compile-only dependency with no runtime cost on other targets.
+toml = "0.8"
 
 # macOS: the plugin's AppleControl talks to the NE via objc2 (ne_spike moves here in a later task).
 [target.'cfg(target_os = "macos")'.dependencies]
