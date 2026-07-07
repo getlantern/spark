@@ -112,69 +112,60 @@ After migrating its `VpnService`/`VpnController`/foreground-service Kotlin + man
 ## Goal prompt (< 4000 chars)
 
 ```
-# GOAL — Tauri-on-Android: run the Spark UI as a real Android VPN app
+# GOAL — Tauri-on-Android (execution)
 
 ## Mission
-Bring up the existing Tauri/SvelteKit UI shell (gui-tauri/) as a native Android
-VPN app at full feature parity with desktop, by extracting VPN control into ONE
-cross-platform Tauri plugin. macOS + Android ship in this milestone; Windows and
-iOS are reserved seams, not built.
+Run the existing Tauri/SvelteKit UI (gui-tauri/) as a native Android VPN app at full
+desktop parity, by extracting VPN control into ONE cross-platform Tauri plugin
+`tauri-plugin-spark-vpn`. Ship macOS (migrated) + Android (new); Windows/iOS = compiling
+stubs. Branch: fisk/tauri-android. Spec+plan: docs/superpowers/{specs,plans}/2026-07-06-tauri-android*.
 
-## Why
-ADR 0008 makes the Tauri shell the single UI across desktop + mobile (Android is
-priority #1). Today the SvelteKit screens run only on macOS; Android has a separate
-throwaway native Compose demo. The core routing-mode + split-tunnel features and the
-Android JNI bridge already exist and are merged — what's missing is the Android app
-scaffold + a VpnService plugin to drive the tunnel.
+## Architecture (fixed)
+Plugin = unprivileged control client everywhere, behind a `TunnelControl` trait (connect/
+disconnect/status/servers/select_server/get|set_split_tunnel/get|set_routing_mode). Impls:
+AppleControl (macOS, CROSS-PROCESS to the system extension = migrated ne_spike);
+AndroidControl (IN-PROCESS same-UID: foreground VpnService + JNI); ServiceControl
+(Windows/Linux future stub over spark-ipc). Durable settings persist app-side (shared Rust,
+platform-provided dir); delivery/live/status differ per transport behind the trait.
+Frontend: TauriBackend invokes plugin:spark-vpn|* uniformly; MockBackend + screens unchanged.
 
-## Architecture (decided)
-- One in-repo Tauri v2 plugin `tauri-plugin-spark-vpn` owns VPN control on ALL
-  platforms. It is the UNPRIVILEGED control client — it never touches packets.
-- Central seam = `TunnelControl` trait: connect / disconnect / status / servers /
-  select_server / get|set_split_tunnel / get|set_routing_mode. Per-platform impls:
-  - AppleControl (macOS now, iOS later): CROSS-PROCESS to the system extension via
-    NETunnelProviderManager + sendProviderMessage. This is the moved `ne_spike` —
-    lift it verbatim (relocation, not rewrite).
-  - AndroidControl (this milestone): IN-PROCESS, same-UID — start the foreground
-    VpnService + JNI (nativeRun / nativeSet*) directly; core .so loaded in-process.
-  - ServiceControl (Windows/Linux, future stub): CROSS-PROCESS over the existing
-    spark-ipc → spark-service crates.
-- The process model is the crux: separate process + user on macOS/iOS/Windows/Linux;
-  in-process on Android. Do NOT build a leaky "always in-process" abstraction.
-- Durable settings (routing_mode / split_tunnel) persist app-side — shared
-  cross-platform Rust; the settings dir is PLATFORM-PROVIDED, not hardcoded env.
-  Delivery differs: providerConfiguration / nativeRun args at connect;
-  sendProviderMessage / JNI live.
-- `connect` contract (generalized from ne_spike's proven state machine): authorize
-  (N OS permission gates) → deliver settings → start → gate on data-path-ready →
-  resolve, or reject with a clear reason. macOS gates: sysext activation + VPN-config
-  permission. Android gates: VpnService.prepare() consent + POST_NOTIFICATIONS.
-
-## Deliverables
-1. tauri-plugin-spark-vpn (Rust commands + TunnelControl + shared persistence;
-   android/ Kotlin; ios/ stub; permissions/ capability JSON).
-2. macOS control migrated verbatim into AppleControl; app crate keeps UI-shell only
-   and registers the plugin.
-3. `tauri android init` → gen/android; VpnService/foreground-service/consent Kotlin
-   migrated from the demo; manifest permissions; debug APK builds for emulator ABIs.
-4. TauriBackend invoke targets switch to plugin commands UNIFORMLY (no per-platform
-   branch); MockBackend + all screens unchanged.
-5. Delete platforms/android/demo.
+## Phases (risk-first)
+P0 Spike: (0.1) fetch current Tauri v2 plugin docs; record exact @TauriPlugin/
+run_mobile_plugin/activity-result/permission-JSON forms — write NO Tauri API code before
+this. (0.2) `tauri android init`; build+run the UI on the emulator (MockBackend), check
+dark mode. (0.3) confirm libspark_android.so loads+JNIs in the Tauri app process; keep it
+as the tunnel .so.
+P1 Skeleton: error.rs (thiserror), models.rs (mirror TS Status/ServerInfo/SplitTunnel),
+control.rs (TunnelControl), persist.rs (move routing_mode/split_tunnel out of config.rs;
+dir passed in, not hardcoded; port tests), commands.rs (#[command]→trait); register plugin
++ capabilities.
+P2 macOS (GATED): relocate ne_spike VERBATIM into desktop.rs as AppleControl
+(activate_extension, OSSystemExtensionRequestDelegate, connect state machine,
+providerConfiguration inject, send_provider_message, status); move config.rs
+ServerInfo/resolve; delete old app-crate spark_* cmds; point TauriBackend at plugin cmds.
+GATE: rebuild notarized DMG + smoke test identical to PR #51. Do NOT start P3 until green.
+P3 Android: migrate demo VpnService/VpnController/SparkBridge into plugin android/ (keep
+package org.getlantern.spark so JNI symbols match) + cargoNdkBuild gradle task;
+SparkVpnPlugin.kt (@TauriPlugin @Command handlers, in-process state flag for status);
+connect = VpnService.prepare() consent (activity-result) → POST_NOTIFICATIONS (API33+) →
+startForegroundService → nativeRun(settings) → nativeWaitReady; manifest (BIND_VPN_SERVICE,
+FOREGROUND_SERVICE[_SPECIAL_USE], POST_NOTIFICATIONS, <service>); mobile.rs forwards via
+run_mobile_plugin; filesDir persistence + null config (self-fetch).
+P4 Seams+retire: Windows ServiceControl stub (Err unimplemented), ios/ stub; delete
+platforms/android/demo; update docs/STATE.md; final gate.
 
 ## Acceptance
-- Android emulator: UI renders (light+dark); connect → consent → tunnel up; servers
-  populate; split-tunnel + routing-mode switches take effect (verify a domain routes
-  per mode via the smart-routing on-device checklist).
-- macOS no-regression: rebuild the notarized DMG; the existing smoke test behaves
-  identically (connect, routing/split screens, live updates).
-- Whole-workspace + android-target clippy/tests green; svelte-check 0/0; Windows/iOS
-  stubs compile.
+- Android emulator: UI both themes; connect→consent→tunnel up; servers populate+pin;
+  Routing Mode→Full reroutes a normally-Direct domain while ad-blocked stays blocked and a
+  bypassed domain stays Direct; disconnect tears down; reconnect needs no 2nd consent.
+- macOS no-regression: notarized DMG smoke test identical to PR #51.
+- cargo fmt + clippy --workspace --all-features -D warnings + cargo ndk clippy
+  (spark-android + plugin) + cargo test -p spark-core --features smart-routing +
+  npm run check all green; Windows/iOS stubs compile.
 
 ## Constraints
-- NO macOS regression — the moved NE code is a relocation, not a rewrite.
-- Verify exact Tauri v2 plugin macro / activity-result / permission-JSON APIs against
-  current docs BEFORE coding.
-- Repo standards: no unwrap/expect outside tests, thiserror at boundaries,
-  clippy -D warnings, cargo fmt, no new crates without asking.
-- Spike the one-.so-vs-two question on Android before committing to it.
+- macOS code is RELOCATED, not rewritten — no behavior change.
+- Verify Tauri/JNI APIs vs current docs before coding (P0 gates this).
+- Repo std: no unwrap/expect outside tests, thiserror at boundaries, no new crates without
+  asking, cargo fmt, branch-not-main. Execute via superpowers:subagent-driven-development.
 ```
