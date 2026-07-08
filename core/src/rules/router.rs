@@ -20,6 +20,14 @@ use crate::config::{RouteAction, RuleSetRef, SmartRoutingConfig};
 /// first (any match => `Direct`, absolute), then the immutable base matcher from the fetched rules.
 pub struct Router {
     base: Matcher,
+    /// The ad-block rule-sets, compiled to their own matcher (Reject) so they can be toggled
+    /// independently of `base` (which also carries inline config Reject rules that must stay in
+    /// force regardless). Checked before `base` when [`ad_block_enabled`](Self::ad_block_enabled)
+    /// is set — this preserves the "ad-block wins" precedence. Immutable after build.
+    ad_block: Matcher,
+    /// Whether ad-block is applied. User-controllable (Settings toggle); default on. Swapped live
+    /// via [`set_ad_block_enabled`](Router::set_ad_block_enabled), like `mode`/`user_bypass`.
+    ad_block_enabled: RwLock<bool>,
     /// The user's split-tunnel bypass, compiled to its own tiny matcher; `None` = disabled/empty.
     /// Swapped live via [`set_user_bypass`](Router::set_user_bypass). Read per flow-open (not per
     /// packet) and never held across `.await`, so a plain `RwLock` is fine.
@@ -35,9 +43,23 @@ impl Router {
     pub fn new(base: Matcher) -> Self {
         Self {
             base,
+            // No separate ad-block matcher for the bare constructor; callers that want the toggle
+            // (production) go through [`build`], which populates it. Any ad-block Reject entries a
+            // `new` caller folded into `base` are still honored by `decide`, just not toggleable.
+            ad_block: Matcher::build(Vec::new()),
+            ad_block_enabled: RwLock::new(true),
             user_bypass: RwLock::new(None),
             mode: RwLock::new(crate::routing_mode::RoutingMode::default()),
         }
+    }
+
+    /// Enable/disable ad-block live (poison-tolerant recovery, like `set_mode`). When disabled,
+    /// flows that only the ad-block rule-sets would Reject route normally instead.
+    pub fn set_ad_block_enabled(&self, enabled: bool) {
+        *self
+            .ad_block_enabled
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = enabled;
     }
 
     /// Replace the live user-bypass matcher. `Some(st)` with `st.enabled` and non-empty compiles a
@@ -72,14 +94,17 @@ impl Router {
     ) -> Self {
         let mut entries: Vec<(Action, RuleSet)> = Vec::new();
 
-        // 1. ad_block rule-sets → Reject (highest precedence).
+        // 1. ad_block rule-sets → their OWN matcher (Reject), so the Settings toggle can disable
+        //    them without touching the inline/​smart rules in `base`. Checked before `base` in
+        //    `decide`, preserving the "ad-block wins" precedence.
+        let mut ad_block_entries: Vec<(Action, RuleSet)> = Vec::new();
         for r in sr
             .rule_sets
             .iter()
             .filter(|r| r.action == RouteAction::Reject)
         {
             if let Some(rs) = load_ruleset(&mut load, r) {
-                entries.push((Action::Reject, rs));
+                ad_block_entries.push((Action::Reject, rs));
             }
         }
         // 2. inline route.rules (IP/CIDR), grouped per action, above smart_routing.
@@ -104,7 +129,13 @@ impl Router {
                 entries.push((map_action(r.action), rs));
             }
         }
-        Router::new(Matcher::build(entries))
+        Self {
+            base: Matcher::build(entries),
+            ad_block: Matcher::build(ad_block_entries),
+            ad_block_enabled: RwLock::new(true),
+            user_bypass: RwLock::new(None),
+            mode: RwLock::new(crate::routing_mode::RoutingMode::default()),
+        }
     }
 
     /// The action for a flow. The live user **bypass** wins (absolute) — any match => `Direct`;
@@ -123,12 +154,22 @@ impl Router {
                 }
             }
         }
+        // Ad-block (its own matcher) wins next, but only while enabled — checked before `base` so a
+        // blocked host is rejected regardless of routing mode.
+        if *self
+            .ad_block_enabled
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            && matches!(self.ad_block.lookup(domain, ip), Some(Action::Reject))
+        {
+            return Action::Reject;
+        }
         let full = matches!(
             *self.mode.read().unwrap_or_else(|e| e.into_inner()),
             crate::routing_mode::RoutingMode::Full
         );
         match self.base.lookup(domain, ip) {
-            Some(Action::Reject) => Action::Reject, // ad-block always wins
+            Some(Action::Reject) => Action::Reject, // inline config Reject (not ad-block) — always honored
             Some(a) if !full => a,                  // Smart: base decides
             _ => Action::Proxy,                     // Full (or unmatched) → Proxy
         }
@@ -288,6 +329,54 @@ mod tests {
         assert_eq!(r.decide("9.9.9.9".parse().unwrap(), None), Action::Direct);
         // unlisted → Proxy.
         assert_eq!(r.decide(ip, Some("nope-unlisted.test")), Action::Proxy);
+    }
+
+    #[test]
+    fn ad_block_toggle_gates_only_ad_block_rulesets() {
+        use crate::config::{InlineIpRule, RouteAction, RuleSetRef, SmartRoutingConfig};
+        let sr = SmartRoutingConfig {
+            rule_sets: vec![
+                RuleSetRef {
+                    action: RouteAction::Reject,
+                    tag: "banad".into(),
+                    url: "u".into(),
+                },
+                RuleSetRef {
+                    action: RouteAction::Direct,
+                    tag: "common".into(),
+                    url: "u".into(),
+                },
+            ],
+            // An inline config Reject — NOT ad-block; must stay in force regardless of the toggle.
+            inline_ip_rules: vec![InlineIpRule {
+                cidr: "203.0.113.0/24".into(),
+                action: RouteAction::Reject,
+            }],
+        };
+        let r = Router::build(&sr, |rs| {
+            let name = match rs.tag.as_str() {
+                "banad" => "banad_v1",
+                "common" => "common_v3",
+                _ => return None,
+            };
+            std::fs::read(format!("tests/fixtures/srs/{name}.srs")).ok()
+        });
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        // Default: ad-block on → an ad host is rejected.
+        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
+        // Disable ad-block → the ad host is no longer rejected (falls through to Proxy)…
+        r.set_ad_block_enabled(false);
+        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Proxy);
+        // …but an inline config Reject rule is NOT gated by the ad-block toggle…
+        assert_eq!(
+            r.decide("203.0.113.7".parse().unwrap(), None),
+            Action::Reject
+        );
+        // …and smart-routing Direct still applies.
+        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Direct);
+        // Re-enable → rejected again (live, no rebuild).
+        r.set_ad_block_enabled(true);
+        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
     }
 
     #[test]
