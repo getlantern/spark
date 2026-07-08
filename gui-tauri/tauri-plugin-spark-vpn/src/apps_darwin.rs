@@ -80,6 +80,19 @@ fn entry_for_bundle(app: &Path) -> Option<AppEntry> {
         return None;
     }
 
+    // Skip background/agent bundles (menu-bar helpers, URL handlers, login items) — a user doesn't
+    // think of these as "apps to exclude", and they clutter the picker (e.g. "… URL Handler").
+    // LSUIElement / LSBackgroundOnly are the standard Info.plist markers; plutil emits them as a
+    // JSON bool or (for string-valued plists) "1"/"true".
+    let flag_true = |k: &str| {
+        plist.get(k).is_some_and(|v| {
+            v.as_bool() == Some(true) || v.as_str() == Some("1") || v.as_str() == Some("true")
+        })
+    };
+    if flag_true("LSUIElement") || flag_true("LSBackgroundOnly") {
+        return None;
+    }
+
     // CFBundleExecutable is required — a bundle with no exe has no processes to attribute.
     let exe = plist.get("CFBundleExecutable").and_then(|v| v.as_str())?;
     if exe.is_empty() {
