@@ -26,4 +26,11 @@ object VpnController {
             Intent(ctx, SparkVpnService::class.java).setAction(SparkVpnService.ACTION_STOP),
         )
     }
+
+    /** Ask the running service to rebuild with the latest excluded-apps list (live, no reconnect). */
+    fun applyExcludedApps(ctx: Context) {
+        ctx.startService(
+            Intent(ctx, SparkVpnService::class.java).setAction(SparkVpnService.ACTION_APPLY_APPS),
+        )
+    }
 }

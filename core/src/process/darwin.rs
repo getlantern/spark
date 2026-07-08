@@ -1,0 +1,273 @@
+//! macOS backend: `sysctl(net.inet.tcp.pcblist_n)` → match local endpoint → `so_last_pid` →
+//! `proc_pidpath`. Ported from sing-box `common/process/searcher_darwin.go`. The kernel returns a
+//! packed list of per-socket blobs; each blob is a sequence of TLV-tagged sub-structs
+//! (`xinpcb_n`, `xsocket_n`, `xsockbuf_n` ×2, `xsockstat_n`, and for TCP a `xtcpcb_n`). Rather than
+//! hard-code the total blob stride (which is version-sensitive), we walk the sub-structs by their
+//! self-described length (`xNN_len`, the first `u32` of each), keyed by the `xNN_kind` tag. This is
+//! how the XNU userspace tooling (`netstat`) reads the same table and is robust across releases.
+
+use super::ProcessInfo;
+use std::net::IpAddr;
+
+// libc gives us sysctlbyname + proc_pidpath. `c_char` is `u8` on aarch64-apple-darwin.
+use libc::{c_char, c_void, proc_pidpath};
+
+/// TLV kind tags from `bsd/netinet/in_pcblist.c` (`get_pcblist_n`) / `bsd/kern/uipc_socket2.c`.
+/// Each sub-struct in a socket blob begins with `{ u32 len; u32 kind; ... }`.
+const XSO_SOCKET: u32 = 0x001;
+const XSO_INPCB: u32 = 0x010;
+
+/// `proc_pidpath` needs a buffer of `PROC_PIDPATHINFO_MAXSIZE`; libc exposes it as `c_int`.
+const PROC_PIDPATHINFO_MAXSIZE: usize = libc::PROC_PIDPATHINFO_MAXSIZE as usize;
+
+/// Read a native-endian `u32` from `buf` at `off`, or `None` if out of range.
+fn read_u32(buf: &[u8], off: usize) -> Option<u32> {
+    let end = off.checked_add(4)?;
+    let slice = buf.get(off..end)?;
+    Some(u32::from_ne_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+/// One parsed socket, reduced to what the matcher needs.
+struct Pcb {
+    lport_be: u16,
+    vflag: u8,
+    /// Local IPv4 (valid when `vflag & 0x1`).
+    laddr4: [u8; 4],
+    /// Local IPv6 (valid when `vflag & 0x2`).
+    laddr6: [u8; 16],
+    last_pid: u32,
+}
+
+/// Read the whole `net.inet.tcp.pcblist_n` blob via the two-call size-then-read `sysctlbyname`.
+fn read_pcblist() -> std::io::Result<Vec<u8>> {
+    let name = b"net.inet.tcp.pcblist_n\0";
+
+    // First call with a null buffer just fills in the required size.
+    let mut needed: libc::size_t = 0;
+    // SAFETY: `name` is NUL-terminated; passing null `oldp` with a valid `oldlenp` is the documented
+    // size-query form of sysctlbyname; all other pointers are null/valid.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr() as *const c_char,
+            std::ptr::null_mut(),
+            &mut needed,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut buf = vec![0u8; needed];
+    // SAFETY: `buf` has `needed` bytes; `needed` is updated in place to the bytes actually written.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr() as *const c_char,
+            buf.as_mut_ptr() as *mut c_void,
+            &mut needed,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    buf.truncate(needed);
+    Ok(buf)
+}
+
+/// Walk the packed pcblist blob, yielding one [`Pcb`] per socket. The blob begins with a 24-byte
+/// `xinpgen` header; then socket blobs follow, each a run of TLV sub-structs terminated by the next
+/// socket's `xinpcb_n` (kind `XSO_INPCB`). We assemble a `Pcb` from the `xinpcb_n` (ports/addrs/
+/// vflag) and the `xsocket_n` (`so_last_pid`) of each socket.
+fn parse_pcbs(buf: &[u8]) -> Vec<Pcb> {
+    let mut out = Vec::new();
+    let mut i = 24usize; // skip the leading xinpgen block
+
+    let mut cur: Option<Pcb> = None;
+    while i + 8 <= buf.len() {
+        let len = match read_u32(buf, i) {
+            Some(0) | None => break, // zero-length sub-struct → malformed; stop
+            Some(l) => l as usize,
+        };
+        let kind = match read_u32(buf, i + 4) {
+            Some(k) => k,
+            None => break,
+        };
+        if len < 8 || i + len > buf.len() {
+            break;
+        }
+        let item = &buf[i..i + len];
+
+        match kind {
+            XSO_INPCB => {
+                // A new socket starts here; flush the previous one.
+                if let Some(pcb) = cur.take() {
+                    out.push(pcb);
+                }
+                // xinpcb_n layout (bsd/netinet/in_pcb.h, struct xinpcb_n), offsets empirically
+                // verified on Darwin 25 (macOS 26) by dumping our own socket's bytes:
+                //   0  u32 xi_len          (== 104 here)
+                //   4  u32 xi_kind         (== XSO_INPCB)
+                //   8  u64 xi_inpp         (kernel pointer)
+                //   16 u16 inp_fport       (network byte order)
+                //   18 u16 inp_lport       (network byte order)          <- OFF_LPORT
+                //   20 u32 inp_flow
+                //   ...
+                //   44 u8  inp_vflag       (0x1 = IPv4, 0x2 = IPv6)       <- OFF_VFLAG
+                //   ...
+                //   48 inp_dependfaddr union (16 bytes; foreign IPv4 in last 4 @ 60)
+                //   64 inp_dependladdr union (16 bytes; local IPv4 in last 4 @ 76)  <- OFF_LADDR6/4
+                // These are validated by `resolves_our_own_tcp_socket`; adjust there if a future
+                // macOS reshuffles the struct.
+                let lport_be = item
+                    .get(OFF_LPORT..OFF_LPORT + 2)
+                    .map(|s| u16::from_ne_bytes([s[0], s[1]]))
+                    .unwrap_or(0);
+                let vflag = item.get(OFF_VFLAG).copied().unwrap_or(0);
+                let mut laddr4 = [0u8; 4];
+                let mut laddr6 = [0u8; 16];
+                // inp_dependladdr is a 16-byte union: IPv6 fills all 16; IPv4 is its last 4 bytes.
+                if let Some(s) = item.get(OFF_LADDR6..OFF_LADDR6 + 16) {
+                    laddr6.copy_from_slice(s);
+                    laddr4.copy_from_slice(&s[12..16]);
+                }
+                cur = Some(Pcb {
+                    lport_be,
+                    vflag,
+                    laddr4,
+                    laddr6,
+                    last_pid: 0,
+                });
+            }
+            XSO_SOCKET => {
+                if let Some(pcb) = cur.as_mut() {
+                    // xsocket_n: so_last_pid is a pid_t (i32) inside the struct; offset validated by
+                    // the test.
+                    pcb.last_pid = read_u32(item, OFF_SO_LAST_PID).unwrap_or(0);
+                }
+            }
+            _ => {}
+        }
+
+        i += rup8(len);
+    }
+    if let Some(pcb) = cur.take() {
+        out.push(pcb);
+    }
+    out
+}
+
+/// Round up to an 8-byte boundary (the kernel pads each sub-struct).
+fn rup8(n: usize) -> usize {
+    n.div_ceil(8) * 8
+}
+
+/// Offset of `inp_lport` (u16, network byte order) within `xinpcb_n`.
+const OFF_LPORT: usize = 18;
+
+/// Offset of `inp_vflag` (u8; bit 0x1 = IPv4, 0x2 = IPv6) within `xinpcb_n`.
+const OFF_VFLAG: usize = 44;
+
+/// Offset of `inp_dependladdr` (local address union, 16 bytes) within `xinpcb_n`. For IPv6 all 16
+/// bytes are the address; for IPv4 the address is the last 4 bytes (offset 76 overall).
+const OFF_LADDR6: usize = 64;
+
+/// Offset of `so_last_pid` (pid_t) within `xsocket_n`. Validated by the test.
+const OFF_SO_LAST_PID: usize = 68;
+
+/// Resolve the process owning the TCP socket whose local endpoint is `(ip, port)`.
+///
+/// Returns `Ok(None)` if no PCB matches; `Err` only on a `sysctl` failure. The `ip` may be a
+/// wildcard/loopback source as reported by [`std::net::TcpStream::local_addr`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::net::Ipv4Addr;
+/// let owner = spark_core::process::resolve_tcp(Ipv4Addr::LOCALHOST.into(), 12345)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn resolve_tcp(ip: IpAddr, port: u16) -> std::io::Result<Option<ProcessInfo>> {
+    let buf = read_pcblist()?;
+    let target_lport_be = port.to_be();
+    let is_ipv4 = ip.is_ipv4();
+
+    for pcb in parse_pcbs(&buf) {
+        if pcb.lport_be != target_lport_be {
+            continue;
+        }
+        let matches = if is_ipv4 && pcb.vflag & 0x1 != 0 {
+            IpAddr::from(pcb.laddr4) == ip
+        } else if !is_ipv4 && pcb.vflag & 0x2 != 0 {
+            IpAddr::from(pcb.laddr6) == ip
+        } else {
+            false
+        };
+        if !matches {
+            continue;
+        }
+        let pid = pcb.last_pid;
+        return Ok(exe_path(pid).map(|exe_path| ProcessInfo { pid, exe_path }));
+    }
+    Ok(None)
+}
+
+/// `proc_pidpath(pid)` → absolute executable path, or `None` on failure.
+fn exe_path(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+    // SAFETY: `buf` is `PROC_PIDPATHINFO_MAXSIZE` bytes and we pass that exact capacity as the size.
+    let n = unsafe {
+        proc_pidpath(
+            pid as i32,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    // `proc_pidpath` writes a NUL-terminated path and returns its length. Defensively cut at the
+    // first NUL within the returned range (in case the count ever includes the terminator), then
+    // decode lossily — macOS paths are effectively always UTF-8, but don't drop a valid path (which
+    // `String::from_utf8` would) on the off chance one isn't, since it feeds later path matching.
+    let len = n as usize;
+    let end = buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+
+    // Open a real loopback TCP connection, take the CLIENT socket's local endpoint, and assert the
+    // resolver maps it back to THIS test process (pid + an exe path ending in the test binary).
+    #[test]
+    fn resolves_our_own_tcp_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut client = TcpStream::connect(addr).expect("connect");
+        let (mut server, _) = listener.accept().expect("accept");
+        // Keep both ends alive + established while we scan the PCB table.
+        client.write_all(b"x").expect("write");
+        let local = client.local_addr().expect("local");
+
+        let info = resolve_tcp(local.ip(), local.port())
+            .expect("sysctl/parse ok")
+            .expect("our socket is in the PCB table");
+        assert_eq!(info.pid, std::process::id(), "must resolve to this process");
+        assert!(
+            !info.exe_path.is_empty(),
+            "exe path must be non-empty, got {:?}",
+            info.exe_path
+        );
+        let _ = server.write(b"y");
+        drop(server);
+    }
+}

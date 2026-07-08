@@ -55,3 +55,21 @@ pub(crate) async fn set_routing_mode<R: Runtime>(
 ) -> crate::Result<()> {
     app.state::<Ctl>().set_routing_mode(&mode)
 }
+
+#[tauri::command]
+pub(crate) async fn list_installed_apps<R: Runtime>(app: AppHandle<R>) -> crate::Result<String> {
+    app.state::<Ctl>().list_installed_apps()
+}
+
+#[tauri::command]
+pub(crate) async fn get_excluded_apps<R: Runtime>(app: AppHandle<R>) -> crate::Result<String> {
+    app.state::<Ctl>().get_excluded_apps()
+}
+
+#[tauri::command]
+pub(crate) async fn set_excluded_apps<R: Runtime>(
+    app: AppHandle<R>,
+    json: String,
+) -> crate::Result<()> {
+    app.state::<Ctl>().set_excluded_apps(&json)
+}

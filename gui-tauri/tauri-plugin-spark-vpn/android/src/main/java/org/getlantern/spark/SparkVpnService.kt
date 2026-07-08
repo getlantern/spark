@@ -39,6 +39,11 @@ class SparkVpnService : VpnService() {
     // Network callbacks (and the blocking restartTunnel they trigger) run on this dedicated thread,
     // never the main looper — restartTunnel's nativeStop()+join would otherwise risk an ANR.
     private var netCbThread: HandlerThread? = null
+    // Coalesces live app-exclusion applies: a burst of picker toggles debounces to a single tunnel
+    // rebuild on one long-lived thread, rather than spawning a thread per ACTION_APPLY_APPS.
+    private var applyThread: HandlerThread? = null
+    private var applyHandler: Handler? = null
+    private val applyRunnable = Runnable { applyExcludedAppsLive() }
     private var currentNet: Network? = null
     private var lastConfig: String? = null // last config handed to startTunnel, reused on restart
 
@@ -54,6 +59,15 @@ class SparkVpnService : VpnService() {
         if (intent?.action == ACTION_STOP) {
             stopTunnel()
             return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_APPLY_APPS) {
+            // Live-apply a changed exclusion set. Debounced onto one long-lived thread so a burst of
+            // picker toggles coalesces into a single rebuild (restartTunnel reads the latest
+            // excluded_apps.json at establish time). If the tunnel isn't running there's nothing to
+            // apply — don't keep an idle service sticky.
+            if (worker == null) return START_NOT_STICKY
+            scheduleApply()
+            return START_STICKY
         }
         // Optional explicit config (IP:port / TOML / config_raw.json) from the launching Intent,
         // trimmed and normalized to null when blank so the mode log + the value handed to native match
@@ -131,10 +145,14 @@ class SparkVpnService : VpnService() {
             .addAddress(TUN_ADDR6, TUN_PREFIX6) // in-tunnel client v6 address (ULA)
             .addRoute("::", 0) // capture all IPv6 (fail-closed if the core can't proxy v6)
             .addDnsServer("8.8.8.8")
-        try {
-            builder.addDisallowedApplication(packageName)
-        } catch (e: Exception) {
-            Log.e(TAG, "addDisallowedApplication failed", e)
+        // Always exclude ourselves (loop avoidance) + the user's chosen apps (split tunneling).
+        // A package that isn't installed throws NameNotFoundException — skip it, don't fail the tunnel.
+        for (pkg in listOf(packageName) + loadExcludedApps()) {
+            try {
+                builder.addDisallowedApplication(pkg)
+            } catch (e: Exception) {
+                Log.w(TAG, "addDisallowedApplication($pkg) skipped: ${e.message}")
+            }
         }
 
         val pfd = builder.establish()
@@ -217,6 +235,13 @@ class SparkVpnService : VpnService() {
         runCatching { File(filesDir, "routing_mode.txt").readText().trim() }
             .getOrNull()
             ?.takeIf { it == "smart" || it == "full" }
+
+    /** Read persisted excluded-app packages (`<filesDir>/excluded_apps.json`); empty on any error. */
+    private fun loadExcludedApps(): List<String> =
+        runCatching {
+            val arr = org.json.JSONArray(File(filesDir, "excluded_apps.json").readText())
+            (0 until arr.length()).map { arr.getString(it) }.filter { it.isNotBlank() }
+        }.getOrDefault(emptyList())
 
     /** Human-readable description of a network for the debug logs: handle, interface, transports. */
     private fun netDesc(cm: ConnectivityManager, network: Network?): String {
@@ -319,6 +344,30 @@ class SparkVpnService : VpnService() {
      * can't deadlock. Clearing `worker` BEFORE calling startTunnel is what lets the restart past
      * startTunnel's `if (worker != null) return` guard.
      */
+    /** Rebuild the tunnel with the freshly-persisted exclusion set. Reuses restartTunnel's machinery
+     *  (nativeStop → new establish() → nativeRun), so the VpnService stays authorized — no re-consent,
+     *  no VPN-off flicker; only in-flight connections reset. Runs off the main thread. */
+    private fun applyExcludedAppsLive() {
+        Log.i(TAG, "applyExcludedAppsLive: rebuilding tunnel with new exclusion set")
+        restartTunnel()
+    }
+
+    /**
+     * Debounce an app-exclusion apply onto a single long-lived handler thread. Rapid picker toggles
+     * (each a separate ACTION_APPLY_APPS) collapse to one tunnel rebuild once they settle, instead of
+     * one thread + rebuild per toggle. Lazily starts the thread on first use; torn down in stopTunnel.
+     */
+    @Synchronized
+    private fun scheduleApply() {
+        val h = applyHandler ?: run {
+            val t = HandlerThread("spark-apply-apps").apply { start() }
+            applyThread = t
+            Handler(t.looper).also { applyHandler = it }
+        }
+        h.removeCallbacks(applyRunnable)
+        h.postDelayed(applyRunnable, APPLY_DEBOUNCE_MS)
+    }
+
     @Synchronized
     private fun restartTunnel() {
         // A network callback can be queued/in-flight when the service stops (quitSafely() drains the
@@ -353,6 +402,12 @@ class SparkVpnService : VpnService() {
         netCallback = null
         netCbThread?.quitSafely()
         netCbThread = null
+        // Cancel any pending debounced apply and stop its thread so a queued rebuild can't resurrect
+        // a tunnel the user just stopped.
+        applyHandler?.removeCallbacks(applyRunnable)
+        applyHandler = null
+        applyThread?.quitSafely()
+        applyThread = null
         // Reset so a later re-register treats its first onAvailable as the initial network (prev ==
         // null), not a spurious "change" from the prior run that would churn an immediate restart.
         currentNet = null
@@ -376,9 +431,13 @@ class SparkVpnService : VpnService() {
         private const val TUN_ADDR6 = "fd00::2"
         private const val TUN_PREFIX6 = 64
         private const val READY_TIMEOUT_MS = 30_000 // ceiling for cold-start self-fetch before giving up
+        private const val APPLY_DEBOUNCE_MS = 400L // coalesce rapid app-exclusion toggles into one rebuild
         private const val CHANNEL_ID = "spark_vpn" // foreground-service notification channel (API 26+)
         private const val NOTIF_ID = 1 // ongoing foreground notification id
         const val ACTION_STOP = "org.getlantern.spark.STOP"
+
+        /** Rebuild the running tunnel with the latest excluded-apps set (live, no reconnect). */
+        const val ACTION_APPLY_APPS = "org.getlantern.spark.APPLY_APPS"
 
         /** Optional Intent string extra: an explicit config (IP:port / TOML / config_raw.json; the
          *  relay override is an IP literal, not a hostname). Absent → self-fetch from config-new. */

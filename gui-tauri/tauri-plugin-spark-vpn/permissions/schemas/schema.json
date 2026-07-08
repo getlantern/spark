@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the disconnect command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_excluded_apps command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-excluded-apps",
+          "markdownDescription": "Enables the get_excluded_apps command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_excluded_apps command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-excluded-apps",
+          "markdownDescription": "Denies the get_excluded_apps command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_routing_mode command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-routing-mode",
@@ -343,6 +355,18 @@
           "markdownDescription": "Denies the get_split_tunnel command without any pre-configured scope."
         },
         {
+          "description": "Enables the list_installed_apps command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-installed-apps",
+          "markdownDescription": "Enables the list_installed_apps command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_installed_apps command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-installed-apps",
+          "markdownDescription": "Denies the list_installed_apps command without any pre-configured scope."
+        },
+        {
           "description": "Enables the select_server command without any pre-configured scope.",
           "type": "string",
           "const": "allow-select-server",
@@ -365,6 +389,18 @@
           "type": "string",
           "const": "deny-servers",
           "markdownDescription": "Denies the servers command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_excluded_apps command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-excluded-apps",
+          "markdownDescription": "Enables the set_excluded_apps command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_excluded_apps command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-excluded-apps",
+          "markdownDescription": "Denies the set_excluded_apps command without any pre-configured scope."
         },
         {
           "description": "Enables the set_routing_mode command without any pre-configured scope.",
@@ -403,10 +439,10 @@
           "markdownDescription": "Denies the status command without any pre-configured scope."
         },
         {
-          "description": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`",
+          "description": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`"
+          "markdownDescription": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`"
         }
       ]
     }

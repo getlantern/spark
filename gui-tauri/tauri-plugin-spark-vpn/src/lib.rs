@@ -72,6 +72,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::set_split_tunnel,
             commands::get_routing_mode,
             commands::set_routing_mode,
+            commands::list_installed_apps,
+            commands::get_excluded_apps,
+            commands::set_excluded_apps,
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]

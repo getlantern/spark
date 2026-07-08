@@ -768,6 +768,23 @@ impl TunnelControl for AppleControl {
         }
         Ok(())
     }
+
+    // App split tunneling is Android-only for now; the macOS backend lands in a later phase (P3).
+    // Reads return an empty catalog so the picker loads cleanly; the write errors (like other
+    // not-yet-implemented actions) so a caller isn't told an unsupported change succeeded.
+    fn list_installed_apps(&self) -> crate::Result<String> {
+        Ok("[]".to_string())
+    }
+
+    fn get_excluded_apps(&self) -> crate::Result<String> {
+        Ok("[]".to_string())
+    }
+
+    fn set_excluded_apps(&self, _json: &str) -> crate::Result<()> {
+        Err(crate::Error::Platform(
+            "app split tunneling is not yet supported on macOS".into(),
+        ))
+    }
 }
 
 // ── Windows/Linux: ServiceControl over spark-ipc — future. ───────────────────
@@ -823,5 +840,22 @@ impl TunnelControl for ServiceControl {
 
     fn set_routing_mode(&self, mode: &str) -> crate::Result<()> {
         crate::persist::save_routing_mode(&self.base, mode)
+    }
+
+    // App split tunneling is Android-only for now; the desktop backend lands in a later phase.
+    // Reads return an empty catalog so the picker loads; the write errors (like the other
+    // not-yet-implemented ServiceControl actions) rather than falsely reporting success.
+    fn list_installed_apps(&self) -> crate::Result<String> {
+        Ok("[]".to_string())
+    }
+
+    fn get_excluded_apps(&self) -> crate::Result<String> {
+        Ok("[]".to_string())
+    }
+
+    fn set_excluded_apps(&self, _json: &str) -> crate::Result<()> {
+        Err(crate::Error::Platform(
+            "desktop service: not yet implemented (spark-ipc)".into(),
+        ))
     }
 }

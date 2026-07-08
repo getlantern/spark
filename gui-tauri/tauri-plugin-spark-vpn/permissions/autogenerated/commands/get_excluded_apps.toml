@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-get-excluded-apps"
+description = "Enables the get_excluded_apps command without any pre-configured scope."
+commands.allow = ["get_excluded_apps"]
+
+[[permission]]
+identifier = "deny-get-excluded-apps"
+description = "Denies the get_excluded_apps command without any pre-configured scope."
+commands.deny = ["get_excluded_apps"]

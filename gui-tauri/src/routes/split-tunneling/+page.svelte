@@ -34,9 +34,10 @@
 
     {#if st.enabled}
       <div class="card" style="margin-top:12px">
-        <button class="row" disabled>
+        <button class="row" onclick={() => goto("/split-tunneling/apps")}>
           <span class="ic" aria-hidden="true">▦</span>
-          <div class="meta"><div class="name">Apps</div><div class="sub">Coming soon</div></div>
+          <div class="meta"><div class="name">Apps</div></div>
+          <span class="chev">›</span>
         </button>
         <div class="divider"></div>
         <button class="row" onclick={() => goto("/split-tunneling/websites")}>
@@ -109,5 +110,4 @@
     border-radius: 50%; background: #fff; transition: transform 0.15s ease;
   }
   .switch.on .knob { transform: translateX(18px); }
-  .row[disabled] { opacity: 0.5; cursor: default; }
 </style>

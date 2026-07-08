@@ -38,6 +38,14 @@ export interface SplitTunnel {
   ips: string[];
 }
 
+/** An installed application the user can exclude from the VPN. `id` is the platform match key
+ * (Android package name; desktop executable path). `icon` is an optional data-URL for display. */
+export interface InstalledApp {
+  id: string;
+  name: string;
+  icon?: string | null;
+}
+
 export interface SparkBackend {
   status(): Promise<SparkStatus>;
   connect(): Promise<void>;
@@ -50,6 +58,12 @@ export interface SparkBackend {
   setSplitTunnel(st: SplitTunnel): Promise<void>;
   getRoutingMode(): Promise<"smart" | "full">;
   setRoutingMode(mode: "smart" | "full"): Promise<void>;
+  /** Installed apps the user can choose to exclude (platform-enumerated; empty on platforms w/o support). */
+  listInstalledApps(): Promise<InstalledApp[]>;
+  /** The currently-excluded app match keys (package names / exe paths). */
+  getExcludedApps(): Promise<string[]>;
+  /** Persist the excluded set; applied live (Android rebuilds the tunnel, no reconnect). */
+  setExcludedApps(ids: string[]): Promise<void>;
 }
 
 // MockBackend simulates the service for U0: connect → connecting → (≈900ms) →
@@ -65,7 +79,8 @@ const mockState: {
   pinned: number | null;
   split: SplitTunnel;
   routingMode: "smart" | "full";
-} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart" };
+  excludedApps: string[];
+} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", excludedApps: [] };
 
 export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
@@ -126,4 +141,14 @@ export class MockBackend implements SparkBackend {
   async setSplitTunnel(st: SplitTunnel): Promise<void> { mockState.split = structuredClone(st); }
   async getRoutingMode(): Promise<"smart" | "full"> { return mockState.routingMode; }
   async setRoutingMode(mode: "smart" | "full"): Promise<void> { mockState.routingMode = mode; }
+
+  async listInstalledApps(): Promise<InstalledApp[]> {
+    return [
+      { id: "com.android.chrome", name: "Chrome", icon: null },
+      { id: "org.mozilla.firefox", name: "Firefox", icon: null },
+      { id: "com.spotify.music", name: "Spotify", icon: null },
+    ];
+  }
+  async getExcludedApps(): Promise<string[]> { return [...mockState.excludedApps]; }
+  async setExcludedApps(ids: string[]): Promise<void> { mockState.excludedApps = [...ids]; }
 }
