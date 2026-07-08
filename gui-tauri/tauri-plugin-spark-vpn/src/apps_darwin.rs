@@ -51,7 +51,9 @@ const CACHE_BASENAME: &str = "installed_apps_cache";
 /// serving that stale list once under stale-while-revalidate. Encoded into the cache filename.
 ///
 /// v2: Safari + background/agent-bundle filtering; NSWorkspace icon fallback.
-const CACHE_VERSION: u32 = 2;
+/// v3: icons come from NSWorkspace for *every* app then downscaled via sips (fixes Books's stub
+///     `.icns` rendering blank, and Calendar's un-downscaled multi-MB icon bloating the cache).
+const CACHE_VERSION: u32 = 3;
 
 /// Path of the current-version SWR cache file under `base`.
 fn cache_file(base: &Path) -> PathBuf {
@@ -200,20 +202,46 @@ fn icns_path(app: &Path, plist: &serde_json::Value) -> Option<PathBuf> {
 /// Best-effort 64×64 PNG icon for `app` as a `data:image/png;base64,…` URL, or `None` if every
 /// strategy fails. Icons are cosmetic, so a failure here never drops the app from the catalog.
 ///
-/// Fast path: a standalone `.icns` decoded by `sips` (covers ~all third-party apps). Fallback:
-/// apps with no `.icns` — most macOS system apps (Calendar, Books, …) keep their icon in an
-/// `Assets.car` asset catalog that `sips` can't read — are rendered via AppKit's `NSWorkspace`.
+/// Primary source is AppKit's `NSWorkspace`, which returns the exact Finder icon for *every* app:
+/// asset-catalog system apps (Calendar), apps whose real icon is in `Assets.car` behind a tiny
+/// stub `.icns` (Books), and ordinary third-party apps alike. Its native-resolution TIFF is
+/// handed to `sips` to produce a consistent, small 64×64 PNG. Falls back to decoding a standalone
+/// `.icns` directly on the rare chance the `NSWorkspace` path yields nothing.
+///
+/// (An earlier version decoded the bundle's `.icns` first, but Books ships a ~2 KB *stub* `.icns`
+/// that `sips` happily converts to a blank image — so `.icns`-first served that blank instead of
+/// falling through. Going through `NSWorkspace` for every app avoids the stub trap entirely.)
 fn icon_data_url(app: &Path, plist: &serde_json::Value) -> Option<String> {
-    if let Some(url) = icns_path(app, plist).and_then(|icns| icon_from_icns(&icns)) {
+    if let Some(url) =
+        tiff_via_nsworkspace(app).and_then(|tiff| sips_png_data_url_from_bytes(&tiff, "tiff"))
+    {
         return Some(url);
     }
-    icon_via_nsworkspace(app)
+    // Fallback (only if NSWorkspace failed, which is rare): decode a standalone `.icns` via sips.
+    icns_path(app, plist).and_then(|icns| sips_png_data_url(&icns))
 }
 
-/// Decode an `.icns` to a 64×64 PNG data-URL via `sips`. `None` on any `sips`/read failure.
-fn icon_from_icns(icns: &Path) -> Option<String> {
+/// The app's Finder icon as TIFF bytes via AppKit's `NSWorkspace`, or `None` on failure.
+///
+/// Thread-safety: `NSWorkspace`'s icon methods and `NSImage::TIFFRepresentation` (which just
+/// serializes the icon's existing bitmap representations — no drawing context involved) are
+/// usable from any thread (AppKit Thread Safety Summary). This matters because [`enumerate`]
+/// runs off the main thread — on the SWR background-refresh thread and on the Tauri command
+/// worker that services a cache miss.
+fn tiff_via_nsworkspace(app: &Path) -> Option<Vec<u8>> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+
+    let path = NSString::from_str(app.to_str()?);
+    let image = NSWorkspace::sharedWorkspace().iconForFile(&path);
+    Some(image.TIFFRepresentation()?.to_vec())
+}
+
+/// Convert an on-disk image file (`.icns`, `.tiff`, …) to a 64×64 PNG data-URL via `sips`.
+/// `None` on any `sips`/read failure.
+fn sips_png_data_url(input: &Path) -> Option<String> {
     // Per-process/-icon temp path so concurrent extractions don't collide. `sips` writes PNG.
-    let tmp = std::env::temp_dir().join(format!(
+    let out = std::env::temp_dir().join(format!(
         "spark-icon-{}-{}.png",
         std::process::id(),
         NEXT_ICON.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -226,51 +254,31 @@ fn icon_from_icns(icns: &Path) -> Option<String> {
         .arg("-s")
         .arg("format")
         .arg("png")
-        .arg(icns)
+        .arg(input)
         .arg("--out")
-        .arg(&tmp)
+        .arg(&out)
         .output()
         .ok();
 
     let ok = status.map(|o| o.status.success()).unwrap_or(false);
-    let png = if ok { std::fs::read(&tmp).ok() } else { None };
-    let _ = std::fs::remove_file(&tmp); // clean up regardless of outcome
+    let png = if ok { std::fs::read(&out).ok() } else { None };
+    let _ = std::fs::remove_file(&out); // clean up regardless of outcome
 
     png.map(|bytes| format!("data:image/png;base64,{}", base64_encode(&bytes)))
 }
 
-/// Render an app's Finder icon to a 64×64 PNG data-URL via AppKit's `NSWorkspace`, for apps
-/// whose icon lives in an `Assets.car` asset catalog rather than a standalone `.icns` (e.g.
-/// macOS system apps like Calendar and Books). `None` on any failure.
-///
-/// Thread-safety: `NSWorkspace`'s icon methods and offscreen `NSImage`/`NSBitmapImageRep`
-/// bitmap generation are usable from any thread (AppKit Thread Safety Summary). This matters
-/// because [`enumerate`] runs off the main thread — both on the SWR background-refresh thread
-/// and on the Tauri command worker that services a cache miss.
-fn icon_via_nsworkspace(app: &Path) -> Option<String> {
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
-    use objc2_foundation::{NSDictionary, NSSize, NSString};
-
-    let path = NSString::from_str(app.to_str()?);
-    let image = NSWorkspace::sharedWorkspace().iconForFile(&path);
-    // Render at 64×64 to match the `sips` path and bound the data-URL size — the icon carries
-    // representations up to 512×512, and `TIFFRepresentation` would otherwise emit the largest.
-    image.setSize(NSSize {
-        width: 64.0,
-        height: 64.0,
-    });
-    let tiff = image.TIFFRepresentation()?;
-    let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)?;
-    let props = NSDictionary::new();
-    // SAFETY: `props` is a valid (empty) properties dictionary of the expected key/value types
-    // and `NSBitmapImageFileType::PNG` is a valid storage type; the method has no further
-    // preconditions. It returns an autoreleased `NSData` (or nil), handled as `Option`.
-    let png =
-        unsafe { bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }?;
-    Some(format!(
-        "data:image/png;base64,{}",
-        base64_encode(&png.to_vec())
-    ))
+/// Write `bytes` to a temp file with extension `ext` and run [`sips_png_data_url`] on it, so
+/// `sips` can decode an in-memory image (e.g. the `NSWorkspace` TIFF). Temp file removed after.
+fn sips_png_data_url_from_bytes(bytes: &[u8], ext: &str) -> Option<String> {
+    let src = std::env::temp_dir().join(format!(
+        "spark-iconsrc-{}-{}.{ext}",
+        std::process::id(),
+        NEXT_ICON.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&src, bytes).ok()?;
+    let url = sips_png_data_url(&src);
+    let _ = std::fs::remove_file(&src); // clean up the source temp regardless of outcome
+    url
 }
 
 /// Monotonic counter so each icon extraction gets a unique temp filename within this process.
