@@ -27,9 +27,13 @@ pub struct Router {
     /// The routing mode. Full = suppress base Direct/Proxy and proxy everything not user-bypassed
     /// (ad-block Reject still honored). Swapped live like `user_bypass`.
     mode: RwLock<crate::routing_mode::RoutingMode>,
-    /// Live app split-tunnel bypass: executable paths that route Direct (absolute). Swapped via
-    /// [`set_app_bypass`](Router::set_app_bypass). Empty/None = no app bypass.
-    app_bypass: RwLock<Option<std::collections::HashSet<String>>>,
+    /// Live app split-tunnel bypass: **canonical bundle-root paths** (e.g.
+    /// `/Applications/Google Chrome.app`) whose flows route Direct (absolute). A flow matches when
+    /// its resolved executable path is the bundle root or lives underneath it — this catches the
+    /// helper/child processes real apps make their network connections from (Chrome's renderers
+    /// inside the bundle; and, after canonicalization, symlinked bundles like Safari's Cryptexes
+    /// target). Swapped via [`set_app_bypass`](Router::set_app_bypass). Empty/None = no app bypass.
+    app_bypass: RwLock<Option<Vec<String>>>,
     /// Platform process resolver (macOS in P1; None elsewhere until P4). Consulted only when
     /// `app_bypass` is non-empty, so non-resolver platforms pay nothing.
     resolver: RwLock<Option<std::sync::Arc<dyn crate::process::ProcessResolver>>>,
@@ -69,19 +73,29 @@ impl Router {
         *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
     }
 
-    /// Replace the live app-bypass set (executable paths). Empty clears it. Poison-tolerant.
+    /// Replace the live app-bypass list of bundle-root paths. Empty clears it. Poison-tolerant.
+    ///
+    /// Each path is **canonicalized** ([`std::fs::canonicalize`]) so symlinked bundles resolve to
+    /// their real location — e.g. `/Applications/Safari.app` → its `/System/…/Cryptexes/…` target —
+    /// which is what the process resolver reports for in-bundle helper processes. If canonicalization
+    /// fails (path missing, permissions), the original string is kept so the caller's intent isn't
+    /// silently dropped.
     pub fn set_app_bypass(&self, paths: &[String]) {
-        let set = if paths.is_empty() {
+        let list = if paths.is_empty() {
             None
         } else {
             Some(
                 paths
                     .iter()
-                    .cloned()
-                    .collect::<std::collections::HashSet<String>>(),
+                    .map(|p| {
+                        std::fs::canonicalize(p)
+                            .map(|c| c.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| p.clone())
+                    })
+                    .collect::<Vec<String>>(),
             )
         };
-        *self.app_bypass.write().unwrap_or_else(|e| e.into_inner()) = set;
+        *self.app_bypass.write().unwrap_or_else(|e| e.into_inner()) = list;
     }
 
     /// Install (or clear) the platform process resolver. Called once at tunnel build on macOS.
@@ -154,18 +168,29 @@ impl Router {
                 }
             }
         }
-        // App split tunneling: if the flow's owning process (resolved from its source endpoint) is
-        // on the app-bypass list, route Direct (absolute). Only resolve when the list is non-empty
-        // (the resolve is a kernel scan). Unresolved → fall through (fail open: the flow is tunneled,
-        // never leaked).
+        // App split tunneling: if the flow's owning process (resolved from its source endpoint)
+        // lives inside a bypassed app bundle, route Direct (absolute). We match by **bundle-root
+        // prefix**, not exact exe equality: real apps open their network connections from helper /
+        // child processes (Chrome's renderers inside its `.app`), so the resolved exe is deeper than
+        // the app's main binary. Only resolve when the list is non-empty (the resolve is a kernel
+        // scan). Unresolved → fall through (fail open: the flow is tunneled, never leaked).
         {
             let bypass = self.app_bypass.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(paths) = bypass.as_ref() {
-                if !paths.is_empty() {
+            if let Some(roots) = bypass.as_ref() {
+                if !roots.is_empty() {
                     let resolver = self.resolver.read().unwrap_or_else(|e| e.into_inner());
                     if let Some(r) = resolver.as_ref() {
                         if let Some(exe) = r.resolve(src) {
-                            if paths.contains(&exe) {
+                            // A flow matches when its exe is a bundle root or lives under one
+                            // (`root` followed by a path separator), catching in-bundle helpers.
+                            let matched = roots
+                                .iter()
+                                .any(|root| exe == *root || exe.starts_with(&format!("{root}/")));
+                            // Release-visible diagnostic: confirms the resolver + NE sandbox surface
+                            // real process paths in the release build (debug is off there). Demote to
+                            // `debug!` once app split-tunneling is verified on device.
+                            tracing::info!(proc = %exe, matched, "app split-tunnel: resolved flow process");
+                            if matched {
                                 return Action::Direct;
                             }
                         }
@@ -264,28 +289,38 @@ mod tests {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use std::sync::Arc;
 
-        // A stub resolver: any flow from port 5555 belongs to "/Applications/Excluded.app/x", else None.
+        // A stub resolver returning helper-process paths (the real-world case: apps open network
+        // flows from child processes deep inside their bundle, not the main exe). Port 5555 → a
+        // helper inside Excluded.app; port 7777 → a helper inside a *different* app's bundle.
+        const EXCLUDED_HELPER: &str =
+            "/Applications/Excluded.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper";
+        const OTHER_HELPER: &str = "/Applications/Other.app/Contents/MacOS/Other Helper";
         struct StubResolver;
         impl crate::process::ProcessResolver for StubResolver {
             fn resolve(&self, src: SocketAddr) -> Option<String> {
-                if src.port() == 5555 {
-                    Some("/Applications/Excluded.app/x".into())
-                } else {
-                    None
+                match src.port() {
+                    5555 => Some(EXCLUDED_HELPER.into()),
+                    7777 => Some(OTHER_HELPER.into()),
+                    _ => None,
                 }
             }
         }
 
         let router = Router::new(Matcher::build(vec![])); // empty base → default Proxy
         router.set_process_resolver(Some(Arc::new(StubResolver)));
-        router.set_app_bypass(&["/Applications/Excluded.app/x".to_string()]);
+        // Bypass the bundle *root*; canonicalize no-ops on this non-existent test path and falls back
+        // to the literal string, so the prefix match below still exercises the intended behavior.
+        router.set_app_bypass(&["/Applications/Excluded.app".to_string()]);
 
         let dst = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
         let excluded_src = SocketAddr::from(([10, 0, 0, 2], 5555));
-        let other_src = SocketAddr::from(([10, 0, 0, 2], 6666));
-        // Excluded app → Direct (absolute). A different app / unresolved → falls through (Proxy here).
+        let other_src = SocketAddr::from(([10, 0, 0, 2], 7777));
+        let unresolved_src = SocketAddr::from(([10, 0, 0, 2], 6666));
+        // A helper inside the bypassed bundle → Direct (bundle-prefix match, absolute).
         assert_eq!(router.decide(dst, None, excluded_src), Action::Direct);
+        // A helper inside a different app / unresolved → falls through (Proxy here).
         assert_eq!(router.decide(dst, None, other_src), Action::Proxy);
+        assert_eq!(router.decide(dst, None, unresolved_src), Action::Proxy);
 
         // Empty app-bypass → never Direct via app path.
         router.set_app_bypass(&[]);
