@@ -75,27 +75,26 @@ impl Router {
 
     /// Replace the live app-bypass list of bundle-root paths. Empty clears it. Poison-tolerant.
     ///
-    /// Each path is **canonicalized** ([`std::fs::canonicalize`]) so symlinked bundles resolve to
-    /// their real location — e.g. `/Applications/Safari.app` → its `/System/…/Cryptexes/…` target —
-    /// which is what the process resolver reports for in-bundle helper processes. If canonicalization
-    /// fails (path missing, permissions), the original string is kept so the caller's intent isn't
-    /// silently dropped.
+    /// Each entry is **trimmed** first (leading/trailing whitespace is easy to introduce across the
+    /// FFI boundary and would otherwise make `canonicalize` fail and store an unmatchable string),
+    /// blank entries are dropped, then it is **canonicalized** ([`std::fs::canonicalize`]) so
+    /// symlinked bundles resolve to their real location — e.g. `/Applications/Safari.app` → its
+    /// `/System/…/Cryptexes/…` target — which is what the process resolver reports for in-bundle
+    /// helper processes. If canonicalization fails (path missing, permissions), the trimmed string
+    /// is kept so the caller's intent isn't silently dropped. An all-blank list clears the bypass.
     pub fn set_app_bypass(&self, paths: &[String]) {
-        let list = if paths.is_empty() {
-            None
-        } else {
-            Some(
-                paths
-                    .iter()
-                    .map(|p| {
-                        std::fs::canonicalize(p)
-                            .map(|c| c.to_string_lossy().into_owned())
-                            .unwrap_or_else(|_| p.clone())
-                    })
-                    .collect::<Vec<String>>(),
-            )
-        };
-        *self.app_bypass.write().unwrap_or_else(|e| e.into_inner()) = list;
+        let list: Vec<String> = paths
+            .iter()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                std::fs::canonicalize(p)
+                    .map(|c| c.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| p.to_owned())
+            })
+            .collect();
+        *self.app_bypass.write().unwrap_or_else(|e| e.into_inner()) =
+            (!list.is_empty()).then_some(list);
     }
 
     /// Install (or clear) the platform process resolver. Called once at tunnel build on macOS.
