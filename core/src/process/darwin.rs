@@ -1,12 +1,17 @@
-//! macOS backend: `sysctl(net.inet.tcp.pcblist_n)` → match local endpoint → `so_last_pid` →
+//! macOS backend: `sysctl(net.inet.{tcp,udp}.pcblist_n)` → match local endpoint → `so_last_pid` →
 //! `proc_pidpath`. Ported from sing-box `common/process/searcher_darwin.go`. The kernel returns a
 //! packed list of per-socket blobs; each blob is a sequence of TLV-tagged sub-structs
 //! (`xinpcb_n`, `xsocket_n`, `xsockbuf_n` ×2, `xsockstat_n`, and for TCP a `xtcpcb_n`). Rather than
 //! hard-code the total blob stride (which is version-sensitive), we walk the sub-structs by their
 //! self-described length (`xNN_len`, the first `u32` of each), keyed by the `xNN_kind` tag. This is
 //! how the XNU userspace tooling (`netstat`) reads the same table and is robust across releases.
+//!
+//! The TCP and UDP tables share the same `xinpcb_n`/`xsocket_n` TLV layout — only the sysctl name
+//! differs — so the parser below is protocol-agnostic; [`resolve`] just picks the table by
+//! [`Protocol`]. This matters for split tunneling because browsers carry most traffic over QUIC
+//! (UDP), which never appears in the TCP table.
 
-use super::ProcessInfo;
+use super::{ProcessInfo, Protocol};
 use std::net::IpAddr;
 
 // libc gives us sysctlbyname + proc_pidpath. `c_char` is `u8` on aarch64-apple-darwin.
@@ -38,9 +43,13 @@ struct Pcb {
     last_pid: u32,
 }
 
-/// Read the whole `net.inet.tcp.pcblist_n` blob via the two-call size-then-read `sysctlbyname`.
-fn read_pcblist() -> std::io::Result<Vec<u8>> {
-    let name = b"net.inet.tcp.pcblist_n\0";
+/// Read the whole `net.inet.{tcp,udp}.pcblist_n` blob via the two-call size-then-read
+/// `sysctlbyname`. The table is chosen by `proto`; both share the same TLV blob layout.
+fn read_pcblist(proto: Protocol) -> std::io::Result<Vec<u8>> {
+    let name: &[u8] = match proto {
+        Protocol::Tcp => b"net.inet.tcp.pcblist_n\0",
+        Protocol::Udp => b"net.inet.udp.pcblist_n\0",
+    };
 
     // First call with a null buffer just fills in the required size.
     let mut needed: libc::size_t = 0;
@@ -177,7 +186,8 @@ const OFF_LADDR6: usize = 64;
 /// Offset of `so_last_pid` (pid_t) within `xsocket_n`. Validated by the test.
 const OFF_SO_LAST_PID: usize = 68;
 
-/// Resolve the process owning the TCP socket whose local endpoint is `(ip, port)`.
+/// Resolve the process owning the socket whose local endpoint is `(ip, port)`, reading the pcblist
+/// table for `proto` (TCP or UDP/QUIC).
 ///
 /// Returns `Ok(None)` if no PCB matches; `Err` only on a `sysctl` failure. The `ip` may be a
 /// wildcard/loopback source as reported by [`std::net::TcpStream::local_addr`].
@@ -186,11 +196,12 @@ const OFF_SO_LAST_PID: usize = 68;
 ///
 /// ```no_run
 /// use std::net::Ipv4Addr;
-/// let owner = spark_core::process::resolve_tcp(Ipv4Addr::LOCALHOST.into(), 12345)?;
+/// use spark_core::process::Protocol;
+/// let owner = spark_core::process::resolve(Ipv4Addr::LOCALHOST.into(), 12345, Protocol::Tcp)?;
 /// # Ok::<(), std::io::Error>(())
 /// ```
-pub fn resolve_tcp(ip: IpAddr, port: u16) -> std::io::Result<Option<ProcessInfo>> {
-    let buf = read_pcblist()?;
+pub fn resolve(ip: IpAddr, port: u16, proto: Protocol) -> std::io::Result<Option<ProcessInfo>> {
+    let buf = read_pcblist(proto)?;
     let target_lport_be = port.to_be();
     let is_ipv4 = ip.is_ipv4();
 
@@ -244,7 +255,7 @@ fn exe_path(pid: u32) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{TcpListener, TcpStream, UdpSocket};
 
     // Open a real loopback TCP connection, take the CLIENT socket's local endpoint, and assert the
     // resolver maps it back to THIS test process (pid + an exe path ending in the test binary).
@@ -258,7 +269,7 @@ mod tests {
         client.write_all(b"x").expect("write");
         let local = client.local_addr().expect("local");
 
-        let info = resolve_tcp(local.ip(), local.port())
+        let info = resolve(local.ip(), local.port(), Protocol::Tcp)
             .expect("sysctl/parse ok")
             .expect("our socket is in the PCB table");
         assert_eq!(info.pid, std::process::id(), "must resolve to this process");
@@ -269,5 +280,28 @@ mod tests {
         );
         let _ = server.write(b"y");
         drop(server);
+    }
+
+    // Bind a UDP socket and `connect` it to a peer so it has a concrete local endpoint, then assert
+    // the UDP-table resolver (`net.inet.udp.pcblist_n`) maps that endpoint back to THIS process —
+    // the QUIC/UDP path that the TCP-only resolver missed. The same TLV parser reads both tables.
+    #[test]
+    fn resolves_our_own_udp_socket() {
+        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        // A peer to connect to, so the kernel pins a local endpoint we can look up.
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        sock.connect(peer_addr).expect("connect");
+        let local = sock.local_addr().expect("local");
+
+        let info = resolve(local.ip(), local.port(), Protocol::Udp)
+            .expect("sysctl/parse ok")
+            .expect("our udp socket is in the UDP PCB table");
+        assert_eq!(info.pid, std::process::id(), "must resolve to this process");
+        assert!(
+            !info.exe_path.is_empty(),
+            "exe path must be non-empty, got {:?}",
+            info.exe_path
+        );
     }
 }

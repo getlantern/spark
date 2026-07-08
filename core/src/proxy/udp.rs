@@ -261,7 +261,12 @@ async fn open_association(
         debug!(dst = %dst, "udp: encrypted DNS to a public resolver — dropping so DNS falls back to plain :53");
         return None;
     }
-    let decision = h.router.decide(dst.ip(), domain.as_deref(), src);
+    let decision = h.router.decide(
+        dst.ip(),
+        domain.as_deref(),
+        src,
+        crate::process::Protocol::Udp,
+    );
     debug!(dst = %dst, domain = domain.as_deref().unwrap_or("-"), ?decision, "udp flow: routing");
     match decision {
         Decision::Reject => None,
@@ -562,7 +567,13 @@ mod tests {
     /// A router that returns one fixed decision.
     struct FixedRouter(Decision);
     impl FlowRouter for FixedRouter {
-        fn decide(&self, _ip: IpAddr, _domain: Option<&str>, _src: SocketAddr) -> Decision {
+        fn decide(
+            &self,
+            _ip: IpAddr,
+            _domain: Option<&str>,
+            _src: SocketAddr,
+            _proto: crate::process::Protocol,
+        ) -> Decision {
             self.0
         }
     }

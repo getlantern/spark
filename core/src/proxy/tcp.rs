@@ -82,7 +82,14 @@ async fn forward(
         Decision::Reject
     } else {
         hooks
-            .map(|h| h.router.decide(original_dst.ip(), domain.as_deref(), src))
+            .map(|h| {
+                h.router.decide(
+                    original_dst.ip(),
+                    domain.as_deref(),
+                    src,
+                    crate::process::Protocol::Tcp,
+                )
+            })
             .unwrap_or(Decision::Proxy)
     };
     if enc_dns {
@@ -320,7 +327,13 @@ mod tests {
     struct StubRouter(Decision);
 
     impl FlowRouter for StubRouter {
-        fn decide(&self, _ip: IpAddr, _domain: Option<&str>, _src: SocketAddr) -> Decision {
+        fn decide(
+            &self,
+            _ip: IpAddr,
+            _domain: Option<&str>,
+            _src: SocketAddr,
+            _proto: crate::process::Protocol,
+        ) -> Decision {
             self.0
         }
     }

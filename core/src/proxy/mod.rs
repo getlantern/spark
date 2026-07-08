@@ -29,8 +29,16 @@ pub trait FlowRouter: Send + Sync {
     /// (M4); at L3 it is `None`.
     ///
     /// `src` is the flow's local (source) endpoint — used by app split tunneling to attribute the
-    /// flow to a process. Implementations that don't need it may ignore it.
-    fn decide(&self, ip: IpAddr, domain: Option<&str>, src: SocketAddr) -> Decision;
+    /// flow to a process. `proto` is the flow's transport, so the process resolver reads the right
+    /// kernel socket table (a QUIC/UDP flow isn't in the TCP table). Implementations that don't need
+    /// them may ignore both.
+    fn decide(
+        &self,
+        ip: IpAddr,
+        domain: Option<&str>,
+        src: SocketAddr,
+        proto: crate::process::Protocol,
+    ) -> Decision;
 }
 
 /// Recovers the domain a flow's (fake) destination IP stands for — the connect-time half of the
