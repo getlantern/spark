@@ -275,15 +275,27 @@ fn icon_via_nsworkspace(app: &Path) -> Option<String> {
         .or_else(|| Some(format!("data:image/png;base64,{}", base64_encode(&bytes))))
 }
 
+/// A hard-to-predict token for temp filenames: pid + a monotonic counter + a wall-clock
+/// nanosecond component. The nanos make the name unpredictable across processes, reducing the
+/// chance another local process pre-creates/symlinks the path before `sips` writes it.
+fn temp_nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        NEXT_ICON.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        nanos
+    )
+}
+
 /// Convert an on-disk image file (`.icns`, `.tiff`, …) to a 64×64 PNG data-URL via `sips`.
 /// `None` on any `sips`/read failure.
 fn sips_png_data_url(input: &Path) -> Option<String> {
     // Per-process/-icon temp path so concurrent extractions don't collide. `sips` writes PNG.
-    let out = std::env::temp_dir().join(format!(
-        "spark-icon-{}-{}.png",
-        std::process::id(),
-        NEXT_ICON.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    let out = std::env::temp_dir().join(format!("spark-icon-{}.png", temp_nonce()));
 
     let status = Command::new("/usr/bin/sips")
         .arg("-z")
@@ -308,11 +320,7 @@ fn sips_png_data_url(input: &Path) -> Option<String> {
 /// Write `bytes` to a temp file with extension `ext` and run [`sips_png_data_url`] on it, so
 /// `sips` can decode an in-memory image (e.g. the `NSWorkspace` TIFF). Temp file removed after.
 fn sips_png_data_url_from_bytes(bytes: &[u8], ext: &str) -> Option<String> {
-    let src = std::env::temp_dir().join(format!(
-        "spark-iconsrc-{}-{}.{ext}",
-        std::process::id(),
-        NEXT_ICON.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    let src = std::env::temp_dir().join(format!("spark-iconsrc-{}.{ext}", temp_nonce()));
     std::fs::write(&src, bytes).ok()?;
     let url = sips_png_data_url(&src);
     let _ = std::fs::remove_file(&src); // clean up the source temp regardless of outcome
@@ -365,7 +373,8 @@ fn enumerate() -> String {
             }
         }
     }
-    entries.sort_by_key(|a| a.name.to_lowercase());
+    // `sort_by_cached_key` computes each lowercase key once, not on every comparison.
+    entries.sort_by_cached_key(|a| a.name.to_lowercase());
     serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
 }
 

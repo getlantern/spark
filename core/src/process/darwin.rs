@@ -292,6 +292,9 @@ mod tests {
         let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
         let peer_addr = peer.local_addr().expect("peer addr");
         sock.connect(peer_addr).expect("connect");
+        // Send one datagram: on some stacks a UDP PCB isn't reliably present in `udp.pcblist_n`
+        // until the socket has actually transmitted, so this avoids a flaky lookup.
+        let _ = sock.send(b"x");
         let local = sock.local_addr().expect("local");
 
         let info = resolve(local.ip(), local.port(), Protocol::Udp)
