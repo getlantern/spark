@@ -614,8 +614,8 @@ mod tests {
             direct_resolver: None,
             proxy_resolver: None,
         };
-        // A fake IP (198.18/15) at :443 — not a DoH host, so not encrypted DNS.
-        let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
+        // A fake IP (28.0.0.0/15) at :443 — not a DoH host, so not encrypted DNS.
+        let dst: SocketAddr = "28.0.0.9:443".parse().unwrap();
 
         assert!(open_association(&proxy, &direct, Some(&hooks), dst)
             .await
@@ -649,7 +649,7 @@ mod tests {
             direct_resolver: None,
             proxy_resolver: Some(Arc::new(FixedResolver(resolved))),
         };
-        let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
+        let dst: SocketAddr = "28.0.0.9:443".parse().unwrap();
 
         assert!(open_association(&proxy, &direct, Some(&hooks), dst)
             .await
@@ -675,7 +675,7 @@ mod tests {
             direct_resolver: Some(Arc::new(FixedResolver(resolved))),
             proxy_resolver: None,
         };
-        let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
+        let dst: SocketAddr = "28.0.0.9:443".parse().unwrap();
 
         assert!(open_association(&proxy, &direct, Some(&hooks), dst)
             .await
