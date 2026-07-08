@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn aaaa_query_gets_a_ula_fake_ip() {
+    fn aaaa_query_gets_a_global_unicast_fake_ip() {
         let pool = shared_pool(Duration::from_secs(300), 100);
         let srv = DnsServer::new(Arc::clone(&pool), 30);
         let resp = srv
