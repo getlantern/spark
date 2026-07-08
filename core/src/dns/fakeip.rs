@@ -23,8 +23,10 @@ use std::time::{Duration, Instant};
 /// space, and then block cross-origin subresource fetches from a public document to those "local"
 /// fake IPs (observed: Google News thumbnails on `encrypted-tbn*.gstatic.com` failing with
 /// "Permission was denied … access the `local` address space"). 28.0.0.0/8 is a real, globally
-/// registered allocation (so Chrome treats it as **public**) that is never publicly announced, so
-/// squatting it as fake-IP space collides with nothing a user would actually reach.
+/// registered allocation (so Chrome treats it as **public**) that, empirically, is not announced on
+/// the public Internet (a US-DoD block used only on internal/private networks) — so squatting it as
+/// fake-IP space is very unlikely to collide with anything a user would actually reach. Best-effort
+/// observation, not a guarantee; revisit if it ever starts appearing in the global routing table.
 pub const V4_BASE: Ipv4Addr = Ipv4Addr::new(28, 0, 0, 0);
 /// Address count in the `/15` (131072).
 pub const V4_COUNT: u128 = 1 << 17;
