@@ -22,6 +22,17 @@ pub const V4_BASE: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 0);
 pub const V4_COUNT: u128 = 1 << 17;
 /// IPv6 fake-IP base — a ULA prefix (`fd00:2018::/32`), well clear of real routable space.
 pub const V6_BASE: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2018, 0, 0, 0, 0, 0, 0);
+
+/// Whether `addr` lies inside the IPv6 fake-IP pool (`[V6_BASE, V6_BASE + V6_COUNT)`).
+///
+/// The netstack uses this to tell *fake* v6 destinations (allocated by our DNS, recoverable to a
+/// domain, deliverable) apart from *real* ones (e.g. from a browser's own DoH), which the tunnel
+/// cannot currently egress — see `netstack::allow_flow_dst`.
+pub fn is_fake_v6(addr: &Ipv6Addr) -> bool {
+    let n = u128::from(*addr);
+    let base = u128::from(V6_BASE);
+    n >= base && n < base + V6_COUNT
+}
 /// IPv6 fake-IP address count offered (1M — far above any live-mapping cap; bounds arithmetic).
 pub const V6_COUNT: u128 = 1 << 20;
 
@@ -243,6 +254,34 @@ mod tests {
 
     fn pool() -> FakeIpPool {
         FakeIpPool::new(Duration::from_secs(300), 4096)
+    }
+
+    #[test]
+    fn is_fake_v6_accepts_only_the_fake_range() {
+        // In range: the base and the last allocatable address.
+        assert!(is_fake_v6(&V6_BASE));
+        let last = Ipv6Addr::from(u128::from(V6_BASE) + V6_COUNT - 1);
+        assert!(is_fake_v6(&last));
+        // Out of range: one past the pool, a neighbouring ULA, a real global address,
+        // link-local, and the unspecified address.
+        let past = Ipv6Addr::from(u128::from(V6_BASE) + V6_COUNT);
+        assert!(!is_fake_v6(&past));
+        assert!(!is_fake_v6(&"fd00:2019::1".parse().unwrap()));
+        assert!(!is_fake_v6(&"2607:f8b0:400f:807::2001".parse().unwrap()));
+        assert!(!is_fake_v6(&"fe80::1".parse().unwrap()));
+        assert!(!is_fake_v6(&Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn allocated_v6_fakes_are_recognized() {
+        let mut p = pool();
+        let t0 = Instant::now();
+        for d in ["a.com", "b.com", "c.com"] {
+            match p.allocate(d, true, t0) {
+                IpAddr::V6(a) => assert!(is_fake_v6(&a), "allocated fake {a} must be in range"),
+                IpAddr::V4(a) => panic!("want_v6 allocation returned v4 {a}"),
+            }
+        }
     }
 
     #[test]

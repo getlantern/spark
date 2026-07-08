@@ -44,6 +44,29 @@ const STACK_BUFFER_SIZE: usize = 16384;
 /// Depth of the per-direction TCP IP-packet channel inside the stack.
 const TCP_BUFFER_SIZE: usize = 8192;
 
+/// Whether the netstack should terminate a flow to `dst`. IPv4: always. IPv6: only our fake-IP
+/// range — a fake v6 recovers to a domain the exit dials by name, so it is deliverable.
+///
+/// A **real** IPv6 destination (e.g. resolved by a browser's own DoH, which bypasses the fake-IP
+/// DNS) cannot currently egress — the exits are v4-only — and smoltcp completes the TCP handshake
+/// locally *before* the upstream dial, which poisons the client's Happy-Eyeballs fallback: the
+/// app sees an established connection that then stalls for ~10 s+ instead of instantly falling
+/// back to v4 (observed as broken Google images / flaky YouTube, whose hosts are aggressively
+/// dual-stacked). Dropping the packets here means the v6 SYN gets no answer, the app's racing v4
+/// candidate wins in milliseconds, and nothing leaks around the tunnel — the platform still
+/// claims `::/0`, so the packets die inside the TUN rather than egressing the physical NIC.
+/// Revisit if the exits gain IPv6 egress.
+fn allow_flow_dst(dst: &std::net::IpAddr) -> bool {
+    match dst {
+        std::net::IpAddr::V4(_) => true,
+        #[cfg(feature = "smart-routing")]
+        std::net::IpAddr::V6(a) => crate::dns::fakeip::is_fake_v6(a),
+        // Without the fake-IP DNS there are no deliverable v6 destinations at all.
+        #[cfg(not(feature = "smart-routing"))]
+        std::net::IpAddr::V6(_) => false,
+    }
+}
+
 /// A surfaced L4 TCP flow, independent of the netstack implementation.
 pub struct TcpFlow {
     /// The address the application originally dialed — i.e. the upstream to connect to.
@@ -167,6 +190,7 @@ impl SmoltcpNetstack {
             .stack_buffer_size(STACK_BUFFER_SIZE)
             .tcp_buffer_size(TCP_BUFFER_SIZE)
             .mtu(mtu)
+            .add_ip_filter_fn(|_src, dst| allow_flow_dst(dst))
             .build()?;
 
         let listener =
@@ -311,5 +335,40 @@ impl Drop for SmoltcpNetstack {
         for task in &self.tasks {
             task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allow_flow_dst;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn v4_destinations_are_always_allowed() {
+        assert!(allow_flow_dst(&ip("142.250.65.161"))); // real
+        assert!(allow_flow_dst(&ip("198.18.0.23"))); // fake-IP v4
+        assert!(allow_flow_dst(&ip("8.8.8.8"))); // the tunnel DNS address
+    }
+
+    #[test]
+    fn real_v6_destinations_are_dropped() {
+        // A real global address (Google), a neighbouring ULA, and link-local: none can currently
+        // egress, and locally accepting them poisons the client's Happy-Eyeballs v4 fallback.
+        assert!(!allow_flow_dst(&ip("2607:f8b0:400f:807::2001")));
+        assert!(!allow_flow_dst(&ip("fd00:2019::1")));
+        assert!(!allow_flow_dst(&ip("fe80::1")));
+    }
+
+    #[cfg(feature = "smart-routing")]
+    #[test]
+    fn fake_v6_destinations_are_allowed() {
+        // Inside the fake pool (fd00:2018::/32 slice used by the allocator) — recoverable to a
+        // domain, so deliverable by name.
+        assert!(allow_flow_dst(&ip("fd00:2018::17")));
+        assert!(allow_flow_dst(&IpAddr::V6(crate::dns::fakeip::V6_BASE)));
     }
 }
