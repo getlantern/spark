@@ -254,21 +254,32 @@ fn icon_data_url(app: &Path, plist: &serde_json::Value) -> Option<String> {
 /// Thread-safety: `NSWorkspace`'s icon methods and offscreen `NSImage`/`NSBitmapImageRep` bitmap
 /// generation are usable from any thread (AppKit Thread Safety Summary). This matters because
 /// [`enumerate`] runs off the main thread — on the SWR refresh thread and the Tauri command worker.
+///
+/// The AppKit work is wrapped in an [`autoreleasepool`](objc2::rc::autoreleasepool): these calls
+/// return autoreleased objects (the icon `NSImage`, the multi-MB `TIFFRepresentation`, the PNG
+/// `NSData`), and background threads have no implicit pool — without an explicit one they would
+/// accumulate across the whole app enumeration and cause large transient memory growth.
 fn icon_via_nsworkspace(app: &Path) -> Option<String> {
+    use objc2::rc::autoreleasepool;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
     use objc2_foundation::{NSDictionary, NSString};
 
-    let path = NSString::from_str(app.to_str()?);
-    let image = NSWorkspace::sharedWorkspace().iconForFile(&path);
-    let tiff = image.TIFFRepresentation()?;
-    let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)?;
-    let props = NSDictionary::new();
-    // SAFETY: `props` is a valid (empty) properties dictionary of the expected key/value types
-    // and `NSBitmapImageFileType::PNG` is a valid storage type; the method has no further
-    // preconditions. It returns an autoreleased `NSData` (or nil), handled as `Option`.
-    let png =
-        unsafe { bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }?;
-    let bytes = png.to_vec();
+    // The PNG bytes are copied out of the pool (`to_vec`) before it drains, so the returned
+    // `Vec`/data-URL outlives the autoreleased AppKit objects.
+    let bytes = autoreleasepool(|_pool| {
+        let path = NSString::from_str(app.to_str()?);
+        let image = NSWorkspace::sharedWorkspace().iconForFile(&path);
+        let tiff = image.TIFFRepresentation()?;
+        let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)?;
+        let props = NSDictionary::new();
+        // SAFETY: `props` is a valid (empty) properties dictionary of the expected key/value types
+        // and `NSBitmapImageFileType::PNG` is a valid storage type; the method has no further
+        // preconditions. It returns an autoreleased `NSData` (or nil), handled as `Option`.
+        let png = unsafe {
+            bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &props)
+        }?;
+        Some(png.to_vec())
+    })?;
     // Downscale the valid (but native-res, often >1 MB) PNG to a consistent 64×64 to keep the
     // cache small; keep the full-size PNG if `sips` fails so we never regress to no icon.
     sips_png_data_url_from_bytes(&bytes, "png")
