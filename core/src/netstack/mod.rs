@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn v4_destinations_are_always_allowed() {
         assert!(allow_flow_dst(&ip("142.250.65.161"))); // real
-        assert!(allow_flow_dst(&ip("198.18.0.23"))); // fake-IP v4
+        assert!(allow_flow_dst(&ip("28.0.0.23"))); // fake-IP v4
         assert!(allow_flow_dst(&ip("8.8.8.8"))); // the tunnel DNS address
     }
 

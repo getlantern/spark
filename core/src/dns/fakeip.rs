@@ -1,12 +1,13 @@
 //! Fake-IP allocator + bidirectional `domain ⇄ fakeip` map with TTL and an LRU cap.
 //!
-//! Every A/AAAA query gets a synthetic IP from a reserved range — IPv4 `198.18.0.0/15` (RFC 2544
-//! benchmarking space, never real traffic) and an IPv6 ULA — recorded so the connecting flow's fake
-//! destination recovers its domain. A domain gets **one fake IP per family** (an A and a AAAA query
-//! for the same host yield distinct v4/v6 fakes that both recover the same domain).
+//! Every A/AAAA query gets a synthetic IP from a dedicated range — IPv4 `28.0.0.0/15` (dark DoD
+//! space; see [`V4_BASE`] for why not the usual 198.18/15) and an IPv6 ULA — recorded so the
+//! connecting flow's fake destination recovers its domain. A domain gets **one fake IP per family**
+//! (an A and a AAAA query for the same host yield distinct v4/v6 fakes that both recover the same
+//! domain).
 //!
-//! Loop safety: the pool only ever returns addresses from its reserved ranges, never a real IP, so a
-//! recovered-direct flow's real dial can't re-enter the fake-IP map.
+//! Loop safety: the pool only ever returns addresses from its fake ranges, never a routable IP a
+//! user would reach, so a recovered-direct flow's real dial can't re-enter the fake-IP map.
 //!
 //! Time is passed in (`now: Instant`) rather than read from the clock, so TTL/LRU behavior is
 //! deterministic under test. The type is not internally synchronized; share it behind a `Mutex`
@@ -16,8 +17,15 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
-/// IPv4 fake-IP base — `198.18.0.0/15` (RFC 2544), matching the config's `dns_fakeip` intent.
-pub const V4_BASE: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 0);
+/// IPv4 fake-IP base — `28.0.0.0/15`, a slice of the US-DoD-allocated `28.0.0.0/8`. Chosen
+/// deliberately over the conventional `198.18.0.0/15` (RFC 2544): browsers (Chromium's Local
+/// Network Access) classify 198.18/15 — and every other reserved range — as the **local** address
+/// space, and then block cross-origin subresource fetches from a public document to those "local"
+/// fake IPs (observed: Google News thumbnails on `encrypted-tbn*.gstatic.com` failing with
+/// "Permission was denied … access the `local` address space"). 28.0.0.0/8 is a real, globally
+/// registered allocation (so Chrome treats it as **public**) that is never publicly announced, so
+/// squatting it as fake-IP space collides with nothing a user would actually reach.
+pub const V4_BASE: Ipv4Addr = Ipv4Addr::new(28, 0, 0, 0);
 /// Address count in the `/15` (131072).
 pub const V4_COUNT: u128 = 1 << 17;
 /// IPv6 fake-IP base — a ULA prefix (`fd00:2018::/32`), well clear of real routable space.
@@ -315,11 +323,11 @@ mod tests {
         assert_ne!(v4, v6);
         assert_eq!(p.recover(v4, t0), Some("d.com".to_string()));
         assert_eq!(p.recover(v6, t0), Some("d.com".to_string()));
-        // v4 in 198.18.0.0/15; v6 under fd00:2018::/32.
+        // v4 in 28.0.0.0/15; v6 under fd00:2018::/32.
         if let IpAddr::V4(a) = v4 {
             let o = a.octets();
-            assert_eq!(o[0], 198);
-            assert!(o[1] == 18 || o[1] == 19);
+            assert_eq!(o[0], 28);
+            assert!(o[1] == 0 || o[1] == 1);
         }
         if let IpAddr::V6(a) = v6 {
             let s = a.segments();
