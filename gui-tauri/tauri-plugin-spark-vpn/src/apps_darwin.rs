@@ -9,15 +9,19 @@
 //! this catches the helper/child processes real apps make their network connections from — so
 //! the bundle root (not the main-exe path) is the match key.
 //!
-//! `icon` is a small PNG data-URL extracted from the bundle's `.icns` via `sips`, or `null` if
-//! extraction fails. `name` is the bundle's display name.
+//! `icon` is a small PNG data-URL: extracted from the bundle's `.icns` via `sips` when present,
+//! else rendered from the app's Finder icon via AppKit's `NSWorkspace` (this covers macOS
+//! system apps like Calendar and Books, whose icons live in an `Assets.car` asset catalog with
+//! no standalone `.icns`), or `null` if both fail. `name` is the bundle's display name.
 //!
 //! Info.plist parsing uses `plutil -convert json` piped into `serde_json` rather than a
 //! `plist` crate (no new dependencies — CLAUDE.md). Icons use `sips` for the same reason.
 //!
-//! A stale-while-revalidate disk cache (`<base>/installed_apps_cache.json`) serves the
-//! previous scan instantly and refreshes in a background thread, mirroring the Android
-//! plugin's approach — a full plist+icon scan is slow enough to stall the picker on first paint.
+//! A stale-while-revalidate disk cache (`<base>/installed_apps_cache.v<N>.json`, where `<N>` is
+//! [`CACHE_VERSION`]) serves the previous scan instantly and refreshes in a background thread,
+//! mirroring the Android plugin's approach — a full plist+icon scan is slow enough to stall the
+//! picker on first paint. The version suffix ensures an upgraded build never serves an older
+//! build's cache (which may list apps the current filter now drops).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,8 +41,42 @@ struct AppEntry {
     icon: Option<String>,
 }
 
-/// Name of the SWR cache file under `base`.
-const CACHE_FILE: &str = "installed_apps_cache.json";
+/// Base name of the SWR cache file under `base`; the version suffix (see [`CACHE_VERSION`])
+/// is appended so an upgraded build never reads a cache written by an older build.
+const CACHE_BASENAME: &str = "installed_apps_cache";
+
+/// Bump when the *shape* or *filtering* of catalog entries changes, so an upgraded build
+/// ignores a cache written by an older build (whose entries may include apps the new filter
+/// now drops — e.g. the LSUIElement/LSBackgroundOnly and Safari exclusions) instead of
+/// serving that stale list once under stale-while-revalidate. Encoded into the cache filename.
+///
+/// v2: Safari + background/agent-bundle filtering; NSWorkspace icon fallback.
+const CACHE_VERSION: u32 = 2;
+
+/// Path of the current-version SWR cache file under `base`.
+fn cache_file(base: &Path) -> PathBuf {
+    base.join(format!("{CACHE_BASENAME}.v{CACHE_VERSION}.json"))
+}
+
+/// Remove cache files left by older builds (any `installed_apps_cache*.json` that isn't the
+/// current version). Best-effort — keeps `base` tidy and reclaims disk after an upgrade.
+/// Called only on refresh/miss paths, never on the hot read path.
+fn prune_stale_caches(base: &Path) {
+    let keep = cache_file(base);
+    let Ok(dir) = std::fs::read_dir(base) else {
+        return;
+    };
+    for dirent in dir.flatten() {
+        let path = dirent.path();
+        let is_cache = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(CACHE_BASENAME) && n.ends_with(".json"));
+        if is_cache && path != keep {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
 
 /// The directories scanned for `*.app` bundles (one level deep). `~/Applications` is
 /// appended when `HOME` is set.
@@ -159,12 +197,21 @@ fn icns_path(app: &Path, plist: &serde_json::Value) -> Option<PathBuf> {
     })
 }
 
-/// Extract a 64×64 PNG icon for `app` and return it as a `data:image/png;base64,…` URL, or
-/// `None` if any step fails (no `.icns`, `sips` error, read/encode failure). Best-effort:
-/// icons are cosmetic, so a failure here never drops the app from the catalog.
+/// Best-effort 64×64 PNG icon for `app` as a `data:image/png;base64,…` URL, or `None` if every
+/// strategy fails. Icons are cosmetic, so a failure here never drops the app from the catalog.
+///
+/// Fast path: a standalone `.icns` decoded by `sips` (covers ~all third-party apps). Fallback:
+/// apps with no `.icns` — most macOS system apps (Calendar, Books, …) keep their icon in an
+/// `Assets.car` asset catalog that `sips` can't read — are rendered via AppKit's `NSWorkspace`.
 fn icon_data_url(app: &Path, plist: &serde_json::Value) -> Option<String> {
-    let icns = icns_path(app, plist)?;
+    if let Some(url) = icns_path(app, plist).and_then(|icns| icon_from_icns(&icns)) {
+        return Some(url);
+    }
+    icon_via_nsworkspace(app)
+}
 
+/// Decode an `.icns` to a 64×64 PNG data-URL via `sips`. `None` on any `sips`/read failure.
+fn icon_from_icns(icns: &Path) -> Option<String> {
     // Per-process/-icon temp path so concurrent extractions don't collide. `sips` writes PNG.
     let tmp = std::env::temp_dir().join(format!(
         "spark-icon-{}-{}.png",
@@ -179,7 +226,7 @@ fn icon_data_url(app: &Path, plist: &serde_json::Value) -> Option<String> {
         .arg("-s")
         .arg("format")
         .arg("png")
-        .arg(&icns)
+        .arg(icns)
         .arg("--out")
         .arg(&tmp)
         .output()
@@ -190,6 +237,40 @@ fn icon_data_url(app: &Path, plist: &serde_json::Value) -> Option<String> {
     let _ = std::fs::remove_file(&tmp); // clean up regardless of outcome
 
     png.map(|bytes| format!("data:image/png;base64,{}", base64_encode(&bytes)))
+}
+
+/// Render an app's Finder icon to a 64×64 PNG data-URL via AppKit's `NSWorkspace`, for apps
+/// whose icon lives in an `Assets.car` asset catalog rather than a standalone `.icns` (e.g.
+/// macOS system apps like Calendar and Books). `None` on any failure.
+///
+/// Thread-safety: `NSWorkspace`'s icon methods and offscreen `NSImage`/`NSBitmapImageRep`
+/// bitmap generation are usable from any thread (AppKit Thread Safety Summary). This matters
+/// because [`enumerate`] runs off the main thread — both on the SWR background-refresh thread
+/// and on the Tauri command worker that services a cache miss.
+fn icon_via_nsworkspace(app: &Path) -> Option<String> {
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+    use objc2_foundation::{NSDictionary, NSSize, NSString};
+
+    let path = NSString::from_str(app.to_str()?);
+    let image = NSWorkspace::sharedWorkspace().iconForFile(&path);
+    // Render at 64×64 to match the `sips` path and bound the data-URL size — the icon carries
+    // representations up to 512×512, and `TIFFRepresentation` would otherwise emit the largest.
+    image.setSize(NSSize {
+        width: 64.0,
+        height: 64.0,
+    });
+    let tiff = image.TIFFRepresentation()?;
+    let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)?;
+    let props = NSDictionary::new();
+    // SAFETY: `props` is a valid (empty) properties dictionary of the expected key/value types
+    // and `NSBitmapImageFileType::PNG` is a valid storage type; the method has no further
+    // preconditions. It returns an autoreleased `NSData` (or nil), handled as `Option`.
+    let png =
+        unsafe { bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64_encode(&png.to_vec())
+    ))
 }
 
 /// Monotonic counter so each icon extraction gets a unique temp filename within this process.
@@ -248,9 +329,12 @@ fn write_cache(base: &Path, json: &str) {
     if std::fs::create_dir_all(base).is_err() {
         return;
     }
-    let final_path = base.join(CACHE_FILE);
+    let final_path = cache_file(base);
     // Per-process temp name so a concurrent refresh in another process can't clobber ours.
-    let tmp_path = base.join(format!("{}.{}.tmp", CACHE_FILE, std::process::id()));
+    let tmp_path = base.join(format!(
+        "{CACHE_BASENAME}.v{CACHE_VERSION}.{}.tmp",
+        std::process::id()
+    ));
     if std::fs::write(&tmp_path, json).is_err() {
         return;
     }
@@ -266,25 +350,73 @@ fn write_cache(base: &Path, json: &str) {
 /// it immediately and kick off a background refresh (so the next call sees fresh data).
 /// On a cache miss, enumerate synchronously, persist, and return.
 pub fn list_installed_apps(base: &Path) -> String {
-    let cache_path = base.join(CACHE_FILE);
+    let cache_path = cache_file(base);
     if let Ok(cached) = std::fs::read_to_string(&cache_path) {
         // Serve the cache instantly; refresh in the background for next time.
         let base = base.to_path_buf();
         std::thread::spawn(move || {
             let fresh = enumerate();
             write_cache(&base, &fresh);
+            prune_stale_caches(&base);
         });
         return cached;
     }
-    // Cache miss: enumerate synchronously so the first caller still gets a real list.
+    // Cache miss (fresh install *or* an upgrade that bumped CACHE_VERSION): enumerate
+    // synchronously so the first caller gets a real list built by the *current* filter, then
+    // drop any older-version cache so it can't be served later.
     let fresh = enumerate();
     write_cache(base, &fresh);
+    prune_stale_caches(base);
     fresh
 }
 
 #[cfg(test)]
 mod tests {
-    use super::base64_encode;
+    use super::{base64_encode, cache_file, prune_stale_caches, CACHE_BASENAME, CACHE_VERSION};
+    use std::path::PathBuf;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("spark-apps-test-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn cache_file_is_version_tagged() {
+        let base = PathBuf::from("/some/base");
+        let expected = format!("{CACHE_BASENAME}.v{CACHE_VERSION}.json");
+        assert_eq!(
+            cache_file(&base).file_name().unwrap().to_str().unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn prune_removes_old_versions_keeps_current() {
+        let base = tmp("prune");
+        // Current-version cache + a stale older-version cache + an unrelated file.
+        let current = cache_file(&base);
+        let stale = base.join(format!("{CACHE_BASENAME}.v1.json"));
+        let unversioned = base.join(format!("{CACHE_BASENAME}.json"));
+        let unrelated = base.join("split_tunnel.json");
+        for p in [&current, &stale, &unversioned, &unrelated] {
+            std::fs::write(p, "[]").unwrap();
+        }
+
+        prune_stale_caches(&base);
+
+        assert!(current.exists(), "current-version cache must be kept");
+        assert!(!stale.exists(), "older-version cache must be pruned");
+        assert!(
+            !unversioned.exists(),
+            "unversioned (legacy) cache must be pruned"
+        );
+        assert!(unrelated.exists(), "unrelated files must be left alone");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {
