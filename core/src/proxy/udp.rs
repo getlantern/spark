@@ -207,8 +207,14 @@ async fn handle_inbound(
     if nat.get_mut(&key, now).is_none() {
         // Route the flow (recover the fake-IP domain, decide, dial the right transport). `None` =
         // Rejected or the dial failed (already logged) — drop the datagram, open no association.
-        let Some((sink, source)) =
-            open_association(transport, direct_transport, hooks, dgram.original_dst).await
+        let Some((sink, source)) = open_association(
+            transport,
+            direct_transport,
+            hooks,
+            dgram.original_dst,
+            dgram.client_src,
+        )
+        .await
         else {
             return;
         };
@@ -244,6 +250,7 @@ async fn open_association(
     direct: &Arc<dyn UdpTransport>,
     hooks: Option<&RouteHooks>,
     dst: SocketAddr,
+    src: SocketAddr,
 ) -> Option<(BoxedPacketSink, BoxedPacketSource)> {
     let Some(h) = hooks else {
         return dial_udp_or_log(proxy, dst).await; // no smart-routing → proxy by IP (prior behavior)
@@ -254,7 +261,7 @@ async fn open_association(
         debug!(dst = %dst, "udp: encrypted DNS to a public resolver — dropping so DNS falls back to plain :53");
         return None;
     }
-    let decision = h.router.decide(dst.ip(), domain.as_deref());
+    let decision = h.router.decide(dst.ip(), domain.as_deref(), src);
     debug!(dst = %dst, domain = domain.as_deref().unwrap_or("-"), ?decision, "udp flow: routing");
     match decision {
         Decision::Reject => None,
@@ -492,6 +499,12 @@ mod tests {
     use crate::proxy::{DomainRecoverer, FlowResolver, FlowRouter};
     use crate::transport::{PacketSink, PacketSource};
 
+    /// A fixed client source endpoint for the routing tests. These install no process resolver, so
+    /// the app-bypass path is inert and the source value is irrelevant to the assertions.
+    fn test_src() -> SocketAddr {
+        "10.0.0.2:5555".parse().unwrap()
+    }
+
     /// A `UdpTransport` that records how it was dialed and hands back inert halves. `reject_domain`
     /// makes `dial_udp_addr` report `Unsupported` for a `Domain` target (a transport that can't carry
     /// a name), exercising the client-side-resolve fallback.
@@ -549,7 +562,7 @@ mod tests {
     /// A router that returns one fixed decision.
     struct FixedRouter(Decision);
     impl FlowRouter for FixedRouter {
-        fn decide(&self, _ip: IpAddr, _domain: Option<&str>) -> Decision {
+        fn decide(&self, _ip: IpAddr, _domain: Option<&str>, _src: SocketAddr) -> Decision {
             self.0
         }
     }
@@ -593,9 +606,11 @@ mod tests {
         };
         let dst: SocketAddr = "1.2.3.4:853".parse().unwrap();
 
-        assert!(open_association(&proxy, &direct, Some(&hooks), dst)
-            .await
-            .is_none());
+        assert!(
+            open_association(&proxy, &direct, Some(&hooks), dst, test_src())
+                .await
+                .is_none()
+        );
         assert!(proxy_rec.dial_addr_targets.lock().unwrap().is_empty());
         assert!(proxy_rec.dial_udp_targets.lock().unwrap().is_empty());
         assert!(direct_rec.dial_udp_targets.lock().unwrap().is_empty());
@@ -617,9 +632,11 @@ mod tests {
         // A fake IP (198.18/15) at :443 — not a DoH host, so not encrypted DNS.
         let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
 
-        assert!(open_association(&proxy, &direct, Some(&hooks), dst)
-            .await
-            .is_some());
+        assert!(
+            open_association(&proxy, &direct, Some(&hooks), dst, test_src())
+                .await
+                .is_some()
+        );
         assert_eq!(
             *proxy_rec.dial_addr_targets.lock().unwrap(),
             vec!["example.com:443".to_string()],
@@ -651,9 +668,11 @@ mod tests {
         };
         let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
 
-        assert!(open_association(&proxy, &direct, Some(&hooks), dst)
-            .await
-            .is_some());
+        assert!(
+            open_association(&proxy, &direct, Some(&hooks), dst, test_src())
+                .await
+                .is_some()
+        );
         assert_eq!(
             *proxy_rec.dial_udp_targets.lock().unwrap(),
             vec![SocketAddr::new(resolved, 443)],
@@ -677,9 +696,11 @@ mod tests {
         };
         let dst: SocketAddr = "198.18.0.9:443".parse().unwrap();
 
-        assert!(open_association(&proxy, &direct, Some(&hooks), dst)
-            .await
-            .is_some());
+        assert!(
+            open_association(&proxy, &direct, Some(&hooks), dst, test_src())
+                .await
+                .is_some()
+        );
         assert_eq!(
             *direct_rec.dial_udp_targets.lock().unwrap(),
             vec![SocketAddr::new(resolved, 443)],

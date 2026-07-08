@@ -27,7 +27,10 @@ pub enum Decision {
 pub trait FlowRouter: Send + Sync {
     /// Decide what to do with a flow to `ip`. `domain` is `Some` once fake-IP DNS recovers it
     /// (M4); at L3 it is `None`.
-    fn decide(&self, ip: IpAddr, domain: Option<&str>) -> Decision;
+    ///
+    /// `src` is the flow's local (source) endpoint — used by app split tunneling to attribute the
+    /// flow to a process. Implementations that don't need it may ignore it.
+    fn decide(&self, ip: IpAddr, domain: Option<&str>, src: SocketAddr) -> Decision;
 }
 
 /// Recovers the domain a flow's (fake) destination IP stands for — the connect-time half of the
