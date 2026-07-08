@@ -115,10 +115,12 @@ pub fn set_split_tunnel(_json: &str) -> bool {
     false
 }
 
-/// Live-push the app-bypass list (JSON array of executable paths) to the running router. Returns
-/// false if the JSON was invalid or no tunnel/router is active. Mirrors [`set_split_tunnel`], but
-/// the payload is a bare `["/path/to/exe", ...]` array (the resolver returns / the catalog stores
-/// executable paths). Called across the platform FFI (Apple C-ABI).
+/// Live-push the app-bypass list (JSON array of canonical `.app` bundle-root paths) to the running
+/// router. Returns false if the JSON was invalid or no tunnel/router is active. Mirrors
+/// [`set_split_tunnel`], but the payload is a bare `["/Applications/Foo.app", ...]` array (the
+/// catalog stores bundle-root paths, matched by prefix against the resolved process path so
+/// in-bundle helpers match too — NOT executable paths). Called across the platform FFI (Apple
+/// C-ABI).
 #[cfg(feature = "smart-routing")]
 pub fn set_app_bypass(json: &str) -> bool {
     let paths: Vec<String> = match serde_json::from_str(json) {

@@ -804,10 +804,13 @@ impl TunnelControl for AppleControl {
 
     fn set_excluded_apps(&self, json: &str) -> crate::Result<()> {
         crate::persist::save_excluded_apps(&self.base, json)?;
+        // Push the canonical (trimmed/deduped/blank-stripped) value, not the raw `json`, so a live
+        // apply matches exactly what a reconnect would apply from the persisted file.
+        let canonical = crate::persist::load_excluded_apps(&self.base);
         // Best-effort live push: only send when the tunnel is actually up.
         let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
         if ne_spike::ui_state(raw) == "connected" {
-            let msg = serde_json::json!({"cmd": "appBypass", "list": json}).to_string();
+            let msg = serde_json::json!({"cmd": "appBypass", "list": canonical}).to_string();
             if let Err(e) = ne_spike::send_provider_message(msg) {
                 ne_spike::ne_debug(&format!(
                     "app-bypass live push failed (persisted; applies next connect): {e}"

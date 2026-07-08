@@ -103,9 +103,10 @@ pub fn save_routing_mode(base: &Path, mode: &str) -> crate::Result<()> {
 
 /// Read the persisted excluded-apps list from `<base>/excluded_apps.json`.
 ///
-/// The list is a JSON array of app match keys (macOS: absolute executable paths).  Returns
-/// the canonical (re-serialized) array, or the empty-array default `"[]"` if the file is
-/// missing, unreadable, or doesn't deserialize into an array of strings.
+/// The list is a JSON array of app match keys (macOS: canonical `.app` bundle-root paths,
+/// matched by prefix so in-bundle helpers match — not executable paths).  Returns the canonical
+/// (re-serialized) array, or the empty-array default `"[]"` if the file is missing, unreadable,
+/// or doesn't deserialize into an array of strings.
 pub fn load_excluded_apps(base: &Path) -> String {
     std::fs::read_to_string(base.join("excluded_apps.json"))
         .ok()
@@ -252,12 +253,12 @@ mod tests {
         let base = tmp("excluded_apps_round_trip");
         let _ = std::fs::remove_dir_all(&base);
 
-        let input = r#"["/Applications/Firefox.app/Contents/MacOS/firefox"]"#;
+        let input = r#"["/Applications/Firefox.app"]"#;
         save_excluded_apps(&base, input).expect("save_excluded_apps");
         let loaded = load_excluded_apps(&base);
         assert!(
-            loaded.contains("/Applications/Firefox.app/Contents/MacOS/firefox"),
-            "loaded JSON must preserve the excluded exe path: {loaded}"
+            loaded.contains("/Applications/Firefox.app"),
+            "loaded JSON must preserve the excluded `.app` bundle-root path: {loaded}"
         );
     }
 

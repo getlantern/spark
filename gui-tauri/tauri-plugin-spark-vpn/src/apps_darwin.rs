@@ -25,8 +25,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+/// Guards against unbounded background refresh threads: repeated `list_installed_apps` calls (UI
+/// polling / multiple windows) each hit the cache and would otherwise each spawn a full enumeration.
+/// Only one SWR refresh runs at a time; concurrent cache hits skip spawning while it's in flight.
+static REFRESH_INFLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// One catalog entry, serialized to match the TS `InstalledApp` shape
 /// (`gui-tauri/src/lib/spark_backend.ts`): `{id, name, icon}`.
@@ -392,13 +398,22 @@ fn write_cache(base: &Path, json: &str) {
 pub fn list_installed_apps(base: &Path) -> String {
     let cache_path = cache_file(base);
     if let Ok(cached) = std::fs::read_to_string(&cache_path) {
-        // Serve the cache instantly; refresh in the background for next time.
-        let base = base.to_path_buf();
-        std::thread::spawn(move || {
-            let fresh = enumerate();
-            write_cache(&base, &fresh);
-            prune_stale_caches(&base);
-        });
+        // Serve the cache instantly; refresh in the background for next time. Only spawn if no
+        // refresh is already in flight — otherwise repeated cache hits (UI polling / multiple
+        // windows) would pile up unbounded threads each running a full enumeration. The spawned
+        // thread clears the flag when done so the next call can refresh again.
+        if REFRESH_INFLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let base = base.to_path_buf();
+            std::thread::spawn(move || {
+                let fresh = enumerate();
+                write_cache(&base, &fresh);
+                prune_stale_caches(&base);
+                REFRESH_INFLIGHT.store(false, Ordering::Release);
+            });
+        }
         return cached;
     }
     // Cache miss (fresh install *or* an upgrade that bumped CACHE_VERSION): enumerate

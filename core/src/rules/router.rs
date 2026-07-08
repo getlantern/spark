@@ -189,14 +189,19 @@ impl Router {
                         if let Some(exe) = r.resolve(src, proto) {
                             // A flow matches when its exe is a bundle root or lives under one
                             // (`root` followed by a path separator), catching in-bundle helpers.
-                            let matched = roots
-                                .iter()
-                                .any(|root| exe == *root || exe.starts_with(&format!("{root}/")));
-                            // Release-visible diagnostic: confirms the resolver + NE sandbox surface
-                            // real process paths in the release build (debug is off there). Demote to
-                            // `debug!` once app split-tunneling is verified on device.
-                            tracing::info!(proc = %exe, matched, "app split-tunnel: resolved flow process");
+                            // `strip_prefix` avoids the per-flow `format!("{root}/")` allocation in
+                            // this hot path — check the boundary is a real path separator.
+                            let matched = roots.iter().any(|root| {
+                                exe == *root
+                                    || exe
+                                        .strip_prefix(root.as_str())
+                                        .is_some_and(|rest| rest.starts_with('/'))
+                            });
+                            // Log only on a match, at `debug` (off in release): avoids a per-flow
+                            // line for every non-matching flow and never emits an unmatched exe path
+                            // (log hygiene — see `docs/GOAL.md`).
                             if matched {
+                                tracing::debug!(proc = %exe, "app split-tunnel: flow matched a bypassed app bundle");
                                 return Action::Direct;
                             }
                         }

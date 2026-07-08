@@ -198,11 +198,12 @@ mod ffi {
     }
 
     /// Update the running tunnel's app-bypass list live. `json` is a NUL-terminated JSON array of
-    /// absolute executable paths (`["/Applications/Foo.app/Contents/MacOS/Foo", ...]`). Returns 0 if
-    /// applied; -1 if `json` is null, not valid UTF-8, not valid JSON, or there is no active router to
-    /// update (no tunnel running, or a tunnel running without smart-routing — e.g. a plain relay/proxy
-    /// path has no router). The listed apps route Direct (absolute); unresolved flows fail open
-    /// (tunneled, never leaked).
+    /// canonical `.app` bundle-root paths (`["/Applications/Foo.app", ...]`), matched by prefix
+    /// against the resolved process path so in-bundle helpers match too — NOT executable paths.
+    /// Returns 0 if applied; -1 if `json` is null, not valid UTF-8, not valid JSON, or there is no
+    /// active router to update (no tunnel running, or a tunnel running without smart-routing — e.g. a
+    /// plain relay/proxy path has no router). The listed apps route Direct (absolute); unresolved
+    /// flows fail open (tunneled, never leaked).
     ///
     /// # Safety
     /// `json` must be null or a valid NUL-terminated C string.

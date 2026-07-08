@@ -134,7 +134,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // Trimmed like the others; nil/empty → NULL (the core's default routing mode).
             let routingMode = (provider?["routingMode"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            // Read the optional app-bypass list (JSON array of exe paths) from
+            // Read the optional app-bypass list (JSON array of canonical `.app` bundle-root paths,
+            // matched by prefix so in-bundle helpers match — not exe paths) from
             // providerConfiguration["appBypass"]. Applied as a live push once the data path is ready
             // (below) rather than as a spark_tunnel_run arg — spark_set_app_bypass needs the router,
             // which is live by the time readiness fires.
@@ -284,7 +285,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             log.notice("handleAppMessage: splitTunnel rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
         case "appBypass":
-            // The app sends {"cmd":"appBypass","list":"<json array of exe paths>"}. Missing/blank
+            // The app sends {"cmd":"appBypass","list":"<json array of canonical `.app` bundle-root
+            // paths, matched by prefix so in-bundle helpers match — not exe paths>"}. Missing/blank
             // list → "[]" (no app bypass), matching the startup providerConfiguration path.
             let trimmed = (obj["list"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let listJson = trimmed.isEmpty ? "[]" : trimmed
