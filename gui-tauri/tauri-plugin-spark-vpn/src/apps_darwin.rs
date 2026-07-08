@@ -55,7 +55,8 @@ const CACHE_BASENAME: &str = "installed_apps_cache";
 ///     `.icns` rendering blank, and Calendar's un-downscaled multi-MB icon bloating the cache).
 /// v4: reverted v3's slow/blank NSWorkspace-TIFF→sips path — sips-on-`.icns` is primary again
 ///     (fast), stub `.icns` skipped, NSWorkspace+NSBitmapImageRep only for `.icns`-less apps.
-const CACHE_VERSION: u32 = 4;
+/// v5: filter Spark's own bundle (`org.getlantern.spark`) from the picker.
+const CACHE_VERSION: u32 = 5;
 
 /// Path of the current-version SWR cache file under `base`.
 fn cache_file(base: &Path) -> PathBuf {
@@ -115,11 +116,14 @@ fn entry_for_bundle(app: &Path) -> Option<AppEntry> {
     }
     let plist: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
 
-    // Skip Safari: its network traffic flows through the shared `com.apple.WebKit.Networking`
-    // system process (outside any app bundle), so a per-process / bundle-prefix match can never
-    // attribute Safari's flows. Offering it in the picker would be a broken promise.
-    if plist.get("CFBundleIdentifier").and_then(|v| v.as_str()) == Some("com.apple.Safari") {
-        return None;
+    // Skip bundles that can't or shouldn't be offered as exclusions:
+    //  - Safari: its network traffic flows through the shared `com.apple.WebKit.Networking` system
+    //    process (outside any app bundle), so a per-process / bundle-prefix match can never
+    //    attribute Safari's flows — offering it would be a broken promise.
+    //  - Spark itself: excluding our own app from its own VPN is meaningless (and confusing).
+    match plist.get("CFBundleIdentifier").and_then(|v| v.as_str()) {
+        Some("com.apple.Safari") | Some("org.getlantern.spark") => return None,
+        _ => {}
     }
 
     // Skip background/agent bundles (menu-bar helpers, URL handlers, login items) — a user doesn't
