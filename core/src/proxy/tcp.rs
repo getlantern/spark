@@ -63,6 +63,7 @@ async fn forward(
         original_dst,
         src,
         mut stream,
+        abort,
     } = flow;
 
     // Count this flow as active for its whole lifetime — including if this task is aborted on stop
@@ -91,9 +92,15 @@ async fn forward(
     debug!(src = %src, dst = %original_dst, domain = domain.as_deref().unwrap_or("-"), ?decision, "tcp flow: routing");
 
     let upstream = match decision {
-        // Dropping `stream` (by returning) closes the flow. Destination at debug only (log hygiene).
+        // Reject with RST when the netstack offers it (fail fast — the client sees ECONNRESET in
+        // milliseconds, like a real firewall REJECT); merely dropping `stream` leaves the client
+        // socket dangling until its own timeout. Destination at debug only (log hygiene).
         Decision::Reject => {
             debug!(dst = %original_dst, "tcp flow rejected by routing rule");
+            drop(stream); // release the stream before aborting the underlying connection
+            if let Some(abort) = abort {
+                abort();
+            }
             return;
         }
         Decision::Direct => {
@@ -276,6 +283,7 @@ mod tests {
             original_dst,
             src: "10.0.0.2:12345".parse().unwrap(),
             stream: Box::new(flow_side),
+            abort: None,
         };
         tokio::spawn(run(
             OneFlow(Some(flow)),
@@ -382,6 +390,7 @@ mod tests {
             original_dst,
             src: "10.0.0.2:12345".parse().unwrap(),
             stream: Box::new(flow_side),
+            abort: None,
         };
         (app, OneFlow(Some(flow)))
     }
@@ -437,6 +446,42 @@ mod tests {
         assert!(
             !direct.dialed.load(Ordering::SeqCst),
             "the direct transport must not be dialed for a Reject decision"
+        );
+    }
+
+    /// `Decision::Reject` on a flow carrying an abort hook → the hook fires (RST to the client),
+    /// so the client fails fast instead of hanging until its own timeout. (Dropping the smoltcp
+    /// stream alone leaves the client socket ESTABLISHED — observed as ad-blocked hosts hanging
+    /// browsers for 15+ s.)
+    #[tokio::test]
+    async fn reject_fires_the_flow_abort_hook() {
+        let proxy = Arc::new(RecordingTransport::default());
+        let direct = Arc::new(RecordingTransport::default());
+        let aborted = Arc::new(AtomicBool::new(false));
+        let (_app, flow_side) = tokio::io::duplex(1024);
+        let flag = aborted.clone();
+        let flow = TcpFlow {
+            original_dst: "203.0.113.7:443".parse().unwrap(),
+            src: "10.0.0.2:12345".parse().unwrap(),
+            stream: Box::new(flow_side),
+            abort: Some(Box::new(move || {
+                flag.store(true, Ordering::SeqCst);
+            })),
+        };
+        // Await `forward` directly (not `run`, which spawns it on a task) so the assertion
+        // deterministically runs after the Reject arm completed.
+        forward(
+            flow,
+            proxy.clone() as Arc<dyn Transport>,
+            direct.clone() as Arc<dyn Transport>,
+            Some(hooks_for(Decision::Reject)),
+            Arc::new(Metrics::default()),
+        )
+        .await;
+
+        assert!(
+            aborted.load(Ordering::SeqCst),
+            "Reject must fire the abort hook so the client gets an RST"
         );
     }
 
