@@ -286,9 +286,8 @@ fn icon_via_nsworkspace(app: &Path) -> Option<String> {
         .or_else(|| Some(format!("data:image/png;base64,{}", base64_encode(&bytes))))
 }
 
-/// A hard-to-predict token for temp filenames: pid + a monotonic counter + a wall-clock
-/// nanosecond component. The nanos make the name unpredictable across processes, reducing the
-/// chance another local process pre-creates/symlinks the path before `sips` writes it.
+/// A hard-to-predict token for the per-call temp directory name: pid + a monotonic counter + a
+/// wall-clock nanosecond component.
 fn temp_nonce() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -302,13 +301,29 @@ fn temp_nonce() -> String {
     )
 }
 
-/// Convert an on-disk image file (`.icns`, `.tiff`, …) to a 64×64 PNG data-URL via `sips`.
-/// `None` on any `sips`/read failure.
-fn sips_png_data_url(input: &Path) -> Option<String> {
-    // Per-process/-icon temp path so concurrent extractions don't collide. `sips` writes PNG.
-    let out = std::env::temp_dir().join(format!("spark-icon-{}.png", temp_nonce()));
+/// Run `f` with a freshly-created, owner-only (0700) per-call temp **directory**, removing it (and
+/// its contents) afterward. Scratch files (the `sips` source/output) go inside it, not directly in
+/// the world-writable temp root — this closes the symlink/clobber race: `create_dir` (not
+/// `create_dir_all`) fails if the path already exists, so a pre-created path from another local
+/// user aborts the operation (returns `None`) instead of letting `sips` write through an attacker's
+/// symlink. Best-effort — any fs error yields `None`, leaving the app iconless (never fatal).
+fn with_temp_dir<T>(f: impl FnOnce(&Path) -> Option<T>) -> Option<T> {
+    let dir = std::env::temp_dir().join(format!("spark-icons-{}", temp_nonce()));
+    std::fs::create_dir(&dir).ok()?; // fails if it already exists → anti-clobber
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let out = f(&dir);
+    let _ = std::fs::remove_dir_all(&dir); // clean up regardless of outcome
+    out
+}
 
-    let status = Command::new("/usr/bin/sips")
+/// Run `sips` to convert on-disk `input` (`.icns`, `.tiff`, `.png`, …) into a 64×64 PNG at `out`;
+/// returns the PNG bytes, or `None` on any `sips`/read failure.
+fn sips_convert(input: &Path, out: &Path) -> Option<Vec<u8>> {
+    let ok = Command::new("/usr/bin/sips")
         .arg("-z")
         .arg("64")
         .arg("64")
@@ -317,25 +332,36 @@ fn sips_png_data_url(input: &Path) -> Option<String> {
         .arg("png")
         .arg(input)
         .arg("--out")
-        .arg(&out)
+        .arg(out)
         .output()
-        .ok();
-
-    let ok = status.map(|o| o.status.success()).unwrap_or(false);
-    let png = if ok { std::fs::read(&out).ok() } else { None };
-    let _ = std::fs::remove_file(&out); // clean up regardless of outcome
-
-    png.map(|bytes| format!("data:image/png;base64,{}", base64_encode(&bytes)))
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if ok {
+        std::fs::read(out).ok()
+    } else {
+        None
+    }
 }
 
-/// Write `bytes` to a temp file with extension `ext` and run [`sips_png_data_url`] on it, so
-/// `sips` can decode an in-memory image (e.g. the `NSWorkspace` TIFF). Temp file removed after.
+/// Convert an on-disk image file (`.icns`, `.tiff`, …) to a 64×64 PNG data-URL via `sips`.
+/// `None` on any `sips`/read failure.
+fn sips_png_data_url(input: &Path) -> Option<String> {
+    with_temp_dir(|dir| {
+        let bytes = sips_convert(input, &dir.join("out.png"))?;
+        Some(format!("data:image/png;base64,{}", base64_encode(&bytes)))
+    })
+}
+
+/// Write `bytes` to a temp file with extension `ext` and convert it via `sips`, so `sips` can
+/// decode an in-memory image (e.g. the `NSWorkspace` TIFF). Both scratch files live in a private
+/// per-call directory that is removed afterward.
 fn sips_png_data_url_from_bytes(bytes: &[u8], ext: &str) -> Option<String> {
-    let src = std::env::temp_dir().join(format!("spark-iconsrc-{}.{ext}", temp_nonce()));
-    std::fs::write(&src, bytes).ok()?;
-    let url = sips_png_data_url(&src);
-    let _ = std::fs::remove_file(&src); // clean up the source temp regardless of outcome
-    url
+    with_temp_dir(|dir| {
+        let src = dir.join(format!("src.{ext}"));
+        std::fs::write(&src, bytes).ok()?;
+        let png = sips_convert(&src, &dir.join("out.png"))?;
+        Some(format!("data:image/png;base64,{}", base64_encode(&png)))
+    })
 }
 
 /// Monotonic counter so each icon extraction gets a unique temp filename within this process.
