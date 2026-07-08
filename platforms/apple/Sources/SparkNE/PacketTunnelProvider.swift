@@ -134,6 +134,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // Trimmed like the others; nil/empty → NULL (the core's default routing mode).
             let routingMode = (provider?["routingMode"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Read the optional app-bypass list (JSON array of exe paths) from
+            // providerConfiguration["appBypass"]. Applied as a live push once the data path is ready
+            // (below) rather than as a spark_tunnel_run arg — spark_set_app_bypass needs the router,
+            // which is live by the time readiness fires.
+            let appBypass = (provider?["appBypass"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
             // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C strings
@@ -190,10 +196,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // core fetches config *before* adopting the fd, so reporting up eagerly would blackhole
             // traffic on a cold start (especially offline). Wait (bounded) for the ready signal on a
             // separate thread, then complete — or fail the connection cleanly if it never comes up.
-            let readyWaiter = Thread { [weak self, log = self.log] in
+            let readyWaiter = Thread { [weak self, log = self.log, appBypass] in
                 let rc = spark_tunnel_wait_ready(30_000) // 30s ceiling
                 if rc == 0 {
                     log.notice("tunnel data path ready; reporting connected")
+                    // The router is live now, so apply any start-time app-bypass list.
+                    if let appBypass, !appBypass.isEmpty {
+                        let rcAb = appBypass.withCString { spark_set_app_bypass($0) }
+                        log.notice("applied start-time app-bypass: rc=\(rcAb)")
+                    }
                     self?.finishStart(nil)
                 } else {
                     log.error("tunnel did not become ready (config unavailable?); failing connection")
@@ -271,6 +282,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let listJson = trimmed.isEmpty ? "{}" : trimmed
             let rc = listJson.withCString { spark_set_split_tunnel($0) }
             log.notice("handleAppMessage: splitTunnel rc=\(rc)")
+            completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
+        case "appBypass":
+            // The app sends {"cmd":"appBypass","list":"<json array of exe paths>"}. Missing/blank
+            // list → "[]" (no app bypass), matching the startup providerConfiguration path.
+            let trimmed = (obj["list"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let listJson = trimmed.isEmpty ? "[]" : trimmed
+            let rc = listJson.withCString { spark_set_app_bypass($0) }
+            log.notice("handleAppMessage: appBypass rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
         case "routingMode":
             // The app sends {"cmd":"routingMode","mode":"smart"|"full"}. Missing mode → "smart" (default).
