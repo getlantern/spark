@@ -314,11 +314,17 @@ fn temp_nonce() -> String {
 /// symlink. Best-effort — any fs error yields `None`, leaving the app iconless (never fatal).
 fn with_temp_dir<T>(f: impl FnOnce(&Path) -> Option<T>) -> Option<T> {
     let dir = std::env::temp_dir().join(format!("spark-icons-{}", temp_nonce()));
-    std::fs::create_dir(&dir).ok()?; // fails if it already exists → anti-clobber
+    // Create with mode 0700 **atomically** at creation (not create-then-chmod, which leaves a
+    // world-readable window and could stay 0755 if the chmod fails). `create` (not `create_all`)
+    // fails if the path already exists → anti-clobber.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).ok()?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&dir).ok()?;
     }
     let out = f(&dir);
     let _ = std::fs::remove_dir_all(&dir); // clean up regardless of outcome
