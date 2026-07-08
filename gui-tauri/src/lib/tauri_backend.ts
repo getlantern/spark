@@ -41,6 +41,12 @@ export class TauriBackend implements SparkBackend {
   async setRoutingMode(mode: "smart" | "full"): Promise<void> {
     await invoke("plugin:spark-vpn|set_routing_mode", { mode });
   }
+  async getAdBlockEnabled(): Promise<boolean> {
+    return await invoke<boolean>("plugin:spark-vpn|get_ad_block_enabled");
+  }
+  async setAdBlockEnabled(enabled: boolean): Promise<void> {
+    await invoke("plugin:spark-vpn|set_ad_block_enabled", { enabled });
+  }
   async listInstalledApps(): Promise<InstalledApp[]> {
     return JSON.parse(await invoke<string>("plugin:spark-vpn|list_installed_apps")) as InstalledApp[];
   }

@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the disconnect command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_ad_block_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-ad-block-enabled",
+          "markdownDescription": "Enables the get_ad_block_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_ad_block_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-ad-block-enabled",
+          "markdownDescription": "Denies the get_ad_block_enabled command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_excluded_apps command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-excluded-apps",
@@ -391,6 +403,18 @@
           "markdownDescription": "Denies the servers command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_ad_block_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-ad-block-enabled",
+          "markdownDescription": "Enables the set_ad_block_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_ad_block_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-ad-block-enabled",
+          "markdownDescription": "Denies the set_ad_block_enabled command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_excluded_apps command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-excluded-apps",
@@ -439,10 +463,10 @@
           "markdownDescription": "Denies the status command without any pre-configured scope."
         },
         {
-          "description": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`",
+          "description": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-get-ad-block-enabled`\n- `allow-set-ad-block-enabled`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`"
+          "markdownDescription": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-get-ad-block-enabled`\n- `allow-set-ad-block-enabled`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`"
         }
       ]
     }

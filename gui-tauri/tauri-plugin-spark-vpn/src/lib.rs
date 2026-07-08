@@ -72,6 +72,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::set_split_tunnel,
             commands::get_routing_mode,
             commands::set_routing_mode,
+            commands::get_ad_block_enabled,
+            commands::set_ad_block_enabled,
             commands::list_installed_apps,
             commands::get_excluded_apps,
             commands::set_excluded_apps,
