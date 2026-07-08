@@ -196,6 +196,17 @@ mod jni {
         }
     }
 
+    /// `SparkBridge.nativeSetAdBlockEnabled(enabled)` — enable/disable ad-block live. Returns true
+    /// if applied. Mirrors `spark_core::fd_tunnel::set_ad_block_enabled`.
+    #[no_mangle]
+    pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeSetAdBlockEnabled<'local>(
+        _env: JNIEnv<'local>,
+        _obj: JObject<'local>,
+        enabled: jboolean,
+    ) -> jboolean {
+        spark_core::fd_tunnel::set_ad_block_enabled(enabled != 0) as jboolean
+    }
+
     /// `SparkBridge.nativeMarkConnecting()` — mark the data path *connecting* before the `nativeRun`
     /// worker starts, so a later [`nativeWaitReady`] can't observe a stale ready/down state from a
     /// prior connect. Mirrors the Apple NE's `spark_tunnel_mark_connecting`.
