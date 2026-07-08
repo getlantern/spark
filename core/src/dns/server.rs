@@ -182,7 +182,7 @@ mod tests {
             .unwrap();
         let ip = first_answer(&resp).expect("a AAAA answer");
         match ip {
-            IpAddr::V6(v6) => assert_eq!((v6.segments()[0], v6.segments()[1]), (0xfd00, 0x2018)),
+            IpAddr::V6(v6) => assert_eq!((v6.segments()[0], v6.segments()[1]), (0x3000, 0x2018)),
             IpAddr::V4(_) => panic!("AAAA query must yield a v6 fake IP"),
         }
         assert_eq!(recover_domain(&pool, ip), Some("example.com".to_string()));

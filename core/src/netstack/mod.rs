@@ -374,9 +374,9 @@ mod tests {
     #[cfg(feature = "smart-routing")]
     #[test]
     fn fake_v6_destinations_are_allowed() {
-        // Inside the fake pool (fd00:2018::/32 slice used by the allocator) — recoverable to a
+        // Inside the fake pool (3000:2018:: slice used by the allocator) — recoverable to a
         // domain, so deliverable by name.
-        assert!(allow_flow_dst(&ip("fd00:2018::17")));
+        assert!(allow_flow_dst(&ip("3000:2018::17")));
         assert!(allow_flow_dst(&IpAddr::V6(crate::dns::fakeip::V6_BASE)));
     }
 }

@@ -1,7 +1,7 @@
 //! Fake-IP allocator + bidirectional `domain ⇄ fakeip` map with TTL and an LRU cap.
 //!
 //! Every A/AAAA query gets a synthetic IP from a dedicated range — IPv4 `28.0.0.0/15` (dark DoD
-//! space; see [`V4_BASE`] for why not the usual 198.18/15) and an IPv6 ULA — recorded so the
+//! space; see [`V4_BASE`] for why not the usual 198.18/15) and an IPv6 slice of dark global unicast (see `V6_BASE`) — recorded so the
 //! connecting flow's fake destination recovers its domain. A domain gets **one fake IP per family**
 //! (an A and a AAAA query for the same host yield distinct v4/v6 fakes that both recover the same
 //! domain).
@@ -28,8 +28,14 @@ use std::time::{Duration, Instant};
 pub const V4_BASE: Ipv4Addr = Ipv4Addr::new(28, 0, 0, 0);
 /// Address count in the `/15` (131072).
 pub const V4_COUNT: u128 = 1 << 17;
-/// IPv6 fake-IP base — a ULA prefix (`fd00:2018::/32`), well clear of real routable space.
-pub const V6_BASE: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2018, 0, 0, 0, 0, 0, 0);
+/// IPv6 fake-IP base — `3000:2018::`, a slice of the IANA-unassigned, never-routed portion of
+/// global unicast (`2000::/3`). Chosen over the conventional ULA (`fd00::/…`) for the same reason
+/// as the IPv4 range (see [`V4_BASE`]): Chromium's Local Network Access maps `fc00::/7` (ULA),
+/// `fe80::/10`, `fec0::/10`, and the IPv6 documentation ranges to the **local** address space and
+/// blocks cross-origin subresource fetches to them from a public document. A dark slice of global
+/// unicast is classified **public** (it is not in Chrome's non-public table) while colliding with
+/// nothing a user would actually reach (`3000::/4` is reserved-unassigned, never announced).
+pub const V6_BASE: Ipv6Addr = Ipv6Addr::new(0x3000, 0x2018, 0, 0, 0, 0, 0, 0);
 
 /// Whether `addr` lies inside the IPv6 fake-IP pool (`[V6_BASE, V6_BASE + V6_COUNT)`).
 ///
@@ -270,14 +276,33 @@ mod tests {
         assert!(is_fake_v6(&V6_BASE));
         let last = Ipv6Addr::from(u128::from(V6_BASE) + V6_COUNT - 1);
         assert!(is_fake_v6(&last));
-        // Out of range: one past the pool, a neighbouring ULA, a real global address,
-        // link-local, and the unspecified address.
+        // Out of range: one past the pool, a real global address, link-local, a ULA, and the
+        // unspecified address.
         let past = Ipv6Addr::from(u128::from(V6_BASE) + V6_COUNT);
         assert!(!is_fake_v6(&past));
-        assert!(!is_fake_v6(&"fd00:2019::1".parse().unwrap()));
         assert!(!is_fake_v6(&"2607:f8b0:400f:807::2001".parse().unwrap()));
         assert!(!is_fake_v6(&"fe80::1".parse().unwrap()));
+        assert!(!is_fake_v6(&"fd00::1".parse().unwrap()));
         assert!(!is_fake_v6(&Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn v6_fake_base_is_public_global_unicast_not_local() {
+        // Chrome's Local Network Access classifies fc00::/7 (ULA), fe80::/10, fec0::/10, and the
+        // IPv6 documentation ranges as the "local" address space, and blocks cross-origin
+        // subresource fetches to them from a public document — exactly the failure the IPv4 range
+        // move fixed. So the v6 fake base MUST be global unicast (2000::/3) and MUST NOT be ULA.
+        let bytes = V6_BASE.octets();
+        assert_eq!(
+            bytes[0] & 0xE0,
+            0x20,
+            "v6 fake base must be in global unicast 2000::/3"
+        );
+        assert_ne!(
+            bytes[0] & 0xFE,
+            0xFC,
+            "v6 fake base must not be a ULA (fc00::/7)"
+        );
     }
 
     #[test]
@@ -323,7 +348,7 @@ mod tests {
         assert_ne!(v4, v6);
         assert_eq!(p.recover(v4, t0), Some("d.com".to_string()));
         assert_eq!(p.recover(v6, t0), Some("d.com".to_string()));
-        // v4 in 28.0.0.0/15; v6 under fd00:2018::/32.
+        // v4 in 28.0.0.0/15; v6 under 3000:2018::/… (dark global unicast).
         if let IpAddr::V4(a) = v4 {
             let o = a.octets();
             assert_eq!(o[0], 28);
@@ -331,7 +356,7 @@ mod tests {
         }
         if let IpAddr::V6(a) = v6 {
             let s = a.segments();
-            assert_eq!((s[0], s[1]), (0xfd00, 0x2018));
+            assert_eq!((s[0], s[1]), (0x3000, 0x2018));
         }
     }
 
