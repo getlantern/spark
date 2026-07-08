@@ -422,10 +422,11 @@ fn write_cache(base: &Path, json: &str) {
         return;
     }
     let final_path = cache_file(base);
-    // Per-process temp name so a concurrent refresh in another process can't clobber ours.
+    // Per-call temp name (pid + counter + nanos) so two writers — even in the same process (a
+    // cache-miss racing a background refresh) — never target the same `.tmp` and clobber each other.
     let tmp_path = base.join(format!(
         "{CACHE_BASENAME}.v{CACHE_VERSION}.{}.tmp",
-        std::process::id()
+        temp_nonce()
     ));
     if std::fs::write(&tmp_path, json).is_err() {
         return;
