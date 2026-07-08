@@ -1,17 +1,23 @@
 //! macOS installed-apps catalog for desktop app-based split tunneling.
 //!
 //! Enumerates `*.app` bundles under `/Applications`, `/System/Applications`, and
-//! `~/Applications`, resolves each bundle's executable path (the split-tunnel match key —
-//! `ProcessResolver` returns exactly this path), and returns a JSON array of
-//! `{id, name, icon}` sorted by display name. `id` is the absolute executable path,
-//! `name` the bundle's display name, `icon` is `null` for v1 (no `.icns` extraction yet).
+//! `~/Applications`, and returns a JSON array of `{id, name, icon}` sorted by display name.
+//!
+//! `id` is the **canonical bundle root** (e.g. `/Applications/Google Chrome.app` after
+//! `std::fs::canonicalize`, so symlinked bundles like Safari resolve to their real path). The
+//! core matches split-tunnel flows by bundle-root *prefix* against the resolved process path —
+//! this catches the helper/child processes real apps make their network connections from — so
+//! the bundle root (not the main-exe path) is the match key.
+//!
+//! `icon` is a small PNG data-URL extracted from the bundle's `.icns` via `sips`, or `null` if
+//! extraction fails. `name` is the bundle's display name.
 //!
 //! Info.plist parsing uses `plutil -convert json` piped into `serde_json` rather than a
-//! `plist` crate (no new dependencies — CLAUDE.md).
+//! `plist` crate (no new dependencies — CLAUDE.md). Icons use `sips` for the same reason.
 //!
 //! A stale-while-revalidate disk cache (`<base>/installed_apps_cache.json`) serves the
 //! previous scan instantly and refreshes in a background thread, mirroring the Android
-//! plugin's approach — a full plist scan is slow enough to stall the picker on first paint.
+//! plugin's approach — a full plist+icon scan is slow enough to stall the picker on first paint.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,12 +28,12 @@ use serde::{Deserialize, Serialize};
 /// (`gui-tauri/src/lib/spark_backend.ts`): `{id, name, icon}`.
 #[derive(Serialize, Deserialize)]
 struct AppEntry {
-    /// Absolute executable path (`<app>/Contents/MacOS/<CFBundleExecutable>`) — the
-    /// value the core's process resolver returns, so it is the split-tunnel match key.
+    /// Canonical bundle-root path (e.g. `/Applications/Google Chrome.app`) — the core matches
+    /// split-tunnel flows by prefix against this, so it is the split-tunnel match key.
     id: String,
     /// Display name (`CFBundleDisplayName` else `CFBundleName` else the bundle stem).
     name: String,
-    /// Optional icon data-URL — always `null` in v1.
+    /// Optional icon data-URL (`data:image/png;base64,…`); `null` if extraction failed.
     icon: Option<String>,
 }
 
@@ -48,8 +54,8 @@ fn scan_roots() -> Vec<PathBuf> {
 }
 
 /// Parse a bundle's `Contents/Info.plist` into an [`AppEntry`], or `None` if the bundle
-/// has no `CFBundleExecutable` (skip it — there's no process path to match on) or the
-/// plist can't be read/parsed.
+/// has no `CFBundleExecutable` (skip it — nothing to attribute flows to), the plist can't
+/// be read/parsed, or it's Safari (whose network can't be process-matched — see below).
 fn entry_for_bundle(app: &Path) -> Option<AppEntry> {
     let info_plist = app.join("Contents/Info.plist");
     // `plutil -convert json -o - <path>` emits the plist as JSON on stdout. This handles
@@ -67,16 +73,24 @@ fn entry_for_bundle(app: &Path) -> Option<AppEntry> {
     }
     let plist: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
 
-    // CFBundleExecutable is required — the exe path is the match key.
+    // Skip Safari: its network traffic flows through the shared `com.apple.WebKit.Networking`
+    // system process (outside any app bundle), so a per-process / bundle-prefix match can never
+    // attribute Safari's flows. Offering it in the picker would be a broken promise.
+    if plist.get("CFBundleIdentifier").and_then(|v| v.as_str()) == Some("com.apple.Safari") {
+        return None;
+    }
+
+    // CFBundleExecutable is required — a bundle with no exe has no processes to attribute.
     let exe = plist.get("CFBundleExecutable").and_then(|v| v.as_str())?;
     if exe.is_empty() {
         return None;
     }
-    let id = app
-        .join("Contents/MacOS")
-        .join(exe)
-        .to_string_lossy()
-        .into_owned();
+
+    // The match key is the **canonical bundle root** (resolve symlinks like Safari's Cryptexes
+    // path). Fall back to the literal path if canonicalization fails so the entry isn't dropped.
+    let id = std::fs::canonicalize(app)
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| app.to_string_lossy().into_owned());
 
     // Display name: CFBundleDisplayName → CFBundleName → the bundle dir stem.
     let name = plist
@@ -93,11 +107,105 @@ fn entry_for_bundle(app: &Path) -> Option<AppEntry> {
         .or_else(|| app.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| id.clone());
 
-    Some(AppEntry {
-        id,
-        name,
-        icon: None,
+    // Best-effort icon; never fails the whole entry.
+    let icon = icon_data_url(app, &plist);
+
+    Some(AppEntry { id, name, icon })
+}
+
+/// Resolve a bundle's `.icns` icon file. Reads `CFBundleIconFile` from the plist (appending
+/// `.icns` if it has no extension); falls back to `Contents/Resources/AppIcon.icns`, then the
+/// first `*.icns` under `Contents/Resources`. `None` if no icon file is found.
+fn icns_path(app: &Path, plist: &serde_json::Value) -> Option<PathBuf> {
+    let resources = app.join("Contents/Resources");
+
+    if let Some(icon_file) = plist
+        .get("CFBundleIconFile")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let mut name = icon_file.to_owned();
+        if Path::new(&name).extension().is_none() {
+            name.push_str(".icns");
+        }
+        let p = resources.join(&name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    let default = resources.join("AppIcon.icns");
+    if default.is_file() {
+        return Some(default);
+    }
+
+    // Last resort: the first `*.icns` in Resources.
+    std::fs::read_dir(&resources).ok()?.flatten().find_map(|e| {
+        let p = e.path();
+        (p.extension().and_then(|x| x.to_str()) == Some("icns")).then_some(p)
     })
+}
+
+/// Extract a 64×64 PNG icon for `app` and return it as a `data:image/png;base64,…` URL, or
+/// `None` if any step fails (no `.icns`, `sips` error, read/encode failure). Best-effort:
+/// icons are cosmetic, so a failure here never drops the app from the catalog.
+fn icon_data_url(app: &Path, plist: &serde_json::Value) -> Option<String> {
+    let icns = icns_path(app, plist)?;
+
+    // Per-process/-icon temp path so concurrent extractions don't collide. `sips` writes PNG.
+    let tmp = std::env::temp_dir().join(format!(
+        "spark-icon-{}-{}.png",
+        std::process::id(),
+        NEXT_ICON.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    let status = Command::new("/usr/bin/sips")
+        .arg("-z")
+        .arg("64")
+        .arg("64")
+        .arg("-s")
+        .arg("format")
+        .arg("png")
+        .arg(&icns)
+        .arg("--out")
+        .arg(&tmp)
+        .output()
+        .ok();
+
+    let ok = status.map(|o| o.status.success()).unwrap_or(false);
+    let png = if ok { std::fs::read(&tmp).ok() } else { None };
+    let _ = std::fs::remove_file(&tmp); // clean up regardless of outcome
+
+    png.map(|bytes| format!("data:image/png;base64,{}", base64_encode(&bytes)))
+}
+
+/// Monotonic counter so each icon extraction gets a unique temp filename within this process.
+static NEXT_ICON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Standard base64 encoder (RFC 4648, with padding). Implemented inline: this crate has no
+/// base64 dependency and CLAUDE.md forbids adding one for a job this small.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(n >> 18) as usize & 0x3f] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 0x3f] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 0x3f] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Enumerate every `*.app` bundle under [`scan_roots`] (one level deep) and build the
@@ -159,4 +267,31 @@ pub fn list_installed_apps(base: &Path) -> String {
     let fresh = enumerate();
     write_cache(base, &fresh);
     fresh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64_encode;
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        // RFC 4648 §10 test vectors — including the three padding cases (0/1/2 pad chars).
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_encodes_all_byte_values() {
+        // Exercises every 6-bit index (0x2b/'+' and 0x2f/'/' among them) via the full byte range.
+        let all: Vec<u8> = (0u8..=255).collect();
+        let encoded = base64_encode(&all);
+        // 256 bytes → ceil(256/3)=86 groups → 344 chars, and it must contain both '+' and '/'.
+        assert_eq!(encoded.len(), 344);
+        assert!(encoded.contains('+') && encoded.contains('/'));
+    }
 }

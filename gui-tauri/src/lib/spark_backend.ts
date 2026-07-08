@@ -39,7 +39,8 @@ export interface SplitTunnel {
 }
 
 /** An installed application the user can exclude from the VPN. `id` is the platform match key
- * (Android package name; desktop executable path). `icon` is an optional data-URL for display. */
+ * (Android package name; macOS canonical bundle-root path, e.g. `/Applications/Google Chrome.app`).
+ * `icon` is an optional data-URL for display. */
 export interface InstalledApp {
   id: string;
   name: string;
