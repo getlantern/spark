@@ -250,6 +250,7 @@ async fn accept_loop(
                     original_dst: target,
                     src: client,
                     stream: Box::new(stream),
+                    abort: None,
                 };
                 if accept_tx.send(flow).await.is_err() {
                     break; // the proxy dropped the receiver

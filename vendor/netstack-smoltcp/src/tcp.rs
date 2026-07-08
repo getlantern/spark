@@ -53,6 +53,10 @@ struct TcpSocketControl {
     recv_waker: Option<Waker>,
     recv_state: TcpSocketState,
     send_state: TcpSocketState,
+    /// Set by [`TcpAbortHandle::abort`]: the next `handle_socket` pass calls `socket.abort()`,
+    /// which sends an RST and closes immediately — REJECT semantics (the peer fails fast with
+    /// ECONNRESET) as opposed to the graceful FIN of `close()`.
+    abort_pending: bool,
 }
 
 struct TcpSocketCreation {
@@ -158,6 +162,7 @@ impl TcpListenerRunner {
                     recv_waker: None,
                     recv_state: TcpSocketState::Normal,
                     send_state: TcpSocketState::Normal,
+                    abort_pending: false,
                 }));
 
                 stream_tx
@@ -214,6 +219,17 @@ impl TcpListenerRunner {
                 let socket_handle = *socket_handle;
                 let socket = socket_set.get_mut::<TcpSocket>(socket_handle);
                 let mut control = control.lock();
+
+                // A requested abort (REJECT semantics) sends an RST and closes immediately.
+                // `continue` on purpose: the RST is only *transmitted* by the next `iface.poll`
+                // at the top of the loop, so the Closed-state removal below must not reap the
+                // socket on this same pass or the RST would be dropped with it.
+                if control.abort_pending {
+                    control.abort_pending = false;
+                    trace!("aborting TCP connection (RST), {:?}", socket.state());
+                    socket.abort();
+                    continue;
+                }
 
                 // Remove the socket only when it is in the closed state.
                 if socket.state() == TcpState::Closed {
@@ -435,6 +451,25 @@ pub struct TcpStream {
     control: SharedControl,
 }
 
+/// A detached handle that aborts its [`TcpStream`]'s connection with an RST (REJECT semantics —
+/// the peer fails fast with ECONNRESET), unlike dropping the stream, which closes gracefully.
+/// Obtained from [`TcpStream::abort_handle`]; safe to hold after the stream itself is dropped.
+pub struct TcpAbortHandle {
+    notify: SharedNotify,
+    control: SharedControl,
+}
+
+impl TcpAbortHandle {
+    /// Send an RST and close the connection immediately.
+    pub fn abort(self) {
+        {
+            let mut control = self.control.lock();
+            control.abort_pending = true;
+        }
+        self.notify.notify_one();
+    }
+}
+
 impl Drop for TcpStream {
     fn drop(&mut self) {
         let mut control = self.control.lock();
@@ -452,6 +487,14 @@ impl Drop for TcpStream {
 }
 
 impl TcpStream {
+    /// A detached [`TcpAbortHandle`] for this connection (see its docs).
+    pub fn abort_handle(&self) -> TcpAbortHandle {
+        TcpAbortHandle {
+            notify: self.notify.clone(),
+            control: self.control.clone(),
+        }
+    }
+
     pub fn local_addr(&self) -> &SocketAddr {
         &self.src_addr
     }

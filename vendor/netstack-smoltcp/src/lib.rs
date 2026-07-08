@@ -13,7 +13,7 @@ pub mod udp;
 pub use udp::UdpSocket;
 
 pub mod tcp;
-pub use tcp::{TcpListener, TcpStream};
+pub use tcp::{TcpAbortHandle, TcpListener, TcpStream};
 
 pub mod stack;
 pub use stack::{Stack, StackBuilder};

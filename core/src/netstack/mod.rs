@@ -77,6 +77,12 @@ pub struct TcpFlow {
     /// The flow's byte stream: reading yields app→upstream bytes, writing delivers
     /// upstream→app bytes.
     pub stream: BoxedStream,
+    /// Abort the connection with an RST (REJECT semantics) — fired for `Decision::Reject` so the
+    /// client fails fast with ECONNRESET instead of hanging until its own timeout. Dropping the
+    /// smoltcp stream alone does not reliably deliver any close to the client (observed: the
+    /// client socket stays ESTABLISHED and ad-blocked hosts hang browsers for 15+ s). `None`
+    /// where the impl has no RST surface (the flow is then just dropped, as before).
+    pub abort: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// A UDP datagram crossing the netstack boundary, tagged with its flow identity.
@@ -322,10 +328,12 @@ impl Netstack for SmoltcpNetstack {
         // Verified against the vendored source (vendor/netstack-smoltcp/src/tcp.rs:118,
         // 132-133,165, where the socket `listen`s on `dst_addr`). Dial `remote_addr`.
         let (stream, src, original_dst) = self.listener.next().await?;
+        let abort = stream.abort_handle();
         Some(TcpFlow {
             original_dst,
             src,
             stream: Box::new(stream),
+            abort: Some(Box::new(move || abort.abort())),
         })
     }
 }
