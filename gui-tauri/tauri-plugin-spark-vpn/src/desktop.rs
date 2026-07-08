@@ -321,7 +321,9 @@ mod ne_spike {
         // App-bypass list (JSON array of canonical `.app` bundle-root paths — the core matches by
         // bundle-root prefix so in-bundle helpers are caught) for desktop app split tunneling,
         // delivered at start via providerConfiguration["appBypass"] (live pushes go through
-        // set_excluded_apps → sendProviderMessage). Empty string when nothing is excluded.
+        // set_excluded_apps → sendProviderMessage). `AppleControl::connect` supplies the persisted
+        // canonical array ("[]" when nothing is excluded); `unwrap_or_default()` only yields "" if a
+        // caller passes `None`, which the NE reads the same as "[]" (no bypass).
         let app_bypass_json = app_bypass.unwrap_or_default();
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let outer = RcBlock::new(
