@@ -89,15 +89,20 @@ fn prune_stale_caches(base: &Path) {
     }
 }
 
-/// The directories scanned for `*.app` bundles (one level deep). `~/Applications` is
-/// appended when `HOME` is set.
+/// The directories scanned for `*.app` bundles (one level deep). Includes the `Utilities`
+/// subfolders so nested system apps (Terminal, Activity Monitor, …) appear in the catalog.
+/// `~/Applications` (and its `Utilities`) is appended when `HOME` is set.
 fn scan_roots() -> Vec<PathBuf> {
     let mut roots = vec![
         PathBuf::from("/Applications"),
+        PathBuf::from("/Applications/Utilities"),
         PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
     ];
     if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(home).join("Applications"));
+        let user_apps = PathBuf::from(home).join("Applications");
+        roots.push(user_apps.join("Utilities"));
+        roots.push(user_apps);
     }
     roots
 }
@@ -415,7 +420,7 @@ fn enumerate() -> String {
     serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Atomically write `json` to `<base>/installed_apps_cache.json` (temp file + rename), so
+/// Atomically write `json` to `cache_file(base)` (`installed_apps_cache.v<N>.json`) (temp file + rename), so
 /// a reader never sees a half-written cache. Best-effort — errors are logged, not fatal.
 fn write_cache(base: &Path, json: &str) {
     if std::fs::create_dir_all(base).is_err() {
@@ -439,7 +444,7 @@ fn write_cache(base: &Path, json: &str) {
 
 /// Return the macOS installed-apps catalog as a JSON array string of `{id, name, icon}`.
 ///
-/// Stale-while-revalidate: if a cache exists at `<base>/installed_apps_cache.json`, return
+/// Stale-while-revalidate: if a cache exists at `cache_file(base)` (`installed_apps_cache.v<N>.json`), return
 /// it immediately and kick off a background refresh (so the next call sees fresh data).
 /// On a cache miss, enumerate synchronously, persist, and return.
 pub fn list_installed_apps(base: &Path) -> String {
