@@ -96,6 +96,14 @@ int32_t spark_select_server(int32_t index);
  * without smart-routing — e.g. a plain relay/proxy path has no router). */
 int32_t spark_set_split_tunnel(const char *json);
 
+/* ---- App-bypass list (desktop app split tunneling) ----
+ * Live-push the app-bypass list to the running tunnel. `json` is a NUL-terminated JSON array of
+ * absolute executable paths (["/Applications/Foo.app/Contents/MacOS/Foo", ...]); the listed apps
+ * route Direct (absolute). Returns 0 if applied; -1 if `json` is NULL, not valid UTF-8, not valid
+ * JSON, or there is no active router to update (no tunnel running, or a tunnel running without
+ * smart-routing — e.g. a plain relay/proxy path has no router). */
+int32_t spark_set_app_bypass(const char *json);
+
 /* Update the running tunnel's routing mode live. `mode` is a NUL-terminated "smart"/"full".
  * Returns 0 if applied; -1 if `mode` is NULL, not valid UTF-8, or there is no active router to
  * update (no tunnel running, or a tunnel running without smart-routing — e.g. a plain relay/proxy

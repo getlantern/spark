@@ -197,6 +197,26 @@ mod ffi {
         }
     }
 
+    /// Update the running tunnel's app-bypass list live. `json` is a NUL-terminated JSON array of
+    /// absolute executable paths (`["/Applications/Foo.app/Contents/MacOS/Foo", ...]`). Returns 0 if
+    /// applied; -1 if `json` is null, not valid UTF-8, not valid JSON, or there is no active router to
+    /// update (no tunnel running, or a tunnel running without smart-routing — e.g. a plain relay/proxy
+    /// path has no router). The listed apps route Direct (absolute); unresolved flows fail open
+    /// (tunneled, never leaked).
+    ///
+    /// # Safety
+    /// `json` must be null or a valid NUL-terminated C string.
+    #[no_mangle]
+    pub unsafe extern "C" fn spark_set_app_bypass(json: *const c_char) -> c_int {
+        if json.is_null() {
+            return -1;
+        }
+        match unsafe { CStr::from_ptr(json) }.to_str() {
+            Ok(s) if spark_core::fd_tunnel::set_app_bypass(s) => 0,
+            _ => -1,
+        }
+    }
+
     /// Update the running tunnel's routing mode live. `mode` is a NUL-terminated `"smart"`/`"full"`.
     /// Returns 0 if applied; -1 if `mode` is null, not valid UTF-8, or there is no active router to
     /// update (no tunnel running, or a tunnel running without smart-routing — e.g. a plain
