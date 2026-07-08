@@ -161,8 +161,8 @@ mod tests {
         match ip {
             IpAddr::V4(v4) => {
                 let o = v4.octets();
-                assert_eq!(o[0], 198);
-                assert!(o[1] == 18 || o[1] == 19, "in 198.18.0.0/15");
+                assert_eq!(o[0], 28);
+                assert!(o[1] == 0 || o[1] == 1, "in 28.0.0.0/15");
             }
             IpAddr::V6(_) => panic!("A query must yield a v4 fake IP"),
         }
