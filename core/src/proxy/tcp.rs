@@ -97,10 +97,14 @@ async fn forward(
         // socket dangling until its own timeout. Destination at debug only (log hygiene).
         Decision::Reject => {
             debug!(dst = %original_dst, "tcp flow rejected by routing rule");
-            drop(stream); // release the stream before aborting the underlying connection
+            // Fire the abort hook FIRST (sets abort_pending + notifies → the netstack runner
+            // aborts the socket with an RST), then drop the stream. Dropping first would race:
+            // `TcpStream::drop` also notifies the runner (Close state), which could observe Close
+            // and `socket.close()` (FIN) before `abort_pending` is set, losing the RST semantics.
             if let Some(abort) = abort {
                 abort();
             }
+            drop(stream);
             return;
         }
         Decision::Direct => {
