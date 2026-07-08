@@ -115,6 +115,41 @@ pub fn set_split_tunnel(_json: &str) -> bool {
     false
 }
 
+/// Live-push the app-bypass list (JSON array of executable paths) to the running router. Returns
+/// false if the JSON was invalid or no tunnel/router is active. Mirrors [`set_split_tunnel`], but
+/// the payload is a bare `["/path/to/exe", ...]` array (the resolver returns / the catalog stores
+/// executable paths). Called across the platform FFI (Apple C-ABI).
+#[cfg(feature = "smart-routing")]
+pub fn set_app_bypass(json: &str) -> bool {
+    let paths: Vec<String> = match serde_json::from_str(json) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("set_app_bypass: invalid JSON: {e}");
+            return false;
+        }
+    };
+    // Clone the Arc out under the lock, then release the mutex before touching the router — so this
+    // mutex is never held across the router's own RwLock. `unwrap_or_else(into_inner)` recovers from
+    // a poisoned mutex instead of panicking: this is FFI-reachable and must not crash the host.
+    let router = active_router()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match router {
+        Some(r) => {
+            r.set_app_bypass(&paths);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Without `smart-routing`, live app-bypass updates are unsupported.
+#[cfg(not(feature = "smart-routing"))]
+pub fn set_app_bypass(_json: &str) -> bool {
+    false
+}
+
 /// Update the running tunnel's routing mode live (no reconnect). `mode` is `"smart"`/`"full"`.
 /// Returns true if applied, false if no router is active. Called across the platform FFI.
 #[cfg(feature = "smart-routing")]
@@ -577,6 +612,15 @@ fn setup_routing_and_udp(
         });
         router.set_user_bypass(user_bypass.as_ref());
         router.set_mode(crate::routing_mode::parse(routing_mode.unwrap_or("smart")));
+        // App split tunneling (macOS): install the process resolver so a flow can be attributed to
+        // its owning executable and routed Direct if that exe is on the app-bypass list. Set on the
+        // same `router` instance later stashed into `active_router()`, before the `Arc` wrap. The
+        // resolver only runs when the app-bypass list is non-empty (`set_app_bypass`), so it's inert
+        // until the NE pushes a list. Non-macOS builds skip this (no backend until P4).
+        #[cfg(target_os = "macos")]
+        router.set_process_resolver(Some(std::sync::Arc::new(
+            crate::process::CachingResolver::new(std::time::Duration::from_secs(3), 1024),
+        )));
         let router = Arc::new(router);
         set_active_router(Some(router.clone()));
         // One pool: the DNS server allocates on query, the recoverer recovers on connect.
