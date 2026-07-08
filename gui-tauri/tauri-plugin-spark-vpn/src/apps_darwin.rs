@@ -53,7 +53,9 @@ const CACHE_BASENAME: &str = "installed_apps_cache";
 /// v2: Safari + background/agent-bundle filtering; NSWorkspace icon fallback.
 /// v3: icons come from NSWorkspace for *every* app then downscaled via sips (fixes Books's stub
 ///     `.icns` rendering blank, and Calendar's un-downscaled multi-MB icon bloating the cache).
-const CACHE_VERSION: u32 = 3;
+/// v4: reverted v3's slow/blank NSWorkspace-TIFF→sips path — sips-on-`.icns` is primary again
+///     (fast), stub `.icns` skipped, NSWorkspace+NSBitmapImageRep only for `.icns`-less apps.
+const CACHE_VERSION: u32 = 4;
 
 /// Path of the current-version SWR cache file under `base`.
 fn cache_file(base: &Path) -> PathBuf {
@@ -199,42 +201,68 @@ fn icns_path(app: &Path, plist: &serde_json::Value) -> Option<PathBuf> {
     })
 }
 
+/// Below this size a bundle's `.icns` is treated as a *stub*: some system apps (e.g. Books) ship
+/// a ~2 KB placeholder `.icns` whose real icon lives in `Assets.car`, and `sips` would convert
+/// that stub to a blank image. Under this threshold we skip the `.icns` and let NSWorkspace
+/// render the true Finder icon instead. Real app icons are far larger (tens of KB to ~1 MB).
+const MIN_USABLE_ICNS_BYTES: u64 = 4096;
+
 /// Best-effort 64×64 PNG icon for `app` as a `data:image/png;base64,…` URL, or `None` if every
 /// strategy fails. Icons are cosmetic, so a failure here never drops the app from the catalog.
 ///
-/// Primary source is AppKit's `NSWorkspace`, which returns the exact Finder icon for *every* app:
-/// asset-catalog system apps (Calendar), apps whose real icon is in `Assets.car` behind a tiny
-/// stub `.icns` (Books), and ordinary third-party apps alike. Its native-resolution TIFF is
-/// handed to `sips` to produce a consistent, small 64×64 PNG. Falls back to decoding a standalone
-/// `.icns` directly on the rare chance the `NSWorkspace` path yields nothing.
-///
-/// (An earlier version decoded the bundle's `.icns` first, but Books ships a ~2 KB *stub* `.icns`
-/// that `sips` happily converts to a blank image — so `.icns`-first served that blank instead of
-/// falling through. Going through `NSWorkspace` for every app avoids the stub trap entirely.)
+/// Fast path: decode the bundle's standalone `.icns` with `sips` — quick (no giant AppKit TIFF)
+/// and correct for nearly every third-party app. A *stub* `.icns` (see [`MIN_USABLE_ICNS_BYTES`])
+/// is skipped so it doesn't yield a blank. Fallback: apps with no usable `.icns` — asset-catalog
+/// system apps (Calendar) and stub-`.icns` apps (Books), whose real icon is in `Assets.car` — are
+/// rendered via AppKit's `NSWorkspace`.
 fn icon_data_url(app: &Path, plist: &serde_json::Value) -> Option<String> {
-    if let Some(url) =
-        tiff_via_nsworkspace(app).and_then(|tiff| sips_png_data_url_from_bytes(&tiff, "tiff"))
+    if let Some(url) = icns_path(app, plist)
+        .filter(|icns| {
+            std::fs::metadata(icns)
+                .map(|m| m.len() >= MIN_USABLE_ICNS_BYTES)
+                .unwrap_or(false)
+        })
+        .and_then(|icns| sips_png_data_url(&icns))
     {
         return Some(url);
     }
-    // Fallback (only if NSWorkspace failed, which is rare): decode a standalone `.icns` via sips.
-    icns_path(app, plist).and_then(|icns| sips_png_data_url(&icns))
+    icon_via_nsworkspace(app)
 }
 
-/// The app's Finder icon as TIFF bytes via AppKit's `NSWorkspace`, or `None` on failure.
+/// Render an app's Finder icon to a 64×64 PNG data-URL via AppKit's `NSWorkspace`, for apps with
+/// no usable standalone `.icns` — asset-catalog system apps (Calendar) and stub-`.icns` apps
+/// (Books), whose real icon lives in `Assets.car`. `None` on any failure.
 ///
-/// Thread-safety: `NSWorkspace`'s icon methods and `NSImage::TIFFRepresentation` (which just
-/// serializes the icon's existing bitmap representations — no drawing context involved) are
-/// usable from any thread (AppKit Thread Safety Summary). This matters because [`enumerate`]
-/// runs off the main thread — on the SWR background-refresh thread and on the Tauri command
-/// worker that services a cache miss.
-fn tiff_via_nsworkspace(app: &Path) -> Option<Vec<u8>> {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::NSString;
+/// The icon is decoded with AppKit's own `NSBitmapImageRep`, **not** `sips`: `NSWorkspace`'s
+/// `TIFFRepresentation` is a ~70 MB *multi-representation* image that `sips` mis-decodes into a
+/// blank (and whose per-app temp-file round-trip is painfully slow), whereas `NSBitmapImageRep`
+/// decodes it correctly in-process. The resulting (large, native-res) PNG is then downscaled to a
+/// small 64×64 with `sips` — which *is* reliable on a single-image PNG — falling back to the
+/// full-size PNG if that downscale fails. Only the handful of apps without a usable `.icns` reach
+/// this path, so the extra work is bounded.
+///
+/// Thread-safety: `NSWorkspace`'s icon methods and offscreen `NSImage`/`NSBitmapImageRep` bitmap
+/// generation are usable from any thread (AppKit Thread Safety Summary). This matters because
+/// [`enumerate`] runs off the main thread — on the SWR refresh thread and the Tauri command worker.
+fn icon_via_nsworkspace(app: &Path) -> Option<String> {
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+    use objc2_foundation::{NSDictionary, NSString};
 
     let path = NSString::from_str(app.to_str()?);
     let image = NSWorkspace::sharedWorkspace().iconForFile(&path);
-    Some(image.TIFFRepresentation()?.to_vec())
+    let tiff = image.TIFFRepresentation()?;
+    let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)?;
+    let props = NSDictionary::new();
+    // SAFETY: `props` is a valid (empty) properties dictionary of the expected key/value types
+    // and `NSBitmapImageFileType::PNG` is a valid storage type; the method has no further
+    // preconditions. It returns an autoreleased `NSData` (or nil), handled as `Option`.
+    let png =
+        unsafe { bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }?;
+    let bytes = png.to_vec();
+    // Downscale the valid (but native-res, often >1 MB) PNG to a consistent 64×64 to keep the
+    // cache small; keep the full-size PNG if `sips` fails so we never regress to no icon.
+    sips_png_data_url_from_bytes(&bytes, "png")
+        .or_else(|| Some(format!("data:image/png;base64,{}", base64_encode(&bytes))))
 }
 
 /// Convert an on-disk image file (`.icns`, `.tiff`, …) to a 64×64 PNG data-URL via `sips`.
