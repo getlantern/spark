@@ -4,7 +4,7 @@
 
 **Goal:** Exclude specific apps from the VPN on desktop (macOS first, then Windows/Linux) by resolving each flow's owning process in the core and routing matched apps `Direct`.
 
-**Architecture:** The core resolves a flow's **source** endpoint → owning process → executable path (macOS `sysctl(net.inet.tcp.pcblist_n)`, already built in `core/src/process/`), and the router routes any flow whose exe path is on a live **app-bypass** list to `Direct` (absolute, like the existing domain/IP `user_bypass`; **fail-open** — an unresolved process is tunneled, never leaked). Delivery mirrors the existing split-tunnel live-push (`spark_set_app_bypass` FFI → `fd_tunnel::set_app_bypass` → `Router::set_app_bypass`). P3 wires the macOS NE + installed-apps catalog + picker; P4 adds Windows/Linux resolver backends.
+**Architecture:** The core resolves a flow's **source** endpoint → owning process → executable path (macOS `sysctl(net.inet.tcp.pcblist_n)` / `udp.pcblist_n`, protocol-aware, in `core/src/process/`), and the router routes any flow whose resolved exe path is under a live **app-bypass** entry to `Direct` (absolute, like the existing domain/IP `user_bypass`; **fail-open** — an unresolved process is tunneled, never leaked). The app-bypass entries are canonical `.app` **bundle-root** paths and the match is a bundle-root **prefix** match, so in-bundle helper/child processes (e.g. Chrome's network helper) are caught. Delivery mirrors the existing split-tunnel live-push (`spark_set_app_bypass` FFI → `fd_tunnel::set_app_bypass` → `Router::set_app_bypass`). P3 wires the macOS NE + installed-apps catalog + picker; P4 adds Windows/Linux resolver backends.
 
 **Tech Stack:** Rust (spark-core, `libc` for macOS syscalls — already a workspace dep), Swift NE (`PacketTunnelProvider`), Rust Tauri plugin (`tauri-plugin-spark-vpn`), SvelteKit UI (picker already built).
 
@@ -21,8 +21,8 @@
 
 **P1 (core — TDD, no build dependency):**
 - Modify: `core/src/process/mod.rs` — add a `ProcessResolver` trait + a `CachingResolver` (src-keyed LRU/TTL) wrapping `resolve_tcp`.
-- Modify: `core/src/proxy/mod.rs` — `FlowRouter::decide` gains a `src: SocketAddr` param.
-- Modify: `core/src/proxy/tcp.rs` — pass `src` at the decide call site (line ~85) + the test `StubRouter`.
+- Modify: `core/src/proxy/mod.rs` — `FlowRouter::decide` gains `src: SocketAddr` + `proto: Protocol` params (protocol-aware so TCP and UDP/QUIC both attribute).
+- Modify: `core/src/proxy/tcp.rs` — pass `src`/`Protocol::Tcp` at the decide call site + the test `StubRouter`; `core/src/proxy/udp.rs` passes `Protocol::Udp`.
 - Modify: `core/src/rules/router.rs` — `Router` gains a live `app_bypass` set + an optional `ProcessResolver`; `decide` consults it; add `set_app_bypass` + `set_process_resolver`.
 - Modify: `core/src/fd_tunnel.rs` — `pub fn set_app_bypass(json) -> bool` (mirrors `set_split_tunnel`); inject the macOS resolver into the `Router` at build.
 - Modify: `platforms/apple/src/lib.rs` + `platforms/apple/include/spark.h` — `spark_set_app_bypass` C-ABI.

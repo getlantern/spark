@@ -318,8 +318,9 @@ mod ne_spike {
         // by the caller and passed in as Option<String>.
         let split_tunnel_json = split_tunnel.unwrap_or_default();
         let routing_mode_str = routing_mode.unwrap_or_default();
-        // App-bypass list (JSON array of exe paths) for desktop app split tunneling, delivered
-        // at start via providerConfiguration["appBypass"] (live pushes go through
+        // App-bypass list (JSON array of canonical `.app` bundle-root paths — the core matches by
+        // bundle-root prefix so in-bundle helpers are caught) for desktop app split tunneling,
+        // delivered at start via providerConfiguration["appBypass"] (live pushes go through
         // set_excluded_apps → sendProviderMessage). Empty string when nothing is excluded.
         let app_bypass_json = app_bypass.unwrap_or_default();
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
