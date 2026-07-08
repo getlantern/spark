@@ -30,13 +30,15 @@ use std::time::{Duration, Instant};
 pub const V4_BASE: Ipv4Addr = Ipv4Addr::new(28, 0, 0, 0);
 /// Address count in the `/15` (131072).
 pub const V4_COUNT: u128 = 1 << 17;
-/// IPv6 fake-IP base — `3000:2018::`, a slice of the IANA-unassigned, never-routed portion of
-/// global unicast (`2000::/3`). Chosen over the conventional ULA (`fd00::/…`) for the same reason
-/// as the IPv4 range (see [`V4_BASE`]): Chromium's Local Network Access maps `fc00::/7` (ULA),
-/// `fe80::/10`, `fec0::/10`, and the IPv6 documentation ranges to the **local** address space and
-/// blocks cross-origin subresource fetches to them from a public document. A dark slice of global
-/// unicast is classified **public** (it is not in Chrome's non-public table) while colliding with
-/// nothing a user would actually reach (`3000::/4` is reserved-unassigned, never announced).
+/// IPv6 fake-IP base — `3000:2018::`, a slice of global unicast (`2000::/3`) that is currently
+/// IANA-unassigned. Chosen over the conventional ULA (`fd00::/…`) for the same reason as the IPv4
+/// range (see [`V4_BASE`]): Chromium's Local Network Access maps `fc00::/7` (ULA), `fe80::/10`,
+/// `fec0::/10`, and the IPv6 documentation ranges to the **local** address space and blocks
+/// cross-origin subresource fetches to them from a public document. This block is classified
+/// **public** by Chrome (it is not in Chrome's non-public table). `3000::/4` sits within global
+/// unicast but is, at present, unallocated and not seen in the global routing table — so a collision
+/// with anything a user would actually reach is very unlikely. Best-effort observation, not a
+/// guarantee (IANA could allocate it later); revisit if it starts being announced.
 pub const V6_BASE: Ipv6Addr = Ipv6Addr::new(0x3000, 0x2018, 0, 0, 0, 0, 0, 0);
 
 /// Whether `addr` lies inside the IPv6 fake-IP pool (`[V6_BASE, V6_BASE + V6_COUNT)`).
