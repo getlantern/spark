@@ -12,6 +12,10 @@ pub(crate) mod persist;
 #[cfg(not(target_os = "android"))]
 mod desktop;
 
+// macOS installed-apps catalog for desktop app-based split tunneling (AppleControl uses it).
+#[cfg(target_os = "macos")]
+mod apps_darwin;
+
 #[cfg(target_os = "android")]
 mod mobile;
 
