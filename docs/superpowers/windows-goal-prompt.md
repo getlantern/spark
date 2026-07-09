@@ -28,10 +28,12 @@ PER-MILESTONE WORKFLOW:
    goal prompt + the progress log. Rebase onto main after each merge (main advances per PR).
 2. superpowers:writing-plans -> save plan. Then superpowers:subagent-driven-development (fresh
    subagent per task, spec-compliance + code-quality review between). Strict TDD.
-3. Gate EVERY task: cargo fmt --all --check; cargo clippy --all-targets --target
-   x86_64-pc-windows-msvc -D warnings AND host clippy; cargo test (WHOLE workspace — cli+service
-   depend on core); for gui-tauri changes, npm test + npm run check. (Install the windows target
-   once: rustup target add x86_64-pc-windows-msvc.)
+3. Gate EVERY task: cargo fmt --all --check; host `cargo clippy --workspace --all-targets -D
+   warnings`; Windows cross-check `cargo xwin clippy --all-targets --target x86_64-pc-windows-msvc
+   -D warnings` (BARE `cargo clippy --target …` FAILS on macOS — ring's C build needs the Windows
+   SDK; use cargo-xwin, already installed, + `brew install llvm`); cargo test --workspace (host —
+   runs pure + non-windows-cfg tests; cfg(windows) tests run only in W4's windows-latest CI); for
+   gui-tauri changes, npm test + npm run check.
 4. Open PR (title ends " (#NN)" squash style). Body: summary + test plan; mermaid sequenceDiagram
    when call flow crosses layers. State clearly that on-Windows runtime is NOT validated (macOS host).
 5. Run the review-pr skill: request Copilot + ensure CodeRabbit; VERIFY each comment before acting;

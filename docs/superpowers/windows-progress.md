@@ -8,8 +8,15 @@ unit-tested. Live on-Windows validation (SCM, named pipe, WinTun routes, tunneli
 hardware; never reported as verified.
 
 ## Status
-- **W1 core Windows routing/kill-switch** — in progress (branch `fisk/windows-w1-routing`; spec +
-  goal prompt + this log committed).
+- **W1 core Windows routing/kill-switch** — code-complete (branch `fisk/windows-w1-routing`).
+  RouteManager Windows path done: route.exe split-default covers via tun ifindex, route-blackhole
+  kill-switch (loopback IF 1), netsh adapter DNS. ifindex threaded from tun-rs `if_index()` via
+  `RouteManager::with_windows_params(ifindex, resolver)` (no windows-sys dep). Gate green: fmt,
+  host clippy --workspace, 184 workspace tests, Windows xwin cross-clippy (core+service) all clean.
+  cfg(windows) unit tests compile + run in W4's windows-latest CI (not the macOS host). route.exe/
+  netsh argv + ifindex value pending on-Windows validation (deferred). PR: (opening).
+  **Toolchain note:** Windows cross-clippy needs `cargo xwin clippy` (+ brew llvm) — bare
+  `cargo clippy --target x86_64-pc-windows-msvc` fails because `ring`'s C build needs the Windows SDK.
 - **W2 live spark-service** — not started.
 - **W3 tauri-plugin ServiceControl IPC client** — not started.
 - **W4 Windows Tauri packaging + service install** — not started.
