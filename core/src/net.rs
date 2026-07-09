@@ -124,9 +124,11 @@ pub fn default_physical_interface() -> Option<String> {
         }
         let lname = iface.name.to_ascii_lowercase();
         // Skip our own tunnel + common virtual adapters (WinTun/TAP/loopback/transition tech).
-        if ["wintun", "tun", "tap", "loopback", "isatap", "teredo", "pseudo"]
-            .iter()
-            .any(|p| lname.contains(p))
+        if [
+            "wintun", "tun", "tap", "loopback", "isatap", "teredo", "pseudo",
+        ]
+        .iter()
+        .any(|p| lname.contains(p))
         {
             continue;
         }
@@ -216,7 +218,11 @@ fn bind_to_index(sock: socket2::SockRef<'_>, index: NonZeroU32, ipv4: bool) -> i
 
     let s = sock.as_raw_socket() as SOCKET;
     let (level, optname, arg) = if ipv4 {
-        (IPPROTO_IP, IP_UNICAST_IF, ipv4_unicast_if_index(index.get()))
+        (
+            IPPROTO_IP,
+            IP_UNICAST_IF,
+            ipv4_unicast_if_index(index.get()),
+        )
     } else {
         (IPPROTO_IPV6, IPV6_UNICAST_IF, index.get())
     };
@@ -274,7 +280,10 @@ mod tests {
     fn ipv4_unicast_if_index_is_network_order() {
         assert_eq!(ipv4_unicast_if_index(5).to_ne_bytes(), [0, 0, 0, 5]);
         assert_eq!(ipv4_unicast_if_index(1).to_ne_bytes(), [0, 0, 0, 1]);
-        assert_eq!(ipv4_unicast_if_index(0x0102_0304).to_ne_bytes(), [1, 2, 3, 4]);
+        assert_eq!(
+            ipv4_unicast_if_index(0x0102_0304).to_ne_bytes(),
+            [1, 2, 3, 4]
+        );
     }
 
     #[test]
