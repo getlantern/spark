@@ -138,7 +138,8 @@ impl RouteManager {
     #[cfg(not(target_os = "windows"))]
     pub async fn install(&mut self) -> io::Result<()> {
         debug!(tun = %self.tun, "installing full-tunnel routes");
-        run(install_ops(&self.tun)).await
+        // Unix routes on-link by interface name, so the gateway arg is unused (empty).
+        run(install_ops(&self.tun, "")).await
     }
 
     /// Windows install: cover both halves via the interface **index** (not the name) and point the
@@ -151,7 +152,8 @@ impl RouteManager {
         // `netsh` aborts before any route change — never leaving full-tunnel routes up with DNS still
         // pointed at the physical resolver. On success the order is immaterial.
         let mut ops = vec![dns_set_op(&w.ifindex, &w.resolver)];
-        ops.extend(install_ops(&w.ifindex));
+        // Windows needs an on-link next-hop gateway; the tun adapter's own address (`resolver`).
+        ops.extend(install_ops(&w.ifindex, &w.resolver));
         run(ops).await
     }
 
@@ -245,13 +247,15 @@ fn clear_op(half: &str) -> RouteOp {
     RouteOp::ignorable(vec!["route", "del", half])
 }
 
-/// Add the cover for `half` pointing at `tun`.
+/// Add the cover for `half` pointing at `tun`. (`_gateway` is the Windows on-link next-hop; unix
+/// routes on-link by interface, so it's unused here — the uniform signature lets the shared
+/// [`install_ops`] pass it through on every platform.)
 #[cfg(target_os = "macos")]
-fn via_tun_op(half: &str, tun: &str) -> RouteOp {
+fn via_tun_op(half: &str, tun: &str, _gateway: &str) -> RouteOp {
     RouteOp::required(vec!["-n", "add", "-net", half, "-interface", tun])
 }
 #[cfg(target_os = "linux")]
-fn via_tun_op(half: &str, tun: &str) -> RouteOp {
+fn via_tun_op(half: &str, tun: &str, _gateway: &str) -> RouteOp {
     RouteOp::required(vec!["route", "add", half, "dev", tun])
 }
 
@@ -285,14 +289,22 @@ fn clear_op(half: &str) -> RouteOp {
     RouteOp::ignorable(vec!["delete", dest, "mask", mask])
 }
 
-/// Add the cover for `half` via the tun interface. `tun` is the resolved interface **index**
-/// (see `RouteManager` on Windows). `0.0.0.0` gateway + `IF <idx>` routes on-link via that
-/// iface; `metric 1` beats the physical default.
+/// Add the cover for `half` via the tun interface. `tun` is the resolved interface **index** and
+/// `gateway` is the tun adapter's own IPv4 address (`with_windows_params`' resolver). `metric 1`
+/// beats the physical default.
+///
+/// VALIDATION-DEFERRED (the #1 on-device item — see `docs/windows-on-device-validation.md`): unlike
+/// unix (`route … dev <tun>`), Windows `route.exe` has no interface-only form — it needs a next-hop
+/// gateway that is on-link on `IF <idx>`. For a point-to-point WinTun adapter that's the adapter's
+/// own address, so we pass `gateway` here rather than the earlier `0.0.0.0` (which MS docs don't
+/// list as a valid on-link next hop and which likely made the covers fail to install). Confirm on a
+/// real box with `route print`; if the covers still don't carry traffic, the peer address is the
+/// next thing to try.
 #[cfg(target_os = "windows")]
-fn via_tun_op(half: &str, tun: &str) -> RouteOp {
+fn via_tun_op(half: &str, tun: &str, gateway: &str) -> RouteOp {
     let (dest, mask) = half_to_dest_mask(half);
     RouteOp::required(vec![
-        "add", dest, "mask", mask, "0.0.0.0", "metric", "1", "IF", tun,
+        "add", dest, "mask", mask, gateway, "metric", "1", "IF", tun,
     ])
 }
 
@@ -308,6 +320,11 @@ fn blackhole_op(half: &str) -> RouteOp {
 
 /// Set the tun adapter's DNS to the tunnel resolver (spark's fake-IP responder) so queries ride
 /// the tunnel. `iface` is the interface index. VALIDATION-DEFERRED: netsh dnsservers syntax.
+///
+/// `validate=no` is essential: netsh defaults to `validate=yes`, which sends a probe to the new DNS
+/// server and only "succeeds" if it answers. Our resolver is the tunnel's own fake-IP responder,
+/// which may not be answering yet at install time (adapter just up, covers not in place) — so the
+/// default probe would stall for seconds and/or make this **required** op fail, aborting install.
 #[cfg(target_os = "windows")]
 fn dns_set_op(iface: &str, resolver: &str) -> RouteOp {
     RouteOp::required_with(
@@ -321,16 +338,19 @@ fn dns_set_op(iface: &str, resolver: &str) -> RouteOp {
             "static",
             resolver,
             "primary",
+            "validate=no",
         ],
     )
 }
 
-/// Revert the adapter's DNS to DHCP on teardown. **Required** (not ignorable): a failure here would
-/// silently leave the adapter pointing at the (now-gone) tunnel resolver, breaking name resolution
-/// after disconnect — so surface it.
+/// Revert the adapter's DNS to DHCP on teardown. **Ignorable**: at teardown the engine drops the
+/// TUN adapter before `restore()` runs, so by the time this fires the adapter (and its interface
+/// index) is often already gone — `netsh` then returns non-zero for a missing interface. A
+/// *required* failure here would abort `restore()` and skip the route-cover cleanup that follows;
+/// since the adapter's DNS dies with the adapter anyway, tolerate the not-found and press on.
 #[cfg(target_os = "windows")]
 fn dns_clear_op(iface: &str) -> RouteOp {
-    RouteOp::required_with(
+    RouteOp::ignorable_with(
         "netsh",
         vec!["interface", "ipv4", "set", "dnsservers", iface, "dhcp"],
     )
@@ -342,7 +362,7 @@ fn clear_op(half: &str) -> RouteOp {
     RouteOp::ignorable(vec!["delete", half])
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn via_tun_op(half: &str, tun: &str) -> RouteOp {
+fn via_tun_op(half: &str, tun: &str, _gateway: &str) -> RouteOp {
     RouteOp::required(vec!["add", half, tun])
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -350,10 +370,11 @@ fn blackhole_op(half: &str) -> RouteOp {
     RouteOp::required(vec!["blackhole", half])
 }
 
-/// Clear stale covers, then point both halves at the TUN.
-fn install_ops(tun: &str) -> Vec<RouteOp> {
+/// Clear stale covers, then point both halves at the TUN. `gateway` is the Windows on-link next-hop
+/// (the tun adapter's own address); ignored on unix (routes on-link by interface).
+fn install_ops(tun: &str, gateway: &str) -> Vec<RouteOp> {
     let mut ops: Vec<RouteOp> = HALVES.iter().map(|h| clear_op(h)).collect();
-    ops.extend(HALVES.iter().map(|h| via_tun_op(h, tun)));
+    ops.extend(HALVES.iter().map(|h| via_tun_op(h, tun, gateway)));
     ops
 }
 
@@ -408,7 +429,7 @@ mod tests {
 
     #[test]
     fn install_clears_then_covers_both_halves_via_the_tun() {
-        let ops = install_ops("utun7");
+        let ops = install_ops("utun7", "");
         assert_eq!(ops.len(), 4, "two clears + two adds");
         // The clears come first and tolerate failure; the adds are required.
         assert!(ops[0].ignore_failure && ops[1].ignore_failure);
@@ -447,7 +468,7 @@ mod tests {
     fn macos_uses_route_with_interface() {
         assert_eq!(ROUTE_PROGRAM, "route");
         assert_eq!(
-            argv(&via_tun_op("0.0.0.0/1", "utun4")),
+            argv(&via_tun_op("0.0.0.0/1", "utun4", "")),
             "-n add -net 0.0.0.0/1 -interface utun4"
         );
         assert_eq!(
@@ -461,7 +482,7 @@ mod tests {
     fn linux_uses_ip_route() {
         assert_eq!(ROUTE_PROGRAM, "ip");
         assert_eq!(
-            argv(&via_tun_op("0.0.0.0/1", "tun0")),
+            argv(&via_tun_op("0.0.0.0/1", "tun0", "")),
             "route add 0.0.0.0/1 dev tun0"
         );
         assert_eq!(
@@ -476,8 +497,9 @@ mod tests {
         assert_eq!(ROUTE_PROGRAM, "route");
         // `tun` carries the resolved interface index on Windows.
         assert_eq!(
-            argv(&via_tun_op("0.0.0.0/1", "12")),
-            "add 0.0.0.0 mask 128.0.0.0 0.0.0.0 metric 1 IF 12"
+            // 3rd arg = the on-link gateway (the tun adapter's own address).
+            argv(&via_tun_op("0.0.0.0/1", "12", "10.6.7.1")),
+            "add 0.0.0.0 mask 128.0.0.0 10.6.7.1 metric 1 IF 12"
         );
         assert_eq!(
             argv(&blackhole_op("0.0.0.0/1")),
@@ -496,7 +518,7 @@ mod tests {
         // set: point the adapter (by index) at the tunnel resolver.
         assert_eq!(
             argv(&dns_set_op("12", "10.6.7.1")),
-            "interface ipv4 set dnsservers 12 static 10.6.7.1 primary"
+            "interface ipv4 set dnsservers 12 static 10.6.7.1 primary validate=no"
         );
         assert_eq!(dns_set_op("12", "10.6.7.1").program, "netsh");
         // clear: revert to DHCP on teardown.

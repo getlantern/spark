@@ -26,6 +26,19 @@ and DNS changes are system-wide.
 - [ ] Status polling (~2s) works steadily with no errors; the service log shows the connections.
 
 ## 3. Connect → tunnel up (W1 routing + W2a params + W2b loop-prevention)
+
+> ⚠️ **Verify the `route.exe` argv FIRST** — this is the highest-risk unverified area (a code
+> audit flagged it; macOS host can't exercise it). The cover install is
+> `route add <dest> mask <mask> <gateway> metric 1 IF <idx>`, where `<gateway>` is now the tun
+> adapter's own address (was `0.0.0.0`, which MS docs don't list as a valid on-link next hop). If
+> the covers don't appear in `route print` or don't carry traffic:
+> 1. Try the tun's **peer** address as the gateway instead of its own address (`via_tun_op`, `core/src/routing.rs`).
+> 2. **Blackhole (§4)** still uses a `0.0.0.0` gateway to loopback `IF 1` (unverified) — the correct
+>    Windows null-route form is unconfirmed; check §4 carefully and note what works.
+> 3. **Fail-closed leak window (§4)**: `block` clears the tun covers *then* adds blackhole covers;
+>    since `route delete <dest> mask <mask>` can't distinguish the two, closing the gap needs
+>    `route change` (atomic replace), not a reorder. If you see a brief leak on kill-switch, that's why.
+
 - [ ] Click **Connect**. The GUI goes Connecting → Connected.
 - [ ] `route print` shows the split-default covers `0.0.0.0 mask 128.0.0.0` and `128.0.0.0 mask 128.0.0.0`
       via the WinTun adapter's interface index (W1 + W2a `with_windows_params`).
