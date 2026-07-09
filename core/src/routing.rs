@@ -63,30 +63,88 @@ impl RouteOp {
 
 /// Manages the lifetime of spark's full-tunnel routes for one TUN device. Liveness is tracked
 /// by the owner (the engine holds `Option<RouteManager>`), so this type is stateless beyond the
-/// device name.
+/// device name (plus, on Windows, the interface index and DNS resolver — see below).
+///
+/// **Windows note:** `route.exe` addresses interfaces by numeric **index**, not name, and spark
+/// additionally points the adapter's DNS at its own fake-IP responder via `netsh`. So on Windows
+/// the manager also carries the resolved interface index and the resolver IP. The engine (W2)
+/// threads both from the open tun-rs device (`DeviceImpl::if_index()`) and [`crate::config::TunConfig`]
+/// via [`with_windows_params`](Self::with_windows_params); the CLI path (no engine) falls back to
+/// defaults resolved from the name / the default tun address.
 #[derive(Debug)]
 pub struct RouteManager {
     tun: String,
+    /// Windows interface index for `route.exe`'s `IF <idx>` and `netsh`'s adapter selector.
+    /// tun-rs exposes this on the open device (`DeviceImpl::if_index()`); it is threaded in by the
+    /// engine (W2). Defaults to the loopback index `"1"` for the not-yet-wired CLI path so the ops
+    /// are well-formed even before W2 supplies the real index.
+    #[cfg(target_os = "windows")]
+    ifindex: String,
+    /// The tunnel DNS resolver IP (`netsh … static <resolver> primary`) — spark's fake-IP
+    /// responder, i.e. the tun's own IPv4 (`TunConfig.addr`). Defaults to the default tun address.
+    #[cfg(target_os = "windows")]
+    resolver: String,
 }
 
 impl RouteManager {
     /// Create a manager for the named TUN device. No routes change until [`install`](Self::install).
     pub fn new(tun: impl Into<String>) -> Self {
-        Self { tun: tun.into() }
+        Self {
+            tun: tun.into(),
+            // CLI-path defaults; the engine overrides these with the open device's index and the
+            // configured tun address via `with_windows_params` (W2).
+            #[cfg(target_os = "windows")]
+            ifindex: "1".to_string(),
+            #[cfg(target_os = "windows")]
+            resolver: "10.0.0.1".to_string(),
+        }
+    }
+
+    /// Supply the Windows interface index and DNS resolver IP for this device. The engine (W2)
+    /// calls this with the open tun-rs device's `if_index()` and the configured tun IPv4, since
+    /// Windows `route.exe`/`netsh` address the adapter by index and DNS is pointed at the tun's own
+    /// fake-IP responder. Threading the index from the already-open device is more robust than a
+    /// name→index lookup (no ambiguity, no extra syscall/dependency), so no alias resolver exists.
+    #[cfg(target_os = "windows")]
+    pub fn with_windows_params(mut self, ifindex: u32, resolver: std::net::Ipv4Addr) -> Self {
+        self.ifindex = ifindex.to_string();
+        self.resolver = resolver.to_string();
+        self
     }
 
     /// Install the split-default covers via the TUN, capturing all IPv4 traffic. Clears any
     /// pre-existing covers first, so a re-connect after a fail-closed block heals cleanly.
+    #[cfg(not(target_os = "windows"))]
     pub async fn install(&mut self) -> io::Result<()> {
         debug!(tun = %self.tun, "installing full-tunnel routes");
         run(install_ops(&self.tun)).await
     }
 
+    /// Windows install: cover both halves via the interface **index** (not the name) and point the
+    /// adapter's DNS at the tunnel resolver so DNS rides the tunnel.
+    #[cfg(target_os = "windows")]
+    pub async fn install(&mut self) -> io::Result<()> {
+        debug!(tun = %self.tun, ifindex = %self.ifindex, resolver = %self.resolver, "installing full-tunnel routes");
+        let mut ops = install_ops(&self.ifindex);
+        ops.push(dns_set_op(&self.ifindex, &self.resolver));
+        run(ops).await
+    }
+
     /// Fail open: remove the covers so the real default route resurfaces (direct routing).
     /// Idempotent — deleting absent covers is tolerated.
+    #[cfg(not(target_os = "windows"))]
     pub async fn restore(&mut self) -> io::Result<()> {
         debug!(tun = %self.tun, "restoring direct routing (removing full-tunnel routes)");
         run(restore_ops()).await
+    }
+
+    /// Windows restore: remove the covers and revert the adapter's DNS to DHCP.
+    #[cfg(target_os = "windows")]
+    pub async fn restore(&mut self) -> io::Result<()> {
+        debug!(tun = %self.tun, ifindex = %self.ifindex, "restoring direct routing (removing full-tunnel routes)");
+        let mut ops = restore_ops();
+        ops.push(dns_clear_op(&self.ifindex));
+        run(ops).await
     }
 
     /// Fail closed: replace the covers with a blackhole so traffic is dropped, not leaked.
@@ -208,6 +266,34 @@ fn blackhole_op(half: &str) -> RouteOp {
     RouteOp::required(vec![
         "add", dest, "mask", mask, "0.0.0.0", "metric", "1", "IF", "1",
     ])
+}
+
+/// Set the tun adapter's DNS to the tunnel resolver (spark's fake-IP responder) so queries ride
+/// the tunnel. `iface` is the interface index. VALIDATION-DEFERRED: netsh dnsservers syntax.
+#[cfg(target_os = "windows")]
+fn dns_set_op(iface: &str, resolver: &str) -> RouteOp {
+    RouteOp::required_with(
+        "netsh",
+        vec![
+            "interface",
+            "ipv4",
+            "set",
+            "dnsservers",
+            iface,
+            "static",
+            resolver,
+            "primary",
+        ],
+    )
+}
+
+/// Revert the adapter's DNS to DHCP on teardown.
+#[cfg(target_os = "windows")]
+fn dns_clear_op(iface: &str) -> RouteOp {
+    RouteOp::ignorable_with(
+        "netsh",
+        vec!["interface", "ipv4", "set", "dnsservers", iface, "dhcp"],
+    )
 }
 
 // A fallback so the crate compiles on other targets; these are never run (`run_one` is a no-op).
@@ -355,5 +441,21 @@ mod tests {
             "add 0.0.0.0 mask 128.0.0.0 0.0.0.0 metric 1 IF 1" // loopback ifindex 1 = discard
         );
         assert_eq!(argv(&clear_op("128.0.0.0/1")), "delete 128.0.0.0");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_sets_and_clears_adapter_dns_via_netsh() {
+        // set: point the adapter (by index) at the tunnel resolver.
+        assert_eq!(
+            argv(&dns_set_op("12", "10.6.7.1")),
+            "interface ipv4 set dnsservers 12 static 10.6.7.1 primary"
+        );
+        assert_eq!(dns_set_op("12", "10.6.7.1").program, "netsh");
+        // clear: revert to DHCP on teardown.
+        assert_eq!(
+            argv(&dns_clear_op("12")),
+            "interface ipv4 set dnsservers 12 dhcp"
+        );
     }
 }
