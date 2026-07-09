@@ -51,34 +51,60 @@ pub(crate) fn map_status(s: TunnelStatus) -> Status {
 
 /// A synchronous spark-ipc client for the desktop service. Each call opens a fresh connection,
 /// handshakes, sends one request, and closes — simple + stateless for an infrequent control plane.
+/// A queued request: the payload plus the channel to return its result on.
+type Job = (
+    RequestPayload,
+    std::sync::mpsc::Sender<crate::Result<ResponsePayload>>,
+);
+
+/// A synchronous spark-ipc client for the desktop service. A single long-lived worker thread owns
+/// one current-thread runtime and serves every request off an mpsc queue — so repeated polls (the
+/// GUI polls `status` every ~2s) reuse the runtime instead of spawning a thread + runtime per call.
+/// Each request still opens a fresh connection (handshake + one request) — simple + stateless for
+/// an infrequent control plane. `block_on` runs on this dedicated thread, never inside Tauri's
+/// runtime, so it can't nest runtimes (the plugin commands are `async fn`).
 #[derive(Clone)]
 pub(crate) struct IpcClient {
-    addr: PathBuf,
+    tx: std::sync::mpsc::Sender<Job>,
 }
 
 impl IpcClient {
     pub(crate) fn new(addr: PathBuf) -> Self {
-        Self { addr }
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    // Can't build the runtime: fail every queued/future request instead of hanging.
+                    for (_payload, resp) in rx {
+                        let _ = resp.send(Err(crate::Error::Platform(format!("ipc runtime: {e}"))));
+                    }
+                    return;
+                }
+            };
+            // Serve requests until all senders drop (IpcClient/ServiceControl gone), then exit.
+            for (payload, resp) in rx {
+                let result = rt
+                    .block_on(round_trip(&addr, payload))
+                    .map_err(|e| crate::Error::Platform(format!("service ipc: {e}")));
+                let _ = resp.send(result);
+            }
+        });
+        Self { tx }
     }
 
-    /// Send one request and return its response payload. Runs the async round-trip on a dedicated
-    /// thread with its own current-thread runtime, so it never panics even when the caller is
-    /// already inside Tauri's tokio runtime (the plugin commands are `async fn`).
+    /// Send one request and block until the worker returns its response payload.
     pub(crate) fn request(&self, payload: RequestPayload) -> crate::Result<ResponsePayload> {
-        let addr = self.addr.clone();
-        std::thread::scope(|scope| {
-            scope
-                .spawn(move || -> crate::Result<ResponsePayload> {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| crate::Error::Platform(format!("ipc runtime: {e}")))?;
-                    rt.block_on(round_trip(&addr, payload))
-                        .map_err(|e| crate::Error::Platform(format!("service ipc: {e}")))
-                })
-                .join()
-                .map_err(|_| crate::Error::Platform("ipc worker panicked".into()))?
-        })
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+        self.tx
+            .send((payload, resp_tx))
+            .map_err(|_| crate::Error::Platform("ipc worker is gone".into()))?;
+        resp_rx
+            .recv()
+            .map_err(|_| crate::Error::Platform("ipc worker dropped the response".into()))?
     }
 }
 
@@ -88,9 +114,27 @@ async fn round_trip(addr: &Path, payload: RequestPayload) -> std::io::Result<Res
     #[cfg(target_os = "windows")]
     {
         use tokio::net::windows::named_pipe::ClientOptions;
-        // `open` takes `impl AsRef<OsStr>`; pass the OsStr explicitly to match the repo's other
-        // named-pipe call sites (a bare `&Path` also satisfies the bound, but this is the convention).
-        let pipe = ClientOptions::new().open(addr.as_os_str())?;
+        use tokio::time::{sleep, Duration, Instant};
+        use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY};
+        // The service pipe may not exist yet (startup) or all instances may be momentarily busy;
+        // both are transient. Retry those for up to ~3s so the GUI doesn't surface spurious errors.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pipe = loop {
+            match ClientOptions::new().open(addr.as_os_str()) {
+                Ok(pipe) => break pipe,
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(code)
+                            if code == ERROR_FILE_NOT_FOUND as i32
+                                || code == ERROR_PIPE_BUSY as i32
+                    ) && Instant::now() < deadline =>
+                {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        };
         let mut client = Client::new(pipe);
         client.handshake().await?;
         client.request(payload).await

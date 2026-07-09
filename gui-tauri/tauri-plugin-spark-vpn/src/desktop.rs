@@ -833,16 +833,17 @@ impl ServiceControl {
         Self { base, ipc }
     }
 
-    /// Send `payload`, expecting an `Ack`. A service-side `Error` surfaces its message verbatim
-    /// (e.g. Unauthorized / NotConnected); anything else is a protocol mismatch.
-    fn ack(&self, payload: spark_ipc::message::RequestPayload) -> crate::Result<()> {
+    /// Send `payload` (named `op` for diagnostics), expecting an `Ack`. A service-side `Error`
+    /// surfaces its message verbatim (e.g. Unauthorized / NotConnected); anything else is a
+    /// protocol mismatch, reported with the operation name.
+    fn ack(&self, op: &str, payload: spark_ipc::message::RequestPayload) -> crate::Result<()> {
         match self.ipc.request(payload)? {
             spark_ipc::message::ResponsePayload::Ack => Ok(()),
             spark_ipc::message::ResponsePayload::Error { message, .. } => {
                 Err(crate::Error::Platform(message))
             }
             other => Err(crate::Error::Platform(format!(
-                "unexpected reply {other:?}"
+                "{op}: unexpected reply {other:?}"
             ))),
         }
     }
@@ -851,11 +852,11 @@ impl ServiceControl {
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 impl TunnelControl for ServiceControl {
     fn connect(&self) -> crate::Result<()> {
-        self.ack(spark_ipc::message::RequestPayload::Connect)
+        self.ack("connect", spark_ipc::message::RequestPayload::Connect)
     }
 
     fn disconnect(&self) -> crate::Result<()> {
-        self.ack(spark_ipc::message::RequestPayload::Disconnect)
+        self.ack("disconnect", spark_ipc::message::RequestPayload::Disconnect)
     }
 
     fn status(&self) -> crate::Result<Status> {
