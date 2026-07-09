@@ -31,5 +31,15 @@
   "back": "Back",
   "routing_note": "Smart Routing uses region-specific rules to automatically send traffic that needs the VPN through Spark. All other traffic goes direct for speed and reliability.",
   "toggle_split_tunneling": "Toggle split tunneling",
-  "sites_count": "{count} Sites"
+  "sites_count": "{count} Sites",
+  "apps_bypassing_vpn_count": "Apps bypassing the VPN ({count}):",
+  "no_matching_apps": "No matching apps",
+  "no_apps_found": "No apps found",
+  "toggle_app": "Toggle {name}",
+  "err_update_excluded_apps": "Couldn't update excluded apps",
+  "websites_bypassing_vpn_count": "Websites bypassing the VPN ({count}):",
+  "remove_host": "Remove {host}",
+  "err_save_changes": "Couldn't save changes",
+  "added_sites": "Added {count, plural, one {# site} other {# sites}}",
+  "removed": "Removed"
 }
