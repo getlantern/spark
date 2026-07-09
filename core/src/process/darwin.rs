@@ -205,21 +205,33 @@ pub fn resolve(ip: IpAddr, port: u16, proto: Protocol) -> std::io::Result<Option
     let target_lport_be = port.to_be();
     let is_ipv4 = ip.is_ipv4();
 
+    // A UDP socket is frequently bound to the wildcard address (0.0.0.0 / ::) even while sending —
+    // Chrome's QUIC sockets are — so `udp.pcblist_n` reports `inp_laddr` as unspecified while the
+    // netstack surfaces the flow's *concrete* source IP. An exact-laddr match then misses the owner,
+    // so QUIC never attributes to the app and app split tunneling silently skips it. Prefer an exact
+    // laddr match, but fall back to a wildcard-bound socket on the same lport. UDP only: a wildcard
+    // TCP laddr is a *listener*, not the outbound flow's owner, so matching it would misattribute.
+    let mut wildcard_pid: Option<u32> = None;
     for pcb in parse_pcbs(&buf) {
         if pcb.lport_be != target_lport_be {
             continue;
         }
-        let matches = if is_ipv4 && pcb.vflag & 0x1 != 0 {
-            IpAddr::from(pcb.laddr4) == ip
+        let laddr = if is_ipv4 && pcb.vflag & 0x1 != 0 {
+            IpAddr::from(pcb.laddr4)
         } else if !is_ipv4 && pcb.vflag & 0x2 != 0 {
-            IpAddr::from(pcb.laddr6) == ip
+            IpAddr::from(pcb.laddr6)
         } else {
-            false
+            continue; // address family doesn't match the flow
         };
-        if !matches {
-            continue;
+        if laddr == ip {
+            let pid = pcb.last_pid;
+            return Ok(exe_path(pid).map(|exe_path| ProcessInfo { pid, exe_path }));
         }
-        let pid = pcb.last_pid;
+        if proto == Protocol::Udp && laddr.is_unspecified() {
+            wildcard_pid.get_or_insert(pcb.last_pid); // first wildcard-bound socket on this lport
+        }
+    }
+    if let Some(pid) = wildcard_pid {
         return Ok(exe_path(pid).map(|exe_path| ProcessInfo { pid, exe_path }));
     }
     Ok(None)
@@ -308,5 +320,30 @@ mod tests {
             "exe path must be non-empty, got {:?}",
             info.exe_path
         );
+    }
+
+    // A UDP socket bound to the wildcard address (0.0.0.0) — as Chrome's QUIC sockets are — keeps
+    // `inp_laddr = 0.0.0.0` in `udp.pcblist_n` even while sending. The netstack surfaces the flow's
+    // *concrete* source IP, so an exact-laddr match misses it; the resolver must fall back to the
+    // wildcard-bound socket on the same lport. Without that fallback, Chrome's QUIC never attributes
+    // to the app and app split tunneling silently misses it (regression this guards).
+    #[test]
+    fn resolves_wildcard_bound_udp_socket_by_concrete_ip() {
+        // Bind to the wildcard so `inp_laddr` stays 0.0.0.0 (unconnected → the kernel doesn't pin a
+        // local address the way `connect` does).
+        let sock = UdpSocket::bind("0.0.0.0:0").expect("bind wildcard");
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        // Transmit (unconnected) to force a PCB entry, without pinning a concrete local address.
+        sock.send_to(b"x", peer_addr)
+            .expect("send_to to force a UDP PCB entry");
+        let port = sock.local_addr().expect("local").port();
+
+        // Query by a CONCRETE source IP (what the netstack surfaces for a real flow) + the socket's
+        // port. Exact-laddr matching would fail (0.0.0.0 != 127.0.0.1); the wildcard fallback wins.
+        let info = resolve("127.0.0.1".parse().unwrap(), port, Protocol::Udp)
+            .expect("sysctl/parse ok")
+            .expect("a wildcard-bound udp socket must resolve by concrete src IP");
+        assert_eq!(info.pid, std::process::id(), "must resolve to this process");
     }
 }

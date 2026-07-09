@@ -20,7 +20,7 @@
 ## File Structure
 
 **P1 (core — TDD, no build dependency):**
-- Modify: `core/src/process/mod.rs` — add a `ProcessResolver` trait + a `CachingResolver` (src-keyed LRU/TTL) wrapping `resolve_tcp`.
+- Modify: `core/src/process/mod.rs` — add a `ProcessResolver` trait + a `CachingResolver` (keyed by `(src, proto)`, TTL + oldest-inserted eviction) wrapping the **protocol-aware** `resolve(ip, port, proto)` — reads the TCP *or* UDP `pcblist_n` table so QUIC/UDP flows attribute too (a TCP-only resolver silently misses Chrome's QUIC).
 - Modify: `core/src/proxy/mod.rs` — `FlowRouter::decide` gains `src: SocketAddr` + `proto: Protocol` params (protocol-aware so TCP and UDP/QUIC both attribute).
 - Modify: `core/src/proxy/tcp.rs` — pass `src`/`Protocol::Tcp` at the decide call site + the test `StubRouter`; `core/src/proxy/udp.rs` passes `Protocol::Udp`.
 - Modify: `core/src/rules/router.rs` — `Router` gains a live `app_bypass` set + an optional `ProcessResolver`; `decide` consults it; add `set_app_bypass` + `set_process_resolver`.
@@ -86,7 +86,8 @@ use std::net::SocketAddr;
 /// app split tunneling uses this to route excluded apps Direct. `None` = couldn't attribute (the
 /// caller must fail **open**: tunnel the flow, never leak it).
 pub trait ProcessResolver: Send + Sync {
-    fn resolve(&self, src: SocketAddr) -> Option<String>;
+    // `proto` selects the kernel table (TCP vs UDP `pcblist_n`) so UDP/QUIC flows attribute too.
+    fn resolve(&self, src: SocketAddr, proto: Protocol) -> Option<String>;
 }
 
 /// A [`ProcessResolver`] that caches results by source endpoint for a short TTL, so a per-flow
@@ -119,8 +120,8 @@ impl ProcessResolver for CachingResolver {
                 }
             }
         }
-        // Miss/expired: scan the PCB table (TCP only for v1; UDP flows tunnel).
-        let path = resolve_tcp(src.ip(), src.port()).ok().flatten().map(|i| i.exe_path);
+        // Miss/expired: scan the pcblist table for this protocol (TCP or UDP/QUIC).
+        let path = resolve(src.ip(), src.port(), proto).ok().flatten().map(|i| i.exe_path);
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if cache.len() >= self.cap {
             // Cheap bound: drop the oldest entry.
@@ -161,7 +162,7 @@ to:
 ```rust
     /// `src` is the flow's local (source) endpoint — used by app split tunneling to attribute the
     /// flow to a process. Implementations that don't need it may ignore it.
-    fn decide(&self, ip: IpAddr, domain: Option<&str>, src: SocketAddr) -> Decision;
+    fn decide(&self, ip: IpAddr, domain: Option<&str>, src: SocketAddr, proto: Protocol) -> Decision;
 ```
 Add `use std::net::SocketAddr;` to `proxy/mod.rs` if not already imported (check top of file).
 
