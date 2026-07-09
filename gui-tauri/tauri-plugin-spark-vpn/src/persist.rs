@@ -101,6 +101,11 @@ pub fn save_routing_mode(base: &Path, mode: &str) -> crate::Result<()> {
 }
 
 // ── Excluded-apps persistence (desktop app split tunneling) ───────────────────
+//
+// Only macOS `AppleControl` reads/writes these today; the Windows/Linux `ServiceControl` stubs the
+// excluded-apps commands (the app-bypass list rides `launch_cfg`, not this persist file, on the
+// service path). So they're dead code on non-macOS lib builds — `allow(dead_code)` there rather than
+// deleting them, since the on-disk format is shared and the tests below exercise them on every host.
 
 /// Read the persisted excluded-apps list from `<base>/excluded_apps.json`.
 ///
@@ -108,6 +113,7 @@ pub fn save_routing_mode(base: &Path, mode: &str) -> crate::Result<()> {
 /// matched by prefix so in-bundle helpers match — not executable paths).  Returns the canonical
 /// (re-serialized) array, or the empty-array default `"[]"` if the file is missing, unreadable,
 /// or doesn't deserialize into an array of strings.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn load_excluded_apps(base: &Path) -> String {
     std::fs::read_to_string(base.join("excluded_apps.json"))
         .ok()
@@ -127,6 +133,7 @@ pub fn load_excluded_apps(base: &Path) -> String {
 /// that a later `load_excluded_apps` would silently discard.
 ///
 /// Creates `base` (and any parents) if they don't exist.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn save_excluded_apps(base: &Path, json: &str) -> crate::Result<()> {
     let list: Vec<String> = serde_json::from_str(json)
         .map_err(|e| crate::Error::Platform(format!("invalid excluded-apps JSON: {e}")))?;
@@ -138,6 +145,7 @@ pub fn save_excluded_apps(base: &Path, json: &str) -> crate::Result<()> {
 }
 
 /// Trim each entry, drop blanks, and dedupe while preserving first-seen order.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn canonicalize_excluded(list: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     list.into_iter()
