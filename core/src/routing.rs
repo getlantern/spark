@@ -105,7 +105,7 @@ async fn run(ops: Vec<RouteOp>) -> io::Result<()> {
 }
 
 /// Run one route command. A non-zero exit is an error unless the op tolerates it.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn run_one(op: &RouteOp) -> io::Result<()> {
     let output = tokio::process::Command::new(op.program)
         .args(&op.args)
@@ -127,7 +127,7 @@ async fn run_one(op: &RouteOp) -> io::Result<()> {
 
 /// On unsupported platforms route management is a no-op (logged once at call sites). The TUN
 /// teardown itself still reverts routing on those platforms via OS interface cleanup.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 async fn run_one(_op: &RouteOp) -> io::Result<()> {
     Ok(())
 }
@@ -138,6 +138,8 @@ async fn run_one(_op: &RouteOp) -> io::Result<()> {
 const ROUTE_PROGRAM: &str = "route";
 #[cfg(target_os = "linux")]
 const ROUTE_PROGRAM: &str = "ip";
+#[cfg(target_os = "windows")]
+const ROUTE_PROGRAM: &str = "route";
 
 /// Delete the cover for `half` (used to clear stale covers before re-installing; ignorable).
 #[cfg(target_os = "macos")]
@@ -171,16 +173,53 @@ fn blackhole_op(half: &str) -> RouteOp {
     RouteOp::required(vec!["route", "add", "blackhole", half])
 }
 
+// --- Windows (`route.exe`) --------------------------------------------------------------
+// Windows `route.exe` takes an explicit dest+mask (no CIDR) and routes on-link via an
+// interface index (not a name), so the halves are translated with `half_to_dest_mask` and the
+// `tun` argument carries the resolved interface **index** string (RouteManager formats the
+// index into the `tun` field on Windows — see `RouteManager` below). VALIDATION-DEFERRED: the
+// exact `route add … 0.0.0.0 … IF <idx>` gateway/interface form is per Microsoft docs and is
+// flagged for on-Windows validation (macOS host cannot exercise it).
+
+/// Delete the cover for `half` (used to clear stale covers before re-installing; ignorable).
+/// Windows `route delete <dest>` removes by destination.
+#[cfg(target_os = "windows")]
+fn clear_op(half: &str) -> RouteOp {
+    let (dest, _mask) = half_to_dest_mask(half);
+    RouteOp::ignorable(vec!["delete", dest])
+}
+
+/// Add the cover for `half` via the tun interface. `tun` is the resolved interface **index**
+/// (see `RouteManager` on Windows). `0.0.0.0` gateway + `IF <idx>` routes on-link via that
+/// iface; `metric 1` beats the physical default.
+#[cfg(target_os = "windows")]
+fn via_tun_op(half: &str, tun: &str) -> RouteOp {
+    let (dest, mask) = half_to_dest_mask(half);
+    RouteOp::required(vec![
+        "add", dest, "mask", mask, "0.0.0.0", "metric", "1", "IF", tun,
+    ])
+}
+
+/// Blackhole the cover (fail-closed) independent of the tun: route via loopback (ifindex 1),
+/// which discards. Survives tun teardown.
+#[cfg(target_os = "windows")]
+fn blackhole_op(half: &str) -> RouteOp {
+    let (dest, mask) = half_to_dest_mask(half);
+    RouteOp::required(vec![
+        "add", dest, "mask", mask, "0.0.0.0", "metric", "1", "IF", "1",
+    ])
+}
+
 // A fallback so the crate compiles on other targets; these are never run (`run_one` is a no-op).
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn clear_op(half: &str) -> RouteOp {
     RouteOp::ignorable(vec!["delete", half])
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn via_tun_op(half: &str, tun: &str) -> RouteOp {
     RouteOp::required(vec!["add", half, tun])
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn blackhole_op(half: &str) -> RouteOp {
     RouteOp::required(vec!["blackhole", half])
 }
@@ -300,5 +339,21 @@ mod tests {
             argv(&blackhole_op("0.0.0.0/1")),
             "route add blackhole 0.0.0.0/1"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_uses_route_exe_dest_mask_via_ifindex() {
+        assert_eq!(ROUTE_PROGRAM, "route");
+        // `tun` carries the resolved interface index on Windows.
+        assert_eq!(
+            argv(&via_tun_op("0.0.0.0/1", "12")),
+            "add 0.0.0.0 mask 128.0.0.0 0.0.0.0 metric 1 IF 12"
+        );
+        assert_eq!(
+            argv(&blackhole_op("0.0.0.0/1")),
+            "add 0.0.0.0 mask 128.0.0.0 0.0.0.0 metric 1 IF 1" // loopback ifindex 1 = discard
+        );
+        assert_eq!(argv(&clear_op("128.0.0.0/1")), "delete 128.0.0.0");
     }
 }
