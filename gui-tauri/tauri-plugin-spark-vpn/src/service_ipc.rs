@@ -88,7 +88,9 @@ async fn round_trip(addr: &Path, payload: RequestPayload) -> std::io::Result<Res
     #[cfg(target_os = "windows")]
     {
         use tokio::net::windows::named_pipe::ClientOptions;
-        let pipe = ClientOptions::new().open(addr)?;
+        // `open` takes `impl AsRef<OsStr>`; pass the OsStr explicitly to match the repo's other
+        // named-pipe call sites (a bare `&Path` also satisfies the bound, but this is the convention).
+        let pipe = ClientOptions::new().open(addr.as_os_str())?;
         let mut client = Client::new(pipe);
         client.handshake().await?;
         client.request(payload).await
@@ -151,8 +153,10 @@ mod tests {
     fn request_round_trips_over_a_unix_socket() {
         let addr = temp_sock("rt");
         // Run the server on its own thread + current-thread runtime; IpcClient::request spawns its
-        // own thread/runtime, so the two never nest.
+        // own thread/runtime, so the two never nest. A readiness channel (not a sleep) makes the
+        // client wait until the listener is actually bound.
         let server_addr = addr.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let server = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -160,11 +164,13 @@ mod tests {
                 .unwrap();
             rt.block_on(async move {
                 let listener = UnixListener::bind(&server_addr).unwrap();
+                ready_tx.send(()).unwrap();
                 serve_one(listener, ResponsePayload::Ack).await;
             });
         });
-        // Let the listener bind (it's on another thread).
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("server listener should bind within 5s");
 
         let client = IpcClient::new(addr.clone());
         let resp = client.request(RequestPayload::Connect).unwrap();

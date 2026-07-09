@@ -832,32 +832,30 @@ impl ServiceControl {
         let ipc = crate::service_ipc::IpcClient::new(crate::service_ipc::default_control_addr());
         Self { base, ipc }
     }
+
+    /// Send `payload`, expecting an `Ack`. A service-side `Error` surfaces its message verbatim
+    /// (e.g. Unauthorized / NotConnected); anything else is a protocol mismatch.
+    fn ack(&self, payload: spark_ipc::message::RequestPayload) -> crate::Result<()> {
+        match self.ipc.request(payload)? {
+            spark_ipc::message::ResponsePayload::Ack => Ok(()),
+            spark_ipc::message::ResponsePayload::Error { message, .. } => {
+                Err(crate::Error::Platform(message))
+            }
+            other => Err(crate::Error::Platform(format!(
+                "unexpected reply {other:?}"
+            ))),
+        }
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 impl TunnelControl for ServiceControl {
     fn connect(&self) -> crate::Result<()> {
-        match self
-            .ipc
-            .request(spark_ipc::message::RequestPayload::Connect)?
-        {
-            spark_ipc::message::ResponsePayload::Ack => Ok(()),
-            other => Err(crate::Error::Platform(format!(
-                "connect: unexpected reply {other:?}"
-            ))),
-        }
+        self.ack(spark_ipc::message::RequestPayload::Connect)
     }
 
     fn disconnect(&self) -> crate::Result<()> {
-        match self
-            .ipc
-            .request(spark_ipc::message::RequestPayload::Disconnect)?
-        {
-            spark_ipc::message::ResponsePayload::Ack => Ok(()),
-            other => Err(crate::Error::Platform(format!(
-                "disconnect: unexpected reply {other:?}"
-            ))),
-        }
+        self.ack(spark_ipc::message::RequestPayload::Disconnect)
     }
 
     fn status(&self) -> crate::Result<Status> {
@@ -866,6 +864,9 @@ impl TunnelControl for ServiceControl {
             .request(spark_ipc::message::RequestPayload::GetStatus)?
         {
             spark_ipc::message::ResponsePayload::Status(s) => Ok(crate::service_ipc::map_status(s)),
+            spark_ipc::message::ResponsePayload::Error { message, .. } => {
+                Err(crate::Error::Platform(message))
+            }
             other => Err(crate::Error::Platform(format!(
                 "status: unexpected reply {other:?}"
             ))),
