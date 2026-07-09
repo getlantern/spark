@@ -70,6 +70,7 @@ class SparkVpnService : VpnService() {
 
     // The single registered UI client (last REGISTER wins — the UI is the only client). State pushes
     // go here; cleared when a send fails (client process gone).
+    @Volatile
     private var controlClient: Messenger? = null
 
     override fun onCreate() {
@@ -449,6 +450,7 @@ class SparkVpnService : VpnService() {
         controlClient = null
         controlThread?.quitSafely()
         controlThread = null
+        controlMessenger = null
         super.onDestroy()
     }
 
@@ -456,6 +458,7 @@ class SparkVpnService : VpnService() {
      * Lazily create the control [Messenger] backed by a dedicated [HandlerThread]. Returned from
      * [onBind] for the CONTROL action.
      */
+    @Synchronized
     private fun controlMessenger(): Messenger {
         controlMessenger?.let { return it }
         val t = HandlerThread("spark-control").apply { start() }
