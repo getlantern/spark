@@ -15,7 +15,7 @@
 
 <main class="app">
   <header class="appbar">
-    <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/settings")}>
+    <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/settings", { replaceState: true })}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
     <span class="title">{$_("appearance")}</span>
