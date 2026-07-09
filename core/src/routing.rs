@@ -67,10 +67,12 @@ impl RouteOp {
 ///
 /// **Windows note:** `route.exe` addresses interfaces by numeric **index**, not name, and spark
 /// additionally points the adapter's DNS at its own fake-IP responder via `netsh`. So on Windows
-/// the manager also carries the resolved interface index and the resolver IP. The engine (W2)
-/// threads both from the open tun-rs device (`DeviceImpl::if_index()`) and [`crate::config::TunConfig`]
-/// via [`with_windows_params`](Self::with_windows_params); the CLI path (no engine) falls back to
-/// defaults resolved from the name / the default tun address.
+/// the manager also carries the interface index and the resolver IP, supplied via
+/// [`with_windows_params`](Self::with_windows_params) — the engine (W2) threads them from the open
+/// tun-rs device's `if_index()` and [`crate::config::TunConfig`]. These are **mandatory**: there is
+/// no fallback, and `install`/`restore` fail fast with `Unsupported` if they were not set (so no
+/// unsafe loopback/bogus-IP defaults). Any Windows caller that manages routes (incl. a future CLI
+/// path) must call `with_windows_params` first.
 #[derive(Debug)]
 pub struct RouteManager {
     tun: String,
