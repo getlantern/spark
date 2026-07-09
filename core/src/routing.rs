@@ -29,23 +29,32 @@ use tracing::{debug, warn};
 /// real default.
 const HALVES: [&str; 2] = ["0.0.0.0/1", "128.0.0.0/1"];
 
-/// A single route-table mutation: a command to run, and whether a non-zero exit is tolerable
-/// (true for the pre-clear deletes, which legitimately fail when the route isn't present).
+/// A single route-table (or DNS) mutation: the program to run, its args, and whether a non-zero
+/// exit is tolerable (true for the pre-clear deletes, which legitimately fail when absent).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteOp {
+    program: &'static str,
     args: Vec<String>,
     ignore_failure: bool,
 }
 
 impl RouteOp {
     fn required(args: Vec<&str>) -> Self {
+        Self::required_with(ROUTE_PROGRAM, args)
+    }
+    fn ignorable(args: Vec<&str>) -> Self {
+        Self::ignorable_with(ROUTE_PROGRAM, args)
+    }
+    fn required_with(program: &'static str, args: Vec<&str>) -> Self {
         Self {
+            program,
             args: args.into_iter().map(String::from).collect(),
             ignore_failure: false,
         }
     }
-    fn ignorable(args: Vec<&str>) -> Self {
+    fn ignorable_with(program: &'static str, args: Vec<&str>) -> Self {
         Self {
+            program,
             args: args.into_iter().map(String::from).collect(),
             ignore_failure: true,
         }
@@ -98,7 +107,7 @@ async fn run(ops: Vec<RouteOp>) -> io::Result<()> {
 /// Run one route command. A non-zero exit is an error unless the op tolerates it.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn run_one(op: &RouteOp) -> io::Result<()> {
-    let output = tokio::process::Command::new(ROUTE_PROGRAM)
+    let output = tokio::process::Command::new(op.program)
         .args(&op.args)
         .stdin(std::process::Stdio::null())
         .output()
@@ -108,7 +117,8 @@ async fn run_one(op: &RouteOp) -> io::Result<()> {
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     Err(io::Error::other(format!(
-        "`{ROUTE_PROGRAM} {}` failed ({}): {}",
+        "`{} {}` failed ({}): {}",
+        op.program,
         op.args.join(" "),
         output.status,
         stderr.trim()
@@ -197,6 +207,10 @@ fn block_ops() -> Vec<RouteOp> {
 /// Translate one of the split-default `HALVES` (`"0.0.0.0/1"` / `"128.0.0.0/1"`) to the
 /// `(dest, mask)` pair Windows `route.exe` wants. Only ever called with the two `HALVES`
 /// constants, so the `/1` mask is fixed at `128.0.0.0`; returns static strs.
+// Only wired into runtime callers on Windows (the `route.exe` builders, added in a later
+// task); on macOS/Linux it is exercised solely by the unit tests, so the non-test lib build
+// would otherwise flag it as dead code.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn half_to_dest_mask(half: &str) -> (&'static str, &'static str) {
     match half {
         "0.0.0.0/1" => ("0.0.0.0", "128.0.0.0"),
@@ -217,6 +231,15 @@ mod tests {
     fn half_to_dest_mask_translates_the_two_covers() {
         assert_eq!(half_to_dest_mask("0.0.0.0/1"), ("0.0.0.0", "128.0.0.0"));
         assert_eq!(half_to_dest_mask("128.0.0.0/1"), ("128.0.0.0", "128.0.0.0"));
+    }
+
+    #[test]
+    fn ops_default_to_the_platform_route_program() {
+        // The generic constructors carry the platform's default route program.
+        assert_eq!(RouteOp::required(vec!["x"]).program, ROUTE_PROGRAM);
+        assert_eq!(RouteOp::ignorable(vec!["x"]).program, ROUTE_PROGRAM);
+        // An explicit-program op carries what it was given.
+        assert_eq!(RouteOp::required_with("netsh", vec!["x"]).program, "netsh");
     }
 
     #[test]
