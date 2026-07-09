@@ -44,7 +44,22 @@ hardware; never reported as verified.
     accept loop**, so W2c = a named-pipe round-trip test (mirrors listener.rs's unix test) that
     exercises `pipe::serve` + SDDL FFI + `serve_connection` + ipc in the windows-latest CI job.
     Live SCM/on-Windows tunneling remain deferred to hardware (W4 checklist).
-- **W3 / W4** — not started.
+- **W3 tauri-plugin ServiceControl → real spark-ipc client** — 🔨 **IN PROGRESS** (branch
+  `fisk/windows-w3-service-ipc`). Plan: docs/superpowers/plans/2026-07-09-windows-w3-service-ipc-client.md.
+  ServiceControl (desktop.rs, cfg not(macos)/not(android) = Win+Linux) now drives spark-service over
+  the named pipe (Win) / unix socket (Linux) via a new `service_ipc.rs`: a sync→async bridge on a
+  **single long-lived worker thread + current-thread runtime (mpsc queue)** — required because the
+  plugin commands are `async fn`, so a naive block_on would nest runtimes; the worker also avoids
+  per-poll churn (the GUI polls status ~2s), bounds each round-trip with a 15s timeout, and retries
+  the transient Windows pipe-open errors. Plus `TunnelStatus`→`Status` mapping. connect/disconnect/
+  status are live; settings stay local-persist (the ipc is **profile-based** — no granular setters;
+  live-apply deferred); servers/select_server stay stubbed. **Plugin is its own cargo workspace** (not in the
+  repo-root `--workspace`), so new deps `spark-ipc`(stream)+`tokio` live in its Cargo.toml, gated
+  not(android) (macOS included so the shared bridge unit-tests on the host — its unix path == Linux's).
+  Verified locally on all 3 targets: macOS `clippy`+`test` (round-trip over a real unix socket +
+  `map_status`), Windows `cargo xwin clippy` (ServiceControl + named-pipe branch; `cargo xwin` works on
+  the tauri plugin). **Plugin CI job deferred to W4** (workflow-edit hook + belongs with packaging).
+- **W4** — not started.
 
 ### W1 detail (superseded by the merged status above)
 - code-complete (branch `fisk/windows-w1-routing`).

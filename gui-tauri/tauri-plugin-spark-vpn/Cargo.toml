@@ -20,6 +20,13 @@ thiserror = "2"
 # a conditional dep block; it's a compile-only dependency with no runtime cost on other targets.
 toml = "0.8"
 
+# Windows/Linux desktop: talk to the privileged spark-service over spark-ipc (W3). Gated off
+# android (which uses the JNI core). macOS is included so the transport-agnostic ipc client +
+# status mapping compile and unit-test on the dev host (its unix-socket path == the Linux path).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+spark-ipc = { path = "../../ipc", features = ["stream"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
+
 # macOS: the plugin's AppleControl talks to the NE via objc2 (ne_spike moves here in a later task).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -28,6 +35,11 @@ objc2-foundation = { version = "0.3", features = ["block2", "NSData"] }
 objc2-network-extension = { version = "0.3", features = ["block2"] }
 objc2-system-extensions = { version = "0.3", features = ["dispatch2"] }
 dispatch2 = "0.3"
+
+# Windows: named-pipe transient-error codes (ERROR_FILE_NOT_FOUND / ERROR_PIPE_BUSY) for the
+# ServiceControl connect retry. Version matches the rest of the tree.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
 # Android: JNI to the in-process tunnel core (wired in a later task).
 [target.'cfg(target_os = "android")'.dependencies]

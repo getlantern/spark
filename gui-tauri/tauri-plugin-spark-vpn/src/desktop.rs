@@ -818,33 +818,70 @@ impl TunnelControl for AppleControl {
     }
 }
 
-// ── Windows/Linux: ServiceControl over spark-ipc — future. ───────────────────
+// ── Windows/Linux: ServiceControl over spark-ipc. ────────────────────────────
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 pub(crate) struct ServiceControl {
     pub(crate) base: PathBuf,
+    ipc: crate::service_ipc::IpcClient,
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+impl ServiceControl {
+    pub(crate) fn new(base: PathBuf) -> Self {
+        let ipc = crate::service_ipc::IpcClient::new(crate::service_ipc::default_control_addr());
+        Self { base, ipc }
+    }
+
+    /// Issue `payload` (named `op` for diagnostics), returning the raw reply. Transport/timeout
+    /// failures are prefixed with the operation so a pipe-open failure or timeout is attributable
+    /// in logs, not just protocol mismatches.
+    fn request(
+        &self,
+        op: &str,
+        payload: spark_ipc::message::RequestPayload,
+    ) -> crate::Result<spark_ipc::message::ResponsePayload> {
+        self.ipc
+            .request(payload)
+            .map_err(|e| crate::Error::Platform(format!("{op}: {e}")))
+    }
+
+    /// Send `payload` (named `op`), expecting an `Ack`. A service-side `Error` surfaces its message
+    /// verbatim (e.g. Unauthorized / NotConnected); anything else is a protocol mismatch, reported
+    /// with the operation name.
+    fn ack(&self, op: &str, payload: spark_ipc::message::RequestPayload) -> crate::Result<()> {
+        match self.request(op, payload)? {
+            spark_ipc::message::ResponsePayload::Ack => Ok(()),
+            spark_ipc::message::ResponsePayload::Error { message, .. } => {
+                Err(crate::Error::Platform(message))
+            }
+            other => Err(crate::Error::Platform(format!(
+                "{op}: unexpected reply {other:?}"
+            ))),
+        }
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 impl TunnelControl for ServiceControl {
     fn connect(&self) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
-        ))
+        self.ack("connect", spark_ipc::message::RequestPayload::Connect)
     }
 
     fn disconnect(&self) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
-        ))
+        self.ack("disconnect", spark_ipc::message::RequestPayload::Disconnect)
     }
 
     fn status(&self) -> crate::Result<Status> {
-        Ok(Status {
-            state: "disconnected".into(),
-            protocol: "AnyTLS".into(),
-            fail_open: false,
-        })
+        match self.request("status", spark_ipc::message::RequestPayload::GetStatus)? {
+            spark_ipc::message::ResponsePayload::Status(s) => Ok(crate::service_ipc::map_status(s)),
+            spark_ipc::message::ResponsePayload::Error { message, .. } => {
+                Err(crate::Error::Platform(message))
+            }
+            other => Err(crate::Error::Platform(format!(
+                "status: unexpected reply {other:?}"
+            ))),
+        }
     }
 
     fn servers(&self) -> crate::Result<Vec<ServerInfo>> {
@@ -853,7 +890,7 @@ impl TunnelControl for ServiceControl {
 
     fn select_server(&self, _index: i32) -> crate::Result<()> {
         Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
+            "server selection is not supported by the desktop service yet".into(),
         ))
     }
 
@@ -882,8 +919,8 @@ impl TunnelControl for ServiceControl {
     }
 
     // App split tunneling is Android-only for now; the desktop backend lands in a later phase.
-    // Reads return an empty catalog so the picker loads; the write errors (like the other
-    // not-yet-implemented ServiceControl actions) rather than falsely reporting success.
+    // Reads return an empty catalog so the picker loads; the write errors rather than falsely
+    // reporting success.
     fn list_installed_apps(&self) -> crate::Result<String> {
         Ok("[]".to_string())
     }
@@ -894,7 +931,7 @@ impl TunnelControl for ServiceControl {
 
     fn set_excluded_apps(&self, _json: &str) -> crate::Result<()> {
         Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
+            "per-app split tunneling is not supported by the desktop service yet".into(),
         ))
     }
 }
