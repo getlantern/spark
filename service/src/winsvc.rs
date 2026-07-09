@@ -80,7 +80,36 @@ fn run_service() -> anyhow::Result<()> {
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
         .context("registering the service control handler")?;
 
-    // Report RUNNING and that we accept Stop/Shutdown.
+    // Report START_PENDING first (the SCM contract): it opens a window to do fallible init before
+    // we claim RUNNING, and the wait-hint keeps the SCM's start timeout from firing meanwhile.
+    status_handle
+        .set_service_status(pending(ServiceState::StartPending))
+        .context("reporting START_PENDING to the SCM")?;
+
+    // Do all fallible init BEFORE reporting RUNNING, and turn any failure into a clean
+    // STOPPED-with-error. Otherwise a failure here (bad binPath args, runtime build) would leave
+    // the SCM believing we're RUNNING when the process exits — it flags the service failed and can
+    // trigger a restart storm. `try_parse` (not `parse`) so a bad binPath returns an error instead
+    // of `process::exit`-ing, which would skip the STOPPED report entirely.
+    let init = (|| -> anyhow::Result<(Args, tokio::runtime::Runtime)> {
+        // The binPath arguments arrive as this process's argv, so the same `Args` parse works here.
+        let args = Args::try_parse().context("parsing service arguments")?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("building the tokio runtime")?;
+        Ok((args, runtime))
+    })();
+    let (args, runtime) = match init {
+        Ok(v) => v,
+        Err(e) => {
+            report_stopped(&status_handle, 1);
+            return Err(e);
+        }
+    };
+
+    // Init succeeded → RUNNING (accepting Stop/Shutdown). The GUI client retries pipe-open for ~3s
+    // (ERROR_FILE_NOT_FOUND), covering the brief gap until `serve_daemon` binds the pipe.
     status_handle
         .set_service_status(status(
             ServiceState::Running,
@@ -89,24 +118,53 @@ fn run_service() -> anyhow::Result<()> {
         .context("reporting RUNNING to the SCM")?;
     info!("spark-service running as a Windows service");
 
-    // The binPath arguments arrive as this process's argv, so the same `Args` parse works here.
-    let args = Args::parse();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("building the tokio runtime")?;
-    let result = runtime.block_on(daemon::serve_daemon(args, async move {
-        let _ = shutdown_rx.await;
+    // Isolate a panic in the daemon so we still report STOPPED (else the SCM sees the process
+    // vanish while RUNNING → "service terminated unexpectedly" + recovery). No-op under
+    // `panic = "abort"`; a strict improvement under unwind.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(daemon::serve_daemon(args, async move {
+            let _ = shutdown_rx.await;
+        }))
     }));
 
-    // Report STOPPED regardless of how the daemon exited, so the SCM doesn't think we hung.
-    let _ = status_handle
-        .set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty()));
-    result
+    // Report STOPPED regardless of how the daemon exited (clean, error, or panic), with a non-zero
+    // exit code on failure so the SCM records an error rather than a normal stop.
+    match result {
+        Ok(inner) => {
+            report_stopped(&status_handle, if inner.is_err() { 1 } else { 0 });
+            inner
+        }
+        Err(_panic) => {
+            report_stopped(&status_handle, 1);
+            Err(anyhow::anyhow!("spark-service panicked"))
+        }
+    }
 }
 
-/// Build a `ServiceStatus` for `state` accepting `controls` (no pending-operation hints — our
-/// start and stop are effectively immediate).
+/// Report STOPPED with an exit code (`0` = clean, non-zero = error → the SCM records a failure).
+/// Best-effort: if the SCM call itself fails there's nothing left to do but log it.
+fn report_stopped(handle: &service_control_handler::ServiceStatusHandle, code: u32) {
+    let exit_code = if code == 0 {
+        ServiceExitCode::NO_ERROR
+    } else {
+        ServiceExitCode::ServiceSpecific(code)
+    };
+    let stopped = ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code,
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    };
+    if let Err(e) = handle.set_service_status(stopped) {
+        error!(error = %e, "reporting STOPPED to the SCM failed");
+    }
+}
+
+/// Build a `ServiceStatus` for a steady `state` accepting `controls` (RUNNING/STOPPED — no
+/// pending-operation hints).
 fn status(state: ServiceState, controls: ServiceControlAccept) -> ServiceStatus {
     ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
@@ -115,6 +173,20 @@ fn status(state: ServiceState, controls: ServiceControlAccept) -> ServiceStatus 
         exit_code: ServiceExitCode::NO_ERROR,
         checkpoint: 0,
         wait_hint: Duration::default(),
+        process_id: None,
+    }
+}
+
+/// Build a transient `*_PENDING` status with a checkpoint + wait-hint so the SCM waits for the
+/// transition instead of timing it out. No controls are accepted while it's in flight.
+fn pending(state: ServiceState) -> ServiceStatus {
+    ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: state,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::NO_ERROR,
+        checkpoint: 1,
+        wait_hint: Duration::from_secs(10),
         process_id: None,
     }
 }
