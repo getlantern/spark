@@ -29,10 +29,13 @@ import org.getlantern.spark.control.vpnStateFromWire
  * lingering binding never keeps a stopped `:vpn` alive.
  */
 class SparkControlClient(private val context: Context) {
-    private val incomingThread = HandlerThread("spark-control-client").apply { start() }
-    private val incoming = Messenger(
-        Handler(incomingThread.looper, Handler.Callback { msg -> handleReply(msg); true }),
-    )
+    // The reply channel. Created lazily on first use — first touched in onServiceConnected (to stamp
+    // replyTo on REGISTER), which only fires on a successful bind — so a UI process that never
+    // connects pays nothing for the thread. Process-lifetime once created (no shutdown path needed).
+    private val incoming: Messenger by lazy {
+        val t = HandlerThread("spark-control-client").apply { start() }
+        Messenger(Handler(t.looper, Handler.Callback { msg -> handleReply(msg); true }))
+    }
 
     private val serversPending = PendingRequests<String>()
     private val selectPending = PendingRequests<Boolean>()

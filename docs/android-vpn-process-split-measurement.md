@@ -1,6 +1,6 @@
 # Android `:vpn` process split — on-device measurement (Redmi)
 
-Device: Redmi (`HQAEJJWG6HYDWW9P`), Android 15 / API 36, 720×1600, low-RAM class.
+Device: Redmi (serial redacted), Android 15 / API 36, 720×1600, low-RAM class.
 Build: **debug** arm64 APK of branch `fisk/android-vpn-process-split` (`app-universal-debug.apk`).
 Date: 2026-07-09. Tunnel connected, live traffic.
 

@@ -950,7 +950,7 @@ Expected: green (per the `spark-android-target-verify` convention — plain `--t
 
 - [ ] **Step 4: Build + install the app on the Redmi**
 
-Confirm the device: `adb devices` (expect `HQAEJJWG6HYDWW9P device`). Build and install the Tauri Android app (arm64):
+Confirm the device: `adb devices` (your device should be listed as `device`). Build and install the Tauri Android app (arm64):
 
 ```bash
 cd gui-tauri && npm run tauri android build -- --apk --target aarch64
