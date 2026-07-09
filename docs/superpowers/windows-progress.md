@@ -14,7 +14,16 @@ hardware; never reported as verified.
   route.exe split-default covers via tun ifindex, blackhole kill-switch (loopback IF 1), netsh
   adapter DNS (DNS set/cleared before/around route changes so a netsh failure can't leave a bad
   partial state), ifindex from tun-rs `if_index()` via `with_windows_params` (mandatory).
-- **W2 live spark-service** — in progress (branch `fisk/windows-w2-service` off `5d9b494`).
+- **W2 live spark-service** — in progress; **split into two PRs** for tractable review (each
+  self-contained + testable):
+  - **W2a core-side tunnel wiring** (branch `fisk/windows-w2-service`): `Tun::if_index()` accessor
+    (cfg windows, delegates to tun-rs); thread `RouteManager::with_windows_params(if_index, tun addr)`
+    in `CoreEngine::start` on Windows (engine.rs:146 — install now needs the params); Windows
+    `SocketProtector` in `core/src/net.rs` (`IP_UNICAST_IF`) so the proxy's own dials bypass the
+    tunnel (loop-prevention deferred from W1). Plan: docs/superpowers/plans/2026-07-09-windows-w2a-*.
+  - **W2b service transport live** (later branch): make `pipe.rs` (named-pipe accept + SDDL),
+    `winsvc.rs`/`daemon.rs` (SCM), `auth.rs` (Windows peer authz) live — all currently
+    "type-checked, never run". `CoreEngine` itself is already the real engine (not a stub).
 - **W3 / W4** — not started.
 
 ### W1 detail (superseded by the merged status above)
