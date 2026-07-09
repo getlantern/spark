@@ -4,9 +4,10 @@
 //! Windows has no `SO_PEERCRED`; the privilege boundary is the pipe's **DACL**. We create the pipe
 //! with a security descriptor granting full control to Local System (`SY`) and the built-in
 //! Administrators group (`BA`), and read/write (connect) to the **Interactive** user (`IU`). Local
-//! System runs the service; `IU` is the logged-on desktop user whose token is UAC-filtered, so
-//! granting it explicitly is what lets the *unprivileged* Tauri GUI open the pipe and drive the
-//! tunnel without elevation (the spec's intended model — see the pipe-DACL decision in
+//! System runs the service; `IU` matches whoever is logged on interactively — either a standard
+//! (non-admin) user, or an admin whose desktop process runs with a UAC-filtered token. Neither has
+//! effective `BA`, so granting `IU` explicitly is what lets the *unprivileged* Tauri GUI open the
+//! pipe and drive the tunnel without elevation (the spec's intended model — see the pipe-DACL decision in
 //! docs/superpowers/windows-progress.md). This DACL *is* the authorization boundary (the Windows
 //! analog of the unix peer-cred / `spark`-group check, process-architecture-and-ipc.md §3), so there
 //! is no per-connection credential test here. The per-connection serve loop
