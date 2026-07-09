@@ -170,6 +170,24 @@ impl Router {
             _ => Action::Proxy,                     // Full (or unmatched) → Proxy
         }
     }
+
+    /// True if `domain` is ad-blocked (and ad-block is enabled) — mirrors the ad-block precedence in
+    /// [`decide`](Self::decide) but keyed on the domain alone (no connection IP exists yet at DNS
+    /// time; ad-block rule-sets are domain-based). The DNS layer uses this to answer NODATA for a
+    /// blocked domain — no fake IP, so the client never opens a connection — which is far cheaper than
+    /// allocating a fake IP and Rejecting the resulting flow (that path churns the netstack socket set
+    /// on ad-heavy pages). Honors the live Settings toggle.
+    pub fn is_ad_blocked(&self, domain: &str) -> bool {
+        *self
+            .ad_block_enabled
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            && matches!(
+                self.ad_block
+                    .lookup(Some(domain), IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                Some(Action::Reject)
+            )
+    }
 }
 
 /// The proxy layer's routing seam ([`crate::proxy::FlowRouter`]), mapping this module's [`Action`]
@@ -377,6 +395,55 @@ mod tests {
         // Re-enable → rejected again (live, no rebuild).
         r.set_ad_block_enabled(true);
         assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
+    }
+
+    #[test]
+    fn is_ad_blocked_matches_only_ad_block_rulesets_and_honors_toggle() {
+        // The DNS layer calls `is_ad_blocked` to answer NODATA (no fake IP) for ad domains, so it
+        // must match exactly the ad-block matcher — not `base` rejects — and honor the same live
+        // Settings toggle as `decide`.
+        use crate::config::{InlineIpRule, RouteAction, RuleSetRef, SmartRoutingConfig};
+        let sr = SmartRoutingConfig {
+            rule_sets: vec![
+                RuleSetRef {
+                    action: RouteAction::Reject,
+                    tag: "banad".into(),
+                    url: "u".into(),
+                    ad_block: true,
+                },
+                RuleSetRef {
+                    action: RouteAction::Direct,
+                    tag: "common".into(),
+                    url: "u".into(),
+                    ad_block: false,
+                },
+            ],
+            // An inline config Reject — NOT ad-block; is_ad_blocked must not report it as one.
+            inline_ip_rules: vec![InlineIpRule {
+                cidr: "203.0.113.0/24".into(),
+                action: RouteAction::Reject,
+            }],
+        };
+        let r = Router::build(&sr, |rs| {
+            let name = match rs.tag.as_str() {
+                "banad" => "banad_v1",
+                "common" => "common_v3",
+                _ => return None,
+            };
+            std::fs::read(format!("tests/fixtures/srs/{name}.srs")).ok()
+        });
+        // An ad host in the ad_block list → blocked.
+        assert!(r.is_ad_blocked("doubleclick.net"));
+        // A smart-routing Direct host is not an ad block.
+        assert!(!r.is_ad_blocked("app.discord.com"));
+        // An unlisted host is not an ad block.
+        assert!(!r.is_ad_blocked("example-unlisted-xyz.test"));
+        // Disabling ad-block lifts is_ad_blocked (live, no rebuild)…
+        r.set_ad_block_enabled(false);
+        assert!(!r.is_ad_blocked("doubleclick.net"));
+        // …and re-enabling restores it.
+        r.set_ad_block_enabled(true);
+        assert!(r.is_ad_blocked("doubleclick.net"));
     }
 
     #[test]

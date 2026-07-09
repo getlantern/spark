@@ -53,12 +53,22 @@ impl crate::proxy::DomainRecoverer for FakeIpRecoverer {
     }
 }
 
+/// A domain ad-block predicate the DNS server consults before allocating a fake IP: `true` means
+/// "blocked" and the query is answered NODATA (no fake IP), so the client never opens a connection.
+/// Wraps the live ad-block matcher (e.g. [`crate::rules::router::Router::is_ad_blocked`]) so the
+/// Settings toggle is honored per query.
+pub type AdBlockCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// Answers the app's DNS queries with fake IPs from the shared pool.
 pub struct DnsServer {
     pool: SharedFakeIp,
     /// TTL (seconds) stamped into A/AAAA answers. Kept short so the client re-queries and the pool's
     /// entries stay warm; it needn't equal the pool's own entry TTL.
     answer_ttl_secs: u32,
+    /// Optional ad-block predicate. When set and it returns `true` for a query's domain, the query is
+    /// answered NODATA and no fake IP is allocated — blocking at DNS is far cheaper than allocating a
+    /// fake IP and Rejecting the resulting flow, which churns the netstack socket set on ad-heavy pages.
+    ad_block: Option<AdBlockCheck>,
 }
 
 impl DnsServer {
@@ -67,7 +77,15 @@ impl DnsServer {
         Self {
             pool,
             answer_ttl_secs,
+            ad_block: None,
         }
+    }
+
+    /// Consult `check(domain)` before allocating a fake IP; a domain it blocks gets a NODATA answer
+    /// (no connection, no fake-IP mapping). Builder so existing callers/tests are unaffected.
+    pub fn with_ad_block(mut self, check: AdBlockCheck) -> Self {
+        self.ad_block = Some(check);
+        self
     }
 
     /// Handle one raw DNS query datagram, returning the raw response to send back, or `None` to drop
@@ -91,6 +109,16 @@ impl DnsServer {
         // (`Address::domain("")` is rejected), so answer NODATA rather than store an unusable mapping.
         if query.name.is_empty() {
             return Some(wire::build_response(&query, &[], self.answer_ttl_secs));
+        }
+        // Ad-block at the DNS layer: a blocked domain gets NODATA (no fake IP), so the client never
+        // opens a connection. Far cheaper than allocating a fake IP and having the proxy Reject the
+        // resulting flow — that path churns the netstack socket set on ad-heavy pages and stalls
+        // legitimate flows. Honors the live Settings toggle via the injected predicate.
+        if let Some(is_blocked) = &self.ad_block {
+            if is_blocked(&query.name) {
+                debug!(domain = %query.name, "dns: ad-blocked domain → NODATA (no fake IP)");
+                return Some(wire::build_response(&query, &[], self.answer_ttl_secs));
+            }
         }
         let ip = self
             .pool
@@ -206,6 +234,39 @@ mod tests {
             pool.lock().unwrap().len(),
             0,
             "no mapping allocated for non-A/AAAA"
+        );
+    }
+
+    #[test]
+    fn ad_blocked_domain_gets_nodata_and_allocates_nothing() {
+        let pool = shared_pool(Duration::from_secs(300), 100);
+        let srv = DnsServer::new(Arc::clone(&pool), 30)
+            .with_ad_block(Arc::new(|d: &str| d == "ads.example.com"));
+
+        // Blocked domain: NODATA, no answer, no fake-IP mapping — the client never connects.
+        let resp = srv
+            .handle(&make_query(1, "ads.example.com", wire::TYPE_A))
+            .unwrap();
+        assert_eq!(
+            u16::from_be_bytes([resp[6], resp[7]]),
+            0,
+            "NODATA: no answers for a blocked domain"
+        );
+        assert_eq!(resp[3] & 0x0F, 0, "RCODE NOERROR");
+        assert!(first_answer(&resp).is_none());
+        assert_eq!(
+            pool.lock().unwrap().len(),
+            0,
+            "no fake IP allocated for a blocked domain"
+        );
+
+        // A non-blocked domain still gets a fake IP (ad-block doesn't affect normal traffic).
+        let resp = srv
+            .handle(&make_query(2, "good.example.com", wire::TYPE_A))
+            .unwrap();
+        assert!(
+            first_answer(&resp).is_some(),
+            "a non-blocked domain must still get a fake IP"
         );
     }
 
