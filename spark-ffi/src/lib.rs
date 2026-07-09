@@ -386,7 +386,10 @@ impl Backend {
     /// pipe on Windows). Does not connect until a method is called.
     #[uniffi::constructor]
     pub fn new(socket_path: String) -> Result<Arc<Self>, BackendError> {
+        // This is the control-plane client runtime (it talks to the privileged service over a
+        // socket/pipe), not the data path — 2 workers is plenty and avoids one-worker-per-core.
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .map_err(transport)?;
