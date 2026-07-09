@@ -20,12 +20,14 @@
     <application>
         <!-- The VpnService must require BIND_VPN_SERVICE and advertise the VpnService action.
              It runs in the foreground (foregroundServiceType=specialUse + the "vpn" subtype) so
-             Android keeps the tunnel alive while the app is backgrounded. This manifest merges
-             into the consuming app. -->
+             the app is backgrounded. It runs in a private ":vpn" process (android:process) so the
+             UI process's WebView can be reclaimed while the tunnel stays up; the UI drives it over a
+             control Messenger (SparkControlClient). This manifest merges into the consuming app. -->
         <service
             android:name="org.getlantern.spark.SparkVpnService"
             android:exported="false"
             android:foregroundServiceType="specialUse"
+            android:process=":vpn"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
