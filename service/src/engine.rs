@@ -145,6 +145,20 @@ impl TunnelEngine for CoreEngine {
         // partial state.
         if config.routing.manage {
             let mut routes = RouteManager::new(&device);
+            // Windows `route.exe`/`netsh` address the adapter by numeric interface index, and spark
+            // points the adapter's DNS at the tun's own fake-IP resolver (its IPv4 address). W1's
+            // Windows RouteManager makes these params mandatory (install() fails fast otherwise), so
+            // supply them from the open device here. No-op on macOS/Linux (name-addressed routes).
+            #[cfg(target_os = "windows")]
+            {
+                let ifindex = match self.tun.as_ref() {
+                    Some(tun) => tun
+                        .if_index()
+                        .map_err(|e| EngineError(format!("querying TUN interface index: {e}")))?,
+                    None => return Err(EngineError("TUN missing while installing routes".into())),
+                };
+                routes = routes.with_windows_params(ifindex, config.tun.addr);
+            }
             let outcome = routes.install().await;
             self.routes = Some(routes);
             if let Err(e) = outcome {
