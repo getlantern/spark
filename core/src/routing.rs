@@ -194,12 +194,29 @@ fn block_ops() -> Vec<RouteOp> {
     ops
 }
 
+/// Translate one of the split-default `HALVES` (`"0.0.0.0/1"` / `"128.0.0.0/1"`) to the
+/// `(dest, mask)` pair Windows `route.exe` wants. Only ever called with the two `HALVES`
+/// constants, so the `/1` mask is fixed at `128.0.0.0`; returns static strs.
+fn half_to_dest_mask(half: &str) -> (&'static str, &'static str) {
+    match half {
+        "0.0.0.0/1" => ("0.0.0.0", "128.0.0.0"),
+        "128.0.0.0/1" => ("128.0.0.0", "128.0.0.0"),
+        other => unreachable!("half_to_dest_mask called with non-HALVES value: {other}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn argv(op: &RouteOp) -> String {
         op.args.join(" ")
+    }
+
+    #[test]
+    fn half_to_dest_mask_translates_the_two_covers() {
+        assert_eq!(half_to_dest_mask("0.0.0.0/1"), ("0.0.0.0", "128.0.0.0"));
+        assert_eq!(half_to_dest_mask("128.0.0.0/1"), ("128.0.0.0", "128.0.0.0"));
     }
 
     #[test]
