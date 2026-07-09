@@ -26,7 +26,8 @@
       {#each OPTIONS as opt, i (opt)}
         {#if i > 0}<div class="divider"></div>{/if}
         <button class="row" aria-pressed={$theme === opt} onclick={() => choose(opt)}>
-          <div class="meta"><div class="name">{$_(opt)}</div></div>
+          <!-- Literal $_() per value (not $_(opt)) so the i18n key-coverage guard protects these keys. -->
+          <div class="meta"><div class="name">{opt === "light" ? $_("light") : opt === "dark" ? $_("dark") : $_("system")}</div></div>
           <span class="radio" class:on={$theme === opt} aria-hidden="true"></span>
         </button>
       {/each}

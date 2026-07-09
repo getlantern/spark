@@ -1,6 +1,20 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { get } from "svelte/store";
-import { resolveTheme, setTheme, theme } from "./theme";
+import { coerceTheme, resolveTheme, setTheme, theme } from "./theme";
+
+describe("coerceTheme", () => {
+  it("passes valid themes through", () => {
+    expect(coerceTheme("system")).toBe("system");
+    expect(coerceTheme("light")).toBe("light");
+    expect(coerceTheme("dark")).toBe("dark");
+  });
+  it("defaults to 'system' for a missing or unknown value", () => {
+    expect(coerceTheme(null)).toBe("system");
+    expect(coerceTheme(undefined)).toBe("system");
+    expect(coerceTheme("")).toBe("system");
+    expect(coerceTheme("solarized")).toBe("system");
+  });
+});
 
 describe("resolveTheme", () => {
   it("passes explicit modes through", () => {

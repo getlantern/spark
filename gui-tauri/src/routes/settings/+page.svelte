@@ -55,7 +55,8 @@
       <button class="row nav" onclick={() => goto("/settings/appearance")}>
         <span class="ic">{@render gear()}</span>
         <div class="meta"><div class="name">{$_("appearance")}</div></div>
-        <span class="value">{$_($theme)}</span>
+        <!-- Literal $_() per value (not $_($theme)) so the i18n key-coverage guard protects these keys. -->
+        <span class="value">{$theme === "light" ? $_("light") : $theme === "dark" ? $_("dark") : $_("system")}</span>
         <span class="chev">{@render chevron()}</span>
       </button>
       <div class="divider"></div>

@@ -9,14 +9,19 @@ export type Theme = "system" | "light" | "dark";
 const STORAGE_KEY = "spark.theme";
 const THEMES: Theme[] = ["system", "light", "dark"];
 
+/** Coerce a raw stored value to a valid Theme, defaulting to 'system' for a missing/unknown value.
+ * Pure (no localStorage) so the init/default/fallback behavior is unit-testable. */
+export function coerceTheme(v: string | null | undefined): Theme {
+  return v && (THEMES as string[]).includes(v) ? (v as Theme) : "system";
+}
+
 function initialTheme(): Theme {
   try {
-    const v = localStorage.getItem(STORAGE_KEY);
-    if (v && (THEMES as string[]).includes(v)) return v as Theme;
+    return coerceTheme(localStorage.getItem(STORAGE_KEY));
   } catch {
     /* localStorage unavailable (SSR / node) */
+    return "system";
   }
-  return "system";
 }
 
 export const theme = writable<Theme>(initialTheme());
