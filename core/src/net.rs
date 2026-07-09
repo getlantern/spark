@@ -144,6 +144,76 @@ pub fn default_physical_interface() -> Option<String> {
     None
 }
 
+/// True if `interface` has a **global-unicast** IPv6 address (`2000::/3`) — the pragmatic signal
+/// that the physical uplink can reach the public IPv6 internet.
+///
+/// The fake-IP DNS otherwise hands out an AAAA fake IP for every name; the app (Happy Eyeballs)
+/// then prefers IPv6, and a `Direct` flow dials a real IPv6 that a v4-only uplink can't route
+/// (`EHOSTUNREACH`), stalling the flow before it falls back to proxy. When this returns `false`
+/// the DNS server suppresses AAAA (answers NODATA) so the app uses IPv4. Enumerates via
+/// `getifaddrs` (raw `libc` on unix, the crate on Windows); `false` on error.
+#[cfg(unix)]
+pub fn interface_has_global_ipv6(interface: &str) -> bool {
+    use std::ffi::CStr;
+    let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` allocates the list; we read fields only while it's alive and
+    // `freeifaddrs` before returning on every path that allocated.
+    unsafe {
+        if libc::getifaddrs(&mut ifap) != 0 || ifap.is_null() {
+            return false;
+        }
+        let mut found = false;
+        let mut cur = ifap;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() || ifa.ifa_name.is_null() {
+                continue;
+            }
+            if i32::from((*ifa.ifa_addr).sa_family) != libc::AF_INET6 {
+                continue;
+            }
+            if CStr::from_ptr(ifa.ifa_name).to_bytes() != interface.as_bytes() {
+                continue;
+            }
+            let sa6 = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+            if is_global_unicast_v6(std::net::Ipv6Addr::from(sa6.sin6_addr.s6_addr)) {
+                found = true;
+                break;
+            }
+        }
+        libc::freeifaddrs(ifap);
+        found
+    }
+}
+
+/// Windows: same check via the cross-platform `getifaddrs` crate. See the unix variant's doc.
+#[cfg(windows)]
+pub fn interface_has_global_ipv6(interface: &str) -> bool {
+    getifaddrs::getifaddrs()
+        .map(|ifaces| {
+            ifaces.filter(|i| i.name == interface).any(|i| {
+                matches!(i.address.ip_addr(), Some(std::net::IpAddr::V6(a)) if is_global_unicast_v6(a))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Platforms without interface enumeration: can't probe, so assume IPv6 is present and don't
+/// suppress AAAA (preserves prior behavior). See the unix variant's doc.
+#[cfg(not(any(unix, windows)))]
+pub fn interface_has_global_ipv6(_interface: &str) -> bool {
+    true
+}
+
+/// A global-unicast IPv6 address (`2000::/3`), the currently-allocated public range. Excludes
+/// link-local (`fe80::/10`), unique-local (`fc00::/7` — includes our own `fd00:2018::/32` fake
+/// range), loopback (`::1`), unspecified (`::`), and multicast (`ff00::/8`) — none of which imply
+/// reachable public IPv6. (`Ipv6Addr::is_global` is unstable, so classify by prefix directly.)
+fn is_global_unicast_v6(a: std::net::Ipv6Addr) -> bool {
+    (a.segments()[0] & 0xE000) == 0x2000
+}
+
 /// Resolve an interface name to its index via `if_nametoindex`.
 #[cfg(unix)]
 fn interface_index(interface: &str) -> io::Result<NonZeroU32> {
@@ -326,6 +396,39 @@ mod tests {
             }
             SocketProtector::for_interface(&name).expect("discovered interface should resolve");
         }
+    }
+
+    #[test]
+    fn global_unicast_v6_classifies_addresses() {
+        use std::net::Ipv6Addr;
+        // Global unicast (2000::/3): usable public IPv6.
+        assert!(is_global_unicast_v6(
+            "2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap()
+        ));
+        assert!(is_global_unicast_v6(
+            "2001:db8::1".parse::<Ipv6Addr>().unwrap()
+        ));
+        assert!(is_global_unicast_v6("3fff::1".parse::<Ipv6Addr>().unwrap())); // top of 2000::/3
+                                                                               // Not global unicast → not a signal of reachable public v6.
+        assert!(!is_global_unicast_v6(
+            "fe80::1".parse::<Ipv6Addr>().unwrap()
+        )); // link-local
+        assert!(!is_global_unicast_v6(
+            "fd00:2018::1".parse::<Ipv6Addr>().unwrap()
+        )); // ULA (our fake range)
+        assert!(!is_global_unicast_v6(Ipv6Addr::LOCALHOST)); // ::1
+        assert!(!is_global_unicast_v6(Ipv6Addr::UNSPECIFIED)); // ::
+        assert!(!is_global_unicast_v6(
+            "ff02::1".parse::<Ipv6Addr>().unwrap()
+        )); // multicast
+        assert!(!is_global_unicast_v6(
+            "4000::1".parse::<Ipv6Addr>().unwrap()
+        )); // above 2000::/3
+    }
+
+    #[test]
+    fn interface_has_global_ipv6_false_for_unknown_iface() {
+        assert!(!interface_has_global_ipv6("definitely-not-an-iface-xyz"));
     }
 
     // Confirms the IP_BOUND_IF / IP_UNICAST_IF setsockopt actually applies on this host

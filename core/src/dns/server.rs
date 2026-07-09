@@ -69,15 +69,22 @@ pub struct DnsServer {
     /// answered NODATA and no fake IP is allocated — blocking at DNS is far cheaper than allocating a
     /// fake IP and Rejecting the resulting flow, which churns the netstack socket set on ad-heavy pages.
     ad_block: Option<AdBlockCheck>,
+    /// Whether to answer AAAA queries with a fake IPv6. When `false` (no usable IPv6 egress on the
+    /// physical uplink) AAAA gets NODATA so the app falls back to IPv4 — otherwise Happy Eyeballs
+    /// prefers the fake v6, a `Direct` flow dials a real IPv6 the uplink can't route (`EHOSTUNREACH`),
+    /// and the flow stalls before falling back to proxy.
+    answer_aaaa: bool,
 }
 
 impl DnsServer {
-    /// A server over `pool`, stamping `answer_ttl_secs` into its A/AAAA answers.
+    /// A server over `pool`, stamping `answer_ttl_secs` into its A/AAAA answers. AAAA answers are on
+    /// by default; disable with [`with_aaaa`](Self::with_aaaa) when there's no IPv6 egress.
     pub fn new(pool: SharedFakeIp, answer_ttl_secs: u32) -> Self {
         Self {
             pool,
             answer_ttl_secs,
             ad_block: None,
+            answer_aaaa: true,
         }
     }
 
@@ -85,6 +92,14 @@ impl DnsServer {
     /// (no connection, no fake-IP mapping). Builder so existing callers/tests are unaffected.
     pub fn with_ad_block(mut self, check: AdBlockCheck) -> Self {
         self.ad_block = Some(check);
+        self
+    }
+
+    /// Enable/disable AAAA answers. Pass `false` when the egress interface has no global IPv6
+    /// ([`crate::net::interface_has_global_ipv6`]) so AAAA is answered NODATA and apps use IPv4.
+    /// Builder so existing callers/tests are unaffected (default: enabled).
+    pub fn with_aaaa(mut self, answer: bool) -> Self {
+        self.answer_aaaa = answer;
         self
     }
 
@@ -105,6 +120,13 @@ impl DnsServer {
             // Non-A/AAAA (HTTPS/SVCB, TXT, PTR, …): NODATA so the client falls back to A/AAAA.
             _ => return Some(wire::build_response(&query, &[], self.answer_ttl_secs)),
         };
+        // No usable IPv6 egress → answer AAAA with NODATA (no fake v6) so the app uses IPv4. A fake
+        // v6 would make Happy Eyeballs prefer IPv6, and a Direct flow would then dial a real IPv6 the
+        // uplink can't route (EHOSTUNREACH), stalling before the proxy fallback. IPv4 direct works.
+        if want_v6 && !self.answer_aaaa {
+            debug!("dns: AAAA suppressed (no IPv6 egress) → NODATA");
+            return Some(wire::build_response(&query, &[], self.answer_ttl_secs));
+        }
         // An empty QNAME (the DNS root) has no address and can't be recovered into a dialable domain
         // (`Address::domain("")` is rejected), so answer NODATA rather than store an unusable mapping.
         if query.name.is_empty() {
@@ -214,6 +236,38 @@ mod tests {
             IpAddr::V4(_) => panic!("AAAA query must yield a v6 fake IP"),
         }
         assert_eq!(recover_domain(&pool, ip), Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn aaaa_suppressed_returns_nodata_and_a_still_works() {
+        let pool = shared_pool(Duration::from_secs(300), 100);
+        let srv = DnsServer::new(Arc::clone(&pool), 30).with_aaaa(false);
+
+        // AAAA with suppression on: NODATA, no answer, no allocation → app falls back to IPv4.
+        let resp = srv
+            .handle(&make_query(1, "example.com", wire::TYPE_AAAA))
+            .unwrap();
+        assert_eq!(
+            u16::from_be_bytes([resp[6], resp[7]]),
+            0,
+            "NODATA: no AAAA answer when v6 egress is absent"
+        );
+        assert_eq!(resp[3] & 0x0F, 0, "RCODE NOERROR");
+        assert!(first_answer(&resp).is_none());
+        assert_eq!(
+            pool.lock().unwrap().len(),
+            0,
+            "no fake IP allocated for a suppressed AAAA"
+        );
+
+        // A queries are unaffected: a fake v4 is still handed out.
+        let resp = srv
+            .handle(&make_query(2, "example.com", wire::TYPE_A))
+            .unwrap();
+        match first_answer(&resp).expect("an A answer") {
+            IpAddr::V4(_) => {}
+            IpAddr::V6(_) => panic!("A query must yield a v4 fake IP"),
+        }
     }
 
     #[test]

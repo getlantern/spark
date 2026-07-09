@@ -617,9 +617,21 @@ fn setup_routing_and_udp(
             direct_resolver: dns::resolver::direct_resolver(&config.dns),
             proxy_resolver: dns::resolver::proxy_resolver(&config.dns),
         });
+        // Suppress AAAA fake-IPs when the egress interface has no usable IPv6. Otherwise Happy
+        // Eyeballs prefers the fake v6 and a Direct flow dials a real IPv6 the uplink can't route
+        // (EHOSTUNREACH), stalling before the proxy fallback. Unknown egress (no protect_interface —
+        // e.g. Android's addDisallowedApplication bypass) → keep AAAA. When v6 egress IS present,
+        // direct v6 dials are pinned to that interface (SocketProtector) and work, so AAAA stays on.
+        let answer_aaaa = config
+            .transport
+            .protect_interface
+            .as_deref()
+            .map(crate::net::interface_has_global_ipv6)
+            .unwrap_or(true);
         let dns_server = Arc::new(
             dns::server::DnsServer::new(pool, DNS_ANSWER_TTL_SECS)
-                .with_ad_block(Arc::new(move |d: &str| ad_block_router.is_ad_blocked(d))),
+                .with_ad_block(Arc::new(move |d: &str| ad_block_router.is_ad_blocked(d)))
+                .with_aaaa(answer_aaaa),
         );
         info!(
             rule_sets = sr.rule_sets.len(),
@@ -627,6 +639,7 @@ fn setup_routing_and_udp(
             user_bypass = user_bypass
                 .as_ref()
                 .map_or(0, |s| s.domains.len() + s.ips.len()),
+            answer_aaaa,
             "smart-routing: fake-IP DNS + per-flow route hooks active"
         );
         (Some(hooks), Some(dns_server))
