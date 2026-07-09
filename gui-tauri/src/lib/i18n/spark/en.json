@@ -1,0 +1,23 @@
+{
+  "app_name_spark": "SPARK",
+  "vpn_status": "VPN status",
+  "routing_mode": "Routing Mode",
+  "routing_smart_title": "Smart Routing",
+  "routing_smart_desc": "Routes only blocked traffic through the VPN",
+  "routing_full_title": "Full Tunnel",
+  "routing_full_desc": "Routes all traffic through VPN",
+  "split_tunneling": "Split Tunneling",
+  "split_tunneling_desc": "Add apps & websites to bypass the VPN",
+  "split_apps": "Apps",
+  "split_websites": "Websites",
+  "app_split_tunneling_title": "App Split Tunneling",
+  "search_apps": "Search apps",
+  "website_split_tunneling_title": "Website Split Tunneling",
+  "website_enter_url": "Enter URL or IP Address",
+  "website_none_selected": "No websites selected",
+  "website_comma_hint": "Use commas to separate multiple URLs",
+  "server_selection": "Server selection",
+  "server_smart_location": "Smart location",
+  "server_fastest": "Fastest server",
+  "server_all_locations": "All locations"
+}
