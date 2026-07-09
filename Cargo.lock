@@ -2520,6 +2520,7 @@ dependencies = [
  "flint-verify",
  "foreign-types-shared",
  "futures",
+ "getifaddrs",
  "h2",
  "http",
  "libc",
@@ -2543,6 +2544,7 @@ dependencies = [
  "wat",
  "webpki-root-certs",
  "webpki-roots",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
