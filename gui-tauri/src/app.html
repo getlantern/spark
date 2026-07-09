@@ -7,6 +7,18 @@
          (Android 15 draws behind the status bar + camera cutout by default; iOS notch). -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Spark</title>
+    <script>
+      // Zero-flash appearance: resolve the persisted theme before first paint so a dark-mode user
+      // never sees a light flash during the i18n render-gate. Mirrors src/lib/theme.ts resolveTheme;
+      // inline + dependency-free on purpose. +layout.svelte re-applies data-theme reactively after.
+      (function () {
+        try {
+          var t = localStorage.getItem("spark.theme") || "system";
+          var dark = t === "dark" || (t !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+        } catch (e) {}
+      })();
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
