@@ -337,7 +337,7 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     /**
      * Persist the split-tunnel list to `<filesDir>/split_tunnel.json` and, if the tunnel is up, push
-     * it live via `nativeSetSplitTunnel`.
+     * it live via `control.setSplitTunnel`.
      */
     @Command
     fun setSplitTunnel(invoke: Invoke) {
@@ -411,7 +411,7 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     /**
      * Persist the routing mode to `<filesDir>/routing_mode.txt` (rejecting anything but smart/full)
-     * and, if the tunnel is up, push it live via `nativeSetRoutingMode`.
+     * and, if the tunnel is up, push it live via `control.setRoutingMode`.
      */
     @Command
     fun setRoutingMode(invoke: Invoke) {
