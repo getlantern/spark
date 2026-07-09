@@ -111,6 +111,10 @@ int32_t spark_set_app_bypass(const char *json);
  * path has no router). */
 int32_t spark_set_routing_mode(const char *mode);
 
+/* Enable (`enabled != 0`) or disable (`0`) ad-block on the running tunnel live. Returns 0 if
+ * applied; -1 if there is no active router (no tunnel, or one without smart-routing). */
+int32_t spark_set_ad_block_enabled(int32_t enabled);
+
 #ifdef __cplusplus
 }
 #endif

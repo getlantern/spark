@@ -366,7 +366,32 @@ pub fn from_config_with_control(
 )> {
     let protector = match config.transport.protect_interface.as_deref() {
         Some(name) => Some(SocketProtector::for_interface(name)?),
-        None => None,
+        None => {
+            // Windows: with no explicit egress configured, pin the proxy's own dials to the
+            // discovered physical interface so they bypass W1's full-tunnel routes (loop-prevention).
+            // Other platforms keep the prior behavior (macOS discovers in fd_tunnel; None here).
+            #[cfg(target_os = "windows")]
+            {
+                match crate::net::default_physical_interface() {
+                    Some(name) => match crate::net::SocketProtector::for_interface(&name) {
+                        Ok(protector) => {
+                            tracing::debug!(interface = %name, "pinned upstream sockets to physical egress (loop-prevention)");
+                            Some(protector)
+                        }
+                        Err(e) => {
+                            // Degrade to unpinned rather than fail bringup, but surface why.
+                            tracing::warn!(interface = %name, error = %e, "could not pin upstream sockets to physical egress; leaving unpinned");
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                None
+            }
+        }
     };
     // A configured server pool supersedes the single-transport fields: build a latency-selecting
     // transport over it (the only path with a control handle).

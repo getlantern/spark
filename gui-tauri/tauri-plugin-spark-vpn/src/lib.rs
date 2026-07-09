@@ -16,6 +16,12 @@ mod desktop;
 #[cfg(target_os = "macos")]
 mod apps_darwin;
 
+// Desktop control over spark-ipc (Windows named pipe / Linux unix socket). Compiled off android;
+// on macOS it provides the transport-agnostic ipc client that AppleControl doesn't use but which
+// unit-tests here (its unix path == the Linux path).
+#[cfg(not(target_os = "android"))]
+mod service_ipc;
+
 #[cfg(target_os = "android")]
 mod mobile;
 
@@ -57,7 +63,7 @@ mod platform {
 
         #[cfg(not(target_os = "macos"))]
         {
-            Ok(Box::new(crate::desktop::ServiceControl { base }))
+            Ok(Box::new(crate::desktop::ServiceControl::new(base)))
         }
     }
 }
@@ -76,6 +82,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::set_split_tunnel,
             commands::get_routing_mode,
             commands::set_routing_mode,
+            commands::get_ad_block_enabled,
+            commands::set_ad_block_enabled,
             commands::list_installed_apps,
             commands::get_excluded_apps,
             commands::set_excluded_apps,

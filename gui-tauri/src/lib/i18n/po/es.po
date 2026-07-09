@@ -1,0 +1,1700 @@
+# Translators:
+# Aimara pena, 2025
+# e2f <projects@e2f.com>, 2026
+# e2f_es r2 <tx_e2f_es_r2@ate2f.com>, 2026
+# tx_e2f_es t35 <tx_e2f_es_t35@ate2f.com>, 2026
+# strel, 2026
+# Derek F <derek@getlantern.org>, 2026
+# Lantern, 2026
+# 
+msgid ""
+msgstr ""
+"Last-Translator: Lantern, 2026\n"
+"Language-Team: Spanish (https://app.transifex.com/lantern-1/teams/94371/es/)\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: es\n"
+"Plural-Forms: nplurals=3; plural=n == 1 ? 0 : n != 0 && n % 1000000 == 0 ? 1 : 2;\n"
+
+msgid "app_name"
+msgstr "Lantern"
+
+msgid "upgrade_to_pro"
+msgstr "Actualizar a Pro"
+
+msgid "settings"
+msgstr "Configuración"
+
+msgid "report_an_issue"
+msgstr "Reportar un Problema"
+
+msgid "lantern_projects"
+msgstr "Proyectos de Lantern:"
+
+msgid "invite_friends"
+msgstr "Invitar Amigos"
+
+msgid "your_referral_code"
+msgstr "Tu Código de Referido"
+
+msgid "invite_friends_message"
+msgstr ""
+"Comparte tu código de referido con un amigo. Cuando compren Lantern Pro, "
+"ambos recibirán tiempo adicional:"
+
+msgid "share_referral_code"
+msgstr "Compartir Código de Referido"
+
+msgid "unbounded"
+msgstr "Unbounded"
+
+msgid "help_fight_global_internet_censorship"
+msgstr "Ayuda a Combatir la Censura Global de Internet"
+
+msgid "vpn_settings"
+msgstr "Configuración de VPN"
+
+msgid "split_tunneling"
+msgstr "Túnel Dividido"
+
+msgid "server_locations"
+msgstr "Ubicaciones de Servidor"
+
+msgid "lantern_pro_email"
+msgstr "Email de Lantern Pro:"
+
+msgid "pro_account_expiration"
+msgstr "Vencimiento de Cuenta Pro"
+
+msgid "manage_subscription"
+msgstr "Gestionar Suscripción"
+
+msgid "lantern_pro_devices"
+msgstr "Dispositivos Lantern Pro"
+
+msgid "remove"
+msgstr "Eliminar"
+
+msgid "add_device"
+msgstr "Agregar Dispositivo"
+
+msgid "danger_zone"
+msgstr "Zona de Riesgo:"
+
+msgid "delete_account"
+msgstr "Eliminar Cuenta"
+
+msgid "delete"
+msgstr "Eliminar"
+
+msgid "account"
+msgstr "Cuenta"
+
+msgid "delete_account_?"
+msgstr "¿Eliminar tu Cuenta?"
+
+msgid "delete_account_message"
+msgstr ""
+"La eliminación de la cuenta es permanente. Perderás el acceso en todos los "
+"dispositivos y cualquier tiempo restante de suscripción Pro se perderá sin "
+"reembolso."
+
+msgid "delete_account_message_two"
+msgstr ""
+"Para confirmar la eliminación, por favor ingresa tu contraseña a "
+"continuación"
+
+msgid "Submit Issue Report"
+msgstr "Ingresa la contraseña para confirmar"
+
+msgid "confirm_deletion"
+msgstr "Confirmar Eliminación"
+
+msgid "cancel"
+msgstr "Cancelar"
+
+msgid "daily_data_usage"
+msgstr "Uso de Datos Diario"
+
+msgid "mb"
+msgstr "MB"
+
+msgid "vpn_status"
+msgstr "Estado de VPN"
+
+msgid "telegram"
+msgstr "Telegram"
+
+msgid "instagram"
+msgstr "Instagram"
+
+msgid "x"
+msgstr "X"
+
+msgid "follow_us"
+msgstr "Síguenos"
+
+msgid "server_selection"
+msgstr "Selección de Servidor"
+
+msgid "smart_location"
+msgstr "Ubicación Inteligente"
+
+msgid "automatically_chooses_fastest_location"
+msgstr "Elige automáticamente la ubicación más rápida"
+
+msgid "pro_locations"
+msgstr "Ubicaciones Pro:"
+
+msgid "choose_your_location_with_lantern_pro"
+msgstr "Elige tu ubicación con Lantern Pro:"
+
+msgid "language"
+msgstr "Idioma"
+
+msgid "sign_in"
+msgstr "Iniciar Sesión"
+
+msgid "sign_out"
+msgstr "Cerrar Sesión"
+
+msgid "check_for_updates"
+msgstr "Buscar Actualizaciones"
+
+msgid "support"
+msgstr "Soporte"
+
+msgid "download_links"
+msgstr "Enlaces de Descarga"
+
+msgid "get_30_days_of_pro_free"
+msgstr "Obtén 30 días de Pro gratis"
+
+msgid "share_message_referral_code"
+msgstr ""
+"Para un mes gratis de Lantern Pro, usa este código de referido: %s ; Puedes "
+"descargarlo desde aquí: https://lantern.io/download"
+
+msgid "submit_issue_report"
+msgstr "Enviar Reporte de Problema"
+
+msgid "select_an_issue"
+msgstr "Selecciona un Problema"
+
+msgid "cannot_access_blocked_sites"
+msgstr "No puedo acceder a sitios bloqueados"
+
+msgid "cannot_complete_purchase"
+msgstr "No puedo completar la compra"
+
+msgid "discover_not_working"
+msgstr "Discover no funciona"
+
+msgid "cannot_sign_in"
+msgstr "No puedo iniciar sesión"
+
+msgid "spinner_loads_endlessly"
+msgstr "La rueda de carga gira sin parar"
+
+msgid "slow"
+msgstr "Lento"
+
+msgid "cannot_link_devices"
+msgstr "No puedo vincular dispositivos"
+
+msgid "wrong_device_linking_code"
+msgstr "Código de vinculación de dispositivo incorrecto o inválido"
+
+msgid "cannot_remove_device"
+msgstr "No puedo eliminar dispositivo"
+
+msgid "application_crashes"
+msgstr "La aplicación se cierra inesperadamente"
+
+msgid "other"
+msgstr "Otro"
+
+msgid "issue_description"
+msgstr "Describe tu problema"
+
+msgid "enter_password_to_confirm"
+msgstr "Ingresa contraseña para confirmar"
+
+msgid "cannot_view_logs"
+msgstr ""
+"Lantern no puede ver tus registros de diagnóstico a menos que nos los "
+"envíes."
+
+msgid "split_tunneling_mode"
+msgstr "Modo de Túnel Dividido"
+
+msgid "apps_split_tunneling"
+msgstr "Túnel Dividido de Aplicaciones"
+
+msgid "website_split_tunneling"
+msgstr "Túnel Dividido de Sitios Web"
+
+msgid "iran_optimized"
+msgstr "Túnel dividido optimizado para Irán"
+
+msgid "china_optimized"
+msgstr "Túnel dividido optimizado para China"
+
+msgid "russia_optimized"
+msgstr "Túnel dividido optimizado para Rusia"
+
+msgid "global_optimized"
+msgstr "Túnel dividido optimizado global"
+
+msgid "enter_url"
+msgstr "Ingresar URL"
+
+msgid "add"
+msgstr "Agregar"
+
+msgid "enabled"
+msgstr "Activado"
+
+msgid "disabled"
+msgstr "Desactivado"
+
+msgid "automatic"
+msgstr "Automático"
+
+msgid "automatic_mode"
+msgstr "Modo automático"
+
+msgid "manual"
+msgstr "Manual"
+
+msgid "enter_url_or_ip"
+msgstr "Ingresar URL o Dirección IP"
+
+msgid "installed_apps"
+msgstr "Aplicaciones Instaladas"
+
+msgid "search_apps"
+msgstr "Buscar Aplicaciones"
+
+msgid "search_websites"
+msgstr "Buscar Sitios Web"
+
+msgid "mode"
+msgstr "Modo"
+
+msgid "use_commas"
+msgstr "Usa comas para separar múltiples URLs"
+
+msgid "deep_link_expired"
+msgstr "Este enlace ha expirado. Por favor, solicita uno nuevo."
+
+msgid "invalid_deep_link"
+msgstr "Este enlace no es válido. Por favor, solicita uno nuevo."
+
+msgid "default_bypass"
+msgstr "Listas de Exclusión Predeterminadas"
+
+msgid "global_bypass_list"
+msgstr "Lista de Exclusión Global"
+
+msgid "global_bypass_desc"
+msgstr "Sitios de confianza (HTTPS) con contenido no sensible."
+
+msgid "china_bypass_list"
+msgstr "Lista de Exclusión de China"
+
+msgid "china_bypass_desc"
+msgstr "Sitios accesibles libremente en China. Actualizado regularmente."
+
+msgid "iran_bypass_list"
+msgstr "Lista de Exclusión de Irán"
+
+msgid "iran_bypass_desc"
+msgstr "Sitios accesibles libremente en Irán. Actualizado regularmente."
+
+msgid "russia_bypass_list"
+msgstr "Lista de Exclusión de Rusia"
+
+msgid "russia_bypass_desc"
+msgstr "Sitios accesibles libremente en Rusia. Actualizado regularmente."
+
+msgid "see_sites_included"
+msgstr "Ver sitios incluidos en las "
+
+msgid "default_lists_here"
+msgstr "listas predeterminadas aquí"
+
+msgid "when_connected"
+msgstr ""
+"Cuando esté conectado, los sitios web que selecciones omitirán la VPN."
+
+msgid "lantern_automatic"
+msgstr ""
+"Lantern elige automáticamente qué aplicaciones y sitios web omiten la VPN "
+"según tu ubicación para un mejor rendimiento. "
+
+msgid "apps_bypassing_vpn"
+msgstr "Aplicaciones que omiten la VPN (%d)"
+
+msgid "websites_bypassing_vpn"
+msgstr "Sitios web que omiten la VPN (%d)"
+
+msgid "logs_share_message"
+msgstr "Aquí están mis registros de diagnóstico de Lantern."
+
+msgid "payment_options"
+msgstr "Opciones de Pago"
+
+msgid "add_your_email"
+msgstr "Agrega tu Email"
+
+msgid "continue"
+msgstr "Continuar"
+
+msgid "continue_with_google"
+msgstr "Continuar con Google"
+
+msgid "continue_with_apple"
+msgstr "Continuar con Apple"
+
+msgid "continue_without_email"
+msgstr "Continuar sin Email"
+
+msgid "confirm_email"
+msgstr "Confirmar Email"
+
+msgid "add_your_email_message"
+msgstr ""
+"Agrega tu email para acceder a tu suscripción en cualquier dispositivo."
+
+msgid "confirm_email_code"
+msgstr "Código de Confirmación"
+
+msgid "confirm_email_code_message"
+msgstr ""
+"Confirma que esta dirección de correo electrónico es tuya ingresando el "
+"código enviado a:"
+
+msgid "resend_email"
+msgstr "Reenviar Email"
+
+msgid "create_password"
+msgstr "Crear Contraseña"
+
+msgid "sign_in_to_lantern_pro"
+msgstr "Iniciar sesión en Lantern"
+
+msgid "sign_in_with_email"
+msgstr "Iniciar sesión con Email"
+
+msgid "enter_your_lantern_pro_account_details"
+msgstr "Ingresa los datos de tu cuenta de Lantern."
+
+msgid "email"
+msgstr "Email"
+
+msgid "enter_password"
+msgstr "Ingresar Contraseña"
+
+msgid "forgot_password"
+msgstr "¿Olvidaste tu contraseña?"
+
+msgid "reset_your_password"
+msgstr "Restablecer tu Contraseña"
+
+msgid "enter_your_lantern_pro_account_email"
+msgstr "Ingresa el correo de tu cuenta de Lantern."
+
+msgid "reset_password"
+msgstr "Restablecer Contraseña"
+
+msgid "confirm_new_password"
+msgstr "Confirmar Nueva Contraseña"
+
+msgid "create_new_password"
+msgstr "Crear Nueva Contraseña"
+
+msgid "confirm_password"
+msgstr "Confirmar Contraseña"
+
+msgid "confirm_password_required"
+msgstr "Se requiere confirmar contraseña"
+
+msgid "passwords_do_not_match"
+msgstr "Las contraseñas no coinciden"
+
+msgid "activation_code"
+msgstr "Código de Activación"
+
+msgid "activate_lantern_pro"
+msgstr "Activar Lantern Pro"
+
+msgid "invalid_email"
+msgstr "Dirección de email inválida"
+
+msgid "purchase_already_owned"
+msgstr "Ya posees esta compra, intenta restaurar compra"
+
+msgid "stripe_payment"
+msgstr "Pago con Stripe"
+
+msgid "split_tunneling_description"
+msgstr ""
+"Lantern enruta inteligentemente el tráfico de internet según tu ubicación, "
+"asegurando acceso seguro mientras mantiene tu conexión rápida usando la VPN "
+"solo cuando es necesario."
+
+msgid "region_specific_rules"
+msgstr "Reglas Específicas por Región"
+
+msgid "location_based_rules"
+msgstr "Lantern usa diferentes reglas de enrutamiento según tu ubicación:"
+
+msgid "censored_regions"
+msgstr "En regiones censuradas:"
+
+msgid "blocked_sites_proxied"
+msgstr ""
+"Los sitios web y aplicaciones bloqueados (noticias, mensajería, servicios "
+"restringidos) se enrutan mediante proxy."
+
+msgid "unblocked_sites_bypass"
+msgstr ""
+"La mayoría de los sitios web no bloqueados omiten la VPN para una navegación"
+" más rápida."
+
+msgid "uncensored_regions"
+msgstr "En regiones sin censura:"
+
+msgid "trusted_sites_bypass"
+msgstr ""
+"Solo los sitios web y servicios de confianza omiten la VPN por defecto."
+
+msgid "examples_of_bypassed_sites"
+msgstr ""
+"Estos incluyen sitios cifrados con HTTPS con contenido público o no sensible"
+" como compras, clima y actualizaciones de software."
+
+msgid "routing_rules_vary"
+msgstr "Estas reglas varían por país y se actualizan regularmente."
+
+msgid "view_the_full_list"
+msgstr "Ver la lista completa de reglas de enrutamiento."
+
+msgid "turn_on_split_tunneling"
+msgstr ""
+"Activa el túnel dividido para personalizar qué sitios web usan la VPN."
+
+msgid "welcome_to_lantern_pro"
+msgstr "¡Bienvenido a Lantern Pro!"
+
+msgid "welcome_to_lantern"
+msgstr "¡Bienvenido a Lantern!"
+
+msgid "lantern_pro_description"
+msgstr ""
+"Tus funciones Pro están desbloqueadas—disfruta de datos ilimitados, "
+"velocidades más rápidas y servidores premium."
+
+msgid "plans_fetch_error"
+msgstr "Error al cargar los planes. Por favor intenta de nuevo más tarde."
+
+msgid "best_value"
+msgstr "¡Mejor Valor!"
+
+msgid "choose_payment_method"
+msgstr "Elige Método de Pago"
+
+msgid "payment_information_encrypted"
+msgstr "Tu información de pago está completamente cifrada."
+
+msgid "purchase_not_completed"
+msgstr ""
+"La compra no se completó. Puedes intentar de nuevo en cualquier momento, o "
+"contactar a soporte si necesitas ayuda"
+
+msgid "are_you_sure"
+msgstr "¿Estás seguro?"
+
+msgid "continue_without_email_message"
+msgstr ""
+"Se requiere una dirección de email válida para usar tu suscripción en otros "
+"dispositivos."
+
+msgid "add_email"
+msgstr "Agregar Email"
+
+msgid "block_ads"
+msgstr "Bloquear Anuncios"
+
+msgid "only_active"
+msgstr "Solo activo cuando la VPN está conectada"
+
+msgid "vpn_connected"
+msgstr "Lantern está ahora conectado."
+
+msgid "vpn_disconnected"
+msgstr "Lantern está ahora desconectado."
+
+msgid "open_notification"
+msgstr "Abrir Notificación"
+
+msgid "logout"
+msgstr "Cerrar Sesión"
+
+msgid "logout_message"
+msgstr ""
+"Cerrar sesión cambiará Lantern a la versión gratuita. Para acceder a tu "
+"cuenta nuevamente, deberás volver a iniciar sesión."
+
+msgid "logout_message_expired"
+msgstr "¿Estás seguro de que quieres cerrar sesión de tu cuenta?"
+
+msgid "not_now"
+msgstr "Ahora no"
+
+msgid "billed_once"
+msgstr "Cobrado Una Vez"
+
+msgid "subscription"
+msgstr "Suscripción"
+
+msgid "subscribe"
+msgstr "Suscribirse"
+
+msgid "checkout"
+msgstr "Pagar"
+
+msgid "next_billing_date"
+msgstr "Próxima Fecha de Cobro"
+
+msgid "vpn_may_be_needed"
+msgstr "Es posible que se necesite la VPN"
+
+msgid "google_and_apple_sign_in_blocked"
+msgstr ""
+"El inicio de sesión con Google y Apple puede estar bloqueado en esta región."
+" Para terminar de configurar tu cuenta, por favor activa primero la VPN."
+
+msgid "continue_without_vpn"
+msgstr "Continuar sin VPN"
+
+msgid "turn_on_vpn"
+msgstr "Activar VPN"
+
+msgid "server_setup_do"
+msgstr "Configurar usando DigitalOcean"
+
+msgid "server_setup_do_price"
+msgstr "Solo %s al mes a través de Digital Ocean"
+
+msgid "server_setup_gcp"
+msgstr "Configurar usando Google Cloud Platform"
+
+msgid "continue_with_do"
+msgstr "Continuar con Digital Ocean"
+
+msgid "do_allows"
+msgstr ""
+"Digital Ocean te permite elegir una ubicación de servidor entre las %d "
+"opciones a continuación"
+
+msgid "server_setup_gcp_price"
+msgstr "Solo %s al mes a través de GCP"
+
+msgid "continue_with_gcp"
+msgstr "Continuar con Google"
+
+msgid "gcp_allows"
+msgstr ""
+"Google Cloud Platform te permite elegir una ubicación de servidor entre las "
+"%d opciones a continuación:"
+
+msgid "server_setup_aws"
+msgstr "Configurar usando Amazon Web Services"
+
+msgid "server_setup_aws_price"
+msgstr "Solo %s al mes a través de AWS"
+
+msgid "server_setup_manual"
+msgstr "Configurar Manualmente"
+
+msgid "seamless_integration"
+msgstr "Integración perfecta con Lantern"
+
+msgid "easiest_setup"
+msgstr "Proceso de configuración más fácil"
+
+msgid "multiple_location_options"
+msgstr "Múltiples opciones de ubicación de servidor"
+
+msgid "one_month_included"
+msgstr "%d TB/mes de datos incluidos"
+
+msgid "easiest_setup_process"
+msgstr "Proceso de configuración más fácil"
+
+msgid "setup_a_private_server"
+msgstr "Configurar un Servidor Privado"
+
+msgid "setup_private_server"
+msgstr "Configurar Servidor Privado"
+
+msgid "previous"
+msgstr "Anterior"
+
+msgid "next"
+msgstr "Siguiente"
+
+msgid "error"
+msgstr "Error"
+
+msgid "signup_error_user_exists"
+msgstr ""
+"Parece que algo salió mal con el registro. Por favor, inténtalo de nuevo o "
+"inicia sesión si ya tienes una cuenta"
+
+msgid "user_not_found"
+msgstr ""
+"Usuario no reconocido. Por favor verifica tus credenciales e intenta de "
+"nuevo. Si continúas teniendo problemas, por favor comunícate con nuestro "
+"equipo de soporte para asistencia."
+
+msgid "invalid_code"
+msgstr ""
+"Código incorrecto o puede haber expirado. Por favor intenta reenviarlo de "
+"nuevo"
+
+msgid "email_resend_message"
+msgstr "Tu nuevo código de confirmación ha sido enviado"
+
+msgid "password_has_been_updated"
+msgstr "La contraseña ha sido actualizada"
+
+msgid "password_has_been_updated_message"
+msgstr "Tu contraseña ha sido restablecida exitosamente"
+
+msgid "update_pro_account"
+msgstr "Actualizar Cuenta Pro"
+
+msgid "update_pro_account_message"
+msgstr ""
+"Para gestionar tu cuenta o iniciar sesión en otro dispositivo, por favor "
+"agrega primero un email y contraseña a tu cuenta."
+
+msgid "subscription_cancelled"
+msgstr "Tu suscripción ha sido cancelada."
+
+msgid "subscription_updated"
+msgstr "Tu suscripción ha sido actualizada."
+
+msgid "subscription_renewed"
+msgstr "Tu suscripción ha sido renovada."
+
+msgid "got_it"
+msgstr "Entendido"
+
+msgid "server_location"
+msgstr "Ubicación del Servidor"
+
+msgid "choose"
+msgstr "Elegir"
+
+msgid "choose_your_account"
+msgstr "Elige tu Cuenta"
+
+msgid "choose_your_project"
+msgstr "Elige tu proyecto"
+
+msgid "name_your_google_cloud_project"
+msgstr "Nombra tu Proyecto de Google Cloud"
+
+msgid "billing_account"
+msgstr "Cuenta de Facturación"
+
+msgid "billing_account_placeholder"
+msgstr "Cuenta de facturación para %s"
+
+msgid "server_name"
+msgstr "Nombre del Servidor"
+
+msgid "google_project"
+msgstr "Proyecto de Google"
+
+msgid "field_name_required"
+msgstr "Nombre requerido"
+
+msgid "choose_google_account"
+msgstr "Elige cuenta de facturación de Google"
+
+msgid "server_name_placeholder"
+msgstr "Servidor de Derek"
+
+msgid "change"
+msgstr "Cambiar"
+
+msgid "choose_location"
+msgstr "Elegir Ubicación"
+
+msgid "choose_your_location"
+msgstr "Elige tu Ubicación"
+
+msgid "start_deployment"
+msgstr "Iniciar Despliegue"
+
+msgid "server_name_description"
+msgstr "Cómo aparecerá el servidor en la lista de selección de servidores."
+
+msgid "select_private_server_region"
+msgstr ""
+"Selecciona una región para tu Servidor Privado. Ubicaciones más cercanas "
+"pueden mejorar la velocidad y latencia."
+
+msgid "gcp_location_options"
+msgstr "Opciones de Ubicación de Google Cloud Platform (%d):"
+
+msgid "australia_sydney"
+msgstr "Australia - Sídney"
+
+msgid "belgium_stghislain"
+msgstr "Bélgica - St. Ghislain"
+
+msgid "brazil_saopaulo"
+msgstr "São Paulo"
+
+msgid "us_los_angeles"
+msgstr "EE.UU. - Los Ángeles"
+
+msgid "japan_tokyo"
+msgstr "Japón - Tokio"
+
+msgid "deploying_private_server"
+msgstr "Desplegando Servidor Privado"
+
+msgid "deploying_server_status"
+msgstr ""
+"¡Espera un momento! Tu Servidor Privado se está configurando. Esto puede "
+"tomar unos minutos."
+
+msgid "private_server_setup_in_progress"
+msgstr ""
+"¡Espera un momento! Tu Servidor Privado se está configurando. Esto puede "
+"tomar unos minutos, por favor mantén esta pantalla abierta."
+
+msgid "cancel_server_deployment"
+msgstr "Cancelar Despliegue del Servidor"
+
+msgid "server_ready_title"
+msgstr "Servidor Privado Está Listo"
+
+msgid "server_ready_message"
+msgstr ""
+"Tu Servidor Privado ha sido configurado y agregado a tu lista de servidores."
+" ¡Estás listo para conectarte!"
+
+msgid "server_failed_message"
+msgstr ""
+"Algo salió mal al configurar tu Servidor Privado. Puedes reintentar o "
+"intentar de nuevo más tarde."
+
+msgid "close"
+msgstr "Cerrar"
+
+msgid "connect_now"
+msgstr "Conectar Ahora"
+
+msgid "server_setup_failed"
+msgstr "Falló la Configuración del Servidor"
+
+msgid "cancel_deployment"
+msgstr "Cancelar Despliegue"
+
+msgid "server_setup_failed_message"
+msgstr ""
+"Algo salió mal al configurar tu Servidor Privado. Puedes reintentar o "
+"intentar de nuevo más tarde."
+
+msgid "exit"
+msgstr "Salir"
+
+msgid "retry"
+msgstr "Reintentar"
+
+msgid "all_required_fields"
+msgstr "Por favor completa todos los campos requeridos."
+
+msgid "private_server_ready"
+msgstr "¡Servidor Privado Está Listo!"
+
+msgid "private_server_ready_message"
+msgstr ""
+"¡El servidor (%s) ha sido configurado y agregado a tu lista de servidores. "
+"Estás listo para conectarte!"
+
+msgid "set_up_your_server"
+msgstr "Configura tu Servidor"
+
+msgid "view_instructions_github"
+msgstr "Ver Instrucciones en GitHub"
+
+msgid "server_access_key"
+msgstr "Clave de Acceso al Servidor"
+
+msgid "access_key"
+msgstr "Clave de Acceso"
+
+msgid "name_your_server"
+msgstr "Nombra tu Servidor"
+
+msgid "how_server_appears"
+msgstr "Cómo aparecerá el servidor en la lista de selección de servidores"
+
+msgid "server_nickname"
+msgstr "Apodo del Servidor"
+
+msgid "verify_server"
+msgstr "Verificar Servidor"
+
+msgid "vpn_client_not_setup"
+msgstr "Por favor activa el cliente VPN."
+
+msgid "continue_with"
+msgstr "Continuar con"
+
+msgid "join_a_private_server"
+msgstr "Unirse a un Servidor Privado"
+
+msgid "join_private_server"
+msgstr "Unirse a Servidor Privado"
+
+msgid "join_server"
+msgstr "Unirse al Servidor"
+
+msgid "private_server_usage_message"
+msgstr ""
+"El uso del servidor privado no se cuenta para tu límite de datos diarios de "
+"Lantern."
+
+msgid "manage_private_servers"
+msgstr "Gestionar Servidores Privados"
+
+msgid "my_servers"
+msgstr "Mis Servidores"
+
+msgid "joined_servers"
+msgstr "Servidores Unidos"
+
+msgid "access_key_expiration"
+msgstr ""
+"Cada clave de acceso es única y expira después de 1 día. Puedes generar una "
+"nueva en cualquier momento."
+
+msgid "share_access_key"
+msgstr "Compartir Clave de Acceso"
+
+msgid "rename_server"
+msgstr "Renombrar Servidor"
+
+msgid "rename"
+msgstr "Renombrar"
+
+msgid "selected_location"
+msgstr "Ubicación Seleccionada"
+
+msgid "remove_server_?"
+msgstr "¿Eliminar Servidor?"
+
+msgid "remove_server_message"
+msgstr ""
+"¿Eliminar %s? Esto solo lo eliminará de tu aplicación, no eliminará el "
+"servidor de tu proveedor de nube."
+
+msgid "generate_access_key"
+msgstr "Generar clave de acceso"
+
+msgid "invite_name"
+msgstr "Nombre de Invitación"
+
+msgid "trust_server_operator"
+msgstr "Confía en el Operador del Servidor"
+
+msgid "trust_server_operator_message_one"
+msgstr ""
+"Los servidores privados son alojados y operados por individuos u "
+"organizaciones fuera de Lantern. Cuando te conectas a uno, estás confiando "
+"en la persona que lo opera para gestionarlo de forma segura y usarlo "
+"responsablemente."
+
+msgid "trust_server_operator_message_two"
+msgstr ""
+"Lantern no gestiona ni monitorea los servidores privados. Asegúrate de "
+"conocer y confiar en el operador del servidor antes de unirte a uno."
+
+msgid "trust_server_operator_message_three"
+msgstr ""
+"Si no estás seguro de quién administra el servidor o cómo está configurado, "
+"te recomendamos usar uno de los servidores predeterminados de Lantern "
+"disponibles en tu lista de servidores."
+
+msgid "invalid_server_details"
+msgstr ""
+"Detalles del servidor inválidos. Por favor verifica la clave de acceso e "
+"intenta de nuevo."
+
+msgid "lantern_servers"
+msgstr "Servidores Lantern"
+
+msgid "private_servers"
+msgstr "Servidores Privados"
+
+msgid "fastest_server"
+msgstr "Servidor Más Rápido"
+
+msgid "join_my_private_server"
+msgstr "Únete a mi Servidor Privado de Lantern"
+
+msgid "your_server"
+msgstr "Tus Servidores:"
+
+msgid "no_private_server_setup_yet"
+msgstr ""
+"Aún no has configurado un servidor privado. Haz clic en el botón de abajo "
+"para comenzar."
+
+msgid "connect"
+msgstr "Conectar"
+
+msgid "disconnect"
+msgstr "Desconectar"
+
+msgid "show"
+msgstr "Mostrar"
+
+msgid "status_on"
+msgstr "Conectado"
+
+msgid "status_off"
+msgstr "Desconectado"
+
+msgid "select_location"
+msgstr "Seleccionar ubicación"
+
+msgid "select_your_server_location"
+msgstr "Selecciona la ubicación de tu servidor"
+
+msgid "faster_speeds_unlimited_bandwidth"
+msgstr "Velocidades más rápidas y ancho de banda ilimitado"
+
+msgid "premium_servers_less_congestion"
+msgstr "Servidores premium con menos congestión"
+
+msgid "advanced_anti_censorship"
+msgstr "Tecnología avanzada anti-censura"
+
+msgid "exclusive_access_new_features"
+msgstr "Acceso exclusivo a nuevas funciones"
+
+msgid "connect_up_to_five_devices"
+msgstr "Conecta hasta 5 dispositivos"
+
+msgid "built_in_ad_blocking"
+msgstr "Bloqueo de anuncios integrado"
+
+msgid "get_lantern_pro"
+msgstr "Obtener Lantern Pro"
+
+msgid "connected_to_private_server"
+msgstr "Conectado a Servidor Privado"
+
+msgid "server_already_selected"
+msgstr "Ya estás conectado a este servidor."
+
+msgid "device_limit_reached"
+msgstr "Límite de Dispositivos Alcanzado"
+
+msgid "device_limit_reached_message"
+msgstr ""
+"Has alcanzado tu límite de 5 dispositivos. Por favor elimina un dispositivo "
+"para continuar."
+
+msgid "remove_device_and_sign_in"
+msgstr "Eliminar Dispositivo e Iniciar Sesión"
+
+msgid "cancel_sign_in"
+msgstr "Cancelar Inicio de Sesión"
+
+msgid "change_email"
+msgstr "Cambiar Email"
+
+msgid "change_email_message"
+msgstr ""
+"Este será tu nuevo email de inicio de sesión. Necesitarás verificarlo antes "
+"de que el cambio tenga efecto."
+
+msgid "enter_new_email"
+msgstr "Ingresa tu nuevo Email"
+
+msgid "confirm_password_to_continue"
+msgstr "Para continuar, por favor confirma tu contraseña."
+
+msgid "email_updated"
+msgstr "Tu email ha sido actualizado."
+
+msgid "enable_network_extension"
+msgstr "Habilitar Extensión de Red"
+
+msgid "enable_network_extension_message"
+msgstr ""
+"Para usar Lantern, necesitamos instalar una extensión de red para tu Mac."
+
+msgid "install_now"
+msgstr "Instalar Ahora"
+
+msgid "learn_more"
+msgstr "Saber Más"
+
+msgid "network_extension_required"
+msgstr "Extensión de red requerida"
+
+msgid "click"
+msgstr "Haz clic en"
+
+msgid "open_system_settings"
+msgstr "Abrir Configuración del Sistema"
+
+msgid "when_prompted"
+msgstr "cuando se te solicite."
+
+msgid "activate_extension"
+msgstr "Activar Extensión"
+
+msgid "email_optional"
+msgstr "Email (opcional)"
+
+msgid "please_enter_valid_email"
+msgstr "Por favor ingresa un email válido"
+
+msgid "please_select_an_issue"
+msgstr "Por favor selecciona un problema"
+
+msgid "please_enter_issue_description"
+msgstr "Por favor ingresa una descripción del problema"
+
+msgid "thanks_for_feedback"
+msgstr "¡Gracias por tus comentarios!"
+
+msgid "no_apps_selected"
+msgstr "No hay aplicaciones seleccionadas"
+
+msgid "deselect_all"
+msgstr "Deseleccionar Todas"
+
+msgid "select_all"
+msgstr "Seleccionar Todas"
+
+msgid "no_websites_selected"
+msgstr "No hay sitios web seleccionados"
+
+msgid "enter_activation_code"
+msgstr "Ingresa un Código de Activación"
+
+msgid "restore_purchase"
+msgstr "Restaurar Compra"
+
+msgid "do_private_server_setup"
+msgstr "Configuración de Servidor Privado DO"
+
+msgid "private_server_note"
+msgstr ""
+"Selecciona una región para tu Servidor Privado. Ubicaciones más cercanas "
+"pueden mejorar la velocidad y latencia."
+
+msgid "gcp_private_server_setup"
+msgstr "Configuración de Servidor Privado GCP"
+
+msgid "gcp_private_server_location"
+msgstr "Ubicación de Servidor Privado GCP"
+
+msgid "do_private_server_location"
+msgstr "Ubicación de Servidor Privado DO"
+
+msgid "confirm"
+msgstr "Confirmar"
+
+msgid "private_server_warning"
+msgstr "Solo agrega servidores operados por personas en las que confíes "
+
+msgid "go_to_server_locations"
+msgstr "Ir a Ubicaciones de Servidor"
+
+msgid "lantern_io"
+msgstr "Lantern.io"
+
+msgid "alternative_download_links"
+msgstr "Enlaces Alternativos de Descarga"
+
+msgid "github_download_page"
+msgstr "Página de Descarga de GitHub"
+
+msgid "telegram_bot"
+msgstr "Bot de Telegram"
+
+msgid "if_you_cannot_access_website"
+msgstr ""
+"Si tienes algún problema para acceder a nuestro sitio web, puedes descargar "
+"Lantern desde los enlaces anteriores."
+
+msgid "available_on"
+msgstr "Disponible en:"
+
+msgid "subscription_renewal_date"
+msgstr "Fecha de Renovación de Suscripción"
+
+msgid "enabled_bypass_lists"
+msgstr "Listas de exclusión habilitadas (%d):"
+
+msgid "diagnostic_logs"
+msgstr "Registros de Diagnóstico"
+
+msgid "lantern_user_forum"
+msgstr "Foro de Usuarios de Lantern"
+
+msgid "frequently_asked_questions"
+msgstr "Preguntas Frecuentes"
+
+msgid "privacy_policy"
+msgstr "Política de Privacidad"
+
+msgid "terms_of_service"
+msgstr "Términos de Servicio"
+
+msgid "get_unlimited_data"
+msgstr "¡Obtén datos ilimitados y velocidades más rápidas!"
+
+msgid "private_server_options"
+msgstr "Opciones de Servidor Privado"
+
+msgid "lantern_version"
+msgstr "Versión de Lantern"
+
+msgid "quit"
+msgstr "Salir"
+
+msgid "device_removed"
+msgstr "Dispositivo eliminado"
+
+msgid "set_server_alias"
+msgstr "Establecer Alias del Servidor"
+
+msgid "this_name_pre_filled"
+msgstr ""
+"Este nombre se llenará previamente para el usuario invitado para ayudarlo a "
+"identificar el servidor. Puede cambiarlo después."
+
+msgid "server_alias"
+msgstr "Alias del Servidor"
+
+msgid "add_referral_code"
+msgstr "Agregar un Código de Referido"
+
+msgid "referral_code"
+msgstr "Código de Referido"
+
+msgid "update_fails"
+msgstr "La actualización falla"
+
+msgid "scan_qr_code"
+msgstr "Escanear Código QR"
+
+msgid "choose_your_server_location"
+msgstr "Elige la ubicación de tu servidor"
+
+msgid "we_handle_configuration"
+msgstr "Nosotros manejamos la configuración, solo regístrate."
+
+msgid "90_day_free_trial"
+msgstr "Prueba gratuita de 90 días"
+
+msgid "identity_changed"
+msgstr "Identidad Cambiada para %s"
+
+msgid "identity_changed_message"
+msgstr ""
+"La huella de seguridad de %s ha cambiado. Esto puede indicar manipulación o "
+"una configuración incorrecta."
+
+msgid "recommendation"
+msgstr "Recomendación:"
+
+msgid "recommendation_message"
+msgstr ""
+"Te recomendamos eliminar %s de Lantern y eliminarlo de tu cuenta de "
+"proveedor de nube, luego configurar un nuevo servidor para asegurar que tu "
+"conexión permanezca segura."
+
+msgid "remove_server"
+msgstr "Eliminar Servidor"
+
+msgid "server_alias_cannot_be_empty"
+msgstr "El alias del servidor no puede estar vacío"
+
+msgid "referral_code_applied"
+msgstr "¡Tu código de referido ha sido aplicado!"
+
+msgid "referral_message_1m"
+msgstr " + 15 días adicionales gratis"
+
+msgid "referral_message_1y"
+msgstr " + 1 mes adicional gratis"
+
+msgid "referral_message_2y"
+msgstr "+ 2 meses adicionales gratis"
+
+msgid "referral_code_invalid"
+msgstr ""
+"El código de referido que ingresaste no es válido. Por favor verifica el "
+"código e intenta nuevamente."
+
+msgid "referral_code_own_invalid"
+msgstr ""
+"No puedes usar tu propio código de referido. Por favor ingresa un código "
+"diferente."
+
+msgid "free"
+msgstr "Gratis"
+
+msgid "monthly_plan"
+msgstr " Plan mensual:"
+
+msgid "15_days_each"
+msgstr "+15 días cada uno"
+
+msgid "annual_plan"
+msgstr " Plan anual:"
+
+msgid "1_month_each"
+msgstr "+1 mes cada uno"
+
+msgid "two_year_plan"
+msgstr " Plan de dos años:"
+
+msgid "2_month_each"
+msgstr "+2 meses cada uno"
+
+msgid "referral_code_info"
+msgstr ""
+"¿Aún no eres usuario de Lantern Pro? Lo serás cuando tu primer referido se "
+"suscriba"
+
+msgid "lantern_pro_license"
+msgstr "Licencia Lantern Pro"
+
+msgid "lantern_pro_license_required"
+msgstr "Se requiere licencia de Lantern Pro"
+
+msgid "lantern_pro_license_invalid"
+msgstr "Licencia de Lantern Pro inválida"
+
+msgid "lantern_pro_license_invalid_length"
+msgstr "La licencia de Lantern Pro debe tener 25 caracteres"
+
+msgid "select_account"
+msgstr "Seleccionar cuenta"
+
+msgid "new_to_lantern"
+msgstr "¿Nuevo en Lantern?"
+
+msgid "create_an_account"
+msgstr "Crear una cuenta"
+
+msgid "no_projects_found"
+msgstr " No se encontraron proyectos"
+
+msgid "no_projects_found_desc"
+msgstr ""
+"No se encontraron proyectos. Por favor crea primero un proyecto en tu cuenta"
+" del proveedor de nube."
+
+msgid "add_billing_details"
+msgstr "Agregar detalles de facturación"
+
+msgid "do_billing_details_message"
+msgstr "DigitalOcean requiere información de pago para crear servidores."
+
+msgid "tap"
+msgstr "Toca"
+
+msgid "below_to_go_to_do"
+msgstr "abajo para ir a DigitalOcean"
+
+msgid "1"
+msgstr "1"
+
+msgid "2"
+msgstr "2"
+
+msgid "3"
+msgstr "3"
+
+msgid "add_payment_method"
+msgstr "Agrega un método de pago (tarjeta de crédito o PayPal)"
+
+msgid "return_to_lantern"
+msgstr "Regresa a Lantern y toca \"Continuar\" para proceder con la configuración"
+
+msgid "how_to_add_billing_details"
+msgstr "Cómo agregar detalles de facturación:"
+
+msgid "add_payment_method_message"
+msgstr ""
+"Por favor agrega un método de pago a tu cuenta de DigitalOcean. Si ya lo has"
+" hecho, espera unos minutos e intenta nuevamente."
+
+msgid "ok"
+msgstr "Ok"
+
+msgid "could_not_open_url"
+msgstr "No se pudo abrir la URL"
+
+msgid "new_to_lantern_pro"
+msgstr "¿Nuevo en Lantern?"
+
+msgid "an_error_occurred"
+msgstr "Ocurrió un error. Por favor intenta de nuevo más tarde."
+
+msgid "developer_mode"
+msgstr "Modo de desarrollador"
+
+msgid "developer_mode_note"
+msgstr ""
+"El Modo de desarrollador es exclusivamente para que los desarrolladores de "
+"Lantern prueben funciones durante el desarrollo."
+
+msgid "invalid_activation_code"
+msgstr ""
+"Código de activación inválido. Por favor verifica el código e intenta de "
+"nuevo."
+
+msgid "invalid_activation_code_length"
+msgstr "El código de activación debe tener 25 caracteres."
+
+msgid "error_while_vpn_connection"
+msgstr ""
+"Ocurrió un error al establecer la conexión VPN. Por favor intenta de nuevo."
+
+msgid "help_improve_lantern"
+msgstr "Ayuda a mejorar Lantern"
+
+msgid "share_anonymous_usage_data"
+msgstr ""
+"Comparte datos de uso anónimos para ayudar a mejorar la velocidad y "
+"confiabilidad."
+
+msgid "data_we_collect"
+msgstr ""
+"Nunca recopilamos historial de navegación, destinos de tráfico, consultas "
+"DNS ni registros de conexión."
+
+msgid "you_can_change_anytime"
+msgstr "Puedes cambiar esto en cualquier momento en la Configuración de VPN."
+
+msgid "dont_allow"
+msgstr "No permitir"
+
+msgid "allow"
+msgstr "Permitir"
+
+msgid "anonymous_usage_data"
+msgstr "Datos de uso anónimos"
+
+msgid "helps_improve_lantern_performance"
+msgstr "Ayuda a mejorar el rendimiento de Lantern"
+
+msgid "changes_applied_after_restart"
+msgstr "Los cambios se aplicarán después de reiniciar Lantern."
+
+msgid "email_deliverability_notice"
+msgstr "Aviso de entregabilidad de correo"
+
+msgid "email_deliverability_notice_message"
+msgstr ""
+"Los correos a direcciones de 163.com, 126.com, qq.com y sina.com a veces son"
+" bloqueados y pueden no llegar"
+
+msgid "email_deliverability_notice_message_two"
+msgstr ""
+"Si no recibes tu código de confirmación, considera usar un proveedor de "
+"correo alternativo."
+
+msgid "continue_anyway"
+msgstr "Continuar de todos modos"
+
+msgid "routing_mode"
+msgstr "Modo de Enrutamiento"
+
+msgid "smart_routing"
+msgstr "Enrutamiento Inteligente"
+
+msgid "full_tunnel"
+msgstr "Túnel Completo"
+
+msgid "region_optimized_routing"
+msgstr "Enrutamiento basado en reglas optimizado para tu región"
+
+msgid "all_traffic_through_vpn"
+msgstr "Todo el tráfico a través de VPN"
+
+msgid "smart_routing_description"
+msgstr ""
+"El Enrutamiento Inteligente usa reglas específicas por región para enviar "
+"automáticamente el tráfico que necesita la VPN a través de Lantern. Todo el "
+"demás tráfico va directo para mayor velocidad y confiabilidad."
+
+msgid "add_apps_websites_bypass_vpn"
+msgstr "Agrega apps y sitios web para omitir la VPN"
+
+msgid "lantern_pro_license_applied"
+msgstr "Tu licencia de Lantern Pro se aplicará a tu cuenta existente"
+
+msgid "your_purchase_will_be_applied_to_your_existing_account"
+msgstr "Tu compra se aplicará a tu cuenta existente"
+
+msgid "daily_data_cap_reached"
+msgstr "Límite de datos diario alcanzado"
+
+msgid "daily_data_cap_reached_message"
+msgstr "Velocidad reducida a 128 kb/s - Se reinicia a las %s."
+
+msgid "subscription_renewal_info"
+msgstr ""
+"El pago se carga a tu Apple ID en el momento de la compra. Las suscripciones"
+" se renuevan automáticamente a menos que se cancelen al menos 24 horas antes"
+" del final del período actual. Administra o cancela en la Configuración de "
+"App Store."
+
+msgid "failed_to_update_routing_mode"
+msgstr ""
+"No se pudo actualizar el modo de enrutamiento. Por favor, inténtalo de "
+"nuevo."
+
+msgid "apps"
+msgstr "Aplicaciones"
+
+msgid "websites"
+msgstr "Sitios Web"
+
+msgid "main_channel"
+msgstr "Canal principal"
+
+msgid "data_cap_channel"
+msgstr "Alertas de uso de datos"
+
+msgid "mb_free_data_remaining"
+msgstr "%d MB de datos gratuitos restantes"
+
+msgid "daily_data_cap_reached_notification_message"
+msgstr ""
+"Tus datos se restablecerán a las %s. Actualiza a Pro para obtener datos de "
+"alta velocidad ilimitados."
+
+msgid "if_you_have_not_set_password"
+msgstr ""
+"Si no has establecido una contraseña de Lantern Pro anteriormente, "
+"selecciona la opción '¿olvidaste tu contraseña?' a continuación."
+
+msgid "pro_subscription_expired"
+msgstr "Tu suscripción Pro ha caducado"
+
+msgid "renew_pro_subscription"
+msgstr "Renovar Suscripción Pro"
+
+msgid "subscription_expired"
+msgstr "Suscripción Caducada"
+
+msgid "pro"
+msgstr "Pro"
+
+msgid "pro_subscription_expired_message"
+msgstr ""
+"La suscripción de Lantern Pro ha caducado. Renueva para restaurar datos "
+"ilimitados y funciones Pro."
+
+msgid "last_subscription_renewal_date"
+msgstr "Fecha de Última Renovación de Suscripción"
+
+msgid "set_account_password"
+msgstr "Establecer Contraseña de Cuenta"
+
+msgid "set_password"
+msgstr "Establecer Contraseña"
+
+msgid "set_account_password_message"
+msgstr ""
+"Para administrar tu cuenta o iniciar sesión en otros dispositivos, ahora necesitas establecer una contraseña para tu cuenta de Lantern Pro.\n"
+"\n"
+"Te enviaremos un código de verificación por correo para crear tu contraseña."
+
+msgid "expired"
+msgstr "Caducado"
+
+msgid "lantern_pro_tagline"
+msgstr "Acceso a internet rápido, confiable y privado"
+
+msgid "what_makes_lantern_different"
+msgstr "Qué hace diferente a Lantern"
+
+msgid "built_for_privacy_speed_freedom"
+msgstr "Diseñado para la privacidad, la velocidad y la libertad"
+
+msgid "smart_routing_mode"
+msgstr "Modo de enrutamiento inteligente"
+
+msgid "region_specific_routing_description"
+msgstr ""
+"Las reglas específicas por región enrutan solo lo que necesita la VPN, "
+"manteniendo tu conexión rápida."
+
+msgid "advanced_protocols"
+msgstr "Protocolos avanzados"
+
+msgid "advanced_protocols_description"
+msgstr ""
+"Más protocolos que otras VPN para máxima confiabilidad. AnyTLS, Hysteria2, "
+"VLESS, Kindling, WATER y más."
+
+msgid "private_servers_description"
+msgstr ""
+"Conecta tus propios servidores para tener control total sobre tu conexión."
+
+msgid "nonprofit_mission"
+msgstr "Misión sin fines de lucro"
+
+msgid "built_by_nonprofit"
+msgstr ""
+"Creado por una organización sin fines de lucro con más de 12 años de "
+"experiencia promoviendo la libertad en internet"
+
+msgid "choose_your_routing_mode"
+msgstr "Elige tu modo de enrutamiento"
+
+msgid "fastest"
+msgstr "El más rápido"
+
+msgid "traditional_vpn_mode"
+msgstr "Modo VPN tradicional"
+
+msgid "traditional_vpn_mode_description"
+msgstr "Enruta todo el tráfico a través de Lantern, lo necesite o no."
+
+msgid "change_anytime_in_routing_mode_settings"
+msgstr ""
+"Cámbialo en cualquier momento en la configuración del modo de enrutamiento"
+
+msgid "get_started"
+msgstr "Comenzar"
+
+msgid "skip_connect_now"
+msgstr "Omitir - Conectar ahora"
+
+msgid "renew_pro"
+msgstr "Renovar Pro"
+
+msgid "payment"
+msgstr "Pago"
+
+msgid "it_looks_like_something_went_wrong"
+msgstr ""
+"Parece que algo salió mal. Si realizaste un pago pero no ves tu suscripción "
+"activa, espera unas horas y vuelve a verificar."
+
+msgid "manage_subscription_google_play"
+msgstr ""
+"Tu plan Pro fue adquirido a través de Google Play. Por favor, administra tu "
+"suscripción desde la configuración de tu cuenta de Google Play."
+
+msgid "manage_subscription_apple_app_store"
+msgstr ""
+"Tu plan Pro fue adquirido a través de la Apple App Store. Por favor, "
+"administra tu suscripción desde la configuración de tu cuenta de Apple ID."
+
+msgid "create_account_error"
+msgstr "Error al crear la cuenta"
+
+msgid "appearance"
+msgstr "Apariencia"
+
+msgid "light"
+msgstr "Claro"
+
+msgid "dark"
+msgstr "Oscuro"
+
+msgid "system"
+msgstr "Sistema"
+
+msgid "lantern_email"
+msgstr "Correo electrónico de Lantern"
+
+msgid "confirm_with_account"
+msgstr ""
+"Para confirmar la eliminación, verifica con tu cuenta de %s a continuación:"
+
+msgid "oauth_different_account"
+msgstr ""
+"La cuenta con la que intentas iniciar sesión no coincide con la cuenta "
+"asociada a este correo electrónico. Por favor, inicia sesión con la cuenta "
+"correcta o elige un correo electrónico diferente."
+
+msgid "account_deleted"
+msgstr "Cuenta Eliminada "
+
+msgid "account_deleted_message"
+msgstr "Tu cuenta ha sido eliminada permanentemente. "
+
+msgid "verify_with"
+msgstr "Verificar con %s"
+
+msgid "update_available"
+msgstr "Update available"
+
+msgid "android_sideload_update_available_message"
+msgstr "Lantern %s is available. Lantern will download and verify the APK before opening Android's installer."
+
+msgid "download_and_install_update"
+msgstr "Download and install"
+
+msgid "allow_unknown_app_installs"
+msgstr "Allow app installs"
+
+msgid "android_sideload_install_permission_message"
+msgstr "Android needs permission to install updates from Lantern. Turn on Allow from this source, then check for updates again."
+
+msgid "error_install_update"
+msgstr "Unable to install update"
+
+msgid "android_sideload_install_failed_message"
+msgstr "Lantern could not verify or install this update. Please try again later."
+
+msgid "lantern_is_up_to_date"
+msgstr "Lantern is up to date."
+
+msgid "update_now"
+msgstr "Update now"
+
+msgid "later"
+msgstr "Later"
+
+msgid "update_ready_to_install"
+msgstr "Lantern %s is ready to install"
+
+msgid "up_to_date"
+msgstr "Up to date"
+
+msgid "running_latest_version"
+msgstr "You're running the latest version Lantern %s"
+
+msgid "couldnt_check_for_updates"
+msgstr "Couldn't check for updates"
+
+msgid "check_connection_and_retry"
+msgstr "Check your connection and try again"

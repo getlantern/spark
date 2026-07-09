@@ -3,6 +3,7 @@
   import { goto } from "$app/navigation";
   import { MockBackend, type SparkBackend, type SplitTunnel } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
+  import { _ } from "$lib/i18n";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
   // Fail-safe default: if getSplitTunnel() fails on mount, don't persist enabled:true (which would
@@ -64,7 +65,7 @@
       await backend.setSplitTunnel(st);
       showSnack(msg);
     } catch {
-      showSnack("Couldn't save changes");
+      showSnack($_("err_save_changes"));
     }
   }
   async function add() {
@@ -76,41 +77,41 @@
       else if (kind === "ip" && !st.ips.includes(h)) { st.ips = [...st.ips, h]; added++; }
     }
     entry = "";
-    if (added) await persist(`Added ${added} ${added === 1 ? "site" : "sites"}`);
+    if (added) await persist($_("added_sites", { values: { count: added } }));
   }
   async function remove(host: string) {
     st.domains = st.domains.filter((d) => d !== host);
     st.ips = st.ips.filter((i) => i !== host);
-    await persist("Removed");
+    await persist($_("removed"));
   }
 </script>
 
 <main class="app">
   <header class="appbar">
-    <button class="iconbtn" aria-label="Back" onclick={() => goto("/split-tunneling")}>
+    <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/split-tunneling")}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
-    <span class="title">Website Split Tunneling</span>
+    <span class="title">{$_("website_split_tunneling")}</span>
   </header>
 
   <div class="scroll">
-    <div class="seclabel">Enter URL or IP Address</div>
+    <div class="seclabel">{$_("enter_url_or_ip")}</div>
     <div class="addrow">
-      <input class="input" placeholder="Enter URL" bind:value={entry} onkeydown={(e) => e.key === "Enter" && add()} />
-      <button class="addbtn" onclick={add}>Add</button>
+      <input class="input" placeholder={$_("enter_url")} bind:value={entry} onkeydown={(e) => e.key === "Enter" && add()} />
+      <button class="addbtn" onclick={add}>{$_("add")}</button>
     </div>
-    <p class="helper">Use commas to separate multiple URLs</p>
+    <p class="helper">{$_("use_commas")}</p>
 
-    <div class="header">Websites bypassing the VPN ({rows.length}):</div>
+    <div class="header">{$_("websites_bypassing_vpn_count", { values: { count: rows.length } })}</div>
     <div class="card">
       {#if rows.length === 0}
-        <div class="row empty">No websites selected</div>
+        <div class="row empty">{$_("no_websites_selected")}</div>
       {:else}
         {#each rows as host, i (host)}
           {#if i > 0}<div class="divider"></div>{/if}
           <div class="row">
             <div class="meta"><div class="name">{host}</div></div>
-            <button class="x" aria-label={`Remove ${host}`} onclick={() => remove(host)}>✕</button>
+            <button class="x" aria-label={$_("remove_host", { values: { host } })} onclick={() => remove(host)}>✕</button>
           </div>
         {/each}
       {/if}
@@ -148,9 +149,10 @@
   }
   .row {
     display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 16px;
-    background: none; border: none; font-family: var(--font); text-align: left;
+    background: none; border: none; font-family: var(--font); text-align: start;
     transition: background 0.12s ease;
   }
+  :global([dir="rtl"]) .iconbtn svg { transform: scaleX(-1); }
   .meta { flex: 1; min-width: 0; }
   .name {
     font-size: 15px; font-weight: 600; color: var(--text-primary);

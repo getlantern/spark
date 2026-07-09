@@ -1,0 +1,1689 @@
+# Translators:
+# tx_e2f_my t1 <divinahramaroson@gmail.com>, 2025
+# Alyssa Chung <lisiachung7@gmail.com>, 2025
+# e2f <projects@e2f.com>, 2026
+# tx_e2f_ms t9 <tx_e2f_ms_t9@ate2f.com>, 2026
+# e2f_my c2 <tx_e2f_my_c2@ate2f.com>, 2026
+# Derek F <derek@getlantern.org>, 2026
+# Lantern, 2026
+# 
+msgid ""
+msgstr ""
+"Last-Translator: Lantern, 2026\n"
+"Language-Team: Malay (https://app.transifex.com/lantern-1/teams/94371/ms/)\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: ms\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "app_name"
+msgstr "Lantern"
+
+msgid "upgrade_to_pro"
+msgstr "Naik Taraf ke Pro"
+
+msgid "settings"
+msgstr "Tetapan"
+
+msgid "report_an_issue"
+msgstr "Laporkan Masalah"
+
+msgid "lantern_projects"
+msgstr "Projek Lantern:"
+
+msgid "invite_friends"
+msgstr "Jemput Rakan"
+
+msgid "your_referral_code"
+msgstr "Kod Rujukan Anda"
+
+msgid "invite_friends_message"
+msgstr ""
+"Kongsi kod rujukan anda dengan rakan. Apabila mereka membeli Lantern Pro, "
+"anda berdua akan mendapat masa bonus:"
+
+msgid "share_referral_code"
+msgstr "Kongsi Kod Rujukan"
+
+msgid "unbounded"
+msgstr "Unbounded"
+
+msgid "help_fight_global_internet_censorship"
+msgstr "Bantu Menentang Penapisan Internet Global"
+
+msgid "vpn_settings"
+msgstr "Tetapan VPN"
+
+msgid "split_tunneling"
+msgstr "Terowong Terpisah"
+
+msgid "server_locations"
+msgstr "Lokasi Pelayan"
+
+msgid "lantern_pro_email"
+msgstr "E-mel Pro:"
+
+msgid "pro_account_expiration"
+msgstr "Tarikh Tamat Akaun Pro"
+
+msgid "manage_subscription"
+msgstr "Urus Langganan"
+
+msgid "lantern_pro_devices"
+msgstr "Peranti Lantern Pro"
+
+msgid "remove"
+msgstr "Buang"
+
+msgid "add_device"
+msgstr "Tambah Peranti"
+
+msgid "danger_zone"
+msgstr "Zon Berbahaya:"
+
+msgid "delete_account"
+msgstr "Padam Akaun"
+
+msgid "delete"
+msgstr "Padam"
+
+msgid "account"
+msgstr "Akaun"
+
+msgid "delete_account_?"
+msgstr "Padam Akaun Anda?"
+
+msgid "delete_account_message"
+msgstr ""
+"Pemadaman akaun adalah kekal. Anda akan kehilangan akses pada semua peranti,"
+" dan sebarang masa langganan Pro yang berbaki akan dilucuthakkan tanpa "
+"bayaran balik."
+
+msgid "delete_account_message_two"
+msgstr "Untuk mengesahkan pemadaman, sila masukkan kata laluan anda di bawah"
+
+msgid "Submit Issue Report"
+msgstr "Masukkan Kata Laluan untuk Mengesahkan"
+
+msgid "confirm_deletion"
+msgstr "Sahkan Pemadaman"
+
+msgid "cancel"
+msgstr "Batal"
+
+msgid "daily_data_usage"
+msgstr "Penggunaan Data Harian"
+
+msgid "mb"
+msgstr "MB"
+
+msgid "vpn_status"
+msgstr "Status VPN"
+
+msgid "telegram"
+msgstr "Telegram"
+
+msgid "instagram"
+msgstr "Instagram"
+
+msgid "x"
+msgstr "X"
+
+msgid "follow_us"
+msgstr "Ikuti Kami"
+
+msgid "server_selection"
+msgstr "Pemilihan Pelayan"
+
+msgid "smart_location"
+msgstr "Lokasi Pintar"
+
+msgid "automatically_chooses_fastest_location"
+msgstr "Secara automatik memilih lokasi terpantas"
+
+msgid "pro_locations"
+msgstr "Lokasi Pro:"
+
+msgid "choose_your_location_with_lantern_pro"
+msgstr "Pilih lokasi anda dengan Lantern Pro:"
+
+msgid "language"
+msgstr "Bahasa"
+
+msgid "sign_in"
+msgstr "Log Masuk"
+
+msgid "sign_out"
+msgstr "Log Keluar"
+
+msgid "check_for_updates"
+msgstr "Semak Kemas Kini"
+
+msgid "support"
+msgstr "Sokongan"
+
+msgid "download_links"
+msgstr "Pautan Muat Turun"
+
+msgid "get_30_days_of_pro_free"
+msgstr "Dapatkan 30 hari Pro percuma"
+
+msgid "share_message_referral_code"
+msgstr ""
+"Untuk bulan percuma Lantern Pro, gunakan kod rujukan ini: %s ; Anda boleh "
+"memuat turunnya dari sini: https://lantern.io/download"
+
+msgid "submit_issue_report"
+msgstr "Hantar Laporan Masalah"
+
+msgid "select_an_issue"
+msgstr "Pilih Masalah"
+
+msgid "cannot_access_blocked_sites"
+msgstr "Tidak dapat mengakses laman yang disekat"
+
+msgid "cannot_complete_purchase"
+msgstr "Tidak dapat melengkapkan pembelian"
+
+msgid "discover_not_working"
+msgstr "Discover tidak berfungsi"
+
+msgid "cannot_sign_in"
+msgstr "Tidak dapat log masuk"
+
+msgid "spinner_loads_endlessly"
+msgstr "Pemuat berputar tanpa henti"
+
+msgid "slow"
+msgstr "Perlahan"
+
+msgid "cannot_link_devices"
+msgstr "Tidak dapat memautkan peranti"
+
+msgid "wrong_device_linking_code"
+msgstr "Kod pautan peranti salah atau tidak sah"
+
+msgid "cannot_remove_device"
+msgstr "Tidak dapat membuang peranti"
+
+msgid "application_crashes"
+msgstr "Aplikasi terhenti secara tiba-tiba"
+
+msgid "other"
+msgstr "Lain-lain"
+
+msgid "issue_description"
+msgstr "Huraikan masalah anda"
+
+msgid "enter_password_to_confirm"
+msgstr "Masukkan kata laluan untuk mengesahkan"
+
+msgid "cannot_view_logs"
+msgstr ""
+"Lantern tidak dapat melihat log diagnostik anda melainkan anda menghantarnya"
+" kepada kami."
+
+msgid "split_tunneling_mode"
+msgstr "Mod Terowong Terpisah"
+
+msgid "apps_split_tunneling"
+msgstr "Terowong Terpisah Aplikasi"
+
+msgid "website_split_tunneling"
+msgstr "Terowong Terpisah Laman Web"
+
+msgid "iran_optimized"
+msgstr "Terowong terpisah dioptimumkan untuk Iran"
+
+msgid "china_optimized"
+msgstr "Terowong terpisah dioptimumkan untuk China"
+
+msgid "russia_optimized"
+msgstr "Terowong terpisah dioptimumkan untuk Rusia"
+
+msgid "global_optimized"
+msgstr "Terowong terpisah dioptimumkan untuk global"
+
+msgid "enter_url"
+msgstr "Masukkan URL"
+
+msgid "add"
+msgstr "Tambah"
+
+msgid "enabled"
+msgstr "Didayakan"
+
+msgid "disabled"
+msgstr "Dilumpuhkan"
+
+msgid "automatic"
+msgstr "Automatik"
+
+msgid "automatic_mode"
+msgstr "Mod automatik"
+
+msgid "manual"
+msgstr "Manual"
+
+msgid "enter_url_or_ip"
+msgstr "Masukkan URL atau Alamat IP"
+
+msgid "installed_apps"
+msgstr "Aplikasi Terpasang"
+
+msgid "search_apps"
+msgstr "Cari Aplikasi"
+
+msgid "search_websites"
+msgstr "Cari Laman Web"
+
+msgid "mode"
+msgstr "Mod"
+
+msgid "use_commas"
+msgstr "Gunakan koma untuk memisahkan berbilang URL"
+
+msgid "deep_link_expired"
+msgstr "Pautan ini telah tamat tempoh. Sila minta pautan baru."
+
+msgid "invalid_deep_link"
+msgstr "Pautan ini tidak sah. Sila minta pautan baru."
+
+msgid "default_bypass"
+msgstr "Senarai Lepasan Lalai"
+
+msgid "global_bypass_list"
+msgstr "Senarai Lepasan Global"
+
+msgid "global_bypass_desc"
+msgstr "Laman dipercayai (HTTPS) dengan kandungan tidak sensitif."
+
+msgid "china_bypass_list"
+msgstr "Senarai Lepasan China"
+
+msgid "china_bypass_desc"
+msgstr ""
+"Laman yang boleh diakses secara bebas di China. Dikemas kini secara berkala."
+
+msgid "iran_bypass_list"
+msgstr "Senarai Lepasan Iran"
+
+msgid "iran_bypass_desc"
+msgstr ""
+"Laman yang boleh diakses secara bebas di Iran. Dikemas kini secara berkala."
+
+msgid "russia_bypass_list"
+msgstr "Senarai Lepasan Rusia"
+
+msgid "russia_bypass_desc"
+msgstr ""
+"Laman yang boleh diakses secara bebas di Rusia. Dikemas kini secara berkala."
+
+msgid "see_sites_included"
+msgstr "Lihat laman yang termasuk dalam "
+
+msgid "default_lists_here"
+msgstr "senarai lalai di sini"
+
+msgid "when_connected"
+msgstr "Apabila disambungkan, laman web yang anda pilih akan melepasi VPN."
+
+msgid "lantern_automatic"
+msgstr ""
+"Lantern secara automatik memilih aplikasi dan laman web yang melepasi VPN "
+"berdasarkan lokasi anda untuk prestasi terbaik. "
+
+msgid "apps_bypassing_vpn"
+msgstr "Aplikasi yang melepasi VPN (%d)"
+
+msgid "websites_bypassing_vpn"
+msgstr "Laman web yang melepasi VPN (%d)"
+
+msgid "logs_share_message"
+msgstr "Berikut adalah log diagnostik saya dari Lantern."
+
+msgid "payment_options"
+msgstr "Pilihan Pembayaran"
+
+msgid "add_your_email"
+msgstr "Tambah E-mel Anda"
+
+msgid "continue"
+msgstr "Teruskan"
+
+msgid "continue_with_google"
+msgstr "Teruskan dengan Google"
+
+msgid "continue_with_apple"
+msgstr "Teruskan dengan Apple"
+
+msgid "continue_without_email"
+msgstr "Teruskan tanpa E-mel"
+
+msgid "confirm_email"
+msgstr "Sahkan E-mel"
+
+msgid "add_your_email_message"
+msgstr ""
+"Tambah e-mel anda untuk mengakses langganan anda pada mana-mana peranti."
+
+msgid "confirm_email_code"
+msgstr "Kod Pengesahan"
+
+msgid "confirm_email_code_message"
+msgstr ""
+"Sahkan bahawa alamat e-mel ini milik anda, masukkan kod yang dihantar ke: "
+
+msgid "resend_email"
+msgstr "Hantar Semula E-mel"
+
+msgid "create_password"
+msgstr "Cipta Kata Laluan"
+
+msgid "sign_in_to_lantern_pro"
+msgstr "Log Masuk ke Lantern"
+
+msgid "sign_in_with_email"
+msgstr "Log masuk dengan E-mel"
+
+msgid "enter_your_lantern_pro_account_details"
+msgstr "Masukkan butiran akaun Lantern anda."
+
+msgid "email"
+msgstr "E-mel"
+
+msgid "enter_password"
+msgstr "Masukkan Kata Laluan"
+
+msgid "forgot_password"
+msgstr "Terlupa kata laluan anda?"
+
+msgid "reset_your_password"
+msgstr "Set Semula Kata Laluan Anda"
+
+msgid "enter_your_lantern_pro_account_email"
+msgstr "Masukkan e-mel akaun Lantern anda."
+
+msgid "reset_password"
+msgstr "Set Semula Kata Laluan"
+
+msgid "confirm_new_password"
+msgstr "Sahkan Kata Laluan Baru"
+
+msgid "create_new_password"
+msgstr "Cipta Kata Laluan Baru"
+
+msgid "confirm_password"
+msgstr "Sahkan Kata Laluan"
+
+msgid "confirm_password_required"
+msgstr "Pengesahan kata laluan diperlukan"
+
+msgid "passwords_do_not_match"
+msgstr "Kata laluan tidak sepadan"
+
+msgid "activation_code"
+msgstr "Kod Pengaktifan"
+
+msgid "activate_lantern_pro"
+msgstr "Aktifkan Lantern Pro"
+
+msgid "invalid_email"
+msgstr "Alamat e-mel tidak sah"
+
+msgid "purchase_already_owned"
+msgstr "Anda sudah memiliki pembelian ini. Cuba pulihkan pembelian"
+
+msgid "stripe_payment"
+msgstr "Pembayaran Stripe"
+
+msgid "split_tunneling_description"
+msgstr ""
+"Lantern menghalakan trafik internet secara pintar berdasarkan lokasi anda, "
+"memastikan akses selamat sambil mengekalkan sambungan pantas dengan hanya "
+"menggunakan VPN apabila perlu."
+
+msgid "region_specific_rules"
+msgstr "Peraturan Khusus Wilayah"
+
+msgid "location_based_rules"
+msgstr ""
+"Lantern menggunakan peraturan penghalaan berbeza bergantung pada lokasi "
+"anda:"
+
+msgid "censored_regions"
+msgstr "Di wilayah bertapisan:"
+
+msgid "blocked_sites_proxied"
+msgstr ""
+"Laman web dan aplikasi yang disekat (berita, pemesejan, perkhidmatan terhad)"
+" diproksi."
+
+msgid "unblocked_sites_bypass"
+msgstr ""
+"Kebanyakan laman web tidak disekat melepasi VPN untuk pelayaran lebih "
+"pantas."
+
+msgid "uncensored_regions"
+msgstr "Di wilayah tidak bertapisan:"
+
+msgid "trusted_sites_bypass"
+msgstr ""
+"Hanya laman web dan perkhidmatan dipercayai melepasi VPN secara lalai."
+
+msgid "examples_of_bypassed_sites"
+msgstr ""
+"Ini termasuk laman disulitkan HTTPS dengan kandungan awam atau tidak "
+"sensitif seperti membeli-belah, cuaca, dan kemas kini perisian."
+
+msgid "routing_rules_vary"
+msgstr ""
+"Peraturan ini berbeza mengikut negara dan dikemas kini secara berkala."
+
+msgid "view_the_full_list"
+msgstr "Lihat senarai penuh peraturan penghalaan."
+
+msgid "turn_on_split_tunneling"
+msgstr ""
+"Hidupkan terowong terpisah untuk menyesuaikan laman web yang menggunakan "
+"VPN."
+
+msgid "welcome_to_lantern_pro"
+msgstr "Selamat Datang ke Lantern Pro!"
+
+msgid "welcome_to_lantern"
+msgstr "Selamat datang ke Lantern!"
+
+msgid "lantern_pro_description"
+msgstr ""
+"Ciri Pro anda dibuka kunci—nikmati data tanpa had, kelajuan lebih pantas, "
+"dan pelayan premium."
+
+msgid "plans_fetch_error"
+msgstr "Ralat mendapatkan pelan. Sila cuba lagi kemudian."
+
+msgid "best_value"
+msgstr "Nilai Terbaik!"
+
+msgid "choose_payment_method"
+msgstr "Pilih Kaedah Pembayaran"
+
+msgid "payment_information_encrypted"
+msgstr "Maklumat pembayaran anda disulitkan sepenuhnya."
+
+msgid "purchase_not_completed"
+msgstr ""
+"Pembelian tidak selesai. Anda boleh cuba lagi pada bila-bila masa, atau "
+"hubungi sokongan jika anda perlukan bantuan"
+
+msgid "are_you_sure"
+msgstr "Adakah anda pasti?"
+
+msgid "continue_without_email_message"
+msgstr ""
+"Alamat e-mel yang sah diperlukan untuk menggunakan langganan anda pada "
+"peranti lain."
+
+msgid "add_email"
+msgstr "Tambah E-mel"
+
+msgid "block_ads"
+msgstr "Sekat Iklan"
+
+msgid "only_active"
+msgstr "Hanya aktif apabila VPN disambungkan"
+
+msgid "vpn_connected"
+msgstr "Lantern kini disambungkan."
+
+msgid "vpn_disconnected"
+msgstr "Lantern kini diputuskan."
+
+msgid "open_notification"
+msgstr "Buka Pemberitahuan"
+
+msgid "logout"
+msgstr "Log Keluar"
+
+msgid "logout_message"
+msgstr ""
+"Log keluar akan menukar Lantern kepada versi percuma. Untuk mengakses akaun "
+"anda semula, anda perlu log masuk kembali."
+
+msgid "logout_message_expired"
+msgstr "Adakah anda pasti mahu log keluar dari akaun anda?"
+
+msgid "not_now"
+msgstr "Tidak sekarang"
+
+msgid "billed_once"
+msgstr "Dibilkan Sekali"
+
+msgid "subscription"
+msgstr "Langganan"
+
+msgid "subscribe"
+msgstr "Langgan"
+
+msgid "checkout"
+msgstr "Daftar Keluar"
+
+msgid "next_billing_date"
+msgstr "Tarikh Bil Seterusnya"
+
+msgid "vpn_may_be_needed"
+msgstr "VPN mungkin diperlukan"
+
+msgid "google_and_apple_sign_in_blocked"
+msgstr ""
+"Log masuk Google dan Apple mungkin disekat di wilayah ini. Untuk "
+"melengkapkan persediaan akaun anda, sila hidupkan VPN terlebih dahulu."
+
+msgid "continue_without_vpn"
+msgstr "Teruskan tanpa VPN"
+
+msgid "turn_on_vpn"
+msgstr "Hidupkan VPN"
+
+msgid "server_setup_do"
+msgstr "Sediakan menggunakan DigitalOcean"
+
+msgid "server_setup_do_price"
+msgstr "Hanya %s sebulan melalui Digital Ocean"
+
+msgid "server_setup_gcp"
+msgstr "Sediakan menggunakan Google Cloud Platform"
+
+msgid "continue_with_do"
+msgstr "Teruskan dengan Digital Ocean"
+
+msgid "do_allows"
+msgstr ""
+"Digital Ocean membolehkan anda memilih satu lokasi pelayan daripada %d "
+"pilihan di bawah"
+
+msgid "server_setup_gcp_price"
+msgstr "Hanya %s sebulan melalui GCP"
+
+msgid "continue_with_gcp"
+msgstr "Teruskan dengan Google"
+
+msgid "gcp_allows"
+msgstr ""
+"Google Cloud Platform membolehkan anda memilih satu lokasi pelayan daripada "
+"%d pilihan di bawah:"
+
+msgid "server_setup_aws"
+msgstr "Sediakan pelayan peribadi di Digital Ocean"
+
+msgid "server_setup_aws_price"
+msgstr "Hanya %s sebulan melalui AWS"
+
+msgid "server_setup_manual"
+msgstr "Sediakan Secara Manual"
+
+msgid "seamless_integration"
+msgstr "Integrasi lancar dengan Lantern"
+
+msgid "easiest_setup"
+msgstr "Proses persediaan termudah"
+
+msgid "multiple_location_options"
+msgstr "Pelbagai pilihan lokasi pelayan"
+
+msgid "one_month_included"
+msgstr "%d TB/bulan data disertakan"
+
+msgid "easiest_setup_process"
+msgstr "Proses persediaan termudah"
+
+msgid "setup_a_private_server"
+msgstr "Sediakan Pelayan Peribadi"
+
+msgid "setup_private_server"
+msgstr "Sediakan Pelayan Peribadi"
+
+msgid "previous"
+msgstr "Sebelumnya"
+
+msgid "next"
+msgstr "Seterusnya"
+
+msgid "error"
+msgstr "Ralat"
+
+msgid "signup_error_user_exists"
+msgstr ""
+"Nampaknya terdapat masalah dengan pendaftaran. Sila cuba lagi atau log masuk"
+" jika anda sudah mempunyai akaun"
+
+msgid "user_not_found"
+msgstr ""
+"Pengguna tidak dikenali. Sila semak kelayakan anda dan cuba lagi. Jika anda "
+"terus mengalami masalah, sila hubungi pasukan sokongan kami untuk bantuan."
+
+msgid "invalid_code"
+msgstr "Kod salah atau mungkin telah tamat tempoh. Sila cuba hantar semula"
+
+msgid "email_resend_message"
+msgstr "Kod pengesahan baru anda telah dihantar"
+
+msgid "password_has_been_updated"
+msgstr "Kata laluan telah dikemas kini"
+
+msgid "password_has_been_updated_message"
+msgstr "Kata laluan anda telah berjaya ditetapkan semula"
+
+msgid "update_pro_account"
+msgstr "Kemas Kini Akaun Pro"
+
+msgid "update_pro_account_message"
+msgstr ""
+"Untuk mengurus akaun anda atau log masuk ke peranti lain, sila tambahkan "
+"e-mel dan kata laluan ke akaun anda terlebih dahulu."
+
+msgid "subscription_cancelled"
+msgstr "Langganan anda telah dibatalkan."
+
+msgid "subscription_updated"
+msgstr "Langganan anda telah dikemas kini."
+
+msgid "subscription_renewed"
+msgstr "Langganan anda telah diperbaharui."
+
+msgid "got_it"
+msgstr "Faham"
+
+msgid "server_location"
+msgstr "Lokasi Pelayan"
+
+msgid "choose"
+msgstr "Pilih"
+
+msgid "choose_your_account"
+msgstr "Pilih Akaun Anda"
+
+msgid "choose_your_project"
+msgstr "Pilih projek anda"
+
+msgid "name_your_google_cloud_project"
+msgstr "Namakan Projek Google Cloud anda"
+
+msgid "billing_account"
+msgstr "Akaun Bil"
+
+msgid "billing_account_placeholder"
+msgstr "Akaun bil untuk %s"
+
+msgid "server_name"
+msgstr "Nama Pelayan"
+
+msgid "google_project"
+msgstr "Projek Google"
+
+msgid "field_name_required"
+msgstr "Nama diperlukan"
+
+msgid "choose_google_account"
+msgstr "Pilih akaun bil Google"
+
+msgid "server_name_placeholder"
+msgstr "Pelayan Saya"
+
+msgid "change"
+msgstr "Ubah"
+
+msgid "choose_location"
+msgstr "Pilih Lokasi"
+
+msgid "choose_your_location"
+msgstr "Pilih Lokasi Anda"
+
+msgid "start_deployment"
+msgstr "Mula Pelancaran"
+
+msgid "server_name_description"
+msgstr "Bagaimana pelayan akan muncul dalam senarai pemilihan pelayan."
+
+msgid "select_private_server_region"
+msgstr ""
+"Pilih wilayah untuk Pelayan Peribadi anda. Lokasi yang lebih dekat mungkin "
+"meningkatkan kelajuan dan kependaman."
+
+msgid "gcp_location_options"
+msgstr "Pilihan Lokasi Google Cloud Platform (%d):"
+
+msgid "australia_sydney"
+msgstr "Australia - Sydney"
+
+msgid "belgium_stghislain"
+msgstr "Belgium - St. Ghislain"
+
+msgid "brazil_saopaulo"
+msgstr "São Paulo"
+
+msgid "us_los_angeles"
+msgstr "AS - Los Angeles"
+
+msgid "japan_tokyo"
+msgstr "Jepun - Tokyo"
+
+msgid "deploying_private_server"
+msgstr "Melancarkan Pelayan Peribadi"
+
+msgid "deploying_server_status"
+msgstr ""
+"Tunggu sebentar! Pelayan Peribadi anda sedang disediakan. Ini mungkin "
+"mengambil beberapa minit."
+
+msgid "private_server_setup_in_progress"
+msgstr ""
+"Tunggu sebentar! Pelayan Peribadi anda sedang disediakan. Ini mungkin "
+"mengambil beberapa minit, sila biarkan skrin ini terbuka."
+
+msgid "cancel_server_deployment"
+msgstr "Batalkan Pelancaran Pelayan"
+
+msgid "server_ready_title"
+msgstr "Pelayan Peribadi Sudah Sedia"
+
+msgid "server_ready_message"
+msgstr ""
+"Pelayan Peribadi anda telah disediakan dan ditambah ke senarai pelayan anda."
+" Anda sudah bersedia untuk menyambung!"
+
+msgid "server_failed_message"
+msgstr ""
+"Ada masalah semasa menyediakan Pelayan Peribadi anda. Anda boleh cuba semula"
+" atau cuba lagi kemudian."
+
+msgid "close"
+msgstr "Tutup"
+
+msgid "connect_now"
+msgstr "Sambung Sekarang"
+
+msgid "server_setup_failed"
+msgstr "Persediaan Pelayan Gagal"
+
+msgid "cancel_deployment"
+msgstr "Batalkan Pelancaran"
+
+msgid "server_setup_failed_message"
+msgstr ""
+"Ada masalah semasa menyediakan Pelayan Peribadi anda. Anda boleh cuba semula"
+" atau cuba lagi kemudian."
+
+msgid "exit"
+msgstr "Keluar"
+
+msgid "retry"
+msgstr "Cuba Semula"
+
+msgid "all_required_fields"
+msgstr "Sila isi semua medan yang diperlukan."
+
+msgid "private_server_ready"
+msgstr "Pelayan Peribadi Sudah Sedia!"
+
+msgid "private_server_ready_message"
+msgstr ""
+"Pelayan (%s) telah disediakan dan ditambah ke senarai pelayan anda. Anda "
+"sudah bersedia untuk menyambung!"
+
+msgid "set_up_your_server"
+msgstr "Sediakan Pelayan Anda"
+
+msgid "view_instructions_github"
+msgstr "Lihat Arahan di GitHub"
+
+msgid "server_access_key"
+msgstr "Kunci Akses Pelayan"
+
+msgid "access_key"
+msgstr "Kunci Akses"
+
+msgid "name_your_server"
+msgstr "Namakan Pelayan Anda"
+
+msgid "how_server_appears"
+msgstr "Bagaimana pelayan akan muncul dalam senarai pemilihan pelayan"
+
+msgid "server_nickname"
+msgstr "Nama Samaran Pelayan"
+
+msgid "verify_server"
+msgstr "Sahkan Pelayan"
+
+msgid "vpn_client_not_setup"
+msgstr "Sila hidupkan klien VPN."
+
+msgid "continue_with"
+msgstr "Teruskan dengan"
+
+msgid "join_a_private_server"
+msgstr "Sertai Pelayan Peribadi"
+
+msgid "join_private_server"
+msgstr "Sertai Pelayan Peribadi"
+
+msgid "join_server"
+msgstr "Sertai Pelayan"
+
+msgid "private_server_usage_message"
+msgstr ""
+"Penggunaan pelayan peribadi tidak dikira dalam had data harian Lantern anda."
+
+msgid "manage_private_servers"
+msgstr "Urus Pelayan Peribadi"
+
+msgid "my_servers"
+msgstr "Pelayan Saya"
+
+msgid "joined_servers"
+msgstr "Pelayan yang Disertai"
+
+msgid "access_key_expiration"
+msgstr ""
+"Setiap kunci akses adalah unik dan tamat tempoh selepas 1 hari. Anda boleh "
+"menjana yang baru pada bila-bila masa."
+
+msgid "share_access_key"
+msgstr "Kongsi Kunci Akses"
+
+msgid "rename_server"
+msgstr "Namakan Semula Pelayan"
+
+msgid "rename"
+msgstr "Namakan Semula"
+
+msgid "selected_location"
+msgstr "Lokasi Dipilih"
+
+msgid "remove_server_?"
+msgstr "Buang Pelayan?"
+
+msgid "remove_server_message"
+msgstr ""
+"Buang %s? Ini hanya akan membuangnya daripada aplikasi anda, ia tidak akan "
+"memadamkan pelayan daripada pembekal awan anda."
+
+msgid "generate_access_key"
+msgstr "Jana Kunci Akses"
+
+msgid "invite_name"
+msgstr "Nama Jemputan"
+
+msgid "trust_server_operator"
+msgstr "Percayai Pengendali Pelayan"
+
+msgid "trust_server_operator_message_one"
+msgstr ""
+"Pelayan peribadi dihoskan dan dikendalikan oleh individu atau organisasi di "
+"luar Lantern. Apabila anda menyambung ke satu, anda mempercayai orang yang "
+"mengendalikannya untuk mengurusnya dengan selamat dan menggunakannya dengan "
+"bertanggungjawab."
+
+msgid "trust_server_operator_message_two"
+msgstr ""
+"Lantern tidak mengurus atau memantau pelayan peribadi. Pastikan anda "
+"mengenali dan mempercayai pengendali pelayan sebelum menyertainya."
+
+msgid "trust_server_operator_message_three"
+msgstr ""
+"Jika anda tidak pasti siapa yang mengendalikan pelayan atau bagaimana ia "
+"dikonfigurasikan, kami cadangkan menggunakan salah satu pelayan Lantern "
+"lalai yang tersedia dalam senarai pelayan anda."
+
+msgid "invalid_server_details"
+msgstr "Butiran pelayan tidak sah. Sila semak kunci akses dan cuba lagi."
+
+msgid "lantern_servers"
+msgstr "Pelayan Lantern"
+
+msgid "private_servers"
+msgstr "Pelayan Peribadi"
+
+msgid "fastest_server"
+msgstr "Pelayan Terpantas"
+
+msgid "join_my_private_server"
+msgstr "Sertai Pelayan Peribadi Lantern Saya"
+
+msgid "your_server"
+msgstr "Pelayan Anda:"
+
+msgid "no_private_server_setup_yet"
+msgstr ""
+"Anda belum menyediakan pelayan peribadi lagi. Klik butang di bawah untuk "
+"bermula."
+
+msgid "connect"
+msgstr "Sambung"
+
+msgid "disconnect"
+msgstr "Putuskan"
+
+msgid "show"
+msgstr "Tunjuk"
+
+msgid "status_on"
+msgstr "Disambungkan"
+
+msgid "status_off"
+msgstr "Diputuskan"
+
+msgid "select_location"
+msgstr "Pilih Lokasi"
+
+msgid "select_your_server_location"
+msgstr "Pilih lokasi pelayan anda"
+
+msgid "faster_speeds_unlimited_bandwidth"
+msgstr "Kelajuan lebih pantas & lebar jalur tanpa had"
+
+msgid "premium_servers_less_congestion"
+msgstr "Pelayan premium dengan kurang kesesakan"
+
+msgid "advanced_anti_censorship"
+msgstr "Teknologi anti-penapisan canggih"
+
+msgid "exclusive_access_new_features"
+msgstr "Akses eksklusif kepada ciri baharu"
+
+msgid "connect_up_to_five_devices"
+msgstr "Sambungkan sehingga 5 peranti"
+
+msgid "built_in_ad_blocking"
+msgstr "Penyekatan iklan terbina dalam"
+
+msgid "get_lantern_pro"
+msgstr "Dapatkan Lantern Pro"
+
+msgid "connected_to_private_server"
+msgstr "Disambungkan ke Pelayan Peribadi"
+
+msgid "server_already_selected"
+msgstr "Anda sudah disambungkan ke pelayan ini."
+
+msgid "device_limit_reached"
+msgstr "Had Peranti Dicapai"
+
+msgid "device_limit_reached_message"
+msgstr ""
+"Anda telah mencapai had 5 peranti anda. Sila buang peranti untuk meneruskan."
+
+msgid "remove_device_and_sign_in"
+msgstr "Buang Peranti dan Log Masuk"
+
+msgid "cancel_sign_in"
+msgstr "Batalkan Log Masuk"
+
+msgid "change_email"
+msgstr "Tukar E-mel"
+
+msgid "change_email_message"
+msgstr ""
+"Ini akan menjadi e-mel log masuk baharu anda. Anda perlu mengesahkannya "
+"sebelum perubahan berkuat kuasa."
+
+msgid "enter_new_email"
+msgstr "Masukkan E-mel baharu anda"
+
+msgid "confirm_password_to_continue"
+msgstr "Untuk meneruskan, sila sahkan kata laluan anda."
+
+msgid "email_updated"
+msgstr "E-mel anda telah dikemas kini."
+
+msgid "enable_network_extension"
+msgstr "Dayakan Sambungan Rangkaian"
+
+msgid "enable_network_extension_message"
+msgstr ""
+"Untuk menggunakan Lantern, kami perlu memasang sambungan rangkaian untuk Mac"
+" anda."
+
+msgid "install_now"
+msgstr "Pasang Sekarang"
+
+msgid "learn_more"
+msgstr "Ketahui Lebih Lanjut"
+
+msgid "network_extension_required"
+msgstr "Sambungan rangkaian diperlukan"
+
+msgid "click"
+msgstr "Klik"
+
+msgid "open_system_settings"
+msgstr "Buka Tetapan Sistem"
+
+msgid "when_prompted"
+msgstr "apabila diminta."
+
+msgid "activate_extension"
+msgstr "Pasang Sekarang"
+
+msgid "email_optional"
+msgstr "E-mel (pilihan)"
+
+msgid "please_enter_valid_email"
+msgstr "Sila masukkan e-mel yang sah"
+
+msgid "please_select_an_issue"
+msgstr "Sila pilih masalah"
+
+msgid "please_enter_issue_description"
+msgstr "Sila masukkan huraian masalah"
+
+msgid "thanks_for_feedback"
+msgstr "Terima kasih atas maklum balas anda!"
+
+msgid "no_apps_selected"
+msgstr "Tiada aplikasi dipilih"
+
+msgid "deselect_all"
+msgstr "Nyahpilih Semua"
+
+msgid "select_all"
+msgstr "Pilih Semua"
+
+msgid "no_websites_selected"
+msgstr "Tiada laman web dipilih"
+
+msgid "enter_activation_code"
+msgstr "Masukkan Kod Pengaktifan"
+
+msgid "restore_purchase"
+msgstr "Pulihkan Pembelian"
+
+msgid "do_private_server_setup"
+msgstr "Persediaan Pelayan Peribadi DO"
+
+msgid "private_server_note"
+msgstr ""
+"Pilih wilayah untuk Pelayan Peribadi anda. Lokasi yang lebih dekat mungkin "
+"meningkatkan kelajuan dan kependaman."
+
+msgid "gcp_private_server_setup"
+msgstr "Persediaan Pelayan Peribadi GCP"
+
+msgid "gcp_private_server_location"
+msgstr "Lokasi Pelayan Peribadi GCP"
+
+msgid "do_private_server_location"
+msgstr "Lokasi Pelayan Peribadi DO"
+
+msgid "confirm"
+msgstr "Sahkan"
+
+msgid "private_server_warning"
+msgstr "Hanya tambah pelayan yang dikendalikan oleh orang yang anda percayai "
+
+msgid "go_to_server_locations"
+msgstr "Pergi ke Lokasi Pelayan"
+
+msgid "lantern_io"
+msgstr "Lantern.io"
+
+msgid "alternative_download_links"
+msgstr "Pautan Muat Turun Alternatif"
+
+msgid "github_download_page"
+msgstr "Halaman Muat Turun GitHub"
+
+msgid "telegram_bot"
+msgstr "Bot Telegram"
+
+msgid "if_you_cannot_access_website"
+msgstr ""
+"Jika anda menghadapi sebarang masalah mengakses laman web kami, anda boleh "
+"memuat turun Lantern daripada pautan di atas."
+
+msgid "available_on"
+msgstr "Tersedia di:"
+
+msgid "subscription_renewal_date"
+msgstr "Tarikh Pembaharuan Langganan"
+
+msgid "enabled_bypass_lists"
+msgstr "Senarai lepasan didayakan (%d):"
+
+msgid "diagnostic_logs"
+msgstr "Log Diagnostik"
+
+msgid "lantern_user_forum"
+msgstr "Forum Pengguna Lantern"
+
+msgid "frequently_asked_questions"
+msgstr "Soalan Lazim"
+
+msgid "privacy_policy"
+msgstr "Dasar Privasi"
+
+msgid "terms_of_service"
+msgstr "Syarat Perkhidmatan"
+
+msgid "get_unlimited_data"
+msgstr "Dapatkan data tanpa had, dan kelajuan lebih pantas!"
+
+msgid "private_server_options"
+msgstr "Pilihan Pelayan Peribadi"
+
+msgid "lantern_version"
+msgstr "Versi Lantern"
+
+msgid "quit"
+msgstr "Keluar"
+
+msgid "device_removed"
+msgstr "Peranti dibuang"
+
+msgid "set_server_alias"
+msgstr "Tetapkan Alias Pelayan"
+
+msgid "this_name_pre_filled"
+msgstr ""
+"Nama ini akan diisi terlebih dahulu untuk pengguna yang dijemput bagi "
+"membantu mereka mengenal pasti pelayan. Mereka boleh mengubahnya kemudian."
+
+msgid "server_alias"
+msgstr "Alias Pelayan"
+
+msgid "add_referral_code"
+msgstr "Tambah Kod Rujukan"
+
+msgid "referral_code"
+msgstr "Kod Rujukan"
+
+msgid "update_fails"
+msgstr "Kemas kini gagal"
+
+msgid "scan_qr_code"
+msgstr "Imbas Kod QR"
+
+msgid "choose_your_server_location"
+msgstr "Pilih lokasi pelayan anda"
+
+msgid "we_handle_configuration"
+msgstr "Kami mengendalikan konfigurasi, cuma daftar."
+
+msgid "90_day_free_trial"
+msgstr "Percubaan percuma 90 hari"
+
+msgid "identity_changed"
+msgstr "Identiti Berubah untuk %s"
+
+msgid "identity_changed_message"
+msgstr ""
+"Cap jari keselamatan %s telah berubah. Ini mungkin menandakan gangguan atau "
+"salah konfigurasi."
+
+msgid "recommendation"
+msgstr "Cadangan:"
+
+msgid "recommendation_message"
+msgstr ""
+"Kami mengesyorkan membuang %s daripada Lantern dan memadamkannya daripada "
+"akaun pembekal awan anda, kemudian sediakan pelayan baharu untuk memastikan "
+"sambungan anda kekal selamat."
+
+msgid "remove_server"
+msgstr "Buang Pelayan"
+
+msgid "server_alias_cannot_be_empty"
+msgstr "Alias pelayan tidak boleh kosong"
+
+msgid "referral_code_applied"
+msgstr " Kod rujukan anda telah digunakan!"
+
+msgid "referral_message_1m"
+msgstr "+ 15 hari tambahan percuma"
+
+msgid "referral_message_1y"
+msgstr " + 1 bulan tambahan percuma"
+
+msgid "referral_message_2y"
+msgstr "+ 2 bulan tambahan percuma"
+
+msgid "referral_code_invalid"
+msgstr ""
+"Kod rujukan yang anda masukkan tidak sah. Sila semak kod dan cuba lagi."
+
+msgid "referral_code_own_invalid"
+msgstr ""
+"Anda tidak boleh menggunakan kod rujukan anda sendiri. Sila masukkan kod "
+"yang berbeza."
+
+msgid "free"
+msgstr "Percuma"
+
+msgid "monthly_plan"
+msgstr "Pelan bulanan:"
+
+msgid "15_days_each"
+msgstr "+15 hari setiap satu"
+
+msgid "annual_plan"
+msgstr " Pelan tahunan:"
+
+msgid "1_month_each"
+msgstr "+1 bulan setiap satu"
+
+msgid "two_year_plan"
+msgstr "Pelan dua tahun:"
+
+msgid "2_month_each"
+msgstr "+2 bulan setiap satu"
+
+msgid "referral_code_info"
+msgstr ""
+"Belum lagi pengguna Lantern Pro? Anda akan menjadi seorang apabila rujukan "
+"pertama anda melanggan"
+
+msgid "lantern_pro_license"
+msgstr "Lesen Lantern Pro"
+
+msgid "lantern_pro_license_required"
+msgstr "Lesen Lantern Pro diperlukan"
+
+msgid "lantern_pro_license_invalid"
+msgstr "Lesen Lantern Pro tidak sah"
+
+msgid "lantern_pro_license_invalid_length"
+msgstr "Lesen Lantern Pro mestilah 25 aksara"
+
+msgid "select_account"
+msgstr "Pilih Akaun"
+
+msgid "new_to_lantern"
+msgstr "Baru ke Lantern?"
+
+msgid "create_an_account"
+msgstr " Cipta akaun"
+
+msgid "no_projects_found"
+msgstr "Tiada Projek Dijumpai"
+
+msgid "no_projects_found_desc"
+msgstr ""
+"Tiada projek dijumpai. Sila cipta projek dalam akaun pembekal awan anda "
+"dahulu."
+
+msgid "add_billing_details"
+msgstr "Tambah Butiran Pengebilan"
+
+msgid "do_billing_details_message"
+msgstr "DigitalOcean memerlukan maklumat pembayaran untuk mencipta pelayan."
+
+msgid "tap"
+msgstr "Ketik"
+
+msgid "below_to_go_to_do"
+msgstr "di bawah untuk pergi ke DigitalOcean"
+
+msgid "1"
+msgstr "1"
+
+msgid "2"
+msgstr "2"
+
+msgid "3"
+msgstr "3"
+
+msgid "add_payment_method"
+msgstr "Tambah kaedah pembayaran (kad kredit atau PayPal)"
+
+msgid "return_to_lantern"
+msgstr "Kembali ke Lantern dan ketik \"Teruskan\" untuk meneruskan persediaan"
+
+msgid "how_to_add_billing_details"
+msgstr "Cara menambah butiran pengebilan:"
+
+msgid "add_payment_method_message"
+msgstr ""
+"Sila tambah kaedah pembayaran ke akaun DigitalOcean anda. Jika sudah "
+"ditambah, tunggu beberapa minit dan cuba lagi."
+
+msgid "ok"
+msgstr "OK"
+
+msgid "could_not_open_url"
+msgstr "Tidak dapat membuka URL"
+
+msgid "new_to_lantern_pro"
+msgstr "Baru ke Lantern?"
+
+msgid "an_error_occurred"
+msgstr "Ralat berlaku. Sila cuba lagi kemudian."
+
+msgid "developer_mode"
+msgstr "Mod Pembangun"
+
+msgid "developer_mode_note"
+msgstr ""
+"Mod Pembangun adalah khusus untuk Pembangun Lantern menguji ciri semasa "
+"membangunkan."
+
+msgid "invalid_activation_code"
+msgstr "Kod pengaktifan tidak sah. Sila semak kod dan cuba lagi."
+
+msgid "invalid_activation_code_length"
+msgstr "Kod pengaktifan mestilah 25 aksara panjang."
+
+msgid "error_while_vpn_connection"
+msgstr "Ralat berlaku semasa mewujudkan sambungan VPN. Sila cuba lagi."
+
+msgid "help_improve_lantern"
+msgstr "Bantu Tingkatkan Lantern"
+
+msgid "share_anonymous_usage_data"
+msgstr ""
+"Kongsikan data penggunaan tanpa nama untuk membantu meningkatkan kelajuan "
+"dan kebolehpercayaan."
+
+msgid "data_we_collect"
+msgstr ""
+"Kami tidak pernah mengumpul sejarah pelayaran, destinasi trafik, pertanyaan "
+"DNS atau log sambungan."
+
+msgid "you_can_change_anytime"
+msgstr "Anda boleh menukar ini pada bila-bila masa dalam Tetapan VPN."
+
+msgid "dont_allow"
+msgstr "Jangan Benarkan"
+
+msgid "allow"
+msgstr "Benarkan"
+
+msgid "anonymous_usage_data"
+msgstr "Data Penggunaan Tanpa Nama"
+
+msgid "helps_improve_lantern_performance"
+msgstr "Membantu meningkatkan prestasi Lantern"
+
+msgid "changes_applied_after_restart"
+msgstr "Perubahan akan digunakan selepas memulakan semula Lantern."
+
+msgid "email_deliverability_notice"
+msgstr "Notis Kebolehan Penghantaran E-mel"
+
+msgid "email_deliverability_notice_message"
+msgstr ""
+"E-mel ke alamat 163.com, 126.com, qq.com dan sina.com kadang-kadang disekat "
+"dan mungkin tidak sampai"
+
+msgid "email_deliverability_notice_message_two"
+msgstr ""
+"Jika anda tidak menerima kod pengesahan, pertimbangkan untuk menggunakan "
+"pembekal e-mel alternatif."
+
+msgid "continue_anyway"
+msgstr "Teruskan Juga"
+
+msgid "routing_mode"
+msgstr "Mod Penghalaan"
+
+msgid "smart_routing"
+msgstr "Penghalaan Pintar"
+
+msgid "full_tunnel"
+msgstr "Terowong Penuh"
+
+msgid "region_optimized_routing"
+msgstr "Penghalaan berasaskan peraturan yang dioptimumkan untuk wilayah anda"
+
+msgid "all_traffic_through_vpn"
+msgstr "Semua trafik melalui VPN"
+
+msgid "smart_routing_description"
+msgstr ""
+"Penghalaan Pintar menggunakan peraturan khusus wilayah untuk menghantar "
+"trafik yang memerlukan VPN melalui Lantern secara automatik. Semua trafik "
+"lain pergi terus untuk kelajuan dan kebolehpercayaan."
+
+msgid "add_apps_websites_bypass_vpn"
+msgstr "Tambah apl & laman web untuk memintas VPN"
+
+msgid "lantern_pro_license_applied"
+msgstr "Lesen Lantern Pro anda akan digunakan pada akaun sedia ada anda"
+
+msgid "your_purchase_will_be_applied_to_your_existing_account"
+msgstr "Pembelian anda akan digunakan pada akaun sedia ada anda"
+
+msgid "daily_data_cap_reached"
+msgstr "Had data harian dicapai"
+
+msgid "daily_data_cap_reached_message"
+msgstr "Kelajuan dikurangkan kepada 128 kb/s - Set semula pada %s."
+
+msgid "subscription_renewal_info"
+msgstr ""
+"Pembayaran akan dicaj ke Apple ID anda semasa pembelian. Langganan akan "
+"diperbaharui secara automatik melainkan dibatalkan sekurang-kurangnya 24 jam"
+" sebelum tamat tempoh semasa. Urus atau batalkan di Tetapan App Store."
+
+msgid "failed_to_update_routing_mode"
+msgstr "Gagal mengemas kini mod penghalaan. Sila cuba lagi."
+
+msgid "apps"
+msgstr "Aplikasi"
+
+msgid "websites"
+msgstr "Laman Web"
+
+msgid "main_channel"
+msgstr "Saluran Utama"
+
+msgid "data_cap_channel"
+msgstr "Amaran Penggunaan Data"
+
+msgid "mb_free_data_remaining"
+msgstr "%d MB data percuma berbaki"
+
+msgid "daily_data_cap_reached_notification_message"
+msgstr ""
+"Data anda akan ditetapkan semula pada %s. Naik taraf ke Pro untuk data "
+"berkelajuan tinggi tanpa had."
+
+msgid "if_you_have_not_set_password"
+msgstr ""
+"Jika anda tidak pernah menetapkan kata laluan Lantern Pro sebelum ini, pilih"
+" pilihan 'terlupa kata laluan?' di bawah."
+
+msgid "pro_subscription_expired"
+msgstr "Langganan Pro anda telah tamat tempoh"
+
+msgid "renew_pro_subscription"
+msgstr "Perbaharui Langganan Pro"
+
+msgid "subscription_expired"
+msgstr "Langganan Tamat Tempoh"
+
+msgid "pro"
+msgstr "Pro"
+
+msgid "pro_subscription_expired_message"
+msgstr ""
+"Langganan Lantern Pro telah tamat tempoh. Perbaharui untuk memulihkan data "
+"tanpa had dan ciri Pro."
+
+msgid "last_subscription_renewal_date"
+msgstr "Tarikh Pembaharuan Langganan Terakhir"
+
+msgid "set_account_password"
+msgstr "Tetapkan Kata Laluan Akaun"
+
+msgid "set_password"
+msgstr "Tetapkan Kata Laluan"
+
+msgid "set_account_password_message"
+msgstr ""
+"Untuk mengurus akaun anda atau log masuk pada peranti lain, anda kini perlu menetapkan kata laluan untuk akaun Lantern Pro anda.\n"
+"\n"
+"Kami akan menghantar kod pengesahan melalui e-mel untuk mencipta kata laluan anda."
+
+msgid "expired"
+msgstr "Tamat Tempoh"
+
+msgid "lantern_pro_tagline"
+msgstr "Akses internet yang pantas, boleh dipercayai dan peribadi"
+
+msgid "what_makes_lantern_different"
+msgstr "Apa yang membezakan Lantern"
+
+msgid "built_for_privacy_speed_freedom"
+msgstr "Dibina untuk privasi, kelajuan dan kebebasan"
+
+msgid "smart_routing_mode"
+msgstr "Mod Penghalaan Pintar"
+
+msgid "region_specific_routing_description"
+msgstr ""
+"Peraturan khusus wilayah menghalakan hanya trafik yang memerlukan VPN, "
+"mengekalkan sambungan anda pantas."
+
+msgid "advanced_protocols"
+msgstr "Protokol Lanjutan"
+
+msgid "advanced_protocols_description"
+msgstr ""
+"Lebih banyak protokol berbanding VPN lain untuk kebolehpercayaan maksimum. "
+"AnyTLS, Hysteria2, VLESS, Kindling, WATER dan banyak lagi."
+
+msgid "private_servers_description"
+msgstr ""
+"Sambungkan pelayan anda sendiri untuk kawalan penuh ke atas sambungan anda."
+
+msgid "nonprofit_mission"
+msgstr "Misi Bukan Untung"
+
+msgid "built_by_nonprofit"
+msgstr ""
+"Dibina oleh organisasi bukan untung dengan pengalaman 12+ tahun memajukan "
+"kebebasan internet"
+
+msgid "choose_your_routing_mode"
+msgstr "Pilih mod penghalaan anda"
+
+msgid "fastest"
+msgstr "Terpantas"
+
+msgid "traditional_vpn_mode"
+msgstr "Mod VPN Tradisional"
+
+msgid "traditional_vpn_mode_description"
+msgstr "Menghalakan semua trafik melalui Lantern, sama ada perlu atau tidak."
+
+msgid "change_anytime_in_routing_mode_settings"
+msgstr "Boleh ditukar pada bila-bila masa dalam Tetapan Mod Penghalaan"
+
+msgid "get_started"
+msgstr "Mula"
+
+msgid "skip_connect_now"
+msgstr "Langkau - Sambung Sekarang"
+
+msgid "renew_pro"
+msgstr "Perbaharui Pro"
+
+msgid "payment"
+msgstr "Pembayaran"
+
+msgid "it_looks_like_something_went_wrong"
+msgstr ""
+"Nampaknya terdapat masalah. Jika anda telah membuat pembayaran tetapi tidak "
+"melihat langganan anda aktif, sila tunggu beberapa jam dan semak semula."
+
+msgid "manage_subscription_google_play"
+msgstr ""
+"Pelan Pro anda telah dibeli melalui Google Play. Sila urus langganan anda "
+"daripada tetapan akaun Google Play anda."
+
+msgid "manage_subscription_apple_app_store"
+msgstr ""
+"Pelan Pro anda telah dibeli melalui Apple App Store. Sila urus langganan "
+"anda daripada tetapan akaun Apple ID anda."
+
+msgid "create_account_error"
+msgstr "Ralat Cipta Akaun"
+
+msgid "appearance"
+msgstr "Rupa"
+
+msgid "light"
+msgstr "Cerah"
+
+msgid "dark"
+msgstr "Gelap"
+
+msgid "system"
+msgstr "Sistem"
+
+msgid "lantern_email"
+msgstr "E-mel Lantern"
+
+msgid "confirm_with_account"
+msgstr ""
+"Untuk mengesahkan pemadaman, sila sahkan dengan akaun %s anda di bawah:"
+
+msgid "oauth_different_account"
+msgstr ""
+"Akaun yang anda cuba gunakan untuk log masuk tidak sepadan dengan akaun yang"
+" dikaitkan dengan e-mel ini. Sila log masuk dengan akaun yang betul atau "
+"pilih e-mel lain."
+
+msgid "account_deleted"
+msgstr "Akaun Dipadamkan "
+
+msgid "account_deleted_message"
+msgstr "Akaun anda telah dipadamkan secara kekal. "
+
+msgid "verify_with"
+msgstr "Sahkan dengan %s"
+
+msgid "update_available"
+msgstr "Update available"
+
+msgid "android_sideload_update_available_message"
+msgstr "Lantern %s is available. Lantern will download and verify the APK before opening Android's installer."
+
+msgid "download_and_install_update"
+msgstr "Download and install"
+
+msgid "allow_unknown_app_installs"
+msgstr "Allow app installs"
+
+msgid "android_sideload_install_permission_message"
+msgstr "Android needs permission to install updates from Lantern. Turn on Allow from this source, then check for updates again."
+
+msgid "error_install_update"
+msgstr "Unable to install update"
+
+msgid "android_sideload_install_failed_message"
+msgstr "Lantern could not verify or install this update. Please try again later."
+
+msgid "lantern_is_up_to_date"
+msgstr "Lantern is up to date."
+
+msgid "update_now"
+msgstr "Update now"
+
+msgid "later"
+msgstr "Later"
+
+msgid "update_ready_to_install"
+msgstr "Lantern %s is ready to install"
+
+msgid "up_to_date"
+msgstr "Up to date"
+
+msgid "running_latest_version"
+msgstr "You're running the latest version Lantern %s"
+
+msgid "couldnt_check_for_updates"
+msgstr "Couldn't check for updates"
+
+msgid "check_connection_and_retry"
+msgstr "Check your connection and try again"

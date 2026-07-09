@@ -13,6 +13,8 @@ Allows all spark-vpn tunnel-control commands.
 - `allow-set-split-tunnel`
 - `allow-get-routing-mode`
 - `allow-set-routing-mode`
+- `allow-get-ad-block-enabled`
+- `allow-set-ad-block-enabled`
 - `allow-list-installed-apps`
 - `allow-get-excluded-apps`
 - `allow-set-excluded-apps`
@@ -74,6 +76,32 @@ Enables the disconnect command without any pre-configured scope.
 <td>
 
 Denies the disconnect command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-get-ad-block-enabled`
+
+</td>
+<td>
+
+Enables the get_ad_block_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-get-ad-block-enabled`
+
+</td>
+<td>
+
+Denies the get_ad_block_enabled command without any pre-configured scope.
 
 </td>
 </tr>
@@ -230,6 +258,32 @@ Enables the servers command without any pre-configured scope.
 <td>
 
 Denies the servers command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-set-ad-block-enabled`
+
+</td>
+<td>
+
+Enables the set_ad_block_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-set-ad-block-enabled`
+
+</td>
+<td>
+
+Denies the set_ad_block_enabled command without any pre-configured scope.
 
 </td>
 </tr>

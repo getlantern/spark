@@ -4,6 +4,7 @@
   import { MockBackend, type SparkBackend, type InstalledApp } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import Spinner from "$lib/Spinner.svelte";
+  import { _ } from "$lib/i18n";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -41,7 +42,7 @@
       await backend.setExcludedApps([...next]);
     } catch {
       excluded = prev; // revert so the toggle reflects the actual persisted state
-      showSnack("Couldn't update excluded apps");
+      showSnack($_("err_update_excluded_apps"));
     }
   }
 
@@ -54,24 +55,24 @@
 
 <main class="app">
   <header class="appbar">
-    <button class="iconbtn" aria-label="Back" onclick={() => goto("/split-tunneling")}>
+    <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/split-tunneling")}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
-    <span class="title">App Split Tunneling</span>
+    <span class="title">{$_("app_split_tunneling_title")}</span>
   </header>
 
   <div class="scroll">
-    <div class="seclabel">Search apps</div>
+    <div class="seclabel">{$_("search_apps")}</div>
     <div class="addrow">
-      <input class="input" placeholder="Search apps" bind:value={query} />
+      <input class="input" placeholder={$_("search_apps")} bind:value={query} />
     </div>
 
-    <div class="header">Apps bypassing the VPN ({excluded.size}):</div>
+    <div class="header">{$_("apps_bypassing_vpn_count", { values: { count: excluded.size } })}</div>
     <div class="card">
       {#if loading}
         <div class="loading"><Spinner /></div>
       {:else if filtered.length === 0}
-        <div class="row empty">{query.trim() ? "No matching apps" : "No apps found"}</div>
+        <div class="row empty">{query.trim() ? $_("no_matching_apps") : $_("no_apps_found")}</div>
       {:else}
         {#each filtered as app, i (app.id)}
           {#if i > 0}<div class="divider"></div>{/if}
@@ -87,7 +88,7 @@
               class:on={excluded.has(app.id)}
               role="switch"
               aria-checked={excluded.has(app.id)}
-              aria-label={`Toggle ${app.name}`}
+              aria-label={$_("toggle_app", { values: { name: app.name } })}
               onclick={() => toggle(app.id)}
             ><span class="knob"></span></button>
           </div>
@@ -125,9 +126,10 @@
   }
   .row {
     display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 16px;
-    background: none; border: none; font-family: var(--font); text-align: left;
+    background: none; border: none; font-family: var(--font); text-align: start;
     transition: background 0.12s ease;
   }
+  :global([dir="rtl"]) .iconbtn svg { transform: scaleX(-1); }
   .meta { flex: 1; min-width: 0; }
   .name {
     font-size: 15px; font-weight: 600; color: var(--text-primary);

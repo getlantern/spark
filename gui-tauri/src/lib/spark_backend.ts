@@ -59,6 +59,10 @@ export interface SparkBackend {
   setSplitTunnel(st: SplitTunnel): Promise<void>;
   getRoutingMode(): Promise<"smart" | "full">;
   setRoutingMode(mode: "smart" | "full"): Promise<void>;
+  /** Whether ad-block is enabled (defaults on). */
+  getAdBlockEnabled(): Promise<boolean>;
+  /** Persist the ad-block toggle; applied live when connected, else on next connect. */
+  setAdBlockEnabled(enabled: boolean): Promise<void>;
   /** Installed apps the user can choose to exclude (platform-enumerated; empty on platforms w/o support). */
   listInstalledApps(): Promise<InstalledApp[]>;
   /** The currently-excluded app match keys (package names / exe paths). */
@@ -80,8 +84,9 @@ const mockState: {
   pinned: number | null;
   split: SplitTunnel;
   routingMode: "smart" | "full";
+  adBlockEnabled: boolean;
   excludedApps: string[];
-} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", excludedApps: [] };
+} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [] };
 
 export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
@@ -142,6 +147,8 @@ export class MockBackend implements SparkBackend {
   async setSplitTunnel(st: SplitTunnel): Promise<void> { mockState.split = structuredClone(st); }
   async getRoutingMode(): Promise<"smart" | "full"> { return mockState.routingMode; }
   async setRoutingMode(mode: "smart" | "full"): Promise<void> { mockState.routingMode = mode; }
+  async getAdBlockEnabled(): Promise<boolean> { return mockState.adBlockEnabled; }
+  async setAdBlockEnabled(enabled: boolean): Promise<void> { mockState.adBlockEnabled = enabled; }
 
   async listInstalledApps(): Promise<InstalledApp[]> {
     return [

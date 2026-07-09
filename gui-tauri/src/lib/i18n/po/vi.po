@@ -1,0 +1,1682 @@
+# Translators:
+# Ngoc Hoang <ngocit09@gmail.com>, 2025
+# Nathan Tran, 2025
+# Yen Le Van <yenlevanbk@gmail.com>, 2025
+# Anh Phan <vietnamesel10n@gmail.com>, 2025
+# e2f_vi r1 <tx_e2f_vi_r1@ate2f.com>, 2026
+# e2f <projects@e2f.com>, 2026
+# Derek F <derek@getlantern.org>, 2026
+# Lantern, 2026
+# 
+msgid ""
+msgstr ""
+"Last-Translator: Lantern, 2026\n"
+"Language-Team: Vietnamese (https://app.transifex.com/lantern-1/teams/94371/vi/)\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: vi\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "app_name"
+msgstr "Lantern"
+
+msgid "upgrade_to_pro"
+msgstr "Nâng cấp lên Pro"
+
+msgid "settings"
+msgstr "Cài đặt"
+
+msgid "report_an_issue"
+msgstr "Báo cáo sự cố"
+
+msgid "lantern_projects"
+msgstr "Dự án Lantern:"
+
+msgid "invite_friends"
+msgstr "Mời bạn bè"
+
+msgid "your_referral_code"
+msgstr "Mã giới thiệu của bạn"
+
+msgid "invite_friends_message"
+msgstr ""
+"Chia sẻ mã giới thiệu của bạn với bạn bè. Khi họ mua Lantern Pro, cả hai sẽ "
+"nhận được thời gian thưởng:"
+
+msgid "share_referral_code"
+msgstr "Chia sẻ mã giới thiệu"
+
+msgid "unbounded"
+msgstr "Unbounded"
+
+msgid "help_fight_global_internet_censorship"
+msgstr "Chung tay chống kiểm duyệt Internet toàn cầu"
+
+msgid "vpn_settings"
+msgstr "Cài đặt VPN"
+
+msgid "split_tunneling"
+msgstr "Định tuyến phân tách"
+
+msgid "server_locations"
+msgstr "Vị trí máy chủ"
+
+msgid "lantern_pro_email"
+msgstr "Email Lantern Pro:"
+
+msgid "pro_account_expiration"
+msgstr "Ngày hết hạn tài khoản Pro"
+
+msgid "manage_subscription"
+msgstr "Quản lý gói đăng ký"
+
+msgid "lantern_pro_devices"
+msgstr "Thiết bị Lantern Pro"
+
+msgid "remove"
+msgstr "Xóa"
+
+msgid "add_device"
+msgstr "Thêm thiết bị"
+
+msgid "danger_zone"
+msgstr "Vùng nguy hiểm:"
+
+msgid "delete_account"
+msgstr "Xóa tài khoản"
+
+msgid "delete"
+msgstr "Xóa"
+
+msgid "account"
+msgstr "Tài khoản"
+
+msgid "delete_account_?"
+msgstr "Xóa tài khoản của bạn?"
+
+msgid "delete_account_message"
+msgstr ""
+"Việc xóa tài khoản là vĩnh viễn. Bạn sẽ mất quyền truy cập trên tất cả các "
+"thiết bị, và thời gian đăng ký Pro còn lại sẽ bị hủy mà không được hoàn "
+"tiền."
+
+msgid "delete_account_message_two"
+msgstr "Để xác nhận xóa, vui lòng nhập mật khẩu của bạn bên dưới"
+
+msgid "Submit Issue Report"
+msgstr "Nhập mật khẩu để xác nhận"
+
+msgid "confirm_deletion"
+msgstr "Xác nhận xóa"
+
+msgid "cancel"
+msgstr "Hủy"
+
+msgid "daily_data_usage"
+msgstr "Lưu lượng dữ liệu hàng ngày"
+
+msgid "mb"
+msgstr "MB"
+
+msgid "vpn_status"
+msgstr "Trạng thái VPN"
+
+msgid "telegram"
+msgstr "Telegram"
+
+msgid "instagram"
+msgstr "Instagram"
+
+msgid "x"
+msgstr "X"
+
+msgid "follow_us"
+msgstr "Theo dõi chúng tôi"
+
+msgid "server_selection"
+msgstr "Chọn máy chủ"
+
+msgid "smart_location"
+msgstr "Vị trí thông minh"
+
+msgid "automatically_chooses_fastest_location"
+msgstr "Tự động chọn vị trí nhanh nhất"
+
+msgid "pro_locations"
+msgstr "Vị trí Pro:"
+
+msgid "choose_your_location_with_lantern_pro"
+msgstr "Chọn vị trí của bạn với Lantern Pro:"
+
+msgid "language"
+msgstr "Ngôn ngữ"
+
+msgid "sign_in"
+msgstr "Đăng nhập"
+
+msgid "sign_out"
+msgstr "Đăng xuất"
+
+msgid "check_for_updates"
+msgstr "Kiểm tra cập nhật"
+
+msgid "support"
+msgstr "Hỗ trợ"
+
+msgid "download_links"
+msgstr "Liên kết tải xuống"
+
+msgid "get_30_days_of_pro_free"
+msgstr "Nhận 30 ngày Pro miễn phí"
+
+msgid "share_message_referral_code"
+msgstr ""
+"Để nhận một tháng Lantern Pro miễn phí, hãy sử dụng mã giới thiệu này: %s ; "
+"Bạn có thể tải xuống từ đây: https://lantern.io/download"
+
+msgid "submit_issue_report"
+msgstr "Gửi báo cáo sự cố"
+
+msgid "select_an_issue"
+msgstr "Chọn một sự cố"
+
+msgid "cannot_access_blocked_sites"
+msgstr "Không thể truy cập các trang web bị chặn"
+
+msgid "cannot_complete_purchase"
+msgstr "Không thể hoàn tất thanh toán"
+
+msgid "discover_not_working"
+msgstr "Discover không hoạt động"
+
+msgid "cannot_sign_in"
+msgstr "Không thể đăng nhập"
+
+msgid "spinner_loads_endlessly"
+msgstr "Biểu tượng tải quay mãi không dừng"
+
+msgid "slow"
+msgstr "Chậm"
+
+msgid "cannot_link_devices"
+msgstr "Không thể liên kết thiết bị"
+
+msgid "wrong_device_linking_code"
+msgstr "Mã liên kết thiết bị sai hoặc không hợp lệ"
+
+msgid "cannot_remove_device"
+msgstr "Không thể xóa thiết bị"
+
+msgid "application_crashes"
+msgstr "Ứng dụng bị lỗi"
+
+msgid "other"
+msgstr "Khác"
+
+msgid "issue_description"
+msgstr "Mô tả sự cố của bạn"
+
+msgid "enter_password_to_confirm"
+msgstr "Nhập mật khẩu để xác nhận"
+
+msgid "cannot_view_logs"
+msgstr ""
+"Lantern không thể xem nhật ký chẩn đoán của bạn trừ khi bạn gửi cho chúng "
+"tôi."
+
+msgid "split_tunneling_mode"
+msgstr "Chế độ định tuyến phân tách"
+
+msgid "apps_split_tunneling"
+msgstr "Định tuyến phân tách ứng dụng"
+
+msgid "website_split_tunneling"
+msgstr "Định tuyến phân tách trang web"
+
+msgid "iran_optimized"
+msgstr "Định tuyến phân tách tối ưu cho Iran"
+
+msgid "china_optimized"
+msgstr "Định tuyến phân tách tối ưu cho Trung Quốc"
+
+msgid "russia_optimized"
+msgstr "Định tuyến phân tách tối ưu cho Nga"
+
+msgid "global_optimized"
+msgstr "Định tuyến phân tách tối ưu toàn cầu"
+
+msgid "enter_url"
+msgstr "Nhập URL"
+
+msgid "add"
+msgstr "Thêm"
+
+msgid "enabled"
+msgstr "Đã bật"
+
+msgid "disabled"
+msgstr "Đã tắt"
+
+msgid "automatic"
+msgstr "Tự động"
+
+msgid "automatic_mode"
+msgstr "Chế độ tự động"
+
+msgid "manual"
+msgstr "Thủ công"
+
+msgid "enter_url_or_ip"
+msgstr "Nhập URL hoặc địa chỉ IP"
+
+msgid "installed_apps"
+msgstr "Ứng dụng đã cài đặt"
+
+msgid "search_apps"
+msgstr "Tìm kiếm ứng dụng"
+
+msgid "search_websites"
+msgstr "Tìm kiếm trang web"
+
+msgid "mode"
+msgstr "Chế độ"
+
+msgid "use_commas"
+msgstr "Sử dụng dấu phẩy để phân tách nhiều URL"
+
+msgid "deep_link_expired"
+msgstr "Liên kết này đã hết hạn. Vui lòng yêu cầu liên kết mới."
+
+msgid "invalid_deep_link"
+msgstr "Liên kết này không hợp lệ. Vui lòng yêu cầu liên kết mới."
+
+msgid "default_bypass"
+msgstr "Danh sách bỏ qua mặc định"
+
+msgid "global_bypass_list"
+msgstr "Danh sách bỏ qua toàn cầu"
+
+msgid "global_bypass_desc"
+msgstr "Các trang web đáng tin cậy (HTTPS) với nội dung không nhạy cảm."
+
+msgid "china_bypass_list"
+msgstr "Danh sách bỏ qua Trung Quốc"
+
+msgid "china_bypass_desc"
+msgstr ""
+"Các trang web có thể truy cập tự do ở Trung Quốc. Được cập nhật thường "
+"xuyên."
+
+msgid "iran_bypass_list"
+msgstr "Danh sách bỏ qua Iran"
+
+msgid "iran_bypass_desc"
+msgstr ""
+"Các trang web có thể truy cập tự do ở Iran. Được cập nhật thường xuyên."
+
+msgid "russia_bypass_list"
+msgstr "Danh sách bỏ qua Nga"
+
+msgid "russia_bypass_desc"
+msgstr ""
+"Các trang web có thể truy cập tự do ở Nga. Được cập nhật thường xuyên."
+
+msgid "see_sites_included"
+msgstr "Xem các trang web trong "
+
+msgid "default_lists_here"
+msgstr "danh sách mặc định tại đây"
+
+msgid "when_connected"
+msgstr "Khi được kết nối, các trang web bạn chọn sẽ bỏ qua VPN."
+
+msgid "lantern_automatic"
+msgstr ""
+"Lantern tự động chọn ứng dụng và trang web nào bỏ qua VPN dựa trên vị trí "
+"của bạn để có hiệu suất tốt nhất. "
+
+msgid "apps_bypassing_vpn"
+msgstr "Ứng dụng bỏ qua VPN (%d)"
+
+msgid "websites_bypassing_vpn"
+msgstr "Trang web bỏ qua VPN (%d)"
+
+msgid "logs_share_message"
+msgstr "Đây là nhật ký chẩn đoán của tôi từ Lantern."
+
+msgid "payment_options"
+msgstr "Phương thức thanh toán"
+
+msgid "add_your_email"
+msgstr "Thêm email của bạn"
+
+msgid "continue"
+msgstr "Tiếp tục"
+
+msgid "continue_with_google"
+msgstr "Tiếp tục với Google"
+
+msgid "continue_with_apple"
+msgstr "Tiếp tục với Apple"
+
+msgid "continue_without_email"
+msgstr "Tiếp tục mà không cần email"
+
+msgid "confirm_email"
+msgstr "Xác nhận email"
+
+msgid "add_your_email_message"
+msgstr "Thêm email để truy cập gói đăng ký trên bất kỳ thiết bị nào."
+
+msgid "confirm_email_code"
+msgstr "Mã xác nhận"
+
+msgid "confirm_email_code_message"
+msgstr ""
+"Xác nhận địa chỉ email này thuộc về bạn bằng cách nhập mã được gửi đến: "
+
+msgid "resend_email"
+msgstr "Gửi lại email"
+
+msgid "create_password"
+msgstr "Tạo mật khẩu"
+
+msgid "sign_in_to_lantern_pro"
+msgstr "Đăng nhập vào Lantern"
+
+msgid "sign_in_with_email"
+msgstr "Đăng nhập bằng email"
+
+msgid "enter_your_lantern_pro_account_details"
+msgstr "Nhập thông tin tài khoản Lantern của bạn."
+
+msgid "email"
+msgstr "Email"
+
+msgid "enter_password"
+msgstr "Nhập mật khẩu"
+
+msgid "forgot_password"
+msgstr "Quên mật khẩu?"
+
+msgid "reset_your_password"
+msgstr "Đặt lại mật khẩu"
+
+msgid "enter_your_lantern_pro_account_email"
+msgstr "Nhập email tài khoản Lantern của bạn."
+
+msgid "reset_password"
+msgstr "Đặt lại mật khẩu"
+
+msgid "confirm_new_password"
+msgstr "Xác nhận mật khẩu mới"
+
+msgid "create_new_password"
+msgstr "Tạo mật khẩu mới"
+
+msgid "confirm_password"
+msgstr "Xác nhận mật khẩu"
+
+msgid "confirm_password_required"
+msgstr "Yêu cầu xác nhận mật khẩu"
+
+msgid "passwords_do_not_match"
+msgstr "Mật khẩu không khớp"
+
+msgid "activation_code"
+msgstr "Mã kích hoạt"
+
+msgid "activate_lantern_pro"
+msgstr "Kích hoạt Lantern Pro"
+
+msgid "invalid_email"
+msgstr "Địa chỉ email không hợp lệ"
+
+msgid "purchase_already_owned"
+msgstr "Bạn đã sở hữu gói mua này, hãy thử khôi phục gói mua"
+
+msgid "stripe_payment"
+msgstr "Thanh toán Stripe"
+
+msgid "split_tunneling_description"
+msgstr ""
+"Lantern định tuyến lưu lượng internet một cách thông minh dựa trên vị trí "
+"của bạn, đảm bảo truy cập an toàn đồng thời giữ kết nối nhanh chóng bằng "
+"cách chỉ sử dụng VPN khi cần thiết."
+
+msgid "region_specific_rules"
+msgstr "Quy tắc theo khu vực"
+
+msgid "location_based_rules"
+msgstr ""
+"Lantern sử dụng các quy tắc định tuyến khác nhau tùy theo vị trí của bạn:"
+
+msgid "censored_regions"
+msgstr "Ở các khu vực bị kiểm duyệt:"
+
+msgid "blocked_sites_proxied"
+msgstr ""
+"Các trang web và ứng dụng bị chặn (tin tức, nhắn tin, dịch vụ bị hạn chế) "
+"được định tuyến qua proxy."
+
+msgid "unblocked_sites_bypass"
+msgstr ""
+"Hầu hết các trang web không bị chặn sẽ bỏ qua VPN để duyệt web nhanh hơn."
+
+msgid "uncensored_regions"
+msgstr "Ở các khu vực không bị kiểm duyệt:"
+
+msgid "trusted_sites_bypass"
+msgstr ""
+"Chỉ các trang web và dịch vụ đáng tin cậy mới bỏ qua VPN theo mặc định."
+
+msgid "examples_of_bypassed_sites"
+msgstr ""
+"Bao gồm các trang web được mã hóa HTTPS với nội dung công khai hoặc không "
+"nhạy cảm như mua sắm, thời tiết và cập nhật phần mềm."
+
+msgid "routing_rules_vary"
+msgstr ""
+"Các quy tắc này khác nhau theo quốc gia và được cập nhật thường xuyên."
+
+msgid "view_the_full_list"
+msgstr "Xem danh sách đầy đủ các quy tắc định tuyến."
+
+msgid "turn_on_split_tunneling"
+msgstr "Bật định tuyến phân tách để tùy chỉnh các trang web sử dụng VPN."
+
+msgid "welcome_to_lantern_pro"
+msgstr "Chào mừng đến với Lantern Pro!"
+
+msgid "welcome_to_lantern"
+msgstr "Chào mừng đến với Lantern!"
+
+msgid "lantern_pro_description"
+msgstr ""
+"Các tính năng Pro của bạn đã được mở khóa—tận hưởng dữ liệu không giới hạn, "
+"tốc độ nhanh hơn và máy chủ cao cấp."
+
+msgid "plans_fetch_error"
+msgstr "Lỗi khi tải gói dịch vụ. Vui lòng thử lại sau."
+
+msgid "best_value"
+msgstr "Giá trị tốt nhất!"
+
+msgid "choose_payment_method"
+msgstr "Chọn phương thức thanh toán"
+
+msgid "payment_information_encrypted"
+msgstr "Thông tin thanh toán của bạn được mã hóa hoàn toàn."
+
+msgid "purchase_not_completed"
+msgstr ""
+"Giao dịch mua chưa hoàn tất. Bạn có thể thử lại bất kỳ lúc nào hoặc liên hệ "
+"bộ phận hỗ trợ nếu cần giúp đỡ"
+
+msgid "are_you_sure"
+msgstr "Bạn có chắc chắn?"
+
+msgid "continue_without_email_message"
+msgstr ""
+"Nếu bạn chọn tiếp tục mà không thêm email, bạn sẽ không thể dùng gói đăng ký"
+" trên thiết bị khác."
+
+msgid "add_email"
+msgstr "Thêm email"
+
+msgid "block_ads"
+msgstr "Chặn quảng cáo"
+
+msgid "only_active"
+msgstr "Chỉ hoạt động khi VPN được kết nối"
+
+msgid "vpn_connected"
+msgstr "Lantern đã được kết nối."
+
+msgid "vpn_disconnected"
+msgstr "Lantern đã ngắt kết nối."
+
+msgid "open_notification"
+msgstr "Mở thông báo"
+
+msgid "logout"
+msgstr "Đăng xuất"
+
+msgid "logout_message"
+msgstr ""
+"Đăng xuất sẽ chuyển Lantern về phiên bản miễn phí. Để truy cập tài khoản của"
+" bạn lại, bạn sẽ cần đăng nhập lại."
+
+msgid "logout_message_expired"
+msgstr "Bạn có chắc chắn muốn đăng xuất khỏi tài khoản của mình không?"
+
+msgid "not_now"
+msgstr "Để sau"
+
+msgid "billed_once"
+msgstr "Thanh toán một lần"
+
+msgid "subscription"
+msgstr "Gói đăng ký"
+
+msgid "subscribe"
+msgstr "Đăng ký"
+
+msgid "checkout"
+msgstr "Thanh toán"
+
+msgid "next_billing_date"
+msgstr "Ngày thanh toán tiếp theo"
+
+msgid "vpn_may_be_needed"
+msgstr "Có thể cần VPN"
+
+msgid "google_and_apple_sign_in_blocked"
+msgstr ""
+"Đăng nhập bằng Google và Apple có thể bị chặn ở khu vực này. Để hoàn tất "
+"thiết lập tài khoản, vui lòng bật VPN trước."
+
+msgid "continue_without_vpn"
+msgstr "Tiếp tục mà không có VPN"
+
+msgid "turn_on_vpn"
+msgstr "Bật VPN"
+
+msgid "server_setup_do"
+msgstr "Thiết lập sử dụng DigitalOcean"
+
+msgid "server_setup_do_price"
+msgstr "Chỉ %s/tháng thông qua DigitalOcean"
+
+msgid "server_setup_gcp"
+msgstr "Thiết lập sử dụng Google Cloud Platform"
+
+msgid "continue_with_do"
+msgstr "Tiếp tục với DigitalOcean"
+
+msgid "do_allows"
+msgstr ""
+"DigitalOcean cho phép bạn chọn một vị trí máy chủ từ %d tùy chọn dưới đây."
+
+msgid "server_setup_gcp_price"
+msgstr "Chỉ %s/tháng thông qua GCP"
+
+msgid "continue_with_gcp"
+msgstr "Tiếp tục với Google"
+
+msgid "gcp_allows"
+msgstr ""
+"Google Cloud Platform cho phép bạn chọn một vị trí máy chủ từ %d tùy chọn "
+"dưới đây:"
+
+msgid "server_setup_aws"
+msgstr "Thiết lập máy chủ riêng trên AWS"
+
+msgid "server_setup_aws_price"
+msgstr "Chỉ %s/tháng thông qua AWS"
+
+msgid "server_setup_manual"
+msgstr "Thiết lập thủ công"
+
+msgid "seamless_integration"
+msgstr "Tích hợp liền mạch với Lantern"
+
+msgid "easiest_setup"
+msgstr "Quy trình thiết lập dễ nhất"
+
+msgid "multiple_location_options"
+msgstr "Nhiều tùy chọn vị trí máy chủ"
+
+msgid "one_month_included"
+msgstr "%d TB/tháng dữ liệu đi kèm"
+
+msgid "easiest_setup_process"
+msgstr "Quy trình thiết lập dễ nhất"
+
+msgid "setup_a_private_server"
+msgstr "Thiết lập máy chủ riêng"
+
+msgid "setup_private_server"
+msgstr "Thiết lập máy chủ riêng"
+
+msgid "previous"
+msgstr "Quay lại"
+
+msgid "next"
+msgstr "Tiếp theo"
+
+msgid "error"
+msgstr "Lỗi"
+
+msgid "signup_error_user_exists"
+msgstr ""
+"Có vẻ đã xảy ra lỗi khi đăng ký. Vui lòng thử lại hoặc đăng nhập nếu bạn đã "
+"có tài khoản"
+
+msgid "user_not_found"
+msgstr ""
+"Không nhận diện được người dùng. Vui lòng kiểm tra thông tin đăng nhập và "
+"thử lại. Nếu bạn tiếp tục gặp vấn đề, vui lòng liên hệ nhóm hỗ trợ của chúng"
+" tôi để được trợ giúp."
+
+msgid "invalid_code"
+msgstr "Mã không đúng hoặc có thể đã hết hạn. Vui lòng thử gửi lại"
+
+msgid "email_resend_message"
+msgstr "Mã xác nhận mới của bạn đã được gửi"
+
+msgid "password_has_been_updated"
+msgstr "Mật khẩu đã được cập nhật"
+
+msgid "password_has_been_updated_message"
+msgstr "Mật khẩu của bạn đã được đặt lại thành công"
+
+msgid "update_pro_account"
+msgstr "Cập nhật tài khoản Pro"
+
+msgid "update_pro_account_message"
+msgstr ""
+"Để quản lý tài khoản hoặc đăng nhập vào thiết bị khác, vui lòng thêm email "
+"và mật khẩu vào tài khoản của bạn trước."
+
+msgid "subscription_cancelled"
+msgstr "Gói đăng ký của bạn đã bị hủy."
+
+msgid "subscription_updated"
+msgstr "Gói đăng ký của bạn đã được cập nhật."
+
+msgid "subscription_renewed"
+msgstr "Gói đăng ký của bạn đã được gia hạn."
+
+msgid "got_it"
+msgstr "Đã hiểu"
+
+msgid "server_location"
+msgstr "Vị trí máy chủ"
+
+msgid "choose"
+msgstr "Chọn"
+
+msgid "choose_your_account"
+msgstr "Chọn tài khoản của bạn"
+
+msgid "choose_your_project"
+msgstr "Chọn dự án của bạn"
+
+msgid "name_your_google_cloud_project"
+msgstr "Đặt tên cho dự án Google Cloud của bạn"
+
+msgid "billing_account"
+msgstr "Tài khoản thanh toán"
+
+msgid "billing_account_placeholder"
+msgstr "Tài khoản thanh toán cho %s"
+
+msgid "server_name"
+msgstr "Tên máy chủ"
+
+msgid "google_project"
+msgstr "Dự án Google"
+
+msgid "field_name_required"
+msgstr "Yêu cầu nhập tên"
+
+msgid "choose_google_account"
+msgstr "Chọn tài khoản thanh toán Google"
+
+msgid "server_name_placeholder"
+msgstr "Máy chủ của Derek"
+
+msgid "change"
+msgstr "Thay đổi"
+
+msgid "choose_location"
+msgstr "Chọn vị trí"
+
+msgid "choose_your_location"
+msgstr "Chọn vị trí của bạn"
+
+msgid "start_deployment"
+msgstr "Bắt đầu triển khai"
+
+msgid "server_name_description"
+msgstr "Cách máy chủ sẽ xuất hiện trong danh sách chọn máy chủ."
+
+msgid "select_private_server_region"
+msgstr ""
+"Chọn khu vực cho máy chủ riêng của bạn. Vị trí gần hơn có thể cải thiện tốc "
+"độ và độ trễ."
+
+msgid "gcp_location_options"
+msgstr "Tùy chọn vị trí Google Cloud Platform (%d):"
+
+msgid "australia_sydney"
+msgstr "Úc - Sydney"
+
+msgid "belgium_stghislain"
+msgstr "Bỉ - St. Ghislain"
+
+msgid "brazil_saopaulo"
+msgstr "São Paulo"
+
+msgid "us_los_angeles"
+msgstr "Mỹ - Los Angeles"
+
+msgid "japan_tokyo"
+msgstr "Nhật Bản - Tokyo"
+
+msgid "deploying_private_server"
+msgstr "Đang triển khai máy chủ riêng"
+
+msgid "deploying_server_status"
+msgstr ""
+"Vui lòng đợi! Máy chủ riêng của bạn đang được thiết lập. Quá trình này có "
+"thể mất vài phút."
+
+msgid "private_server_setup_in_progress"
+msgstr ""
+"Vui lòng đợi! Máy chủ riêng của bạn đang được thiết lập. Quá trình này có "
+"thể mất vài phút, vui lòng giữ màn hình này mở."
+
+msgid "cancel_server_deployment"
+msgstr "Hủy triển khai máy chủ"
+
+msgid "server_ready_title"
+msgstr "Máy chủ riêng đã sẵn sàng"
+
+msgid "server_ready_message"
+msgstr ""
+"Máy chủ riêng của bạn đã được thiết lập và thêm vào danh sách máy chủ. Bạn "
+"đã sẵn sàng để kết nối!"
+
+msgid "server_failed_message"
+msgstr ""
+"Đã xảy ra lỗi khi thiết lập máy chủ riêng của bạn. Bạn có thể thử lại hoặc "
+"thử lại sau."
+
+msgid "close"
+msgstr "Đóng"
+
+msgid "connect_now"
+msgstr "Kết nối ngay"
+
+msgid "server_setup_failed"
+msgstr "Thiết lập máy chủ thất bại"
+
+msgid "cancel_deployment"
+msgstr "Hủy triển khai"
+
+msgid "server_setup_failed_message"
+msgstr ""
+"Đã xảy ra lỗi khi thiết lập máy chủ riêng của bạn. Bạn có thể thử lại hoặc "
+"thử lại sau."
+
+msgid "exit"
+msgstr "Thoát"
+
+msgid "retry"
+msgstr "Thử lại"
+
+msgid "all_required_fields"
+msgstr "Vui lòng điền đầy đủ tất cả các trường bắt buộc."
+
+msgid "private_server_ready"
+msgstr "Máy chủ riêng đã sẵn sàng!"
+
+msgid "private_server_ready_message"
+msgstr ""
+"Máy chủ (%s) đã được thiết lập và thêm vào danh sách máy chủ của bạn. Bạn đã"
+" sẵn sàng để kết nối!"
+
+msgid "set_up_your_server"
+msgstr "Thiết lập máy chủ của bạn"
+
+msgid "view_instructions_github"
+msgstr "Xem hướng dẫn trên GitHub"
+
+msgid "server_access_key"
+msgstr "Khóa truy cập máy chủ"
+
+msgid "access_key"
+msgstr "Khóa truy cập"
+
+msgid "name_your_server"
+msgstr "Đặt tên cho máy chủ"
+
+msgid "how_server_appears"
+msgstr "Cách máy chủ sẽ xuất hiện trong danh sách chọn máy chủ"
+
+msgid "server_nickname"
+msgstr "Biệt danh máy chủ"
+
+msgid "verify_server"
+msgstr "Xác minh máy chủ"
+
+msgid "vpn_client_not_setup"
+msgstr "Vui lòng bật ứng dụng VPN."
+
+msgid "continue_with"
+msgstr "Tiếp tục với"
+
+msgid "join_a_private_server"
+msgstr "Tham gia máy chủ riêng"
+
+msgid "join_private_server"
+msgstr "Tham gia máy chủ riêng"
+
+msgid "join_server"
+msgstr "Tham gia máy chủ"
+
+msgid "private_server_usage_message"
+msgstr ""
+"Lưu lượng sử dụng máy chủ riêng không được tính vào hạn mức dữ liệu hàng "
+"ngày của Lantern."
+
+msgid "manage_private_servers"
+msgstr "Quản lý máy chủ riêng"
+
+msgid "my_servers"
+msgstr "Máy chủ của tôi"
+
+msgid "joined_servers"
+msgstr "Máy chủ đã tham gia"
+
+msgid "access_key_expiration"
+msgstr ""
+"Mỗi khóa truy cập là duy nhất và hết hạn sau 1 ngày. Bạn có thể tạo khóa mới"
+" bất kỳ lúc nào."
+
+msgid "share_access_key"
+msgstr "Chia sẻ khóa truy cập"
+
+msgid "rename_server"
+msgstr "Đổi tên máy chủ"
+
+msgid "rename"
+msgstr "Đổi tên"
+
+msgid "selected_location"
+msgstr "Vị trí đã chọn"
+
+msgid "remove_server_?"
+msgstr "Xóa máy chủ?"
+
+msgid "remove_server_message"
+msgstr ""
+"Xóa %s? Việc này chỉ xóa nó khỏi ứng dụng của bạn, nó sẽ không xóa máy chủ "
+"khỏi nhà cung cấp dịch vụ đám mây của bạn."
+
+msgid "generate_access_key"
+msgstr "Tạo khóa truy cập"
+
+msgid "invite_name"
+msgstr "Tên lời mời"
+
+msgid "trust_server_operator"
+msgstr "Tin tưởng người vận hành máy chủ"
+
+msgid "trust_server_operator_message_one"
+msgstr ""
+"Máy chủ riêng được lưu trữ và vận hành bởi cá nhân hoặc tổ chức bên ngoài "
+"Lantern. Khi bạn kết nối với một máy chủ, bạn đang tin tưởng người vận hành "
+"nó để quản lý an toàn và sử dụng có trách nhiệm."
+
+msgid "trust_server_operator_message_two"
+msgstr ""
+"Lantern không quản lý hoặc giám sát máy chủ riêng. Hãy chắc chắn bạn biết và"
+" tin tưởng người vận hành máy chủ trước khi tham gia."
+
+msgid "trust_server_operator_message_three"
+msgstr ""
+"Nếu bạn không chắc ai đang vận hành máy chủ hoặc nó được cấu hình như thế "
+"nào, chúng tôi khuyên bạn nên sử dụng một trong các máy chủ Lantern mặc định"
+" có sẵn trong danh sách máy chủ của bạn."
+
+msgid "invalid_server_details"
+msgstr ""
+"Thông tin máy chủ không hợp lệ. Vui lòng kiểm tra khóa truy cập và thử lại."
+
+msgid "lantern_servers"
+msgstr "Máy chủ Lantern"
+
+msgid "private_servers"
+msgstr "Máy chủ riêng"
+
+msgid "fastest_server"
+msgstr "Máy chủ nhanh nhất"
+
+msgid "join_my_private_server"
+msgstr "Tham gia máy chủ riêng Lantern của tôi"
+
+msgid "your_server"
+msgstr "Máy chủ của bạn:"
+
+msgid "no_private_server_setup_yet"
+msgstr "Bạn chưa thiết lập máy chủ riêng. Nhấn vào nút bên dưới để bắt đầu."
+
+msgid "connect"
+msgstr "Kết nối"
+
+msgid "disconnect"
+msgstr "Ngắt kết nối"
+
+msgid "show"
+msgstr "Hiển thị"
+
+msgid "status_on"
+msgstr "Đã kết nối"
+
+msgid "status_off"
+msgstr "Đã ngắt kết nối"
+
+msgid "select_location"
+msgstr "Chọn vị trí"
+
+msgid "select_your_server_location"
+msgstr "Chọn vị trí máy chủ của bạn"
+
+msgid "faster_speeds_unlimited_bandwidth"
+msgstr "Tốc độ nhanh hơn & băng thông không giới hạn"
+
+msgid "premium_servers_less_congestion"
+msgstr "Máy chủ cao cấp ít tắc nghẽn hơn"
+
+msgid "advanced_anti_censorship"
+msgstr "Công nghệ chống kiểm duyệt tiên tiến"
+
+msgid "exclusive_access_new_features"
+msgstr "Truy cập độc quyền các tính năng mới"
+
+msgid "connect_up_to_five_devices"
+msgstr "Kết nối tối đa 5 thiết bị"
+
+msgid "built_in_ad_blocking"
+msgstr "Chặn quảng cáo tích hợp sẵn"
+
+msgid "get_lantern_pro"
+msgstr "Nhận Lantern Pro"
+
+msgid "connected_to_private_server"
+msgstr "Đã kết nối với máy chủ riêng"
+
+msgid "server_already_selected"
+msgstr "Bạn đã kết nối với máy chủ này rồi."
+
+msgid "device_limit_reached"
+msgstr "Đã đạt giới hạn thiết bị"
+
+msgid "device_limit_reached_message"
+msgstr ""
+"Bạn đã đạt giới hạn 5 thiết bị. Vui lòng xóa một thiết bị để tiếp tục."
+
+msgid "remove_device_and_sign_in"
+msgstr "Xóa thiết bị và đăng nhập"
+
+msgid "cancel_sign_in"
+msgstr "Hủy đăng nhập"
+
+msgid "change_email"
+msgstr "Đổi email"
+
+msgid "change_email_message"
+msgstr ""
+"Đây sẽ trở thành email đăng nhập mới của bạn. Bạn sẽ cần xác minh nó trước "
+"khi thay đổi có hiệu lực."
+
+msgid "enter_new_email"
+msgstr "Nhập email mới của bạn"
+
+msgid "confirm_password_to_continue"
+msgstr "Để tiếp tục, vui lòng xác nhận mật khẩu của bạn."
+
+msgid "email_updated"
+msgstr "Email của bạn đã được cập nhật."
+
+msgid "enable_network_extension"
+msgstr "Bật tiện ích mở rộng mạng"
+
+msgid "enable_network_extension_message"
+msgstr ""
+"Để sử dụng Lantern, chúng tôi cần cài đặt tiện ích mở rộng mạng cho Mac của "
+"bạn."
+
+msgid "install_now"
+msgstr "Cài đặt ngay"
+
+msgid "learn_more"
+msgstr "Tìm hiểu thêm"
+
+msgid "network_extension_required"
+msgstr "Yêu cầu tiện ích mở rộng mạng"
+
+msgid "click"
+msgstr "Nhấn"
+
+msgid "open_system_settings"
+msgstr "Mở cài đặt hệ thống"
+
+msgid "when_prompted"
+msgstr "khi được nhắc."
+
+msgid "activate_extension"
+msgstr "Kích hoạt tiện ích mở rộng"
+
+msgid "email_optional"
+msgstr "Email (tùy chọn)"
+
+msgid "please_enter_valid_email"
+msgstr "Vui lòng nhập email hợp lệ"
+
+msgid "please_select_an_issue"
+msgstr "Vui lòng chọn một sự cố"
+
+msgid "please_enter_issue_description"
+msgstr "Vui lòng nhập mô tả sự cố"
+
+msgid "thanks_for_feedback"
+msgstr "Cảm ơn phản hồi của bạn!"
+
+msgid "no_apps_selected"
+msgstr "Chưa chọn ứng dụng nào"
+
+msgid "deselect_all"
+msgstr "Bỏ chọn tất cả"
+
+msgid "select_all"
+msgstr "Chọn tất cả"
+
+msgid "no_websites_selected"
+msgstr "Chưa chọn trang web nào"
+
+msgid "enter_activation_code"
+msgstr "Nhập mã kích hoạt"
+
+msgid "restore_purchase"
+msgstr "Khôi phục gói mua"
+
+msgid "do_private_server_setup"
+msgstr "Thiết lập máy chủ riêng DO"
+
+msgid "private_server_note"
+msgstr ""
+"Chọn khu vực cho máy chủ riêng của bạn. Vị trí gần hơn có thể cải thiện tốc "
+"độ và độ trễ."
+
+msgid "gcp_private_server_setup"
+msgstr "Thiết lập máy chủ riêng GCP"
+
+msgid "gcp_private_server_location"
+msgstr "Vị trí máy chủ riêng GCP"
+
+msgid "do_private_server_location"
+msgstr "Vị trí máy chủ riêng DO"
+
+msgid "confirm"
+msgstr "Xác nhận"
+
+msgid "private_server_warning"
+msgstr "Chỉ thêm máy chủ do người bạn tin tưởng vận hành "
+
+msgid "go_to_server_locations"
+msgstr "Đi tới vị trí máy chủ"
+
+msgid "lantern_io"
+msgstr "Lantern.io"
+
+msgid "alternative_download_links"
+msgstr "Liên kết tải xuống thay thế"
+
+msgid "github_download_page"
+msgstr "Trang tải xuống GitHub"
+
+msgid "telegram_bot"
+msgstr "Bot Telegram"
+
+msgid "if_you_cannot_access_website"
+msgstr ""
+"Nếu bạn gặp bất kỳ vấn đề nào khi truy cập trang web của chúng tôi, bạn có "
+"thể tải xuống Lantern từ các liên kết ở trên."
+
+msgid "available_on"
+msgstr "Có sẵn trên:"
+
+msgid "subscription_renewal_date"
+msgstr "Ngày gia hạn gói đăng ký"
+
+msgid "enabled_bypass_lists"
+msgstr "Danh sách bỏ qua đã bật (%d):"
+
+msgid "diagnostic_logs"
+msgstr "Nhật ký chẩn đoán"
+
+msgid "lantern_user_forum"
+msgstr "Diễn đàn người dùng Lantern"
+
+msgid "frequently_asked_questions"
+msgstr "Câu hỏi thường gặp"
+
+msgid "privacy_policy"
+msgstr "Chính sách bảo mật"
+
+msgid "terms_of_service"
+msgstr "Điều khoản dịch vụ"
+
+msgid "get_unlimited_data"
+msgstr "Nhận dữ liệu không giới hạn và tốc độ nhanh hơn!"
+
+msgid "private_server_options"
+msgstr "Tùy chọn máy chủ riêng"
+
+msgid "lantern_version"
+msgstr "Phiên bản Lantern"
+
+msgid "quit"
+msgstr "Thoát"
+
+msgid "device_removed"
+msgstr "Đã xóa thiết bị"
+
+msgid "set_server_alias"
+msgstr "Đặt biệt danh máy chủ"
+
+msgid "this_name_pre_filled"
+msgstr ""
+"Tên này sẽ được điền sẵn cho người dùng được mời để giúp họ xác định máy "
+"chủ. Họ có thể thay đổi sau này."
+
+msgid "server_alias"
+msgstr "Biệt danh máy chủ"
+
+msgid "add_referral_code"
+msgstr "Thêm mã giới thiệu"
+
+msgid "referral_code"
+msgstr "Mã giới thiệu"
+
+msgid "update_fails"
+msgstr "Cập nhật thất bại"
+
+msgid "scan_qr_code"
+msgstr "Quét mã QR"
+
+msgid "choose_your_server_location"
+msgstr "Chọn vị trí máy chủ của bạn"
+
+msgid "we_handle_configuration"
+msgstr "Chúng tôi xử lý cấu hình, bạn chỉ cần đăng ký."
+
+msgid "90_day_free_trial"
+msgstr "Dùng thử miễn phí 90 ngày"
+
+msgid "identity_changed"
+msgstr "Danh tính đã thay đổi cho %s"
+
+msgid "identity_changed_message"
+msgstr ""
+"Dấu vân tay bảo mật của %s đã thay đổi. Điều này có thể cho thấy sự can "
+"thiệp hoặc cấu hình sai."
+
+msgid "recommendation"
+msgstr "Khuyến nghị:"
+
+msgid "recommendation_message"
+msgstr ""
+"Chúng tôi khuyên bạn nên xóa %s khỏi Lantern và xóa nó khỏi tài khoản nhà "
+"cung cấp dịch vụ đám mây của bạn, sau đó thiết lập máy chủ mới để đảm bảo "
+"kết nối của bạn vẫn an toàn."
+
+msgid "remove_server"
+msgstr "Xóa máy chủ"
+
+msgid "server_alias_cannot_be_empty"
+msgstr "Biệt danh máy chủ không được để trống"
+
+msgid "referral_code_applied"
+msgstr "Mã giới thiệu của bạn đã được áp dụng!"
+
+msgid "referral_message_1m"
+msgstr "+ 15 ngày bổ sung miễn phí"
+
+msgid "referral_message_1y"
+msgstr "+ 15 ngày bổ sung miễn phí"
+
+msgid "referral_message_2y"
+msgstr "+ 2 tháng bổ sung miễn phí"
+
+msgid "referral_code_invalid"
+msgstr "Mã giới thiệu bạn nhập không hợp lệ. Vui lòng kiểm tra mã và thử lại."
+
+msgid "referral_code_own_invalid"
+msgstr ""
+"Bạn không thể sử dụng mã giới thiệu của chính mình. Vui lòng nhập mã khác."
+
+msgid "free"
+msgstr "Miễn phí"
+
+msgid "monthly_plan"
+msgstr " Gói tháng:"
+
+msgid "15_days_each"
+msgstr " +15 ngày cho mỗi người"
+
+msgid "annual_plan"
+msgstr "Gói năm:"
+
+msgid "1_month_each"
+msgstr "+1 tháng cho mỗi người"
+
+msgid "two_year_plan"
+msgstr " Gói hai năm:"
+
+msgid "2_month_each"
+msgstr "+2 tháng cho mỗi người"
+
+msgid "referral_code_info"
+msgstr ""
+"Chưa phải người dùng Lantern Pro? Bạn sẽ trở thành một khi người giới thiệu "
+"đầu tiên của bạn đăng ký"
+
+msgid "lantern_pro_license"
+msgstr " Giấy phép Lantern Pro"
+
+msgid "lantern_pro_license_required"
+msgstr "Cần có giấy phép Lantern Pro"
+
+msgid "lantern_pro_license_invalid"
+msgstr "Giấy phép Lantern Pro không hợp lệ"
+
+msgid "lantern_pro_license_invalid_length"
+msgstr "Giấy phép Lantern Pro phải có 25 ký tự"
+
+msgid "select_account"
+msgstr " Chọn tài khoản"
+
+msgid "new_to_lantern"
+msgstr "Mới với Lantern?"
+
+msgid "create_an_account"
+msgstr "Tạo tài khoản"
+
+msgid "no_projects_found"
+msgstr " Không tìm thấy dự án"
+
+msgid "no_projects_found_desc"
+msgstr ""
+"Không tìm thấy dự án. Vui lòng tạo dự án trong tài khoản nhà cung cấp đám "
+"mây của bạn trước."
+
+msgid "add_billing_details"
+msgstr "Thêm thông tin thanh toán"
+
+msgid "do_billing_details_message"
+msgstr "DigitalOcean yêu cầu thông tin thanh toán để tạo máy chủ."
+
+msgid "tap"
+msgstr "Nhấn"
+
+msgid "below_to_go_to_do"
+msgstr "bên dưới để đi đến DigitalOcean"
+
+msgid "1"
+msgstr "1"
+
+msgid "2"
+msgstr "2"
+
+msgid "3"
+msgstr "3"
+
+msgid "add_payment_method"
+msgstr "Thêm phương thức thanh toán (thẻ tín dụng hoặc PayPal)"
+
+msgid "return_to_lantern"
+msgstr "Quay lại Lantern và nhấn \"Tiếp tục\" để tiếp tục thiết lập"
+
+msgid "how_to_add_billing_details"
+msgstr "Cách thêm thông tin thanh toán:"
+
+msgid "add_payment_method_message"
+msgstr ""
+"Vui lòng thêm phương thức thanh toán vào tài khoản DigitalOcean của bạn. Nếu"
+" bạn đã thêm, hãy đợi vài phút và thử lại."
+
+msgid "ok"
+msgstr "OK"
+
+msgid "could_not_open_url"
+msgstr "Không thể mở URL"
+
+msgid "new_to_lantern_pro"
+msgstr "Mới với Lantern?"
+
+msgid "an_error_occurred"
+msgstr "Đã xảy ra lỗi. Vui lòng thử lại sau."
+
+msgid "developer_mode"
+msgstr "Chế độ nhà phát triển"
+
+msgid "developer_mode_note"
+msgstr ""
+"Chế độ nhà phát triển chỉ dành cho các nhà phát triển Lantern để kiểm tra "
+"tính năng trong quá trình phát triển."
+
+msgid "invalid_activation_code"
+msgstr "Mã kích hoạt không hợp lệ. Vui lòng kiểm tra mã và thử lại."
+
+msgid "invalid_activation_code_length"
+msgstr "Mã kích hoạt phải có độ dài 25 ký tự."
+
+msgid "error_while_vpn_connection"
+msgstr "Đã xảy ra lỗi khi thiết lập kết nối VPN. Vui lòng thử lại."
+
+msgid "help_improve_lantern"
+msgstr "Giúp cải thiện Lantern"
+
+msgid "share_anonymous_usage_data"
+msgstr ""
+"Chia sẻ dữ liệu sử dụng ẩn danh để giúp cải thiện tốc độ và độ tin cậy."
+
+msgid "data_we_collect"
+msgstr ""
+"Chúng tôi không bao giờ thu thập lịch sử duyệt web, điểm đến lưu lượng truy "
+"cập, truy vấn DNS hoặc nhật ký kết nối."
+
+msgid "you_can_change_anytime"
+msgstr "Bạn có thể thay đổi điều này bất cứ lúc nào trong Cài đặt VPN."
+
+msgid "dont_allow"
+msgstr "Không cho phép"
+
+msgid "allow"
+msgstr "Cho phép"
+
+msgid "anonymous_usage_data"
+msgstr "Dữ liệu sử dụng ẩn danh"
+
+msgid "helps_improve_lantern_performance"
+msgstr "Giúp cải thiện hiệu suất của Lantern"
+
+msgid "changes_applied_after_restart"
+msgstr "Các thay đổi sẽ được áp dụng sau khi khởi động lại Lantern."
+
+msgid "email_deliverability_notice"
+msgstr "Thông báo về khả năng gửi email"
+
+msgid "email_deliverability_notice_message"
+msgstr ""
+"Email gửi đến địa chỉ 163.com, 126.com, qq.com và sina.com đôi khi bị chặn "
+"và có thể không đến được"
+
+msgid "email_deliverability_notice_message_two"
+msgstr ""
+"Nếu bạn không nhận được mã xác nhận, hãy cân nhắc sử dụng nhà cung cấp email"
+" khác."
+
+msgid "continue_anyway"
+msgstr "Vẫn tiếp tục"
+
+msgid "routing_mode"
+msgstr "Chế độ Định tuyến"
+
+msgid "smart_routing"
+msgstr "Định tuyến Thông minh"
+
+msgid "full_tunnel"
+msgstr "Đường hầm Đầy đủ"
+
+msgid "region_optimized_routing"
+msgstr "Định tuyến dựa trên quy tắc được tối ưu hóa cho khu vực của bạn"
+
+msgid "all_traffic_through_vpn"
+msgstr "Toàn bộ lưu lượng qua VPN"
+
+msgid "smart_routing_description"
+msgstr ""
+"Định tuyến Thông minh sử dụng các quy tắc cụ thể theo khu vực để tự động gửi"
+" lưu lượng cần VPN qua Lantern. Tất cả lưu lượng khác sẽ kết nối trực tiếp "
+"để có tốc độ và độ tin cậy cao hơn."
+
+msgid "add_apps_websites_bypass_vpn"
+msgstr "Thêm ứng dụng và trang web để bỏ qua VPN"
+
+msgid "lantern_pro_license_applied"
+msgstr ""
+"Giấy phép Lantern Pro của bạn sẽ được áp dụng cho tài khoản hiện có của bạn"
+
+msgid "your_purchase_will_be_applied_to_your_existing_account"
+msgstr ""
+"Giao dịch mua hàng của bạn sẽ được áp dụng cho tài khoản hiện có của bạn"
+
+msgid "daily_data_cap_reached"
+msgstr "Đã đạt giới hạn dữ liệu hàng ngày"
+
+msgid "daily_data_cap_reached_message"
+msgstr "Tốc độ giảm xuống 128 kb/s - Đặt lại vào lúc %s."
+
+msgid "subscription_renewal_info"
+msgstr ""
+"Thanh toán được tính vào Apple ID của bạn khi mua. Gói đăng ký sẽ tự động "
+"gia hạn trừ khi bị hủy ít nhất 24 giờ trước khi kết thúc thời hạn hiện tại. "
+"Quản lý hoặc hủy trong Cài đặt App Store."
+
+msgid "failed_to_update_routing_mode"
+msgstr "Không thể cập nhật chế độ định tuyến. Vui lòng thử lại."
+
+msgid "apps"
+msgstr "Ứng dụng"
+
+msgid "websites"
+msgstr "Trang web"
+
+msgid "main_channel"
+msgstr "Kênh chính"
+
+msgid "data_cap_channel"
+msgstr "Cảnh báo sử dụng dữ liệu"
+
+msgid "mb_free_data_remaining"
+msgstr "Còn %d MB dữ liệu miễn phí"
+
+msgid "daily_data_cap_reached_notification_message"
+msgstr ""
+"Dữ liệu của bạn sẽ được đặt lại lúc %s. Nâng cấp lên Pro để có dữ liệu tốc "
+"độ cao không giới hạn."
+
+msgid "if_you_have_not_set_password"
+msgstr ""
+"Nếu bạn chưa từng đặt mật khẩu Lantern Pro trước đây, hãy chọn tùy chọn "
+"'quên mật khẩu?' bên dưới."
+
+msgid "pro_subscription_expired"
+msgstr "Gói đăng ký Pro của bạn đã hết hạn"
+
+msgid "renew_pro_subscription"
+msgstr "Gia hạn Gói đăng ký Pro"
+
+msgid "subscription_expired"
+msgstr "Gói đăng ký Đã hết hạn"
+
+msgid "pro"
+msgstr "Pro"
+
+msgid "pro_subscription_expired_message"
+msgstr ""
+"Gói đăng ký Lantern Pro đã hết hạn. Gia hạn để khôi phục dữ liệu không giới "
+"hạn và các tính năng Pro."
+
+msgid "last_subscription_renewal_date"
+msgstr "Ngày Gia hạn Gói đăng ký Gần nhất"
+
+msgid "set_account_password"
+msgstr "Đặt Mật khẩu Tài khoản"
+
+msgid "set_password"
+msgstr "Đặt Mật khẩu"
+
+msgid "set_account_password_message"
+msgstr ""
+"Để quản lý tài khoản của bạn hoặc đăng nhập trên các thiết bị khác, bây giờ bạn cần đặt mật khẩu cho tài khoản Lantern Pro của mình.\n"
+"\n"
+"Chúng tôi sẽ gửi mã xác minh qua email để bạn tạo mật khẩu."
+
+msgid "expired"
+msgstr "Đã hết hạn"
+
+msgid "lantern_pro_tagline"
+msgstr "Truy cập internet nhanh, đáng tin cậy và riêng tư"
+
+msgid "what_makes_lantern_different"
+msgstr "Điều gì làm Lantern khác biệt"
+
+msgid "built_for_privacy_speed_freedom"
+msgstr "Được xây dựng cho quyền riêng tư, tốc độ và tự do"
+
+msgid "smart_routing_mode"
+msgstr "Chế độ định tuyến thông minh"
+
+msgid "region_specific_routing_description"
+msgstr ""
+"Các quy tắc theo vùng chỉ định tuyến những gì cần VPN, giữ kết nối của bạn "
+"luôn nhanh."
+
+msgid "advanced_protocols"
+msgstr "Giao thức nâng cao"
+
+msgid "advanced_protocols_description"
+msgstr ""
+"Nhiều giao thức hơn các VPN khác để đạt độ tin cậy tối đa. AnyTLS, "
+"Hysteria2, VLESS, Kindling, WATER và nhiều hơn nữa."
+
+msgid "private_servers_description"
+msgstr "Kết nối máy chủ riêng của bạn để kiểm soát hoàn toàn kết nối."
+
+msgid "nonprofit_mission"
+msgstr "Sứ mệnh phi lợi nhuận"
+
+msgid "built_by_nonprofit"
+msgstr ""
+"Được xây dựng bởi tổ chức phi lợi nhuận với hơn 12 năm kinh nghiệm thúc đẩy "
+"tự do internet"
+
+msgid "choose_your_routing_mode"
+msgstr "Chọn chế độ định tuyến"
+
+msgid "fastest"
+msgstr "Nhanh nhất"
+
+msgid "traditional_vpn_mode"
+msgstr "Chế độ VPN truyền thống"
+
+msgid "traditional_vpn_mode_description"
+msgstr "Định tuyến tất cả lưu lượng qua Lantern, dù cần thiết hay không."
+
+msgid "change_anytime_in_routing_mode_settings"
+msgstr "Thay đổi bất cứ lúc nào trong Cài đặt chế độ định tuyến"
+
+msgid "get_started"
+msgstr "Bắt đầu"
+
+msgid "skip_connect_now"
+msgstr "Bỏ qua - Kết nối ngay"
+
+msgid "renew_pro"
+msgstr "Gia hạn Pro"
+
+msgid "payment"
+msgstr "Thanh toán"
+
+msgid "it_looks_like_something_went_wrong"
+msgstr ""
+"Có vẻ đã xảy ra lỗi. Nếu bạn đã thanh toán nhưng không thấy gói đăng ký được"
+" kích hoạt, vui lòng đợi vài giờ và kiểm tra lại."
+
+msgid "manage_subscription_google_play"
+msgstr ""
+"Gói Pro của bạn được mua qua Google Play. Vui lòng quản lý đăng ký từ cài "
+"đặt tài khoản Google Play của bạn."
+
+msgid "manage_subscription_apple_app_store"
+msgstr ""
+"Gói Pro của bạn được mua qua Apple App Store. Vui lòng quản lý đăng ký từ "
+"cài đặt tài khoản Apple ID của bạn."
+
+msgid "create_account_error"
+msgstr "Lỗi tạo tài khoản"
+
+msgid "appearance"
+msgstr "Giao diện"
+
+msgid "light"
+msgstr "Sáng"
+
+msgid "dark"
+msgstr "Tối"
+
+msgid "system"
+msgstr "Hệ thống"
+
+msgid "lantern_email"
+msgstr "Email của Lantern"
+
+msgid "confirm_with_account"
+msgstr ""
+"Để xác nhận xóa, vui lòng xác minh bằng tài khoản %s của bạn bên dưới:"
+
+msgid "oauth_different_account"
+msgstr ""
+"Tài khoản bạn đang cố đăng nhập không khớp với tài khoản liên kết với email "
+"này. Vui lòng đăng nhập bằng tài khoản đúng hoặc chọn email khác."
+
+msgid "account_deleted"
+msgstr "Tài khoản đã Xóa "
+
+msgid "account_deleted_message"
+msgstr "Tài khoản của bạn đã bị xóa vĩnh viễn. "
+
+msgid "verify_with"
+msgstr "Xác minh với %s"
+
+msgid "update_available"
+msgstr "Update available"
+
+msgid "android_sideload_update_available_message"
+msgstr "Lantern %s is available. Lantern will download and verify the APK before opening Android's installer."
+
+msgid "download_and_install_update"
+msgstr "Download and install"
+
+msgid "allow_unknown_app_installs"
+msgstr "Allow app installs"
+
+msgid "android_sideload_install_permission_message"
+msgstr "Android needs permission to install updates from Lantern. Turn on Allow from this source, then check for updates again."
+
+msgid "error_install_update"
+msgstr "Unable to install update"
+
+msgid "android_sideload_install_failed_message"
+msgstr "Lantern could not verify or install this update. Please try again later."
+
+msgid "lantern_is_up_to_date"
+msgstr "Lantern is up to date."
+
+msgid "update_now"
+msgstr "Update now"
+
+msgid "later"
+msgstr "Later"
+
+msgid "update_ready_to_install"
+msgstr "Lantern %s is ready to install"
+
+msgid "up_to_date"
+msgstr "Up to date"
+
+msgid "running_latest_version"
+msgstr "You're running the latest version Lantern %s"
+
+msgid "couldnt_check_for_updates"
+msgstr "Couldn't check for updates"
+
+msgid "check_connection_and_retry"
+msgstr "Check your connection and try again"

@@ -96,6 +96,15 @@ impl Tun {
         self.dev.name().map_err(TunError::Query)
     }
 
+    /// The OS interface index of the device. Windows `route.exe`/`netsh` address the adapter by
+    /// numeric index (not name), so the engine threads this into `RouteManager::with_windows_params`.
+    /// Available on every desktop platform; not on Android/iOS (a from-fd device's interface is
+    /// owned by the OS).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn if_index(&self) -> Result<u32, TunError> {
+        self.dev.if_index().map_err(TunError::Query)
+    }
+
     /// Read a single IP packet into `buf`, returning the number of bytes read.
     /// `&self` so the device can be shared across tasks once we split read/write later.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {

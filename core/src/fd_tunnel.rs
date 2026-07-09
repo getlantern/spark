@@ -176,6 +176,29 @@ pub fn set_routing_mode(_mode: &str) -> bool {
     false
 }
 
+/// Enable/disable ad-block on the running tunnel live (no reconnect). Returns true if applied,
+/// false if no router is active. Called across the platform FFI.
+#[cfg(feature = "smart-routing")]
+pub fn set_ad_block_enabled(enabled: bool) -> bool {
+    let router = active_router()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match router {
+        Some(r) => {
+            r.set_ad_block_enabled(enabled);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Without `smart-routing`, live ad-block updates are unsupported.
+#[cfg(not(feature = "smart-routing"))]
+pub fn set_ad_block_enabled(_enabled: bool) -> bool {
+    false
+}
+
 /// Readiness of the current tunnel's data path, for the platform shim to gate "connected" on. The NE
 /// runs one tunnel per process, so a single global suffices. The shim calls [`mark_connecting`]
 /// **synchronously** before starting the worker thread (a race-free baseline so [`wait_ready`] on
@@ -625,6 +648,11 @@ fn setup_routing_and_udp(
         )));
         let router = Arc::new(router);
         set_active_router(Some(router.clone()));
+        // Clone for the DNS ad-block check before `router` is moved into the flow hooks below.
+        // Blocking ad domains at DNS (NODATA, no fake IP) means the browser never opens a flow
+        // for them at all — cheaper than a flow-level Reject and it doesn't churn the netstack's
+        // socket set (which was stalling legit flows on ad-heavy pages).
+        let ad_block_router = router.clone();
         // One pool: the DNS server allocates on query, the recoverer recovers on connect.
         let pool = dns::server::shared_pool(FAKEIP_TTL, FAKEIP_CAP);
         // Per-action resolvers from the config's `options.dns`: `dns_local` (direct, best-local) for
@@ -635,7 +663,10 @@ fn setup_routing_and_udp(
             direct_resolver: dns::resolver::direct_resolver(&config.dns),
             proxy_resolver: dns::resolver::proxy_resolver(&config.dns),
         });
-        let dns_server = Arc::new(dns::server::DnsServer::new(pool, DNS_ANSWER_TTL_SECS));
+        let dns_server = Arc::new(
+            dns::server::DnsServer::new(pool, DNS_ANSWER_TTL_SECS)
+                .with_ad_block(Arc::new(move |d: &str| ad_block_router.is_ad_blocked(d))),
+        );
         info!(
             rule_sets = sr.rule_sets.len(),
             inline_ip_rules = sr.inline_ip_rules.len(),

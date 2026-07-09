@@ -57,6 +57,19 @@ pub(crate) async fn set_routing_mode<R: Runtime>(
 }
 
 #[tauri::command]
+pub(crate) async fn get_ad_block_enabled<R: Runtime>(app: AppHandle<R>) -> crate::Result<bool> {
+    app.state::<Ctl>().get_ad_block_enabled()
+}
+
+#[tauri::command]
+pub(crate) async fn set_ad_block_enabled<R: Runtime>(
+    app: AppHandle<R>,
+    enabled: bool,
+) -> crate::Result<()> {
+    app.state::<Ctl>().set_ad_block_enabled(enabled)
+}
+
+#[tauri::command]
 pub(crate) async fn list_installed_apps<R: Runtime>(app: AppHandle<R>) -> crate::Result<String> {
     app.state::<Ctl>().list_installed_apps()
 }

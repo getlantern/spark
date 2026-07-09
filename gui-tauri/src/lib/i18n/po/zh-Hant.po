@@ -1,0 +1,1545 @@
+# Translators:
+# Chi-Hsun Tsai, 2025
+# YFdyh000 <yfdyh000@gmail.com>, 2025
+# Aki, 2025
+# Derek F <derek@getlantern.org>, 2025
+# e2f <projects@e2f.com>, 2026
+# TW C2 <tx_e2f_tw_c2@ate2f.com>, 2026
+# Lantern, 2026
+# 
+msgid ""
+msgstr ""
+"Last-Translator: Lantern, 2026\n"
+"Language-Team: Chinese Traditional (https://app.transifex.com/lantern-1/teams/94371/zh-Hant/)\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh-Hant\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "app_name"
+msgstr "Lantern"
+
+msgid "upgrade_to_pro"
+msgstr "升級至專業版"
+
+msgid "settings"
+msgstr "設定"
+
+msgid "report_an_issue"
+msgstr "回報問題"
+
+msgid "lantern_projects"
+msgstr "Lantern 專案:"
+
+msgid "invite_friends"
+msgstr "邀請朋友"
+
+msgid "your_referral_code"
+msgstr "你的推薦碼"
+
+msgid "invite_friends_message"
+msgstr "將你的推薦碼分享給朋友。當他們購買 Lantern Pro 時，你們都可以獲得額外的使用時間： "
+
+msgid "share_referral_code"
+msgstr "分享推薦碼"
+
+msgid "unbounded"
+msgstr "Unbounded"
+
+msgid "help_fight_global_internet_censorship"
+msgstr "協助對抗全球網路審查"
+
+msgid "vpn_settings"
+msgstr "VPN 設定"
+
+msgid "split_tunneling"
+msgstr "分流"
+
+msgid "server_locations"
+msgstr "伺服器位置"
+
+msgid "lantern_pro_email"
+msgstr "Lantern 專業版電子郵件:"
+
+msgid "pro_account_expiration"
+msgstr "專業版帳號到期日"
+
+msgid "manage_subscription"
+msgstr "管理訂閱"
+
+msgid "lantern_pro_devices"
+msgstr "Lantern 專業版裝置"
+
+msgid "remove"
+msgstr "移除"
+
+msgid "add_device"
+msgstr "新增裝置"
+
+msgid "danger_zone"
+msgstr "危險區域"
+
+msgid "delete_account"
+msgstr "刪除帳號"
+
+msgid "delete"
+msgstr "刪除"
+
+msgid "account"
+msgstr "帳號"
+
+msgid "delete_account_?"
+msgstr "刪除你的帳號?"
+
+msgid "delete_account_message"
+msgstr "帳號刪除後將無法復原。你將失去所有裝置的存取權限,且任何剩餘的專業版訂閱時間都將被沒收且不予退款。"
+
+msgid "delete_account_message_two"
+msgstr "請在下方輸入你的密碼以確認刪除"
+
+msgid "Submit Issue Report"
+msgstr "輸入密碼以確認"
+
+msgid "confirm_deletion"
+msgstr "確認刪除"
+
+msgid "cancel"
+msgstr "取消"
+
+msgid "daily_data_usage"
+msgstr "每日數據用量"
+
+msgid "mb"
+msgstr "MB"
+
+msgid "vpn_status"
+msgstr "VPN 狀態"
+
+msgid "telegram"
+msgstr "Telegram"
+
+msgid "instagram"
+msgstr "Instagram"
+
+msgid "x"
+msgstr "X"
+
+msgid "follow_us"
+msgstr "追蹤我們"
+
+msgid "server_selection"
+msgstr "伺服器選擇"
+
+msgid "smart_location"
+msgstr "智慧位置"
+
+msgid "automatically_chooses_fastest_location"
+msgstr "自動選擇最快的位置"
+
+msgid "pro_locations"
+msgstr "專業版位置:"
+
+msgid "choose_your_location_with_lantern_pro"
+msgstr "使用 Lantern 專業版選擇你的位置:"
+
+msgid "language"
+msgstr "語言"
+
+msgid "sign_in"
+msgstr "登入"
+
+msgid "sign_out"
+msgstr "登出"
+
+msgid "check_for_updates"
+msgstr "檢查更新"
+
+msgid "support"
+msgstr "支援"
+
+msgid "download_links"
+msgstr "下載連結"
+
+msgid "get_30_days_of_pro_free"
+msgstr "免費獲得 30 天專業版"
+
+msgid "share_message_referral_code"
+msgstr "免費獲得一個月的 Lantern 專業版,請使用此推薦碼:%s;你可以從這裡下載:https://lantern.io/download"
+
+msgid "submit_issue_report"
+msgstr "提交問題回報"
+
+msgid "select_an_issue"
+msgstr "選擇問題"
+
+msgid "cannot_access_blocked_sites"
+msgstr "無法存取被封鎖的網站"
+
+msgid "cannot_complete_purchase"
+msgstr "無法完成購買"
+
+msgid "discover_not_working"
+msgstr "探索功能無法使用"
+
+msgid "cannot_sign_in"
+msgstr "無法登入"
+
+msgid "spinner_loads_endlessly"
+msgstr "載入動畫無限轉圈"
+
+msgid "slow"
+msgstr "速度慢"
+
+msgid "cannot_link_devices"
+msgstr "無法連結裝置"
+
+msgid "wrong_device_linking_code"
+msgstr "裝置連結碼錯誤或無效"
+
+msgid "cannot_remove_device"
+msgstr "無法移除裝置"
+
+msgid "application_crashes"
+msgstr "應用程式崩潰"
+
+msgid "other"
+msgstr "其他"
+
+msgid "issue_description"
+msgstr "描述你的問題"
+
+msgid "enter_password_to_confirm"
+msgstr "輸入密碼確認"
+
+msgid "cannot_view_logs"
+msgstr "除非你傳送診斷記錄給我們,否則 Lantern 無法檢視你的診斷記錄。"
+
+msgid "split_tunneling_mode"
+msgstr "分流模式"
+
+msgid "apps_split_tunneling"
+msgstr "應用程式分流"
+
+msgid "website_split_tunneling"
+msgstr "網站分流"
+
+msgid "iran_optimized"
+msgstr "伊朗最佳化分流"
+
+msgid "china_optimized"
+msgstr "中國最佳化分流"
+
+msgid "russia_optimized"
+msgstr "俄羅斯最佳化分流"
+
+msgid "global_optimized"
+msgstr "全球最佳化分流"
+
+msgid "enter_url"
+msgstr "輸入網址"
+
+msgid "add"
+msgstr "新增"
+
+msgid "enabled"
+msgstr "已啟用"
+
+msgid "disabled"
+msgstr "已停用"
+
+msgid "automatic"
+msgstr "自動"
+
+msgid "automatic_mode"
+msgstr "自動模式"
+
+msgid "manual"
+msgstr "手動"
+
+msgid "enter_url_or_ip"
+msgstr "輸入網址或 IP 位址"
+
+msgid "installed_apps"
+msgstr "已安裝的應用程式"
+
+msgid "search_apps"
+msgstr "搜尋應用程式"
+
+msgid "search_websites"
+msgstr "搜尋網站"
+
+msgid "mode"
+msgstr "模式"
+
+msgid "use_commas"
+msgstr "使用逗號分隔多個網址"
+
+msgid "deep_link_expired"
+msgstr "此連結已過期，請重新取得。"
+
+msgid "invalid_deep_link"
+msgstr "此連結無效，請重新取得。"
+
+msgid "default_bypass"
+msgstr "預設繞過清單"
+
+msgid "global_bypass_list"
+msgstr "全球繞過清單"
+
+msgid "global_bypass_desc"
+msgstr "可信任的網站(HTTPS)且內容非敏感資訊。"
+
+msgid "china_bypass_list"
+msgstr "中國繞過清單"
+
+msgid "china_bypass_desc"
+msgstr "在中國可自由存取的網站。定期更新。"
+
+msgid "iran_bypass_list"
+msgstr "伊朗繞過清單"
+
+msgid "iran_bypass_desc"
+msgstr "在伊朗可自由存取的網站。定期更新。"
+
+msgid "russia_bypass_list"
+msgstr "俄羅斯繞過清單"
+
+msgid "russia_bypass_desc"
+msgstr "在俄羅斯可自由存取的網站。定期更新。"
+
+msgid "see_sites_included"
+msgstr "查看包含在"
+
+msgid "default_lists_here"
+msgstr "預設清單中的網站"
+
+msgid "when_connected"
+msgstr "連線時,你選擇的網站將繞過 VPN。"
+
+msgid "lantern_automatic"
+msgstr "Lantern 會根據你的位置自動選擇哪些應用程式和網站繞過 VPN,以獲得最佳效能。"
+
+msgid "apps_bypassing_vpn"
+msgstr "繞過 VPN 的應用程式 (%d)"
+
+msgid "websites_bypassing_vpn"
+msgstr "繞過 VPN 的網站 (%d)"
+
+msgid "logs_share_message"
+msgstr "這是我從 Lantern 取得的診斷記錄。"
+
+msgid "payment_options"
+msgstr "付款選項"
+
+msgid "add_your_email"
+msgstr "新增你的電子郵件"
+
+msgid "continue"
+msgstr "繼續"
+
+msgid "continue_with_google"
+msgstr "使用 Google 繼續"
+
+msgid "continue_with_apple"
+msgstr "使用 Apple 繼續"
+
+msgid "continue_without_email"
+msgstr "不使用電子郵件繼續"
+
+msgid "confirm_email"
+msgstr "確認電子郵件"
+
+msgid "add_your_email_message"
+msgstr "新增你的電子郵件以在任何裝置上存取你的訂閱。"
+
+msgid "confirm_email_code"
+msgstr "確認碼"
+
+msgid "confirm_email_code_message"
+msgstr "確認此電子郵件地址屬於你,請輸入傳送至以下地址的驗證碼:"
+
+msgid "resend_email"
+msgstr "重新傳送電子郵件"
+
+msgid "create_password"
+msgstr "建立密碼"
+
+msgid "sign_in_to_lantern_pro"
+msgstr "登入 Lantern"
+
+msgid "sign_in_with_email"
+msgstr "使用電子郵件登入"
+
+msgid "enter_your_lantern_pro_account_details"
+msgstr "輸入您的 Lantern 帳戶詳情。"
+
+msgid "email"
+msgstr "電子郵件"
+
+msgid "enter_password"
+msgstr "輸入密碼"
+
+msgid "forgot_password"
+msgstr "忘記密碼?"
+
+msgid "reset_your_password"
+msgstr "重設你的密碼"
+
+msgid "enter_your_lantern_pro_account_email"
+msgstr "輸入您的 Lantern 帳戶電子郵件。"
+
+msgid "reset_password"
+msgstr "重設密碼"
+
+msgid "confirm_new_password"
+msgstr "確認新密碼"
+
+msgid "create_new_password"
+msgstr "建立新密碼"
+
+msgid "confirm_password"
+msgstr "確認密碼"
+
+msgid "confirm_password_required"
+msgstr "需要確認密碼"
+
+msgid "passwords_do_not_match"
+msgstr "密碼不符"
+
+msgid "activation_code"
+msgstr "啟用碼"
+
+msgid "activate_lantern_pro"
+msgstr "啟用 Lantern 專業版"
+
+msgid "invalid_email"
+msgstr "無效的電子郵件地址"
+
+msgid "purchase_already_owned"
+msgstr "你已經擁有此購買項目,請嘗試恢復購買"
+
+msgid "stripe_payment"
+msgstr "Stripe 付款"
+
+msgid "split_tunneling_description"
+msgstr "Lantern 會根據你的位置智慧地路由網路流量,確保安全存取,同時僅在必要時使用 VPN 以保持連線速度。"
+
+msgid "region_specific_rules"
+msgstr "區域專用規則"
+
+msgid "location_based_rules"
+msgstr "Lantern 根據你的位置使用不同的路由規則:"
+
+msgid "censored_regions"
+msgstr "在有審查的地區:"
+
+msgid "blocked_sites_proxied"
+msgstr "被封鎖的網站和應用程式(新聞、通訊、受限服務)會經過代理。"
+
+msgid "unblocked_sites_bypass"
+msgstr "大多數未被封鎖的網站會繞過 VPN 以加快瀏覽速度。"
+
+msgid "uncensored_regions"
+msgstr "在無審查的地區:"
+
+msgid "trusted_sites_bypass"
+msgstr "預設僅有可信任的網站和服務繞過 VPN。"
+
+msgid "examples_of_bypassed_sites"
+msgstr "這些包括使用 HTTPS 加密且內容為公開或非敏感資訊的網站,例如購物、天氣和軟體更新。"
+
+msgid "routing_rules_vary"
+msgstr "這些規則因國家而異,並會定期更新。"
+
+msgid "view_the_full_list"
+msgstr "查看完整的路由規則清單。"
+
+msgid "turn_on_split_tunneling"
+msgstr "開啟分流以自訂哪些網站使用 VPN。"
+
+msgid "welcome_to_lantern_pro"
+msgstr "歡迎使用 Lantern 專業版"
+
+msgid "welcome_to_lantern"
+msgstr "歡迎使用 Lantern！"
+
+msgid "lantern_pro_description"
+msgstr "你的專業版功能已解鎖—盡情享受無限數據、更快速度和高級伺服器。"
+
+msgid "plans_fetch_error"
+msgstr "取得方案時發生錯誤。請稍後再試。"
+
+msgid "best_value"
+msgstr "最超值"
+
+msgid "choose_payment_method"
+msgstr "選擇付款方式"
+
+msgid "payment_information_encrypted"
+msgstr "你的付款資訊已完全加密。"
+
+msgid "purchase_not_completed"
+msgstr "購買未完成。你可以隨時重試,或如需協助請聯絡支援"
+
+msgid "are_you_sure"
+msgstr "你確定嗎?"
+
+msgid "continue_without_email_message"
+msgstr "需要有效的電子郵件地址才能在其他裝置上使用你的訂閱。"
+
+msgid "add_email"
+msgstr "新增電子郵件"
+
+msgid "block_ads"
+msgstr "封鎖廣告"
+
+msgid "only_active"
+msgstr "僅在 VPN 連線時啟用"
+
+msgid "vpn_connected"
+msgstr "Lantern 現已連線。"
+
+msgid "vpn_disconnected"
+msgstr "Lantern 現已斷線。"
+
+msgid "open_notification"
+msgstr "開啟通知"
+
+msgid "logout"
+msgstr "登出"
+
+msgid "logout_message"
+msgstr "登出後 Lantern 將切換至免費版本。若要再次存取你的帳號,你需要重新登入。"
+
+msgid "logout_message_expired"
+msgstr "您確定要登出您的帳戶嗎？"
+
+msgid "not_now"
+msgstr "暫時不要"
+
+msgid "billed_once"
+msgstr "單次計費"
+
+msgid "subscription"
+msgstr "訂閱"
+
+msgid "subscribe"
+msgstr "訂閱"
+
+msgid "checkout"
+msgstr "結帳"
+
+msgid "next_billing_date"
+msgstr "下次計費日期"
+
+msgid "vpn_may_be_needed"
+msgstr "可能需要 VPN"
+
+msgid "google_and_apple_sign_in_blocked"
+msgstr "在此地區 Google 和 Apple 登入可能被封鎖。為完成帳號設定,請先開啟 VPN。"
+
+msgid "continue_without_vpn"
+msgstr "不使用 VPN 繼續"
+
+msgid "turn_on_vpn"
+msgstr "開啟 VPN"
+
+msgid "server_setup_do"
+msgstr "使用 DigitalOcean 設定"
+
+msgid "server_setup_do_price"
+msgstr "透過 DigitalOcean 每月只需 %s"
+
+msgid "server_setup_gcp"
+msgstr "使用 Google Cloud Platform 設定"
+
+msgid "continue_with_do"
+msgstr "使用 DigitalOcean 繼續"
+
+msgid "do_allows"
+msgstr "DigitalOcean 讓你從以下 %d 個選項中選擇一個伺服器位置"
+
+msgid "server_setup_gcp_price"
+msgstr "透過 GCP 每月只需 %s"
+
+msgid "continue_with_gcp"
+msgstr "使用 Google 繼續"
+
+msgid "gcp_allows"
+msgstr "Google Cloud Platform 讓你從以下 %d 個選項中選擇一個伺服器位置:"
+
+msgid "server_setup_aws"
+msgstr "在 DigitalOcean 上設定私人伺服器"
+
+msgid "server_setup_aws_price"
+msgstr "透過 AWS 每月只需 %s"
+
+msgid "server_setup_manual"
+msgstr "手動設定"
+
+msgid "seamless_integration"
+msgstr "與 Lantern 無縫整合"
+
+msgid "easiest_setup"
+msgstr "最簡單的設定流程"
+
+msgid "multiple_location_options"
+msgstr "多個伺服器位置選項"
+
+msgid "one_month_included"
+msgstr "包含每月 %d TB 數據"
+
+msgid "easiest_setup_process"
+msgstr "最簡單的設定流程"
+
+msgid "setup_a_private_server"
+msgstr "設定私人伺服器"
+
+msgid "setup_private_server"
+msgstr "設定私人伺服器"
+
+msgid "previous"
+msgstr "上一步"
+
+msgid "next"
+msgstr "下一步"
+
+msgid "error"
+msgstr "錯誤"
+
+msgid "signup_error_user_exists"
+msgstr "註冊時似乎發生問題，請再試一次，或者如果您已有帳戶請直接登入"
+
+msgid "user_not_found"
+msgstr "無法識別使用者。請檢查你的憑證後重試。如果問題持續發生,請聯絡我們的支援團隊尋求協助。"
+
+msgid "invalid_code"
+msgstr "驗證碼錯誤或可能已過期。請嘗試重新傳送"
+
+msgid "email_resend_message"
+msgstr "你的新確認碼已傳送"
+
+msgid "password_has_been_updated"
+msgstr "密碼已更新"
+
+msgid "password_has_been_updated_message"
+msgstr "你的密碼已成功重設"
+
+msgid "update_pro_account"
+msgstr "更新專業版帳號"
+
+msgid "update_pro_account_message"
+msgstr "若要管理你的帳號或登入其他裝置,請先為你的帳號新增電子郵件和密碼。"
+
+msgid "subscription_cancelled"
+msgstr "你的訂閱已取消。"
+
+msgid "subscription_updated"
+msgstr "你的訂閱已更新。"
+
+msgid "subscription_renewed"
+msgstr "你的訂閱已續訂。"
+
+msgid "got_it"
+msgstr "知道了"
+
+msgid "server_location"
+msgstr "伺服器位置"
+
+msgid "choose"
+msgstr "選擇"
+
+msgid "choose_your_account"
+msgstr "選擇你的帳號"
+
+msgid "choose_your_project"
+msgstr "選擇你的專案"
+
+msgid "name_your_google_cloud_project"
+msgstr "為你的 Google Cloud 專案命名"
+
+msgid "billing_account"
+msgstr "帳單帳號"
+
+msgid "billing_account_placeholder"
+msgstr "%s 的帳單帳號"
+
+msgid "server_name"
+msgstr "伺服器名稱"
+
+msgid "google_project"
+msgstr "Google 專案"
+
+msgid "field_name_required"
+msgstr "需要名稱"
+
+msgid "choose_google_account"
+msgstr "選擇 Google 帳單帳號"
+
+msgid "server_name_placeholder"
+msgstr "Derek 的伺服器"
+
+msgid "change"
+msgstr "變更"
+
+msgid "choose_location"
+msgstr "選擇位置"
+
+msgid "choose_your_location"
+msgstr "選擇你的位置"
+
+msgid "start_deployment"
+msgstr "開始部署"
+
+msgid "server_name_description"
+msgstr "伺服器在伺服器選擇清單中顯示的名稱。"
+
+msgid "select_private_server_region"
+msgstr "選擇私人伺服器的區域。較近的位置可能會提升速度並降低延遲。"
+
+msgid "gcp_location_options"
+msgstr "Google Cloud Platform 位置選項 (%d):"
+
+msgid "australia_sydney"
+msgstr "澳洲 - 雪梨"
+
+msgid "belgium_stghislain"
+msgstr "比利時 - 聖吉斯蘭"
+
+msgid "brazil_saopaulo"
+msgstr "巴西 - 聖保羅"
+
+msgid "us_los_angeles"
+msgstr "美國 - 洛杉磯"
+
+msgid "japan_tokyo"
+msgstr "日本 - 東京"
+
+msgid "deploying_private_server"
+msgstr "正在部署私人伺服器"
+
+msgid "deploying_server_status"
+msgstr "稍等片刻!你的私人伺服器正在設定中。這可能需要幾分鐘。"
+
+msgid "private_server_setup_in_progress"
+msgstr "稍等片刻!你的私人伺服器正在設定中。這可能需要幾分鐘,請保持此畫面開啟。"
+
+msgid "cancel_server_deployment"
+msgstr "取消伺服器部署"
+
+msgid "server_ready_title"
+msgstr "私人伺服器已就緒"
+
+msgid "server_ready_message"
+msgstr "你的私人伺服器已設定完成並新增至你的伺服器清單。你已準備好連線!"
+
+msgid "server_failed_message"
+msgstr "設定私人伺服器時發生問題。你可以重試或稍後再試。"
+
+msgid "close"
+msgstr "關閉"
+
+msgid "connect_now"
+msgstr "立即連線"
+
+msgid "server_setup_failed"
+msgstr "伺服器設定失敗"
+
+msgid "cancel_deployment"
+msgstr "取消部署"
+
+msgid "server_setup_failed_message"
+msgstr "設定私人伺服器時發生問題。你可以重試或稍後再試。"
+
+msgid "exit"
+msgstr "離開"
+
+msgid "retry"
+msgstr "重試"
+
+msgid "all_required_fields"
+msgstr "請填寫所有必填欄位。"
+
+msgid "private_server_ready"
+msgstr "私人伺服器已就緒"
+
+msgid "private_server_ready_message"
+msgstr "(%s) 伺服器已設定完成並新增至你的伺服器清單。你已準備好連線!"
+
+msgid "set_up_your_server"
+msgstr "設定你的伺服器"
+
+msgid "view_instructions_github"
+msgstr "在 GitHub 上查看說明"
+
+msgid "server_access_key"
+msgstr "伺服器存取金鑰"
+
+msgid "access_key"
+msgstr "存取金鑰"
+
+msgid "name_your_server"
+msgstr "為你的伺服器命名"
+
+msgid "how_server_appears"
+msgstr "伺服器在伺服器選擇清單中顯示的名稱"
+
+msgid "server_nickname"
+msgstr "伺服器暱稱"
+
+msgid "verify_server"
+msgstr "驗證伺服器"
+
+msgid "vpn_client_not_setup"
+msgstr "請開啟 VPN 用戶端。"
+
+msgid "continue_with"
+msgstr "使用以下方式繼續"
+
+msgid "join_a_private_server"
+msgstr "加入私人伺服器"
+
+msgid "join_private_server"
+msgstr "加入私人伺服器"
+
+msgid "join_server"
+msgstr "加入伺服器"
+
+msgid "private_server_usage_message"
+msgstr "私人伺服器的使用量不計入你的 Lantern 每日數據限額。"
+
+msgid "manage_private_servers"
+msgstr "管理私人伺服器"
+
+msgid "my_servers"
+msgstr "我的伺服器"
+
+msgid "joined_servers"
+msgstr "已加入的伺服器"
+
+msgid "access_key_expiration"
+msgstr "每個存取金鑰都是唯一的,並在 1 天後過期。你可以隨時產生新的金鑰。"
+
+msgid "share_access_key"
+msgstr "分享存取金鑰"
+
+msgid "rename_server"
+msgstr "重新命名伺服器"
+
+msgid "rename"
+msgstr "重新命名"
+
+msgid "selected_location"
+msgstr "已選擇的位置"
+
+msgid "remove_server_?"
+msgstr "移除伺服器?"
+
+msgid "remove_server_message"
+msgstr "移除 %s?這只會將其從你的應用程式中移除,不會從雲端供應商刪除伺服器。"
+
+msgid "generate_access_key"
+msgstr "產生存取金鑰"
+
+msgid "invite_name"
+msgstr "邀請名稱"
+
+msgid "trust_server_operator"
+msgstr "信任伺服器營運者"
+
+msgid "trust_server_operator_message_one"
+msgstr "私人伺服器由 Lantern 以外的個人或組織託管和營運。當你連線至私人伺服器時,你信任營運者能安全地管理並負責任地使用它。"
+
+msgid "trust_server_operator_message_two"
+msgstr "Lantern 不管理或監控私人伺服器。在加入之前,請確保你認識並信任伺服器營運者。"
+
+msgid "trust_server_operator_message_three"
+msgstr "如果您不確定誰在運營伺服器或伺服器如何設定，我們建議您使用伺服器清單中的預設 Lantern 伺服器。"
+
+msgid "invalid_server_details"
+msgstr "無效的伺服器資訊。請檢查存取金鑰後重試。"
+
+msgid "lantern_servers"
+msgstr "Lantern 伺服器"
+
+msgid "private_servers"
+msgstr "私人伺服器"
+
+msgid "fastest_server"
+msgstr "最快伺服器"
+
+msgid "join_my_private_server"
+msgstr "加入我的 Lantern 私人伺服器"
+
+msgid "your_server"
+msgstr "你的伺服器:"
+
+msgid "no_private_server_setup_yet"
+msgstr "你尚未設定私人伺服器。點擊下方按鈕開始設定。"
+
+msgid "connect"
+msgstr "連線"
+
+msgid "disconnect"
+msgstr "中斷連線"
+
+msgid "show"
+msgstr "顯示"
+
+msgid "status_on"
+msgstr "已連線"
+
+msgid "status_off"
+msgstr "已中斷連線"
+
+msgid "select_location"
+msgstr "選擇位置"
+
+msgid "select_your_server_location"
+msgstr "選擇你的伺服器位置"
+
+msgid "faster_speeds_unlimited_bandwidth"
+msgstr "更快速度與無限頻寬"
+
+msgid "premium_servers_less_congestion"
+msgstr "高級伺服器,較少壅塞"
+
+msgid "advanced_anti_censorship"
+msgstr "進階反審查技術"
+
+msgid "exclusive_access_new_features"
+msgstr "獨家存取新功能"
+
+msgid "connect_up_to_five_devices"
+msgstr "最多連接 5 台裝置"
+
+msgid "built_in_ad_blocking"
+msgstr "內建廣告封鎖"
+
+msgid "get_lantern_pro"
+msgstr "取得 Lantern 專業版"
+
+msgid "connected_to_private_server"
+msgstr "已連線至私人伺服器"
+
+msgid "server_already_selected"
+msgstr "你已經連線至此伺服器。"
+
+msgid "device_limit_reached"
+msgstr "已達裝置數量上限"
+
+msgid "device_limit_reached_message"
+msgstr "你已達到 5 台裝置的上限。請移除一台裝置以繼續。"
+
+msgid "remove_device_and_sign_in"
+msgstr "移除裝置並登入"
+
+msgid "cancel_sign_in"
+msgstr "取消登入"
+
+msgid "change_email"
+msgstr "變更電子郵件"
+
+msgid "change_email_message"
+msgstr "這將成為你的新登入電子郵件。你需要先驗證才能生效。"
+
+msgid "enter_new_email"
+msgstr "輸入你的新電子郵件"
+
+msgid "confirm_password_to_continue"
+msgstr "若要繼續,請確認你的密碼。"
+
+msgid "email_updated"
+msgstr "你的電子郵件已更新。"
+
+msgid "enable_network_extension"
+msgstr "啟用網路擴充功能"
+
+msgid "enable_network_extension_message"
+msgstr "為使用 Lantern,我們需要為你的 Mac 安裝網路擴充功能。"
+
+msgid "install_now"
+msgstr "立即安裝"
+
+msgid "learn_more"
+msgstr "進一步了解"
+
+msgid "network_extension_required"
+msgstr "需要網路擴充功能"
+
+msgid "click"
+msgstr "點擊"
+
+msgid "open_system_settings"
+msgstr "開啟系統設定"
+
+msgid "when_prompted"
+msgstr "出現提示時。"
+
+msgid "activate_extension"
+msgstr "立即安裝"
+
+msgid "email_optional"
+msgstr "電子郵件(選填)"
+
+msgid "please_enter_valid_email"
+msgstr "請輸入有效的電子郵件"
+
+msgid "please_select_an_issue"
+msgstr "請選擇一個問題"
+
+msgid "please_enter_issue_description"
+msgstr "請輸入問題描述"
+
+msgid "thanks_for_feedback"
+msgstr "感謝你的回饋!"
+
+msgid "no_apps_selected"
+msgstr "未選擇應用程式"
+
+msgid "deselect_all"
+msgstr "取消全選"
+
+msgid "select_all"
+msgstr "全選"
+
+msgid "no_websites_selected"
+msgstr "未選擇網站"
+
+msgid "enter_activation_code"
+msgstr "輸入啟用碼"
+
+msgid "restore_purchase"
+msgstr "恢復購買"
+
+msgid "do_private_server_setup"
+msgstr "DO 私人伺服器設定"
+
+msgid "private_server_note"
+msgstr "選擇私人伺服器的區域。較近的位置可能會提升速度並降低延遲。"
+
+msgid "gcp_private_server_setup"
+msgstr "GCP 私人伺服器設定"
+
+msgid "gcp_private_server_location"
+msgstr "GCP 私人伺服器位置"
+
+msgid "do_private_server_location"
+msgstr "DO 私人伺服器位置"
+
+msgid "confirm"
+msgstr "確認"
+
+msgid "private_server_warning"
+msgstr "僅新增你信任的人營運的伺服器"
+
+msgid "go_to_server_locations"
+msgstr "前往伺服器位置"
+
+msgid "lantern_io"
+msgstr "Lantern.io"
+
+msgid "alternative_download_links"
+msgstr "替代下載連結"
+
+msgid "github_download_page"
+msgstr "GitHub 下載頁面"
+
+msgid "telegram_bot"
+msgstr "Telegram Bot"
+
+msgid "if_you_cannot_access_website"
+msgstr "如果你在存取我們的網站時遇到任何問題,可以從上方連結下載 Lantern。"
+
+msgid "available_on"
+msgstr "適用於:"
+
+msgid "subscription_renewal_date"
+msgstr "訂閱續訂日期"
+
+msgid "enabled_bypass_lists"
+msgstr "已啟用的繞過清單 (%d):"
+
+msgid "diagnostic_logs"
+msgstr "診斷記錄"
+
+msgid "lantern_user_forum"
+msgstr "Lantern 使用者論壇"
+
+msgid "frequently_asked_questions"
+msgstr "常見問題"
+
+msgid "privacy_policy"
+msgstr "隱私權政策"
+
+msgid "terms_of_service"
+msgstr "服務條款"
+
+msgid "get_unlimited_data"
+msgstr "取得無限數據和更快速度"
+
+msgid "private_server_options"
+msgstr "私人伺服器選項"
+
+msgid "lantern_version"
+msgstr "Lantern 版本"
+
+msgid "quit"
+msgstr "結束"
+
+msgid "device_removed"
+msgstr "裝置已移除"
+
+msgid "set_server_alias"
+msgstr "設定伺服器別名"
+
+msgid "this_name_pre_filled"
+msgstr "此名稱將為受邀使用者預先填入,以幫助他們識別伺服器。他們可以稍後變更。"
+
+msgid "server_alias"
+msgstr "伺服器別名"
+
+msgid "add_referral_code"
+msgstr "新增推薦碼"
+
+msgid "referral_code"
+msgstr "推薦碼"
+
+msgid "update_fails"
+msgstr "更新失敗"
+
+msgid "scan_qr_code"
+msgstr "掃描 QR 碼"
+
+msgid "choose_your_server_location"
+msgstr "選擇你的伺服器位置"
+
+msgid "we_handle_configuration"
+msgstr "我們處理配置,只需註冊即可。"
+
+msgid "90_day_free_trial"
+msgstr "90 天免費試用"
+
+msgid "identity_changed"
+msgstr "%s 的身份已變更"
+
+msgid "identity_changed_message"
+msgstr "%s 的安全指紋已變更。這可能表示被竄改或配置錯誤。"
+
+msgid "recommendation"
+msgstr "建議:"
+
+msgid "recommendation_message"
+msgstr "我們建議從 Lantern 中移除 %s 並從你的雲端供應商帳號中刪除它,然後設定新伺服器以確保你的連線保持安全。"
+
+msgid "remove_server"
+msgstr "移除伺服器"
+
+msgid "server_alias_cannot_be_empty"
+msgstr "伺服器別名不能為空"
+
+msgid "referral_code_applied"
+msgstr "您的推薦代碼已成功套用！"
+
+msgid "referral_message_1m"
+msgstr "+ 15 天免費"
+
+msgid "referral_message_1y"
+msgstr "+ 1 個月免費"
+
+msgid "referral_message_2y"
+msgstr "+ 2 個月免費"
+
+msgid "referral_code_invalid"
+msgstr "您輸入的推薦碼無效。請檢查該碼並重試。"
+
+msgid "referral_code_own_invalid"
+msgstr "你不能使用自己的推薦碼。請輸入其他代碼。"
+
+msgid "free"
+msgstr "免费"
+
+msgid "monthly_plan"
+msgstr "月度計劃："
+
+msgid "15_days_each"
+msgstr "每次+15天"
+
+msgid "annual_plan"
+msgstr "年度計劃："
+
+msgid "1_month_each"
+msgstr "每个 +1 个月"
+
+msgid "two_year_plan"
+msgstr "兩年計劃："
+
+msgid "2_month_each"
+msgstr "每个 +2 个月"
+
+msgid "referral_code_info"
+msgstr "尚未成為 Lantern Pro 用戶？當您的第一位推薦人訂閱時，您將成為用戶。"
+
+msgid "lantern_pro_license"
+msgstr "燈籠專業版許可證"
+
+msgid "lantern_pro_license_required"
+msgstr "需要蓝灯 Pro 许可证"
+
+msgid "lantern_pro_license_invalid"
+msgstr "蓝灯 Pro 许可证无效"
+
+msgid "lantern_pro_license_invalid_length"
+msgstr "蓝灯 Pro 许可证必须为 25 个字符"
+
+msgid "select_account"
+msgstr "選擇帳戶"
+
+msgid "new_to_lantern"
+msgstr "初次使用藍燈嗎？"
+
+msgid "create_an_account"
+msgstr "建立帳戶"
+
+msgid "no_projects_found"
+msgstr "找不到專案"
+
+msgid "no_projects_found_desc"
+msgstr "找不到專案。請先在您的雲端供應商帳戶中建立一個專案。"
+
+msgid "add_billing_details"
+msgstr "添加账单详情"
+
+msgid "do_billing_details_message"
+msgstr "DigitalOcean 需要付款信息才能创建服务器。"
+
+msgid "tap"
+msgstr "点击"
+
+msgid "below_to_go_to_do"
+msgstr "下方前往 DigitalOcean"
+
+msgid "1"
+msgstr "1"
+
+msgid "2"
+msgstr "2"
+
+msgid "3"
+msgstr "3"
+
+msgid "add_payment_method"
+msgstr "添加付款方式(信用卡或 PayPal)"
+
+msgid "return_to_lantern"
+msgstr "返回蓝灯并点击\"继续\"以继续设置"
+
+msgid "how_to_add_billing_details"
+msgstr "如何添加账单详情:"
+
+msgid "add_payment_method_message"
+msgstr "请在您的 DigitalOcean 账户中添加付款方式。如果已添加,请等待几分钟后重试。"
+
+msgid "ok"
+msgstr "好的"
+
+msgid "could_not_open_url"
+msgstr "无法打开 URL"
+
+msgid "new_to_lantern_pro"
+msgstr "初次使用 Lantern？"
+
+msgid "an_error_occurred"
+msgstr "发生错误。请稍后重试。"
+
+msgid "developer_mode"
+msgstr "开发者模式"
+
+msgid "developer_mode_note"
+msgstr "开发者模式专供蓝灯开发人员在开发过程中测试功能使用。"
+
+msgid "invalid_activation_code"
+msgstr "激活码无效。请检查代码后重试。"
+
+msgid "invalid_activation_code_length"
+msgstr "激活码必须为 25 个字符。"
+
+msgid "error_while_vpn_connection"
+msgstr "建立 VPN 连接时发生错误。请重试。"
+
+msgid "help_improve_lantern"
+msgstr "帮助改进蓝灯"
+
+msgid "share_anonymous_usage_data"
+msgstr "分享匿名使用数据以帮助改善速度和可靠性。"
+
+msgid "data_we_collect"
+msgstr "我们从不收集浏览历史、流量目的地、DNS 查询或连接日志。"
+
+msgid "you_can_change_anytime"
+msgstr "您可以随时在 VPN 设置中更改此项。"
+
+msgid "dont_allow"
+msgstr "不允许"
+
+msgid "allow"
+msgstr "允许"
+
+msgid "anonymous_usage_data"
+msgstr "匿名使用数据"
+
+msgid "helps_improve_lantern_performance"
+msgstr "帮助提升蓝灯性能"
+
+msgid "changes_applied_after_restart"
+msgstr "更改将在重启蓝灯后生效。"
+
+msgid "email_deliverability_notice"
+msgstr "邮件送达提醒"
+
+msgid "email_deliverability_notice_message"
+msgstr "发送到 163.com、126.com、qq.com 和 sina.com 地址的邮件有时会被拦截且可能无法送达"
+
+msgid "email_deliverability_notice_message_two"
+msgstr "如果您没有收到确认码,请考虑使用其他邮箱服务商。"
+
+msgid "continue_anyway"
+msgstr "仍然继续"
+
+msgid "routing_mode"
+msgstr "路由模式"
+
+msgid "smart_routing"
+msgstr "智慧路由"
+
+msgid "full_tunnel"
+msgstr "全域代理"
+
+msgid "region_optimized_routing"
+msgstr "根據您所在地區最佳化的規則路由"
+
+msgid "all_traffic_through_vpn"
+msgstr "所有流量透過 VPN"
+
+msgid "smart_routing_description"
+msgstr "智慧路由使用特定地區的規則，自動將需要 VPN 的流量透過 Lantern 傳送。所有其他流量直連以提高速度和可靠性。"
+
+msgid "add_apps_websites_bypass_vpn"
+msgstr "新增應用程式和網站以繞過 VPN"
+
+msgid "lantern_pro_license_applied"
+msgstr "您的 Lantern Pro 授權將套用於您的現有帳戶"
+
+msgid "your_purchase_will_be_applied_to_your_existing_account"
+msgstr "您的購買將套用於您的現有帳戶"
+
+msgid "daily_data_cap_reached"
+msgstr "已達到每日資料上限"
+
+msgid "daily_data_cap_reached_message"
+msgstr "速度已降至 128 kb/s - 將在 %s 重設。"
+
+msgid "subscription_renewal_info"
+msgstr ""
+"購買時將從您的 Apple ID 扣款。訂閱將自動續訂，除非在當前週期結束前至少 24 小時取消。在 App Store 設定中管理或取消。"
+
+msgid "failed_to_update_routing_mode"
+msgstr "更新路由模式失敗。請重試。"
+
+msgid "apps"
+msgstr "應用程式"
+
+msgid "websites"
+msgstr "網站"
+
+msgid "main_channel"
+msgstr "主要頻道"
+
+msgid "data_cap_channel"
+msgstr "流量使用提醒"
+
+msgid "mb_free_data_remaining"
+msgstr "剩餘 %d MB 免費流量"
+
+msgid "daily_data_cap_reached_notification_message"
+msgstr "您的流量將於 %s 重置。升級至 Pro 可享有無限高速流量。"
+
+msgid "if_you_have_not_set_password"
+msgstr "如果您之前沒有設定 Lantern Pro 密碼，請選擇下方的「忘記密碼？」選項。"
+
+msgid "pro_subscription_expired"
+msgstr "您的 Pro 訂閱已過期"
+
+msgid "renew_pro_subscription"
+msgstr "續訂 Pro 訂閱"
+
+msgid "subscription_expired"
+msgstr "訂閱已過期"
+
+msgid "pro"
+msgstr "專業版"
+
+msgid "pro_subscription_expired_message"
+msgstr "Lantern Pro 訂閱已過期。續訂以恢復無限流量和 Pro 功能。"
+
+msgid "last_subscription_renewal_date"
+msgstr "上次訂閱續訂日期"
+
+msgid "set_account_password"
+msgstr "設定帳戶密碼"
+
+msgid "set_password"
+msgstr "設定密碼"
+
+msgid "set_account_password_message"
+msgstr ""
+"要管理您的帳戶或在其他裝置上登入，您現在需要為 Lantern Pro 帳戶設定密碼。\n"
+"\n"
+"我們將透過電子郵件向您傳送驗證碼以建立密碼。"
+
+msgid "expired"
+msgstr "已過期"
+
+msgid "lantern_pro_tagline"
+msgstr "快速、可靠且私密的網路存取"
+
+msgid "what_makes_lantern_different"
+msgstr "Lantern 有何不同"
+
+msgid "built_for_privacy_speed_freedom"
+msgstr "為隱私、速度和自由而打造"
+
+msgid "smart_routing_mode"
+msgstr "智慧路由模式"
+
+msgid "region_specific_routing_description"
+msgstr "依各地區的規則僅對需要 VPN 的流量進行路由，維持快速連線。"
+
+msgid "advanced_protocols"
+msgstr "進階協定"
+
+msgid "advanced_protocols_description"
+msgstr "比其他 VPN 支援更多協定，確保最高可靠性。AnyTLS、Hysteria2、VLESS、Kindling、WATER 等。"
+
+msgid "private_servers_description"
+msgstr "連接您自己的伺服器，完全掌控您的連線。"
+
+msgid "nonprofit_mission"
+msgstr "非營利使命"
+
+msgid "built_by_nonprofit"
+msgstr "由一個擁有超過 12 年推動網路自由經驗的非營利組織打造"
+
+msgid "choose_your_routing_mode"
+msgstr "選擇您的路由模式"
+
+msgid "fastest"
+msgstr "最快"
+
+msgid "traditional_vpn_mode"
+msgstr "傳統 VPN 模式"
+
+msgid "traditional_vpn_mode_description"
+msgstr "將所有流量透過 Lantern 路由，無論是否需要。"
+
+msgid "change_anytime_in_routing_mode_settings"
+msgstr "可隨時在路由模式設定中變更"
+
+msgid "get_started"
+msgstr "開始使用"
+
+msgid "skip_connect_now"
+msgstr "略過 - 立即連線"
+
+msgid "renew_pro"
+msgstr "續訂 Pro"
+
+msgid "payment"
+msgstr "付款"
+
+msgid "it_looks_like_something_went_wrong"
+msgstr "似乎發生了問題。如果您已付款但未看到訂閱啟用，請等待數小時後再查看。"
+
+msgid "manage_subscription_google_play"
+msgstr "您的 Pro 方案是透過 Google Play 購買的。請在 Google Play 帳戶設定中管理您的訂閱。"
+
+msgid "manage_subscription_apple_app_store"
+msgstr "您的 Pro 方案是透過 Apple App Store 購買的。請在 Apple ID 帳戶設定中管理您的訂閱。"
+
+msgid "create_account_error"
+msgstr "建立帳戶時發生錯誤"
+
+msgid "appearance"
+msgstr "外觀"
+
+msgid "light"
+msgstr "淺色"
+
+msgid "dark"
+msgstr "深色"
+
+msgid "system"
+msgstr "跟隨系統"
+
+msgid "lantern_email"
+msgstr "Lantern 電子郵件"
+
+msgid "confirm_with_account"
+msgstr "若要確認刪除，請在下方使用您的 %s 帳戶進行驗證："
+
+msgid "oauth_different_account"
+msgstr "您嘗試登入的帳戶與此電子郵件關聯的帳戶不符。請使用正確的帳戶登入或選擇其他電子郵件。"
+
+msgid "account_deleted"
+msgstr "帳戶已刪除"
+
+msgid "account_deleted_message"
+msgstr "您的帳戶已永久刪除。"
+
+msgid "verify_with"
+msgstr "透過 %s 驗證"
+
+msgid "update_available"
+msgstr "Update available"
+
+msgid "android_sideload_update_available_message"
+msgstr "Lantern %s is available. Lantern will download and verify the APK before opening Android's installer."
+
+msgid "download_and_install_update"
+msgstr "Download and install"
+
+msgid "allow_unknown_app_installs"
+msgstr "Allow app installs"
+
+msgid "android_sideload_install_permission_message"
+msgstr "Android needs permission to install updates from Lantern. Turn on Allow from this source, then check for updates again."
+
+msgid "error_install_update"
+msgstr "Unable to install update"
+
+msgid "android_sideload_install_failed_message"
+msgstr "Lantern could not verify or install this update. Please try again later."
+
+msgid "lantern_is_up_to_date"
+msgstr "Lantern is up to date."
+
+msgid "update_now"
+msgstr "Update now"
+
+msgid "later"
+msgstr "Later"
+
+msgid "update_ready_to_install"
+msgstr "Lantern %s is ready to install"
+
+msgid "up_to_date"
+msgstr "Up to date"
+
+msgid "running_latest_version"
+msgstr "You're running the latest version Lantern %s"
+
+msgid "couldnt_check_for_updates"
+msgstr "Couldn't check for updates"
+
+msgid "check_connection_and_retry"
+msgstr "Check your connection and try again"

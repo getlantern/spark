@@ -309,6 +309,7 @@ mod ne_spike {
         split_tunnel: Option<String>,
         routing_mode: Option<String>,
         app_bypass: Option<String>,
+        ad_block: bool,
     ) -> Result<(), String> {
         // No provider can start until the extension is activated + user-approved.
         activate_extension()?;
@@ -325,6 +326,9 @@ mod ne_spike {
         // canonical array ("[]" when nothing is excluded); `unwrap_or_default()` only yields "" if a
         // caller passes `None`, which the NE reads the same as "[]" (no bypass).
         let app_bypass_json = app_bypass.unwrap_or_default();
+        // providerConfiguration values are strings, so pre-format the bool as "true"/"false"
+        // (the NE parses "false" → off). Owned so the closure can stay `Fn`.
+        let ad_block_str = if ad_block { "true" } else { "false" }.to_owned();
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let outer = RcBlock::new(
             move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
@@ -349,11 +353,11 @@ mod ne_spike {
                 unsafe {
                     proto.setProviderBundleIdentifier(Some(&NSString::from_str(TUNNEL_SYSEXT_ID)));
                     proto.setServerAddress(Some(ns_string!("Spark")));
-                    // Always include splitTunnel, routingMode, and appBypass in
+                    // Always include splitTunnel, routingMode, appBypass, and adBlock in
                     // providerConfiguration so the NE can apply the user's domain bypass list,
-                    // routing mode, and app-bypass list on every connect. Also include the
-                    // optional dev-override config when present. providerConfiguration is
-                    // NSDictionary<NSString, AnyObject>; upcast each NSString value
+                    // routing mode, app-bypass list, and ad-block toggle on every connect. Also
+                    // include the optional dev-override config when present. providerConfiguration
+                    // is NSDictionary<NSString, AnyObject>; upcast each NSString value
                     // (NSString → NSObject → AnyObject).
                     let st_val: Retained<AnyObject> = NSString::from_str(&split_tunnel_json)
                         .into_super()
@@ -364,6 +368,8 @@ mod ne_spike {
                     let ab_val: Retained<AnyObject> = NSString::from_str(&app_bypass_json)
                         .into_super()
                         .into_super();
+                    let adb_val: Retained<AnyObject> =
+                        NSString::from_str(&ad_block_str).into_super().into_super();
                     let dict = if let Some(ref c) = config {
                         let cfg_val: Retained<AnyObject> =
                             NSString::from_str(c).into_super().into_super();
@@ -373,8 +379,9 @@ mod ne_spike {
                                 ns_string!("splitTunnel"),
                                 ns_string!("routingMode"),
                                 ns_string!("appBypass"),
+                                ns_string!("adBlock"),
                             ],
-                            &[cfg_val, st_val, rm_val, ab_val],
+                            &[cfg_val, st_val, rm_val, ab_val, adb_val],
                         )
                     } else {
                         NSDictionary::from_retained_objects(
@@ -382,8 +389,9 @@ mod ne_spike {
                                 ns_string!("splitTunnel"),
                                 ns_string!("routingMode"),
                                 ns_string!("appBypass"),
+                                ns_string!("adBlock"),
                             ],
-                            &[st_val, rm_val, ab_val],
+                            &[st_val, rm_val, ab_val, adb_val],
                         )
                     };
                     proto.setProviderConfiguration(Some(&dict));
@@ -695,7 +703,8 @@ impl TunnelControl for AppleControl {
                 Some(a)
             }
         };
-        ne_spike::connect(config, split, mode, app_bypass).map_err(crate::Error::Platform)
+        let ad_block = crate::persist::load_ad_block_enabled(&self.base);
+        ne_spike::connect(config, split, mode, app_bypass, ad_block).map_err(crate::Error::Platform)
     }
 
     fn disconnect(&self) -> crate::Result<()> {
@@ -795,6 +804,25 @@ impl TunnelControl for AppleControl {
         Ok(())
     }
 
+    fn get_ad_block_enabled(&self) -> crate::Result<bool> {
+        Ok(crate::persist::load_ad_block_enabled(&self.base))
+    }
+
+    fn set_ad_block_enabled(&self, enabled: bool) -> crate::Result<()> {
+        crate::persist::save_ad_block_enabled(&self.base, enabled)?;
+        // Best-effort live push: only send when the tunnel is actually up.
+        let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
+        if ne_spike::ui_state(raw) == "connected" {
+            let msg = serde_json::json!({"cmd": "adBlock", "enabled": enabled}).to_string();
+            if let Err(e) = ne_spike::send_provider_message(msg) {
+                ne_spike::ne_debug(&format!(
+                    "ad-block live push failed (persisted; applies next connect): {e}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     // App split tunneling: the macOS installed-apps catalog + excluded-apps persistence, with a
     // best-effort live push to the running NE (mirroring set_split_tunnel).
     fn list_installed_apps(&self) -> crate::Result<String> {
@@ -824,33 +852,70 @@ impl TunnelControl for AppleControl {
     }
 }
 
-// ── Windows/Linux: ServiceControl over spark-ipc — future. ───────────────────
+// ── Windows/Linux: ServiceControl over spark-ipc. ────────────────────────────
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 pub(crate) struct ServiceControl {
     pub(crate) base: PathBuf,
+    ipc: crate::service_ipc::IpcClient,
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+impl ServiceControl {
+    pub(crate) fn new(base: PathBuf) -> Self {
+        let ipc = crate::service_ipc::IpcClient::new(crate::service_ipc::default_control_addr());
+        Self { base, ipc }
+    }
+
+    /// Issue `payload` (named `op` for diagnostics), returning the raw reply. Transport/timeout
+    /// failures are prefixed with the operation so a pipe-open failure or timeout is attributable
+    /// in logs, not just protocol mismatches.
+    fn request(
+        &self,
+        op: &str,
+        payload: spark_ipc::message::RequestPayload,
+    ) -> crate::Result<spark_ipc::message::ResponsePayload> {
+        self.ipc
+            .request(payload)
+            .map_err(|e| crate::Error::Platform(format!("{op}: {e}")))
+    }
+
+    /// Send `payload` (named `op`), expecting an `Ack`. A service-side `Error` surfaces its message
+    /// verbatim (e.g. Unauthorized / NotConnected); anything else is a protocol mismatch, reported
+    /// with the operation name.
+    fn ack(&self, op: &str, payload: spark_ipc::message::RequestPayload) -> crate::Result<()> {
+        match self.request(op, payload)? {
+            spark_ipc::message::ResponsePayload::Ack => Ok(()),
+            spark_ipc::message::ResponsePayload::Error { message, .. } => {
+                Err(crate::Error::Platform(message))
+            }
+            other => Err(crate::Error::Platform(format!(
+                "{op}: unexpected reply {other:?}"
+            ))),
+        }
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 impl TunnelControl for ServiceControl {
     fn connect(&self) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
-        ))
+        self.ack("connect", spark_ipc::message::RequestPayload::Connect)
     }
 
     fn disconnect(&self) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
-        ))
+        self.ack("disconnect", spark_ipc::message::RequestPayload::Disconnect)
     }
 
     fn status(&self) -> crate::Result<Status> {
-        Ok(Status {
-            state: "disconnected".into(),
-            protocol: "AnyTLS".into(),
-            fail_open: false,
-        })
+        match self.request("status", spark_ipc::message::RequestPayload::GetStatus)? {
+            spark_ipc::message::ResponsePayload::Status(s) => Ok(crate::service_ipc::map_status(s)),
+            spark_ipc::message::ResponsePayload::Error { message, .. } => {
+                Err(crate::Error::Platform(message))
+            }
+            other => Err(crate::Error::Platform(format!(
+                "status: unexpected reply {other:?}"
+            ))),
+        }
     }
 
     fn servers(&self) -> crate::Result<Vec<ServerInfo>> {
@@ -859,7 +924,7 @@ impl TunnelControl for ServiceControl {
 
     fn select_server(&self, _index: i32) -> crate::Result<()> {
         Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
+            "server selection is not supported by the desktop service yet".into(),
         ))
     }
 
@@ -879,9 +944,17 @@ impl TunnelControl for ServiceControl {
         crate::persist::save_routing_mode(&self.base, mode)
     }
 
+    fn get_ad_block_enabled(&self) -> crate::Result<bool> {
+        Ok(crate::persist::load_ad_block_enabled(&self.base))
+    }
+
+    fn set_ad_block_enabled(&self, enabled: bool) -> crate::Result<()> {
+        crate::persist::save_ad_block_enabled(&self.base, enabled)
+    }
+
     // App split tunneling is Android-only for now; the desktop backend lands in a later phase.
-    // Reads return an empty catalog so the picker loads; the write errors (like the other
-    // not-yet-implemented ServiceControl actions) rather than falsely reporting success.
+    // Reads return an empty catalog so the picker loads; the write errors rather than falsely
+    // reporting success.
     fn list_installed_apps(&self) -> crate::Result<String> {
         Ok("[]".to_string())
     }
@@ -892,7 +965,7 @@ impl TunnelControl for ServiceControl {
 
     fn set_excluded_apps(&self, _json: &str) -> crate::Result<()> {
         Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
+            "per-app split tunneling is not supported by the desktop service yet".into(),
         ))
     }
 }
