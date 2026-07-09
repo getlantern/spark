@@ -74,15 +74,21 @@ impl RouteOp {
 #[derive(Debug)]
 pub struct RouteManager {
     tun: String,
-    /// Windows interface index for `route.exe`'s `IF <idx>` and `netsh`'s adapter selector.
-    /// tun-rs exposes this on the open device (`DeviceImpl::if_index()`); it is threaded in by the
-    /// engine (W2). Defaults to the loopback index `"1"` for the not-yet-wired CLI path so the ops
-    /// are well-formed even before W2 supplies the real index.
+    /// Windows-only fields (`route.exe` `IF <idx>` + `netsh` adapter selector + the tunnel DNS
+    /// resolver IP). **Mandatory on Windows** — `route.exe` can't address the adapter by name — and
+    /// supplied via [`with_windows_params`](Self::with_windows_params) (the engine threads them from
+    /// the open tun-rs device's `if_index()` + `TunConfig.addr`). `None` until then, and
+    /// `install`/`restore` **fail fast** rather than emit dangerous ops (routing via loopback or
+    /// repointing DNS at a bogus IP).
     #[cfg(target_os = "windows")]
+    windows: Option<WindowsParams>,
+}
+
+/// The Windows-only fields `RouteManager` needs but can't derive from the device name.
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+struct WindowsParams {
     ifindex: String,
-    /// The tunnel DNS resolver IP (`netsh … static <resolver> primary`) — spark's fake-IP
-    /// responder, i.e. the tun's own IPv4 (`TunConfig.addr`). Defaults to the default tun address.
-    #[cfg(target_os = "windows")]
     resolver: String,
 }
 
@@ -91,12 +97,10 @@ impl RouteManager {
     pub fn new(tun: impl Into<String>) -> Self {
         Self {
             tun: tun.into(),
-            // CLI-path defaults; the engine overrides these with the open device's index and the
-            // configured tun address via `with_windows_params` (W2).
+            // Mandatory on Windows; the engine supplies them via `with_windows_params` (W2). Until
+            // then `install`/`restore` fail fast rather than emit dangerous ops.
             #[cfg(target_os = "windows")]
-            ifindex: "1".to_string(),
-            #[cfg(target_os = "windows")]
-            resolver: "10.0.0.1".to_string(),
+            windows: None,
         }
     }
 
@@ -105,11 +109,26 @@ impl RouteManager {
     /// Windows `route.exe`/`netsh` address the adapter by index and DNS is pointed at the tun's own
     /// fake-IP responder. Threading the index from the already-open device is more robust than a
     /// name→index lookup (no ambiguity, no extra syscall/dependency), so no alias resolver exists.
+    /// **Required before `install`/`restore` on Windows** (they error otherwise).
     #[cfg(target_os = "windows")]
     pub fn with_windows_params(mut self, ifindex: u32, resolver: std::net::Ipv4Addr) -> Self {
-        self.ifindex = ifindex.to_string();
-        self.resolver = resolver.to_string();
+        self.windows = Some(WindowsParams {
+            ifindex: ifindex.to_string(),
+            resolver: resolver.to_string(),
+        });
         self
+    }
+
+    /// The Windows params, or an `Unsupported` error if `with_windows_params` was never called — so a
+    /// misconfigured caller fails fast instead of routing via loopback / repointing DNS at a bogus IP.
+    #[cfg(target_os = "windows")]
+    fn windows_params(&self) -> io::Result<&WindowsParams> {
+        self.windows.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows RouteManager requires with_windows_params() (interface index + resolver)",
+            )
+        })
     }
 
     /// Install the split-default covers via the TUN, capturing all IPv4 traffic. Clears any
@@ -124,9 +143,10 @@ impl RouteManager {
     /// adapter's DNS at the tunnel resolver so DNS rides the tunnel.
     #[cfg(target_os = "windows")]
     pub async fn install(&mut self) -> io::Result<()> {
-        debug!(tun = %self.tun, ifindex = %self.ifindex, resolver = %self.resolver, "installing full-tunnel routes");
-        let mut ops = install_ops(&self.ifindex);
-        ops.push(dns_set_op(&self.ifindex, &self.resolver));
+        let w = self.windows_params()?;
+        debug!(tun = %self.tun, ifindex = %w.ifindex, resolver = %w.resolver, "installing full-tunnel routes");
+        let mut ops = install_ops(&w.ifindex);
+        ops.push(dns_set_op(&w.ifindex, &w.resolver));
         run(ops).await
     }
 
@@ -141,9 +161,10 @@ impl RouteManager {
     /// Windows restore: remove the covers and revert the adapter's DNS to DHCP.
     #[cfg(target_os = "windows")]
     pub async fn restore(&mut self) -> io::Result<()> {
-        debug!(tun = %self.tun, ifindex = %self.ifindex, "restoring direct routing (removing full-tunnel routes)");
+        let w = self.windows_params()?;
+        debug!(tun = %self.tun, ifindex = %w.ifindex, "restoring direct routing (removing full-tunnel routes)");
         let mut ops = restore_ops();
-        ops.push(dns_clear_op(&self.ifindex));
+        ops.push(dns_clear_op(&w.ifindex));
         run(ops).await
     }
 
@@ -287,10 +308,12 @@ fn dns_set_op(iface: &str, resolver: &str) -> RouteOp {
     )
 }
 
-/// Revert the adapter's DNS to DHCP on teardown.
+/// Revert the adapter's DNS to DHCP on teardown. **Required** (not ignorable): a failure here would
+/// silently leave the adapter pointing at the (now-gone) tunnel resolver, breaking name resolution
+/// after disconnect — so surface it.
 #[cfg(target_os = "windows")]
 fn dns_clear_op(iface: &str) -> RouteOp {
-    RouteOp::ignorable_with(
+    RouteOp::required_with(
         "netsh",
         vec!["interface", "ipv4", "set", "dnsservers", iface, "dhcp"],
     )
@@ -374,9 +397,13 @@ mod tests {
         // The clears come first and tolerate failure; the adds are required.
         assert!(ops[0].ignore_failure && ops[1].ignore_failure);
         assert!(!ops[2].ignore_failure && !ops[3].ignore_failure);
-        // Every op names a half; the adds name the TUN.
+        // Every op names a half — by its destination address, which appears in the argv on every
+        // platform (the CIDR `0.0.0.0/1` on macOS/Linux, `0.0.0.0 mask 128.0.0.0` on Windows), so
+        // this stays true across the platform-specific `route`/`ip`/`route.exe` argv shapes.
         for op in &ops {
-            assert!(HALVES.iter().any(|h| argv(op).contains(h)));
+            assert!(HALVES
+                .iter()
+                .any(|h| argv(op).contains(half_to_dest_mask(h).0)));
         }
         assert!(argv(&ops[2]).contains("utun7") && argv(&ops[3]).contains("utun7"));
     }
@@ -457,5 +484,23 @@ mod tests {
             argv(&dns_clear_op("12")),
             "interface ipv4 set dnsservers 12 dhcp"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_params_are_mandatory_and_fail_fast() {
+        // Without with_windows_params(), the manager has no interface index / resolver, so
+        // install/restore must fail fast (Unsupported) rather than route via loopback or repoint
+        // DNS at a bogus IP.
+        let rm = RouteManager::new("spark0");
+        assert_eq!(
+            rm.windows_params().unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        // Once supplied, the params are carried through.
+        let rm = rm.with_windows_params(12, "10.6.7.1".parse().unwrap());
+        let w = rm.windows_params().expect("params present");
+        assert_eq!(w.ifindex, "12");
+        assert_eq!(w.resolver, "10.6.7.1");
     }
 }

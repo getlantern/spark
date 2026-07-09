@@ -13,8 +13,8 @@ SDDL-hardened named pipe using the existing `ipc` crate.
 
 MILESTONES (one PR each, in order):
 - W1 core Windows RouteManager (core/src/routing.rs, cfg windows): route.exe split-default covers
-  (0.0.0.0/1 + 128.0.0.0/1), proxy-IP bypass, netsh adapter DNS, route-blackhole kill-switch;
-  unit-test by asserting emitted commands. Confirm tun-rs WinTun.
+  via tun ifindex, netsh adapter DNS, route-blackhole kill-switch (loopback IF 1); unit-test emitted
+  argv. Loop-prevention (SocketProtector) is W2, NOT a proxy-IP route. [W1 DONE — PR #59]
 - W2 live spark-service: real TunnelEngine (WinTun up -> W1 routes -> run core), pipe.rs named-pipe
   accept + SDDL, winsvc.rs SCM, auth.rs Windows peer authz. Unit-test over in-memory duplex.
 - W3 tauri-plugin-spark-vpn ServiceControl -> real named-pipe ipc client (connect/disconnect/status/

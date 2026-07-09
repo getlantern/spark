@@ -38,14 +38,23 @@ reference = WireGuard for Windows.
 ## Milestones (one spec, paced W1→W4; each is its own PR)
 
 ### W1 — Core Windows routing/kill-switch (`core/src/routing.rs`, `#[cfg(target_os="windows")]`)
-- Split-default covers: `route add 0.0.0.0 mask 128.0.0.0 <tun-gw> metric 1` + `128.0.0.0 mask
-  128.0.0.0 …` (override the physical default without deleting it).
-- Proxy-server bypass: `route add <proxyIP>/32 <physical-gw>` so tunnel egress doesn't loop.
-- Kill-switch/fail-closed: keep blackhole covers when the data path drops (same cover/restore
-  semantics as macOS/Linux).
-- Adapter DNS → spark's fake-IP resolver via `netsh interface ip set dns`.
-- Teardown restores on disconnect. Mirror the macOS/Linux `RouteManager` structure; **unit-test by
-  asserting emitted commands** (like `macos_uses_route_with_interface`). Confirm `tun-rs` 2.8 WinTun.
+- Split-default covers via the tun **interface index** (Windows `route.exe` addresses interfaces by
+  index, not name): `route add 0.0.0.0 mask 128.0.0.0 0.0.0.0 metric 1 IF <ifindex>` + `128.0.0.0
+  mask 128.0.0.0 …` (override the physical default without deleting it; `0.0.0.0` gateway + `IF` =
+  on-link). The ifindex comes from the open `tun-rs` device (`if_index()`), threaded via
+  `RouteManager::with_windows_params(ifindex, resolver)` (mandatory — install/restore fail fast if
+  absent).
+- **Loop-prevention is NOT here.** macOS/Linux prevent the proxy's own dials from re-entering the
+  tunnel via `SocketProtector` (per-socket `IP_BOUND_IF`/`IP_UNICAST_IF`), a no-op on Windows today.
+  Implementing Windows socket-pinning is **W2** (engine wiring). W1 uses no proxy-IP route.
+- Kill-switch/fail-closed: keep blackhole covers (route via loopback `IF 1`) when the data path
+  drops (same cover/restore semantics as macOS/Linux).
+- Adapter DNS → spark's fake-IP resolver: `netsh interface ipv4 set dnsservers <ifindex> static
+  <resolver> primary` on install; reverted to `dhcp` (required op) on teardown.
+- Teardown restores on disconnect. Mirror the macOS/Linux `RouteManager` structure; pure argv
+  builders unit-tested (`half_to_dest_mask` + cross-platform structural tests on the host;
+  `cfg(windows)` argv tests in the `windows-latest` CI job). `tun-rs` already drives WinTun via
+  `DeviceBuilder` (no tun change).
 
 ### W2 — Live Windows `spark-service` (`service/`)
 - Real `TunnelEngine` Windows path: WinTun up → install W1 routes → run `spark-core`
