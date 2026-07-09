@@ -178,9 +178,9 @@ mod tests {
         }
     }
 
-    /// A client drives connect/status over the real admin-DACL named pipe + `serve_connection`.
-    /// Exercises `PipeSecurity` (the SDDL FFI), the accept loop, and the ipc round-trip in the
-    /// windows-latest CI job. Skips if the CI token can't open the admin pipe.
+    /// A client drives connect/status over the real named pipe (its `CONTROL_PIPE_SDDL` DACL) +
+    /// `serve_connection`. Exercises `PipeSecurity` (the SDDL FFI), the accept loop, and the ipc
+    /// round-trip in the windows-latest CI job. Skips if the CI token can't open the pipe.
     ///
     /// `serve` is run as a sub-future via `select!` rather than spawned: it holds the raw security
     /// descriptor across `.await`, so its future isn't `Send` (production `.await`s it directly in

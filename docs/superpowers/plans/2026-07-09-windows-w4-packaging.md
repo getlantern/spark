@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> ⛔ **GATED:** do NOT start until the **pipe-DACL decision** (see `docs/superpowers/windows-progress.md`
-> → "Open decisions / blockers") is made — it determines whether the GUI ships unprivileged (Option A:
-> widen the pipe DACL) or elevated (Option B: NSIS admin manifest). Also note the **workflow-edit
-> security hook** blocks `.github/workflows/*` edits via the current tooling; a human (or a session
-> without that hook) must apply the release.yml / ci.yml changes.
+> ✅ **DACL decision made: Option A** (widen the pipe DACL to the interactive user) — **Task 0 is
+> implemented** in `service/src/pipe.rs` (`CONTROL_PIPE_SDDL` includes `(A;;GRGW;;;IU)`); the GUI ships
+> unprivileged. The remaining tasks (1–5) are what's left. Note the **workflow-edit security hook**
+> blocks `.github/workflows/*` edits via the current tooling; a human (or a session without that hook)
+> must apply the release.yml / ci.yml changes (Tasks 1–3).
 
 **Goal:** Ship the Windows Spark GUI as an installable app whose bundled MSI-installed LocalSystem
 `spark-service` + WinTun make a working VPN — building on the already-merged W1–W3 core.
@@ -28,23 +28,21 @@ GitHub Actions `release.yml` (`workflow_dispatch` for dry-run validation) + `ci.
   matrix leg that: builds `spark`+`spark-service`, zips them, and builds an MSI via `wix build … packaging/windows/spark.wxs` (WiX v5 dotnet tool). It does **not** build the Tauri GUI (the Tauri bundle is macOS-DMG-only via `package-macos-app`).
 - **`packaging/windows/spark.wxs`** already: installs `spark.exe`+`spark-service.exe` to `Program Files\spark`, registers `spark-service` as a LocalSystem auto-start service (`ServiceInstall`), starts/stops/removes it (`ServiceControl`), ships the example config. **Missing:** `wintun.dll`, and the GUI app.
 - **`wintun.dll` is not in the repo.** WinTun (wintun.net, Zerotier/WireGuard-maintained) ships as a signed redistributable DLL, loaded dynamically by `tun-rs` at runtime. It must sit next to `spark-service.exe` (the process that opens the adapter). Source it in CI by downloading the official zip + verifying its SHA-256 (do not commit the binary).
-- **The pipe SDDL is applied at runtime** by `service/src/pipe.rs` (`AdminOnlySecurity` when the service creates the pipe) — **no install-time SDDL step is needed** in the MSI.
-- **The GUI↔service connection depends on the DACL decision** (blocker). Option A: `pipe.rs` SDDL widened → GUI unprivileged. Option B: `pipe.rs` unchanged → GUI elevated (NSIS manifest).
+- **The pipe SDDL is applied at runtime** by `service/src/pipe.rs` (`PipeSecurity` when the service creates the pipe) — **no install-time SDDL step is needed** in the MSI.
+- **The GUI↔service DACL decision is settled: Option A** — `pipe.rs`'s `CONTROL_PIPE_SDDL` already grants the interactive user (`IU`), so the GUI ships unprivileged (no NSIS admin manifest needed).
 - **The plugin is its own workspace with no CI** (deferred from W3); its `Cargo.lock` is gitignored.
 - **Verifiability:** the Windows Tauri build runs only on tag / `workflow_dispatch`, never on PRs. Nothing here is validatable on the macOS host. A `workflow_dispatch` dry-run validates the *build/packaging* (not the install or the tunnel). WiX service install + WinTun + the tunnel are **on-device only** (the checklist in Task 5).
 
 ---
 
-## Task 0 (gate): apply the DACL decision
+## Task 0 (gate): apply the DACL decision — ✅ DONE (Option A)
 
-- [ ] **Option A (widen DACL):** in `service/src/pipe.rs`, extend `ADMIN_ONLY_SDDL` to also grant the
-  interactive user connect rights — e.g. `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)` (grant
-  GENERIC_READ|GENERIC_WRITE to `IU`/Interactive). Re-gate: `cargo xwin clippy -p spark-service …`.
-  Update `pipe.rs`'s module doc + the design spec (which currently says "grant the interactive user").
-- [ ] **Option B (elevated GUI):** leave `pipe.rs` as-is; in Task 2 give the Tauri NSIS bundle an admin
-  manifest (`tauri.conf.json` bundle `windows.nsis` / a `requestedExecutionLevel=requireAdministrator`
-  manifest) so the GUI token has effective `BA`.
-Record which option in the design spec + progress log.
+- [x] **Option A (widen DACL) — implemented (PR #64).** `service/src/pipe.rs`'s `CONTROL_PIPE_SDDL`
+  is now `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)` — grants `GENERIC_READ|GENERIC_WRITE` to the
+  Interactive user (`IU`) alongside SYSTEM+Administrators full control. `cargo xwin clippy -p
+  spark-service` clean; module doc + progress log updated. The exact `IU` access mask is on-device
+  validated (W4 checklist). No NSIS admin manifest needed (GUI ships unprivileged).
+- ~~Option B (elevated GUI)~~ — not taken; recorded in the progress log's decision section.
 
 ## Task 1: bundle `wintun.dll`
 

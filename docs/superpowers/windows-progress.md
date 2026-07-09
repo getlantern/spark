@@ -131,8 +131,8 @@ without elevation. `IU` access-mask correctness is on-device-validated (W4 check
 write-up is kept below for the record.
 
 **The contradiction (as found):** the spec's W2 says the pipe SDDL should grant "the interactive user (service is
-LocalSystem)", but the actual code (`service/src/pipe.rs`, `ADMIN_ONLY_SDDL`) grants
-`D:P(A;;GA;;;SY)(A;;GA;;;BA)` — **SYSTEM + Built-in Administrators only**. W3's GUI is the *unprivileged*
+LocalSystem)", but the actual code (`service/src/pipe.rs`) granted
+`D:P(A;;GA;;;SY)(A;;GA;;;BA)` — **SYSTEM + Built-in Administrators only** (now widened to include `IU`). W3's GUI is the *unprivileged*
 interactive user, whose token is **UAC-filtered** on a normal machine (the admin SID is present but
 deny-only), so it **cannot open an admin-only pipe**. As-is, the GUI can't talk to the service → the
 Windows app doesn't function end-to-end, even though every piece is built. (Not caught earlier because
