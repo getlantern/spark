@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { MockBackend, type SparkBackend } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
@@ -21,6 +21,9 @@
     clearTimeout(snackTimer);
     snackTimer = setTimeout(() => (snack = null), 2500);
   }
+  // Clear a pending snackbar timeout on unmount so it can't fire after navigation away (matches
+  // the split-tunneling/apps screen).
+  onDestroy(() => clearTimeout(snackTimer));
 
   // Optimistic toggle with revert-on-failure (matches the apps screen).
   async function toggleAdBlock() {

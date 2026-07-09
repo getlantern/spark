@@ -5,7 +5,9 @@
 
   function choose(code: string) {
     setLocale(code);
-    goto("/settings");
+    // replaceState so the picker doesn't linger in history — Back from /settings goes to the
+    // previous screen, not back into this picker.
+    goto("/settings", { replaceState: true });
   }
 </script>
 
