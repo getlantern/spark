@@ -7,10 +7,23 @@
   import "@fontsource/urbanist/latin-600.css";
   import "@fontsource/urbanist/latin-700.css";
 
+  import { setupI18n, isRtl, locale, isLoading } from "$lib/i18n";
+
   let { children } = $props();
+
+  let ready = $state(false);
+  setupI18n().then(() => (ready = true));
+
+  $effect(() => {
+    const code = $locale ?? "en";
+    document.documentElement.lang = code;
+    document.documentElement.dir = $isRtl ? "rtl" : "ltr";
+  });
 </script>
 
-{@render children()}
+{#if ready && !$isLoading}
+  {@render children()}
+{/if}
 
 <style>
   /* Lantern palette (app_colors.dart) + semantic mappings (app_semantic_colors.dart), shared by

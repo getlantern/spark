@@ -4,6 +4,12 @@
   "description": "",
   "type": "module",
   "scripts": {
+    "i18n:build": "node scripts/po-to-json.mjs",
+    "predev": "npm run i18n:build",
+    "prebuild": "npm run i18n:build",
+    "precheck": "npm run i18n:build",
+    "pretest": "npm run i18n:build",
+    "test": "vitest run",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
@@ -15,16 +21,21 @@
   "dependencies": {
     "@fontsource/urbanist": "^5.2.7",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-os": "^2.3.2",
+    "svelte-i18n": "^4.0.1"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",
     "@sveltejs/kit": "^2.9.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
+    "@types/node": "^26.1.1",
+    "gettext-parser": "^9.1.1",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vitest": "^4.1.10"
   }
 }

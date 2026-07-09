@@ -5,6 +5,7 @@
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { selectedIndex } from "$lib/selection";
   import { flagEmoji, serverLabel } from "$lib/format";
+  import { _ } from "$lib/i18n";
   // Fonts + global design tokens live in +layout.svelte (shared across home ↔ server selection).
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
@@ -32,10 +33,10 @@
 
   // Capitalized status value, matching the VpnStatus row (vpnStatus.name.capitalize).
   const statusValue = $derived(
-    status.state === "connected" ? "Connected"
-    : status.state === "connecting" ? "Connecting"
-    : status.state === "failed" ? "Failed"
-    : "Disconnected",
+    status.state === "connected" ? $_("status_on")
+    : status.state === "connecting" ? $_("status_connecting")
+    : status.state === "failed" ? $_("status_failed")
+    : $_("status_off"),
   );
 
   async function refresh() {
@@ -102,7 +103,7 @@
   async function loadRouting() {
     try { routingMode = await backend.getRoutingMode(); } catch { /* keep last */ }
   }
-  const routingModeLabel = $derived(routingMode === "full" ? "Full Tunnel" : "Smart Routing");
+  const routingModeLabel = $derived(routingMode === "full" ? $_("full_tunnel") : $_("smart_routing"));
 
   onMount(() => {
     refresh();
@@ -120,9 +121,9 @@
 <main class="app">
   <!-- AppBar: menu · SPARK wordmark · account avatar. -->
   <header class="appbar">
-    <button class="iconbtn" aria-label="Menu">{@render menu()}</button>
-    <span class="wordmark">SPARK</span>
-    <button class="iconbtn" aria-label="Account">{@render account()}</button>
+    <button class="iconbtn" aria-label={$_("menu")}>{@render menu()}</button>
+    <span class="wordmark">{$_("app_name_spark")}</span>
+    <button class="iconbtn" aria-label={$_("account")}>{@render account()}</button>
   </header>
 
   <div class="body">
@@ -132,7 +133,7 @@
       <button
         class="track"
         class:on={connected}
-        aria-label="Toggle VPN connection"
+        aria-label={$_("toggle_vpn_connection")}
         role="switch"
         aria-checked={connected}
         aria-busy={connecting || busy}
@@ -155,7 +156,7 @@
       <div class="tile">
         <div class="tile-head">
           <span class="ic">{@render globe()}</span>
-          <span class="label">VPN status</span>
+          <span class="label">{$_("vpn_status")}</span>
         </div>
         <div class="tile-body">
           <span class="value" class:ok={connected}>{statusValue}{#if connecting}…{/if}</span>
@@ -169,11 +170,11 @@
           <span class="ic">
             {#if current}<span class="emoji">{flagEmoji(current.countryCode)}</span>{:else}{@render pin()}{/if}
           </span>
-          <span class="label">{$selectedIndex === null ? "Smart location" : "Selected location"}</span>
+          <span class="label">{$selectedIndex === null ? $_("smart_location") : $_("selected_location")}</span>
         </div>
         <div class="tile-body">
-          <span class="value">{current ? serverLabel(current) : "Fastest server"}</span>
-          {#if $selectedIndex === null}<span class="locbolt" aria-label="Auto">⚡</span>{/if}
+          <span class="value">{current ? serverLabel(current) : $_("fastest_server")}</span>
+          {#if $selectedIndex === null}<span class="locbolt" aria-label={$_("auto")}>⚡</span>{/if}
           <span class="chev">{@render chevron()}</span>
         </div>
         {#if current?.latencyMs != null}
@@ -185,7 +186,7 @@
       <button class="tile nav" onclick={() => goto("/routing")}>
         <div class="tile-head">
           <span class="ic">{@render route()}</span>
-          <span class="label">Routing Mode</span>
+          <span class="label">{$_("routing_mode")}</span>
         </div>
         <div class="tile-body">
           <span class="value">{routingModeLabel}</span>
@@ -197,10 +198,10 @@
       <button class="tile nav" onclick={() => goto("/split-tunneling")}>
         <div class="tile-head">
           <span class="ic">{@render split()}</span>
-          <span class="label">Split Tunneling</span>
+          <span class="label">{$_("split_tunneling")}</span>
         </div>
         <div class="tile-body">
-          <span class="value">{splitEnabled ? "Enabled" : "Disabled"}</span>
+          <span class="value">{splitEnabled ? $_("enabled") : $_("disabled")}</span>
           <span class="chev">{@render chevron()}</span>
         </div>
       </button>
@@ -304,7 +305,7 @@
   .tile { padding: 10px 16px; }
   /* Nav tiles are full-width buttons (navigate to sub-routes). */
   .tile.nav {
-    display: block; width: 100%; text-align: left; border: none; cursor: pointer;
+    display: block; width: 100%; text-align: start; border: none; cursor: pointer;
     background: none; font-family: var(--font);
   }
   .tile.nav:hover { background: var(--hover); }
@@ -312,12 +313,13 @@
   .ic { width: 24px; display: inline-flex; justify-content: center; color: var(--text-secondary); }
   .emoji { font-size: 18px; line-height: 1; }
   .label { font-size: 14px; font-weight: 500; color: var(--text-tertiary); }
-  .tile-body { display: flex; align-items: center; gap: 6px; padding-left: 32px; margin-top: 2px; }
+  .tile-body { display: flex; align-items: center; gap: 6px; padding-inline-start: 32px; margin-top: 2px; }
   .value { flex: 1; font-size: 16px; font-weight: 600; color: var(--text-primary); }
   .value.ok { color: var(--success); }
   .locbolt { color: var(--bolt); font-size: 16px; }
-  .locsub { padding-left: 32px; font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
+  .locsub { padding-inline-start: 32px; font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
   .chev { color: var(--text-tertiary); display: inline-flex; }
+  :global([dir="rtl"]) .chev { transform: scaleX(-1); }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--indicator-off); }
   .dot.on { background: var(--success); }
   .dot.mid { background: var(--brand); }

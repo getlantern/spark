@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
+  import { _ } from "$lib/i18n";
   import { MockBackend, type SparkBackend, type SplitTunnel } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
 
@@ -18,17 +19,17 @@
 
 <main class="app">
   <header class="appbar">
-    <button class="iconbtn" aria-label="Back" onclick={() => goto("/")}>
+    <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/")}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
-    <span class="title">Split Tunneling</span>
+    <span class="title">{$_("split_tunneling")}</span>
   </header>
 
   <div class="scroll">
     <div class="card">
       <div class="row toggle-row">
-        <div class="meta"><div class="name">Split Tunneling</div><div class="sub">Add apps &amp; websites to bypass the VPN</div></div>
-        <button class="switch" class:on={st.enabled} role="switch" aria-checked={st.enabled} aria-label="Toggle split tunneling" onclick={toggle}><span class="knob"></span></button>
+        <div class="meta"><div class="name">{$_("split_tunneling")}</div><div class="sub">{$_("add_apps_websites_bypass_vpn")}</div></div>
+        <button class="switch" class:on={st.enabled} role="switch" aria-checked={st.enabled} aria-label={$_("toggle_split_tunneling")} onclick={toggle}><span class="knob"></span></button>
       </div>
     </div>
 
@@ -36,14 +37,14 @@
       <div class="card" style="margin-top:12px">
         <button class="row" onclick={() => goto("/split-tunneling/apps")}>
           <span class="ic" aria-hidden="true">▦</span>
-          <div class="meta"><div class="name">Apps</div></div>
+          <div class="meta"><div class="name">{$_("apps")}</div></div>
           <span class="chev">›</span>
         </button>
         <div class="divider"></div>
         <button class="row" onclick={() => goto("/split-tunneling/websites")}>
           <span class="ic" aria-hidden="true">🌐</span>
-          <div class="meta"><div class="name">Websites</div></div>
-          <span class="pill">{siteCount} Sites</span>
+          <div class="meta"><div class="name">{$_("websites")}</div></div>
+          <span class="pill">{$_("sites_count", { values: { count: siteCount } })}</span>
           <span class="chev">›</span>
         </button>
       </div>
@@ -72,7 +73,7 @@
   }
   .row {
     display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 16px;
-    background: none; border: none; cursor: pointer; font-family: var(--font); text-align: left;
+    background: none; border: none; cursor: pointer; font-family: var(--font); text-align: start;
     transition: background 0.12s ease;
   }
   .row:hover { background: var(--hover); }
@@ -95,6 +96,8 @@
     color: var(--text-tertiary); font-size: 20px; line-height: 1; display: inline-block;
     transition: transform 0.2s ease;
   }
+  :global([dir="rtl"]) .iconbtn svg { transform: scaleX(-1); }
+  :global([dir="rtl"]) .chev { transform: scaleX(-1); }
   .divider { height: 1px; background: var(--border); margin: 0 16px; }
 
   /* Split-tunneling specific */
