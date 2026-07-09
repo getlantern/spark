@@ -99,7 +99,7 @@
 
   <div class="scroll">
     <!-- Smart Location (auto) -->
-    <div class="seclabel">{$_("server_smart_location")}</div>
+    <div class="seclabel">{$_("smart_location")}</div>
     <div class="card">
       <button class="row" class:sel={$selectedIndex === null} onclick={() => choose(null)}>
         {#if current}
@@ -113,7 +113,7 @@
           {/if}
         {:else}
           <span class="flag" aria-hidden="true">🌐</span>
-          <div class="meta"><div class="name">{$_("server_fastest")}</div></div>
+          <div class="meta"><div class="name">{$_("fastest_server")}</div></div>
         {/if}
         <span class="bolt" class:on={$selectedIndex === null} aria-label={$_("auto")}>⚡</span>
       </button>

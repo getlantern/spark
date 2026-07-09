@@ -27,12 +27,12 @@
   <div class="scroll">
     <div class="card" role="radiogroup" aria-label={$_("routing_mode")}>
       <button class="row" role="radio" aria-checked={mode === "smart"} onclick={() => choose("smart")}>
-        <div class="meta"><div class="name">{$_("routing_smart_title")}</div><div class="sub">{$_("region_optimized_routing")}</div></div>
+        <div class="meta"><div class="name">{$_("smart_routing")}</div><div class="sub">{$_("region_optimized_routing")}</div></div>
         <span class="radio" class:on={mode === "smart"} aria-hidden="true"></span>
       </button>
       <div class="divider"></div>
       <button class="row" role="radio" aria-checked={mode === "full"} onclick={() => choose("full")}>
-        <div class="meta"><div class="name">{$_("routing_full_title")}</div><div class="sub">{$_("routing_full_desc")}</div></div>
+        <div class="meta"><div class="name">{$_("full_tunnel")}</div><div class="sub">{$_("routing_full_desc")}</div></div>
         <span class="radio" class:on={mode === "full"} aria-hidden="true"></span>
       </button>
     </div>

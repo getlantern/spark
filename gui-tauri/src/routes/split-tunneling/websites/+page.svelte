@@ -91,21 +91,21 @@
     <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/split-tunneling")}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
-    <span class="title">{$_("website_split_tunneling_title")}</span>
+    <span class="title">{$_("website_split_tunneling")}</span>
   </header>
 
   <div class="scroll">
-    <div class="seclabel">{$_("website_enter_url")}</div>
+    <div class="seclabel">{$_("enter_url_or_ip")}</div>
     <div class="addrow">
       <input class="input" placeholder={$_("enter_url")} bind:value={entry} onkeydown={(e) => e.key === "Enter" && add()} />
       <button class="addbtn" onclick={add}>{$_("add")}</button>
     </div>
-    <p class="helper">{$_("website_comma_hint")}</p>
+    <p class="helper">{$_("use_commas")}</p>
 
     <div class="header">{$_("websites_bypassing_vpn_count", { values: { count: rows.length } })}</div>
     <div class="card">
       {#if rows.length === 0}
-        <div class="row empty">{$_("website_none_selected")}</div>
+        <div class="row empty">{$_("no_websites_selected")}</div>
       {:else}
         {#each rows as host, i (host)}
           {#if i > 0}<div class="divider"></div>{/if}

@@ -28,7 +28,7 @@
   <div class="scroll">
     <div class="card">
       <div class="row toggle-row">
-        <div class="meta"><div class="name">{$_("split_tunneling")}</div><div class="sub">{$_("split_tunneling_desc")}</div></div>
+        <div class="meta"><div class="name">{$_("split_tunneling")}</div><div class="sub">{$_("add_apps_websites_bypass_vpn")}</div></div>
         <button class="switch" class:on={st.enabled} role="switch" aria-checked={st.enabled} aria-label={$_("toggle_split_tunneling")} onclick={toggle}><span class="knob"></span></button>
       </div>
     </div>
@@ -37,13 +37,13 @@
       <div class="card" style="margin-top:12px">
         <button class="row" onclick={() => goto("/split-tunneling/apps")}>
           <span class="ic" aria-hidden="true">▦</span>
-          <div class="meta"><div class="name">{$_("split_apps")}</div></div>
+          <div class="meta"><div class="name">{$_("apps")}</div></div>
           <span class="chev">›</span>
         </button>
         <div class="divider"></div>
         <button class="row" onclick={() => goto("/split-tunneling/websites")}>
           <span class="ic" aria-hidden="true">🌐</span>
-          <div class="meta"><div class="name">{$_("split_websites")}</div></div>
+          <div class="meta"><div class="name">{$_("websites")}</div></div>
           <span class="pill">{$_("sites_count", { values: { count: siteCount } })}</span>
           <span class="chev">›</span>
         </button>

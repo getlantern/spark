@@ -103,7 +103,7 @@
   async function loadRouting() {
     try { routingMode = await backend.getRoutingMode(); } catch { /* keep last */ }
   }
-  const routingModeLabel = $derived(routingMode === "full" ? $_("routing_full_title") : $_("routing_smart_title"));
+  const routingModeLabel = $derived(routingMode === "full" ? $_("full_tunnel") : $_("smart_routing"));
 
   onMount(() => {
     refresh();
@@ -170,10 +170,10 @@
           <span class="ic">
             {#if current}<span class="emoji">{flagEmoji(current.countryCode)}</span>{:else}{@render pin()}{/if}
           </span>
-          <span class="label">{$selectedIndex === null ? $_("server_smart_location") : $_("selected_location")}</span>
+          <span class="label">{$selectedIndex === null ? $_("smart_location") : $_("selected_location")}</span>
         </div>
         <div class="tile-body">
-          <span class="value">{current ? serverLabel(current) : $_("server_fastest")}</span>
+          <span class="value">{current ? serverLabel(current) : $_("fastest_server")}</span>
           {#if $selectedIndex === null}<span class="locbolt" aria-label={$_("auto")}>⚡</span>{/if}
           <span class="chev">{@render chevron()}</span>
         </div>
