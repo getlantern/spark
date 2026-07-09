@@ -82,9 +82,12 @@ fn run_service() -> anyhow::Result<()> {
 
     // Report START_PENDING first (the SCM contract): it opens a window to do fallible init before
     // we claim RUNNING, and the wait-hint keeps the SCM's start timeout from firing meanwhile.
-    status_handle
-        .set_service_status(pending(ServiceState::StartPending))
-        .context("reporting START_PENDING to the SCM")?;
+    // Even here a failure gets a best-effort STOPPED so the SCM never sees the process vanish
+    // mid-transition (consistent with every other exit path below).
+    if let Err(e) = status_handle.set_service_status(pending(ServiceState::StartPending)) {
+        report_stopped(&status_handle, 1);
+        return Err(anyhow::Error::new(e).context("reporting START_PENDING to the SCM"));
+    }
 
     // Do all fallible init BEFORE reporting RUNNING, and turn any failure into a clean
     // STOPPED-with-error. Otherwise a failure here (bad binPath args, runtime build) would leave
@@ -110,12 +113,13 @@ fn run_service() -> anyhow::Result<()> {
 
     // Init succeeded → RUNNING (accepting Stop/Shutdown). The GUI client retries pipe-open for ~3s
     // (ERROR_FILE_NOT_FOUND), covering the brief gap until `serve_daemon` binds the pipe.
-    status_handle
-        .set_service_status(status(
-            ServiceState::Running,
-            ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-        ))
-        .context("reporting RUNNING to the SCM")?;
+    if let Err(e) = status_handle.set_service_status(status(
+        ServiceState::Running,
+        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+    )) {
+        report_stopped(&status_handle, 1);
+        return Err(anyhow::Error::new(e).context("reporting RUNNING to the SCM"));
+    }
     info!("spark-service running as a Windows service");
 
     // Isolate a panic in the daemon so we still report STOPPED (else the SCM sees the process
@@ -134,9 +138,17 @@ fn run_service() -> anyhow::Result<()> {
             report_stopped(&status_handle, if inner.is_err() { 1 } else { 0 });
             inner
         }
-        Err(_panic) => {
+        Err(panic) => {
+            // Surface the panic message (services have no attached console, so this is the only
+            // post-mortem breadcrumb) before reporting the failure.
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            error!(panic = %msg, "spark-service daemon panicked");
             report_stopped(&status_handle, 1);
-            Err(anyhow::anyhow!("spark-service panicked"))
+            Err(anyhow::anyhow!("spark-service panicked: {msg}"))
         }
     }
 }
