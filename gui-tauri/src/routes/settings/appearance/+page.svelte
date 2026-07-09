@@ -22,10 +22,10 @@
   </header>
 
   <div class="scroll">
-    <div class="card" role="radiogroup" aria-label={$_("appearance")}>
+    <div class="card" role="group" aria-label={$_("appearance")}>
       {#each OPTIONS as opt, i (opt)}
         {#if i > 0}<div class="divider"></div>{/if}
-        <button class="row" role="radio" aria-checked={$theme === opt} onclick={() => choose(opt)}>
+        <button class="row" aria-pressed={$theme === opt} onclick={() => choose(opt)}>
           <div class="meta"><div class="name">{$_(opt)}</div></div>
           <span class="radio" class:on={$theme === opt} aria-hidden="true"></span>
         </button>

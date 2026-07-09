@@ -20,10 +20,10 @@
   </header>
 
   <div class="scroll">
-    <div class="card" role="radiogroup" aria-label={$_("language")}>
+    <div class="card" role="group" aria-label={$_("language")}>
       {#each SUPPORTED as l, i (l.code)}
         {#if i > 0}<div class="divider"></div>{/if}
-        <button class="row" role="radio" aria-checked={$locale === l.code} onclick={() => choose(l.code)}>
+        <button class="row" aria-pressed={$locale === l.code} onclick={() => choose(l.code)}>
           <div class="meta">
             <div class="name">{l.nativeName}</div>
             <div class="sub">{l.name}</div>
