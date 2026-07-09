@@ -463,7 +463,15 @@ class SparkVpnService : VpnService() {
         controlMessenger?.let { return it }
         val t = HandlerThread("spark-control").apply { start() }
         controlThread = t
-        val m = Messenger(Handler(t.looper, Handler.Callback { msg -> handleControl(msg); true }))
+        val m = Messenger(
+            Handler(t.looper, Handler.Callback { msg ->
+                // Guard the looper: a malformed message must not kill the control thread and drop the
+                // channel until the service restarts.
+                runCatching { handleControl(msg) }
+                    .onFailure { Log.w(TAG, "control message handling failed", it) }
+                true
+            }),
+        )
         controlMessenger = m
         return m
     }

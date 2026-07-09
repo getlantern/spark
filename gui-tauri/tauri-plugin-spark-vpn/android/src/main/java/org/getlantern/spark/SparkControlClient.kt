@@ -34,7 +34,15 @@ class SparkControlClient(private val context: Context) {
     // connects pays nothing for the thread. Process-lifetime once created (no shutdown path needed).
     private val incoming: Messenger by lazy {
         val t = HandlerThread("spark-control-client").apply { start() }
-        Messenger(Handler(t.looper, Handler.Callback { msg -> handleReply(msg); true }))
+        Messenger(
+            Handler(t.looper, Handler.Callback { msg ->
+                // Guard the looper: a malformed reply must not kill the thread and stall all future
+                // request/reply/state processing.
+                runCatching { handleReply(msg) }
+                    .onFailure { Log.w(TAG, "control reply handling failed", it) }
+                true
+            }),
+        )
     }
 
     private val serversPending = PendingRequests<String>()
