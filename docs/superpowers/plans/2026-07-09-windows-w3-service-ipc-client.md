@@ -6,13 +6,22 @@
 
 **Architecture:** The plugin (`gui-tauri/tauri-plugin-spark-vpn`, a **separate cargo workspace**) gains a `service_ipc` module (gated `not(android)`, so it compiles + unit-tests on macOS too) holding a per-call sync→async bridge: each `TunnelControl` call opens the platform transport, does the spark-ipc `Client` handshake + one request, and returns. `ServiceControl` (gated `not(macos), not(android)` = Windows + Linux) delegates connect/disconnect/status to it. Settings (routing-mode/ad-block/split-tunnel) stay locally persisted (the ipc is profile-based — no granular setters; live-apply is a documented follow-up).
 
-**Tech Stack:** Rust; `spark-ipc` (path dep, `stream` feature) + `tokio` (added to the plugin, target-gated `not(android)`); tokio `net::windows::named_pipe` (Windows) / `net::UnixStream` (unix). Validated locally on all three targets (macOS clippy+test, `cargo xwin` Windows) + a new plugin CI job.
+**Tech Stack:** Rust; `spark-ipc` (path dep, `stream` feature) + `tokio` (added to the plugin, target-gated `not(android)`); tokio `net::windows::named_pipe` (Windows) / `net::UnixStream` (unix). Validated locally on all three targets (macOS clippy+test, `cargo xwin` Windows).
+
+> **Implementation note (post-review, as merged):** during the Copilot review the sync→async
+> bridge evolved from a per-call `std::thread::scope` runtime to a **single long-lived worker
+> thread + current-thread runtime served off an mpsc queue** (avoids thread/runtime churn under the
+> GUI's ~2s status poll), with a **15s round-trip timeout** and a **Windows pipe-open retry**
+> (`ERROR_FILE_NOT_FOUND`/`ERROR_PIPE_BUSY`). The **plugin CI job was deferred to W4** (workflow-edit
+> hook + belongs with packaging), and the plugin's **`Cargo.lock` is gitignored** (regenerated per
+> build, not committed). The step-by-step below is the original plan; where it differs, the merged
+> code + this note win.
 
 ---
 
 ## Context for the implementer (verified facts — do not re-guess)
 
-- **The plugin is its own workspace** (`[workspace]` at the top of `gui-tauri/tauri-plugin-spark-vpn/Cargo.toml`); the repo-root `cargo --workspace` does NOT include it, and it currently has **no CI**. Its deps are pinned in its own `Cargo.lock`.
+- **The plugin is its own workspace** (`[workspace]` at the top of `gui-tauri/tauri-plugin-spark-vpn/Cargo.toml`); the repo-root `cargo --workspace` does NOT include it, and it currently has **no CI**. Its `Cargo.lock` is **gitignored** (regenerated per build, not committed).
 - **`ServiceControl`** lives in `desktop.rs:823`, `#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]` (Windows **and** Linux desktop). It's `struct ServiceControl { base: PathBuf }`. connect/disconnect/select_server/set_excluded_apps currently return `Error::Platform("...not yet implemented (spark-ipc)")`; status returns a canned Disconnected; settings getters/setters use `crate::persist::*` (keep those).
 - **`TunnelControl`** (`control.rs`) is a **synchronous** trait. The Tauri commands (`commands.rs`) are `#[tauri::command] async fn` that call the sync trait method — so the call runs **inside** Tauri's tokio runtime. Therefore a naive `Runtime::block_on` inside a trait method **panics** ("Cannot start a runtime from within a runtime"). The bridge MUST run its runtime on a separate OS thread (see IpcClient below).
 - **spark-ipc** (`ipc/`, path `../../ipc` from the plugin) exposes: `Client<S: AsyncRead+AsyncWrite+Unpin>` with `async fn handshake() -> io::Result<ProtocolVersion>` and `async fn request(RequestPayload) -> io::Result<ResponsePayload>`; plus `read_frame`/`write_frame` and `message::{Request, Response, ResponsePayload, ServerMessage, RequestPayload, TunnelStatus, TunnelState, PROTOCOL_VERSION}`. `Client` needs the `stream` feature (pulls tokio). Wire protocol (from `stream.rs`): client writes `Request{req_id, payload}` frames; server replies `ServerMessage::Response(Response{req_id, payload})`; handshake is `RequestPayload::Hello{client_version}` → `ResponsePayload::Hello{service_version, negotiated}`.
@@ -20,7 +29,7 @@
 - **Plugin `Status { state: String, protocol: String, fail_open: bool }`** (`models.rs`; serializes camelCase `failOpen`).
 - **Control-plane address defaults** (match `daemon.rs`): Windows `\\.\pipe\spark`; unix `/var/run/spark.sock`.
 - **Local build reality:** `ServiceControl` is `not(macos)`, so it does **not** compile on the macOS host — but `cargo xwin clippy --target x86_64-pc-windows-msvc` (verified working on the tauri plugin) compiles the Windows path. The `service_ipc` module is gated `not(android)` (compiles on macOS), and its unix-socket branch is the **same code Linux uses**, so a macOS `cargo test` exercises the real round-trip. Net local coverage: macOS clippy+test (helper + macOS branch = Linux path), `cargo xwin` (Windows ServiceControl + pipe).
-- **Constraints:** no `unwrap`/`expect` outside tests; `unsafe` needs `// SAFETY:` (none expected here); `cargo fmt` + `clippy -D warnings` clean. New deps are pinned in the plugin's own Cargo.toml/lock — commit `Cargo.lock`. Commit trailer as usual.
+- **Constraints:** no `unwrap`/`expect` outside tests; `unsafe` needs `// SAFETY:` (none expected here); `cargo fmt` + `clippy -D warnings` clean. New deps go in the plugin's own `Cargo.toml`; its `Cargo.lock` is gitignored, so do NOT try to commit it. Commit trailer as usual.
 
 ---
 
@@ -244,7 +253,7 @@ Expected: clean (compiles the module + macOS branch; the test compiles under `cf
 
 ```bash
 cd /Users/afisk/go/src/github.com/getlantern/spark-app-split-tunneling
-git add gui-tauri/tauri-plugin-spark-vpn/Cargo.toml gui-tauri/tauri-plugin-spark-vpn/Cargo.lock gui-tauri/tauri-plugin-spark-vpn/src/service_ipc.rs
+git add gui-tauri/tauri-plugin-spark-vpn/Cargo.toml gui-tauri/tauri-plugin-spark-vpn/src/service_ipc.rs  # Cargo.lock is gitignored
 git commit -m "$(cat <<'EOF'
 Windows W3: spark-ipc sync bridge for the desktop plugin (service_ipc)
 
@@ -391,6 +400,6 @@ Open the PR (base `main`). Body: what changed (ServiceControl → real ipc clien
 ## Self-Review
 
 - **Spec coverage:** implements the spec's W3 "plugin `ServiceControl` → real named-pipe ipc client (connect/disconnect/status …)". Server-selection + live routing-mode/ad-block/split-tunnel over ipc are explicitly deferred (profile-based ipc has no granular setters) — noted, not silently dropped.
-- **Sync/async correctness:** commands are `async fn` (in-runtime), so the bridge runs its runtime on a `std::thread::scope` thread — never nests runtimes. Verified against `commands.rs`.
+- **Sync/async correctness:** commands are `async fn` (in-runtime), so the bridge runs its runtime on a **dedicated long-lived worker thread** (mpsc queue) — never nests runtimes, and reused across calls. Verified against `commands.rs`.
 - **Host-verifiability:** `service_ipc` is `not(android)` so it compiles + unit-tests on macOS; its unix-socket branch == the Linux path. `ServiceControl` (`not(macos)`) is compiled via `cargo xwin` (verified working on the tauri plugin) + the Windows CI job. No code path is validated only by assertion.
 - **Type consistency:** `IpcClient::request(RequestPayload) -> Result<ResponsePayload>`; `map_status(TunnelStatus) -> Status`; `Client::new(stream)` accepts `NamedPipeClient`/`UnixStream` (both `AsyncRead+AsyncWrite+Unpin`). `TunnelState` variants must match `ipc/src/message.rs` — verify the `Failed` variant name during Step 3.

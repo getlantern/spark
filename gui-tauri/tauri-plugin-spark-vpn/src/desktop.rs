@@ -833,11 +833,24 @@ impl ServiceControl {
         Self { base, ipc }
     }
 
-    /// Send `payload` (named `op` for diagnostics), expecting an `Ack`. A service-side `Error`
-    /// surfaces its message verbatim (e.g. Unauthorized / NotConnected); anything else is a
-    /// protocol mismatch, reported with the operation name.
+    /// Issue `payload` (named `op` for diagnostics), returning the raw reply. Transport/timeout
+    /// failures are prefixed with the operation so a pipe-open failure or timeout is attributable
+    /// in logs, not just protocol mismatches.
+    fn request(
+        &self,
+        op: &str,
+        payload: spark_ipc::message::RequestPayload,
+    ) -> crate::Result<spark_ipc::message::ResponsePayload> {
+        self.ipc
+            .request(payload)
+            .map_err(|e| crate::Error::Platform(format!("{op}: {e}")))
+    }
+
+    /// Send `payload` (named `op`), expecting an `Ack`. A service-side `Error` surfaces its message
+    /// verbatim (e.g. Unauthorized / NotConnected); anything else is a protocol mismatch, reported
+    /// with the operation name.
     fn ack(&self, op: &str, payload: spark_ipc::message::RequestPayload) -> crate::Result<()> {
-        match self.ipc.request(payload)? {
+        match self.request(op, payload)? {
             spark_ipc::message::ResponsePayload::Ack => Ok(()),
             spark_ipc::message::ResponsePayload::Error { message, .. } => {
                 Err(crate::Error::Platform(message))
@@ -860,10 +873,7 @@ impl TunnelControl for ServiceControl {
     }
 
     fn status(&self) -> crate::Result<Status> {
-        match self
-            .ipc
-            .request(spark_ipc::message::RequestPayload::GetStatus)?
-        {
+        match self.request("status", spark_ipc::message::RequestPayload::GetStatus)? {
             spark_ipc::message::ResponsePayload::Status(s) => Ok(crate::service_ipc::map_status(s)),
             spark_ipc::message::ResponsePayload::Error { message, .. } => {
                 Err(crate::Error::Platform(message))
