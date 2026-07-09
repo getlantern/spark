@@ -458,9 +458,12 @@ pub fn list_installed_apps(base: &Path) -> String {
     // Only serve a cache file that is actually a JSON array — it's user-writable disk state, so a
     // corrupted/partial/hand-edited file would otherwise be returned verbatim and crash the
     // frontend's `JSON.parse(...) as InstalledApp[]`. An invalid cache is treated as a miss.
+    // Validate it's a well-formed JSON *array* without materializing the (large, icon-laden) contents:
+    // `Vec<IgnoredAny>` walks the structure but allocates nothing per element — cheap on this hot path
+    // (called on every UI poll), unlike deserializing into a full `serde_json::Value`.
     let cached = std::fs::read_to_string(&cache_path)
         .ok()
-        .filter(|c| serde_json::from_str::<serde_json::Value>(c).is_ok_and(|v| v.is_array()));
+        .filter(|c| serde_json::from_str::<Vec<serde::de::IgnoredAny>>(c).is_ok());
     if let Some(cached) = cached {
         // Serve the cache instantly; refresh in the background for next time. Only spawn if no
         // refresh is already in flight — otherwise repeated cache hits (UI polling / multiple
