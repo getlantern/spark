@@ -33,17 +33,18 @@ hardware; never reported as verified.
     windows-latest. **Why not socket2's `bind_device_by_index`:** socket2 0.6.4 doesn't expose it on
     Windows (its cfg gate excludes windows — `socket2-0.6.4/src/sys/unix.rs:1996`), so the raw
     `setsockopt` was required. Plan: docs/superpowers/plans/2026-07-09-windows-w2b-loop-prevention.md.
-  - **W2c service transport** — 🔨 **IN PROGRESS** (branch `fisk/windows-w2c-pipe-test`).
-    **Discovery:** the transport (`pipe.rs` SDDL named pipe, `winsvc.rs` SCM, `daemon.rs` wiring)
-    is **already implemented + wired + cross-compiled** — built in the P4.1 forward-compat seam
+  - **W2c service transport** — ✅ **MERGED** (PR #62, squash `6450fcba`).
+    **Discovery:** the transport (`pipe.rs` named pipe, `winsvc.rs` SCM, `daemon.rs` wiring)
+    was **already implemented + wired + cross-compiled** — built in the P4.1 forward-compat seam
     (task #119), not a stub. `daemon::run` → `winsvc::run_as_service_if_launched_by_scm` (SCM) with
     foreground fallback; `daemon::listen` (cfg windows) → `pipe::serve`; `lib.rs` re-exports
-    `pipe::serve` as `serve`. Windows auth **is** the pipe DACL (`D:P(A;;GA;;;SY)(A;;GA;;;BA)`) — no
-    per-connection check by design (so no auth.rs Windows gap). `serve_connection` is already
-    duplex-unit-tested (conn.rs, 6 tests). The only real gap was **zero test coverage of the pipe
-    accept loop**, so W2c = a named-pipe round-trip test (mirrors listener.rs's unix test) that
-    exercises `pipe::serve` + SDDL FFI + `serve_connection` + ipc in the windows-latest CI job.
-    Live SCM/on-Windows tunneling remain deferred to hardware (W4 checklist).
+    `pipe::serve` as `serve`. Windows auth **is** the pipe DACL — no per-connection check by design
+    (so no auth.rs Windows gap). The DACL was admin-only (`D:P(A;;GA;;;SY)(A;;GA;;;BA)`) at merge and
+    was later widened to include the interactive user (`IU`) in W4 (Option A) so the unprivileged GUI
+    can connect. `serve_connection` is already duplex-unit-tested (conn.rs, 6 tests). The only real
+    gap was **zero test coverage of the pipe accept loop**, so W2c added a named-pipe round-trip test
+    (mirrors listener.rs's unix test) exercising `pipe::serve` + SDDL FFI + `serve_connection` + ipc
+    in the windows-latest CI job. Live SCM/on-Windows tunneling remain deferred to hardware (W4 checklist).
 - **W3 tauri-plugin ServiceControl → real spark-ipc client** — ✅ **MERGED** (PR #63, squash
   `e025a345`). 4 review rounds (Copilot: surface service errors, deterministic test, long-lived
   worker vs per-call churn, pipe-open retry, round-trip timeout, op-labeled errors, doc accuracy;

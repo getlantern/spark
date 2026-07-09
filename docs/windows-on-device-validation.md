@@ -20,7 +20,9 @@ and DNS changes are system-wide.
 - [ ] Launch the Tauri GUI **without elevation** (as the normal logged-in user).
 - [ ] The GUI shows a real status (not an error) — confirms the unprivileged GUI can open the
       admin+`IU` pipe (the widened `CONTROL_PIPE_SDDL`). **If it shows "service ipc" / access-denied,
-      the `IU` access mask in `pipe.rs` is wrong — try `FRFW` or `FA` for `IU`.**
+      the `IU` access mask in `pipe.rs` is wrong — try `FRFW` (targeted file read/write) first. `FA`
+      (full access) is only a temporary diagnostic to confirm it's a mask problem; do NOT ship `FA` —
+      it's far broader than needed.**
 - [ ] Status polling (~2s) works steadily with no errors; the service log shows the connections.
 
 ## 3. Connect → tunnel up (W1 routing + W2a params + W2b loop-prevention)

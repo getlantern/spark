@@ -204,7 +204,7 @@ mod tests {
         let server = serve(name.as_os_str(), cmd_tx);
         let client_flow = async {
             let Some(pipe) = connect(name.as_os_str()).await else {
-                eprintln!("skipping: cannot open the admin-DACL pipe in this environment");
+                eprintln!("skipping: cannot open the control pipe in this environment");
                 return;
             };
             let mut client = Client::new(pipe);
@@ -221,14 +221,14 @@ mod tests {
         };
 
         tokio::select! {
-            // serve() only returns on error. If it can't create the admin-DACL pipe in a
+            // serve() only returns on error. If it can't create the control pipe in a
             // restricted/UAC-filtered environment, skip (like the client side) rather than fail.
             result = server => match result {
                 Err(e)
                     if e.kind() == std::io::ErrorKind::PermissionDenied
                         || e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) =>
                 {
-                    eprintln!("skipping: cannot create the admin-DACL pipe in this environment: {e}");
+                    eprintln!("skipping: cannot create the control pipe in this environment: {e}");
                 }
                 other => panic!("serve() returned unexpectedly: {other:?}"),
             },
