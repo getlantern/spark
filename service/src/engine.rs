@@ -151,11 +151,19 @@ impl TunnelEngine for CoreEngine {
             // supply them from the open device here. No-op on macOS/Linux (name-addressed routes).
             #[cfg(target_os = "windows")]
             {
-                let ifindex = match self.tun.as_ref() {
-                    Some(tun) => tun
-                        .if_index()
-                        .map_err(|e| EngineError(format!("querying TUN interface index: {e}")))?,
-                    None => return Err(EngineError("TUN missing while installing routes".into())),
+                // Match install()'s failure handling below: the supervisor + TUN are already up, so
+                // any early return here must tear them down first — otherwise a failed start would
+                // leave the datapath running and the adapter up.
+                let ifindex = match self.tun.as_ref().map(|tun| tun.if_index()) {
+                    Some(Ok(idx)) => idx,
+                    Some(Err(e)) => {
+                        let _ = self.stop(Teardown::RestoreDirect).await;
+                        return Err(EngineError(format!("querying TUN interface index: {e}")));
+                    }
+                    None => {
+                        let _ = self.stop(Teardown::RestoreDirect).await;
+                        return Err(EngineError("TUN missing while installing routes".into()));
+                    }
                 };
                 routes = routes.with_windows_params(ifindex, config.tun.addr);
             }
