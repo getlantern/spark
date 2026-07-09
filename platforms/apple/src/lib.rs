@@ -202,8 +202,10 @@ mod ffi {
     /// against the resolved process path so in-bundle helpers match too — NOT executable paths.
     /// Returns 0 if applied; -1 if `json` is null, not valid UTF-8, not valid JSON, or there is no
     /// active router to update (no tunnel running, or a tunnel running without smart-routing — e.g. a
-    /// plain relay/proxy path has no router). The listed apps route Direct (absolute); unresolved
-    /// flows fail open (tunneled, never leaked).
+    /// plain relay/proxy path has no router). The listed apps route Direct (absolute). A flow whose
+    /// owning process can't be resolved is **not** force-bypassed — it falls through to the normal
+    /// routing decision (which may itself be Direct via a domain/IP rule), so app-bypass never leaks
+    /// a flow it can't attribute.
     ///
     /// # Safety
     /// `json` must be null or a valid NUL-terminated C string.

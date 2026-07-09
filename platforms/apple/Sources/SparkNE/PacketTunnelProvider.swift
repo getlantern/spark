@@ -212,10 +212,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                         log.notice("applied adBlock=false at connect (rc=\(arc))")
                     }
                     log.notice("tunnel data path ready; reporting connected")
-                    // The router is live now, so apply any start-time app-bypass list.
-                    if let appBypass, !appBypass.isEmpty {
-                        let rcAb = appBypass.withCString { spark_set_app_bypass($0) }
-                        log.notice("applied start-time app-bypass: rc=\(rcAb)")
+                    // The router is live now, so apply any start-time app-bypass list. Skip the
+                    // canonical empty list "[]" (the common default) as well as an empty string, so
+                    // a no-op FFI call + log line don't fire on every ordinary connect.
+                    if let appBypass {
+                        let trimmed = appBypass.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty && trimmed != "[]" {
+                            let rcAb = appBypass.withCString { spark_set_app_bypass($0) }
+                            log.notice("applied start-time app-bypass: rc=\(rcAb)")
+                        }
                     }
                     self?.finishStart(nil)
                 } else {
