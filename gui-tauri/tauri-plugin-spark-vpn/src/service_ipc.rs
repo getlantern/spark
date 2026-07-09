@@ -86,10 +86,24 @@ impl IpcClient {
                 }
             };
             // Serve requests until all senders drop (IpcClient/ServiceControl gone), then exit.
+            // Bound the whole round-trip so a service that accepts the connection but stops
+            // responding (or a stuck uncancel-safe read) can't hang the worker + the caller
+            // forever. The window covers the Windows open-retry (~3s) + handshake + request.
             for (payload, resp) in rx {
-                let result = rt
-                    .block_on(round_trip(&addr, payload))
-                    .map_err(|e| crate::Error::Platform(format!("service ipc: {e}")));
+                let result = rt.block_on(async {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        round_trip(&addr, payload),
+                    )
+                    .await
+                    {
+                        Ok(Ok(payload)) => Ok(payload),
+                        Ok(Err(e)) => Err(crate::Error::Platform(format!("service ipc: {e}"))),
+                        Err(_elapsed) => {
+                            Err(crate::Error::Platform("service ipc timed out".into()))
+                        }
+                    }
+                });
                 let _ = resp.send(result);
             }
         });
