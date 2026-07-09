@@ -470,12 +470,14 @@ class SparkVpnService : VpnService() {
 
     /**
      * VpnService binds for two purposes now: the VPN framework (SERVICE_INTERFACE) and our control
-     * channel (ACTION_CONTROL). Per the VpnService.onBind contract we MUST return super.onBind for
-     * SERVICE_INTERFACE; for anything else return our control binder.
+     * channel (ACTION_CONTROL). Per the VpnService.onBind contract we identify the intent and return
+     * the corresponding interface: super.onBind for SERVICE_INTERFACE, our control binder for
+     * ACTION_CONTROL, and null for any other/unknown (or null) action.
      */
-    override fun onBind(intent: Intent?): IBinder? {
-        if (intent?.action == SERVICE_INTERFACE) return super.onBind(intent)
-        return controlMessenger().binder
+    override fun onBind(intent: Intent?): IBinder? = when (intent?.action) {
+        SERVICE_INTERFACE -> super.onBind(intent)
+        ACTION_CONTROL -> controlMessenger().binder
+        else -> null
     }
 
     /** Dispatch one inbound control message (on the control thread). */

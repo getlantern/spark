@@ -50,7 +50,9 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     // Control channel to the core in the :vpn process. Adopt-bind now so a tunnel already running
     // from a prior UI-process death re-syncs its state; connect() upgrades to an auto-create bind.
-    private val control = SparkControlClient(activity)
+    // Use the application context (not the Activity) for this plugin-lifetime binder to avoid leaking
+    // the Activity across configuration changes.
+    private val control = SparkControlClient(activity.applicationContext)
 
     // Re-entrancy guard for the whole connect flow (consent round-trip + readiness wait). A second
     // connect() while one is in flight is rejected, so an Invoke can never be dropped/overwritten.

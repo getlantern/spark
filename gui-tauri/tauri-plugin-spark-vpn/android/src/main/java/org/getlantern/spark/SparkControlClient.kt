@@ -83,6 +83,10 @@ class SparkControlClient(private val context: Context) {
     private fun unbind() {
         if (!bound) return
         bound = false
+        // Politely deregister so the service stops pushing state to a Messenger we're about to drop.
+        // Only reachable on an intentional unbind (service still bound); onLost() nulls `service`
+        // first because the binding is already dead, so this send is correctly skipped there.
+        service?.let { svc -> runCatching { svc.send(Message.obtain(null, ControlMsg.UNREGISTER)) } }
         service = null
         runCatching { context.unbindService(conn) }
     }
