@@ -8,3 +8,6 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# i18n build output (regenerated from src/lib/i18n/po by scripts/po-to-json.mjs)
+src/lib/i18n/generated/
