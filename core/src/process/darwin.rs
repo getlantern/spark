@@ -293,8 +293,10 @@ mod tests {
         let peer_addr = peer.local_addr().expect("peer addr");
         sock.connect(peer_addr).expect("connect");
         // Send one datagram: on some stacks a UDP PCB isn't reliably present in `udp.pcblist_n`
-        // until the socket has actually transmitted, so this avoids a flaky lookup.
-        let _ = sock.send(b"x");
+        // until the socket has actually transmitted, so this avoids a flaky lookup. Assert the send
+        // succeeds — a silent failure here would surface later as a confusing "not in PCB table".
+        sock.send(b"x")
+            .expect("send datagram to force a UDP PCB entry");
         let local = sock.local_addr().expect("local");
 
         let info = resolve(local.ip(), local.port(), Protocol::Udp)
