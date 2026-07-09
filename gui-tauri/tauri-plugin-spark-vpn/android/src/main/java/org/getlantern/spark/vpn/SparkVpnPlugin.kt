@@ -21,7 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import org.getlantern.spark.SparkBridge
+import org.getlantern.spark.SparkControlClient
 import org.getlantern.spark.SparkState
 import org.getlantern.spark.VpnController
 import org.getlantern.spark.VpnState
@@ -33,7 +33,7 @@ import org.getlantern.spark.VpnState
  * The request path is `invoke("plugin:spark-vpn|connect")` → Rust `#[command] connect`
  * (commands.rs) → `AndroidControl::connect` (mobile.rs) → `run_mobile_plugin("connect")` → the
  * [connect] @Command below. Each @Command parses its args, drives the [SparkVpnService] /
- * [SparkBridge], and resolves/rejects the [Invoke].
+ * [SparkControlClient], and resolves/rejects the [Invoke].
  *
  * Durable settings (split-tunnel list + routing mode) live in filesDir on this side, mirroring the
  * desktop `persist.rs` schema so behaviour matches other platforms. The [SparkVpnService] owns the
@@ -48,11 +48,16 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
     // Process-lived scope for the readiness wait; SupervisorJob so one failure can't cancel siblings.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    // Control channel to the core in the :vpn process. Adopt-bind now so a tunnel already running
+    // from a prior UI-process death re-syncs its state; connect() upgrades to an auto-create bind.
+    private val control = SparkControlClient(activity)
+
     // Re-entrancy guard for the whole connect flow (consent round-trip + readiness wait). A second
     // connect() while one is in flight is rejected, so an Invoke can never be dropped/overwritten.
     @Volatile private var connecting = false
 
     init {
+        control.bindIfRunning()
         // Pre-warm the installed-apps catalog in the background at launch so the split-tunnel picker
         // opens instantly the FIRST time too (enumeration rasterizes an icon per app, ~1s). No-op if
         // the cache already exists; listInstalledApps' stale-while-revalidate keeps it fresh after.
@@ -142,6 +147,7 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // a stale CONNECTED/DISCONNECTED from a prior attempt.
         SparkState.set(VpnState.CONNECTING)
         VpnController.start(activity)
+        control.bindForConnect()
         scope.launch {
             // The service's own readiness gate (nativeWaitReady) uses READY_TIMEOUT_MS = 30s; wait a
             // little longer here so the service is the one to decide FAILED, not us racing it.
@@ -190,24 +196,27 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
     /**
      * The live server pool as a JSON array string, wrapped in `{value: <jsonString>}` so Rust
      * deserializes a `{value: String}` and parses it into `Vec<ServerInfo>`. "[]" before any connect.
-     * nativeServers() is nullable only on a catastrophic JNI string-allocation failure → treat as "[]".
      */
     @Command
     fun servers(invoke: Invoke) {
-        val json = runCatching { SparkBridge.nativeServers() }.getOrNull() ?: "[]"
-        val ret = JSObject()
-        ret.put("value", json)
-        invoke.resolve(ret)
+        scope.launch {
+            val json = runCatching { control.getServers() }.getOrDefault("[]")
+            val ret = JSObject()
+            ret.put("value", json)
+            invoke.resolve(ret)
+        }
     }
 
     /** Pin which pool member new flows dial. Resolves `{ok: Boolean}`. */
     @Command
     fun selectServer(invoke: Invoke) {
         val args = invoke.parseArgs(SelectServerArgs::class.java)
-        val ok = runCatching { SparkBridge.nativeSelectServer(args.index) }.getOrDefault(false)
-        val ret = JSObject()
-        ret.put("ok", ok)
-        invoke.resolve(ret)
+        scope.launch {
+            val ok = runCatching { control.selectServer(args.index) }.getOrDefault(false)
+            val ret = JSObject()
+            ret.put("ok", ok)
+            invoke.resolve(ret)
+        }
     }
 
     // ── installed apps (split-tunnel picker) ───────────────────────────────────────
@@ -347,8 +356,8 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
         if (SparkState.state.value == VpnState.CONNECTED) {
-            runCatching { SparkBridge.nativeSetSplitTunnel(canonical) }
-                .onFailure { Log.w(TAG, "nativeSetSplitTunnel failed", it) }
+            runCatching { control.setSplitTunnel(canonical) }
+                .onFailure { Log.w(TAG, "setSplitTunnel push failed", it) }
         }
         invoke.resolve()
     }
@@ -419,8 +428,8 @@ class SparkVpnPlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
         if (SparkState.state.value == VpnState.CONNECTED) {
-            runCatching { SparkBridge.nativeSetRoutingMode(mode) }
-                .onFailure { Log.w(TAG, "nativeSetRoutingMode failed", it) }
+            runCatching { control.setRoutingMode(mode) }
+                .onFailure { Log.w(TAG, "setRoutingMode push failed", it) }
         }
         invoke.resolve()
     }
