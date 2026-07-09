@@ -104,14 +104,14 @@ pub fn save_routing_mode(base: &Path, mode: &str) -> crate::Result<()> {
 
 /// Read the persisted ad-block toggle from `<base>/ad_block.txt`.
 ///
-/// Returns `true` (ad-block on) unless the file holds exactly `"false"` (trimmed);
+/// Returns `true` (ad-block on) unless the file holds `"false"` (trimmed, case-insensitive);
 /// a missing/unreadable file or any other contents default to on.
 pub fn load_ad_block_enabled(base: &Path) -> bool {
     std::fs::read_to_string(base.join("ad_block.txt"))
         .ok()
-        .map(|s| s.trim().to_owned())
         // Only an explicit "false" turns ad-block off; anything else (incl. missing) stays on.
-        .map(|s| s != "false")
+        // Compare the trimmed &str directly (no allocation) and case-insensitively.
+        .map(|s| !s.trim().eq_ignore_ascii_case("false"))
         .unwrap_or(true)
 }
 

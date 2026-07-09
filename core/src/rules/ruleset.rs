@@ -251,6 +251,7 @@ mod tests {
             action: RouteAction::Reject,
             tag: tag.into(),
             url: format!("https://example.test/{tag}.srs"),
+            ad_block: true,
         }
     }
 

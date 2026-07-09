@@ -96,13 +96,11 @@ impl Router {
 
         // 1. ad_block rule-sets → their OWN matcher (Reject), so the Settings toggle can disable
         //    them without touching the inline/​smart rules in `base`. Checked before `base` in
-        //    `decide`, preserving the "ad-block wins" precedence.
+        //    `decide`, preserving the "ad-block wins" precedence. Keyed on the `ad_block` source
+        //    flag — NOT `action == Reject` — so a smart_routing reject category (also Reject, but
+        //    not ad-block) is not swept in here and made toggleable; it falls to `base` (step 3).
         let mut ad_block_entries: Vec<(Action, RuleSet)> = Vec::new();
-        for r in sr
-            .rule_sets
-            .iter()
-            .filter(|r| r.action == RouteAction::Reject)
-        {
+        for r in sr.rule_sets.iter().filter(|r| r.ad_block) {
             if let Some(rs) = load_ruleset(&mut load, r) {
                 ad_block_entries.push((Action::Reject, rs));
             }
@@ -119,12 +117,10 @@ impl Router {
                 entries.push((map_action(action), RuleSet::ip_only(ip_cidr)));
             }
         }
-        // 3. smart_routing rule-sets (non-Reject, e.g. Direct).
-        for r in sr
-            .rule_sets
-            .iter()
-            .filter(|r| r.action != RouteAction::Reject)
-        {
+        // 3. all non-ad-block rule-sets → `base`, at their own action. This is smart_routing's
+        //    Direct/Proxy categories AND any smart_routing reject category (a base Reject is
+        //    "always honored" in `decide`, i.e. permanent — the ad-block toggle never lifts it).
+        for r in sr.rule_sets.iter().filter(|r| !r.ad_block) {
             if let Some(rs) = load_ruleset(&mut load, r) {
                 entries.push((map_action(r.action), rs));
             }
@@ -298,11 +294,13 @@ mod tests {
                     action: RouteAction::Reject,
                     tag: "banad".into(),
                     url: "u".into(),
+                    ad_block: true,
                 },
                 RuleSetRef {
                     action: RouteAction::Direct,
                     tag: "common".into(),
                     url: "u".into(),
+                    ad_block: false,
                 },
             ],
             inline_ip_rules: vec![InlineIpRule {
@@ -340,11 +338,13 @@ mod tests {
                     action: RouteAction::Reject,
                     tag: "banad".into(),
                     url: "u".into(),
+                    ad_block: true,
                 },
                 RuleSetRef {
                     action: RouteAction::Direct,
                     tag: "common".into(),
                     url: "u".into(),
+                    ad_block: false,
                 },
             ],
             // An inline config Reject — NOT ad-block; must stay in force regardless of the toggle.
@@ -377,6 +377,36 @@ mod tests {
         // Re-enable → rejected again (live, no rebuild).
         r.set_ad_block_enabled(true);
         assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
+    }
+
+    #[test]
+    fn smart_routing_reject_is_permanent_not_ad_block_toggleable() {
+        // A smart_routing category with a reject/block outbound yields RouteAction::Reject but is
+        // NOT ad-block (`ad_block: false`). It must compile into `base` (permanent), so the Settings
+        // ad-block toggle never lifts it — regression for the "every Reject is ad-block" conflation.
+        use crate::config::{RouteAction, RuleSetRef, SmartRoutingConfig};
+        let sr = SmartRoutingConfig {
+            rule_sets: vec![RuleSetRef {
+                action: RouteAction::Reject,
+                tag: "common".into(),
+                url: "u".into(),
+                ad_block: false, // a smart_routing reject category — not an ad_block list
+            }],
+            inline_ip_rules: Vec::new(),
+        };
+        let r = Router::build(&sr, |rs| {
+            let name = match rs.tag.as_str() {
+                "common" => "common_v3",
+                _ => return None,
+            };
+            std::fs::read(format!("tests/fixtures/srs/{name}.srs")).ok()
+        });
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        // A domain in the reject category is rejected…
+        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Reject);
+        // …and disabling ad-block does NOT lift it (it lives in `base`, not the ad_block matcher).
+        r.set_ad_block_enabled(false);
+        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Reject);
     }
 
     #[test]
@@ -478,6 +508,7 @@ mod tests {
                 action: RouteAction::Reject,
                 tag: "missing".into(),
                 url: "u".into(),
+                ad_block: true,
             }],
             inline_ip_rules: Vec::new(),
         };
