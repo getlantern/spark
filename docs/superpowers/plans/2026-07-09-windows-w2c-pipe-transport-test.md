@@ -1,6 +1,6 @@
 # Windows W2c — Named-Pipe Control-Transport Test Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or executing-plans. Steps use `- [ ]`.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Exercise the Windows named-pipe control transport (`pipe::serve` → `serve_connection` → `spark-ipc`) end-to-end in the `windows-latest` CI job — moving it from "type-checked, never run" to "run in CI" — without needing real Windows hardware.
 
