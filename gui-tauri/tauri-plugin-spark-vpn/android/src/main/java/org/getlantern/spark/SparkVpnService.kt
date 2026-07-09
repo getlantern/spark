@@ -13,9 +13,16 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.IBinder
+import android.os.Message
+import android.os.Messenger
 import android.util.Log
+import org.getlantern.spark.control.ControlKey
+import org.getlantern.spark.control.ControlMsg
+import org.getlantern.spark.control.toWire
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
@@ -54,6 +61,24 @@ class SparkVpnService : VpnService() {
     // AtomicInteger (not @Volatile + `+=`) so concurrent (re)starts can't lose an increment and hand
     // two readiness threads the same generation (which would defeat the stale-thread guard).
     private val tunnelGeneration = AtomicInteger(0)
+
+    // Control-plane IPC (Messenger). The UI process (a different process after android:process=":vpn")
+    // binds here to drive servers/selectServer/split-tunnel/routing-mode and receive pushed state.
+    // Handled on a dedicated thread so control traffic never touches the main looper.
+    private var controlThread: HandlerThread? = null
+    private var controlMessenger: Messenger? = null
+
+    // The single registered UI client (last REGISTER wins — the UI is the only client). State pushes
+    // go here; cleared when a send fails (client process gone).
+    private var controlClient: Messenger? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        // Broadcast every state transition to the bound UI client. Set here (before onStartCommand's
+        // startTunnel) so the very first CONNECTING is broadcast too (a no-op until a client registers,
+        // which then gets the current state on REGISTER).
+        SparkState.onChange = { state -> sendState(state) }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -420,7 +445,82 @@ class SparkVpnService : VpnService() {
 
     override fun onDestroy() {
         stopTunnel()
+        SparkState.onChange = null
+        controlClient = null
+        controlThread?.quitSafely()
+        controlThread = null
         super.onDestroy()
+    }
+
+    /**
+     * Lazily create the control [Messenger] backed by a dedicated [HandlerThread]. Returned from
+     * [onBind] for the CONTROL action.
+     */
+    private fun controlMessenger(): Messenger {
+        controlMessenger?.let { return it }
+        val t = HandlerThread("spark-control").apply { start() }
+        controlThread = t
+        val m = Messenger(Handler(t.looper, Handler.Callback { msg -> handleControl(msg); true }))
+        controlMessenger = m
+        return m
+    }
+
+    /**
+     * VpnService binds for two purposes now: the VPN framework (SERVICE_INTERFACE) and our control
+     * channel (ACTION_CONTROL). Per the VpnService.onBind contract we MUST return super.onBind for
+     * SERVICE_INTERFACE; for anything else return our control binder.
+     */
+    override fun onBind(intent: Intent?): IBinder? {
+        if (intent?.action == SERVICE_INTERFACE) return super.onBind(intent)
+        return controlMessenger().binder
+    }
+
+    /** Dispatch one inbound control message (on the control thread). */
+    private fun handleControl(msg: Message) {
+        when (msg.what) {
+            ControlMsg.REGISTER -> {
+                controlClient = msg.replyTo
+                // Immediately sync current state so a late/rebinding UI (e.g. app reopened while the
+                // tunnel kept running) is correct without waiting for the next transition.
+                sendState(SparkState.state.value)
+            }
+            ControlMsg.UNREGISTER -> controlClient = null
+            ControlMsg.GET_SERVERS -> {
+                val json = runCatching { SparkBridge.nativeServers() }.getOrNull() ?: "[]"
+                reply(msg.replyTo, ControlMsg.SERVERS_REPLY, msg.arg1,
+                    Bundle().apply { putString(ControlKey.JSON, json) })
+            }
+            ControlMsg.SELECT_SERVER -> {
+                val index = msg.data?.getInt(ControlKey.INDEX, -1) ?: -1
+                val ok = runCatching { SparkBridge.nativeSelectServer(index) }.getOrDefault(false)
+                reply(msg.replyTo, ControlMsg.SELECT_SERVER_REPLY, msg.arg1,
+                    Bundle().apply { putBoolean(ControlKey.OK, ok) })
+            }
+            ControlMsg.SET_SPLIT_TUNNEL -> {
+                val json = msg.data?.getString(ControlKey.JSON) ?: return
+                runCatching { SparkBridge.nativeSetSplitTunnel(json) }
+                    .onFailure { Log.w(TAG, "nativeSetSplitTunnel failed", it) }
+            }
+            ControlMsg.SET_ROUTING_MODE -> {
+                val mode = msg.data?.getString(ControlKey.MODE) ?: return
+                runCatching { SparkBridge.nativeSetRoutingMode(mode) }
+                    .onFailure { Log.w(TAG, "nativeSetRoutingMode failed", it) }
+            }
+        }
+    }
+
+    /** Send a correlated reply ([requestId] echoed in arg1) back to the requester. */
+    private fun reply(to: Messenger?, what: Int, requestId: Int, data: Bundle) {
+        to ?: return
+        val m = Message.obtain(null, what, requestId, 0).apply { this.data = data }
+        runCatching { to.send(m) }.onFailure { Log.w(TAG, "control reply send failed", it) }
+    }
+
+    /** Push a state transition to the registered UI client; clear it if the send fails (gone). */
+    private fun sendState(state: VpnState) {
+        val c = controlClient ?: return
+        val m = Message.obtain(null, ControlMsg.STATE, state.toWire(), 0)
+        runCatching { c.send(m) }.onFailure { controlClient = null }
     }
 
     companion object {
@@ -435,6 +535,10 @@ class SparkVpnService : VpnService() {
         private const val CHANNEL_ID = "spark_vpn" // foreground-service notification channel (API 26+)
         private const val NOTIF_ID = 1 // ongoing foreground notification id
         const val ACTION_STOP = "org.getlantern.spark.STOP"
+
+        /** Explicit-intent action the UI process uses to bind the control Messenger (distinct from
+         *  the VPN framework's SERVICE_INTERFACE bind). */
+        const val ACTION_CONTROL = "org.getlantern.spark.CONTROL"
 
         /** Rebuild the running tunnel with the latest excluded-apps set (live, no reconnect). */
         const val ACTION_APPLY_APPS = "org.getlantern.spark.APPLY_APPS"
