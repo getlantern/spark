@@ -165,8 +165,12 @@ impl RouteManager {
     pub async fn restore(&mut self) -> io::Result<()> {
         let w = self.windows_params()?;
         debug!(tun = %self.tun, ifindex = %w.ifindex, "restoring direct routing (removing full-tunnel routes)");
-        let mut ops = restore_ops();
-        ops.push(dns_clear_op(&w.ifindex));
+        // Revert DNS FIRST, then remove the covers: `run` stops at the first required-op failure, so
+        // ordering DNS first means a failed `netsh … dhcp` aborts before we fail-open the routes —
+        // avoiding the worst partial state (direct routing while DNS still points at the gone
+        // tunnel resolver). On success the order is immaterial.
+        let mut ops = vec![dns_clear_op(&w.ifindex)];
+        ops.extend(restore_ops());
         run(ops).await
     }
 
@@ -263,11 +267,12 @@ fn blackhole_op(half: &str) -> RouteOp {
 // flagged for on-Windows validation (macOS host cannot exercise it).
 
 /// Delete the cover for `half` (used to clear stale covers before re-installing; ignorable).
-/// Windows `route delete <dest>` removes by destination.
+/// The `mask` is REQUIRED: `route delete 0.0.0.0` (no mask) would also match the real `0.0.0.0/0`
+/// default route and delete it; `route delete <dest> mask <mask>` removes only the `/1` cover.
 #[cfg(target_os = "windows")]
 fn clear_op(half: &str) -> RouteOp {
-    let (dest, _mask) = half_to_dest_mask(half);
-    RouteOp::ignorable(vec!["delete", dest])
+    let (dest, mask) = half_to_dest_mask(half);
+    RouteOp::ignorable(vec!["delete", dest, "mask", mask])
 }
 
 /// Add the cover for `half` via the tun interface. `tun` is the resolved interface **index**
@@ -469,7 +474,11 @@ mod tests {
             argv(&blackhole_op("0.0.0.0/1")),
             "add 0.0.0.0 mask 128.0.0.0 0.0.0.0 metric 1 IF 1" // loopback ifindex 1 = discard
         );
-        assert_eq!(argv(&clear_op("128.0.0.0/1")), "delete 128.0.0.0");
+        // The mask is required so the pre-clear can't match/delete the real 0.0.0.0/0 default route.
+        assert_eq!(
+            argv(&clear_op("128.0.0.0/1")),
+            "delete 128.0.0.0 mask 128.0.0.0"
+        );
     }
 
     #[cfg(target_os = "windows")]

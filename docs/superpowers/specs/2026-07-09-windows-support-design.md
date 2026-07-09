@@ -84,9 +84,14 @@ runs → status Push to GUI. Disconnect reverses (remove covers, tear down WinTu
 data-path exit → engine fires `exit` → loop **fails closed** (covers stay) + alerts.
 
 ## Error handling
-Route-command failure → roll back partial covers (never leave the machine half-routed); GUI
-pipe-connect failure → "service not installed/running"; SCM failures logged; unexpected data-path exit
-→ kill-switch.
+Route ops run sequentially and **stop at the first required-op failure** (the pre-clear deletes are
+ignorable). There is **no automatic rollback** in v1: a mid-sequence failure surfaces the error, and
+the split-default covers self-heal because `install`/`block`/`restore` each re-clear the covers first
+(so a partial state is cleaned up on the next call, and `block` can still fail-closed). `restore`
+reverts DNS before removing covers so a `netsh` failure can't leave direct routing + a stale tunnel
+resolver. (Transactional rollback of a partially-applied cover set is possible future hardening.)
+GUI pipe-connect failure → "service not installed/running"; SCM failures logged; unexpected data-path
+exit → kill-switch.
 
 ## Testing
 Unit: route-command emission, engine fake, `conn` serve loop, `ipc` codec, `ServiceControl` client
