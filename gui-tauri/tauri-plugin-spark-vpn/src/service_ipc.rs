@@ -95,7 +95,9 @@ impl IpcClient {
             // so time it out fast and let the next poll through; connect/disconnect keep the longer
             // window (they can legitimately take a few seconds, incl. the ~3s pipe open-retry).
             for (payload, resp) in rx {
-                let deadline = match payload {
+                // Match on a reference so `payload` stays owned for the `round_trip` move below.
+                // (The non-binding arms wouldn't actually move it, but `&payload` makes that explicit.)
+                let deadline = match &payload {
                     RequestPayload::GetStatus => std::time::Duration::from_secs(5),
                     _ => std::time::Duration::from_secs(15),
                 };
