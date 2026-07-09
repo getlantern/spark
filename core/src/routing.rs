@@ -228,6 +228,12 @@ const ROUTE_PROGRAM: &str = "route";
 const ROUTE_PROGRAM: &str = "ip";
 #[cfg(target_os = "windows")]
 const ROUTE_PROGRAM: &str = "route";
+// Other targets (iOS/Android) never run RouteManager — the OS owns routing there (NEPacketTunnel /
+// VpnService via `fd_tunnel`) and `run_one` is a no-op — but `spark-core` is still compiled for those
+// targets (the Apple staticlib builds `aarch64-apple-ios*`), so the pure `RouteOp` builders that
+// reference `ROUTE_PROGRAM` must still resolve. This value is never executed on those targets.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const ROUTE_PROGRAM: &str = "true";
 
 /// Delete the cover for `half` (used to clear stale covers before re-installing; ignorable).
 #[cfg(target_os = "macos")]
