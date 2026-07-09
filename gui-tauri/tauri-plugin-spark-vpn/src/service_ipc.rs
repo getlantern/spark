@@ -89,20 +89,34 @@ impl IpcClient {
             // Bound the whole round-trip so a service that accepts the connection but stops
             // responding (or a stuck uncancel-safe read) can't hang the worker + the caller
             // forever. The window covers the Windows open-retry (~3s) + handshake + request.
+            // Status polls (the GUI hits `status` ~every 2s) get a shorter deadline than the
+            // mutating commands: a hung-but-connected service must not make every poll cost the full
+            // window and back the queue up behind this single worker — status should be near-instant,
+            // so time it out fast and let the next poll through; connect/disconnect keep the longer
+            // window (they can legitimately take a few seconds, incl. the ~3s pipe open-retry).
             for (payload, resp) in rx {
-                let result = rt.block_on(async {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(15),
-                        round_trip(&addr, payload),
-                    )
-                    .await
-                    {
-                        Ok(Ok(payload)) => Ok(payload),
-                        Ok(Err(e)) => Err(crate::Error::Platform(format!("service ipc: {e}"))),
-                        Err(_elapsed) => {
-                            Err(crate::Error::Platform("service ipc timed out".into()))
+                let deadline = match payload {
+                    RequestPayload::GetStatus => std::time::Duration::from_secs(5),
+                    _ => std::time::Duration::from_secs(15),
+                };
+                // Isolate a panic in the round-trip (a codec/decoder bug, an allocation on a forged
+                // frame length, a dependency `unwrap`) so it fails just this request instead of
+                // unwinding the worker loop — which would drop the receiver and wedge the control
+                // plane for the rest of the session (every later command erroring "worker is gone").
+                // No-op under `panic = "abort"`; a strict improvement under unwind.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rt.block_on(async {
+                        match tokio::time::timeout(deadline, round_trip(&addr, payload)).await {
+                            Ok(Ok(payload)) => Ok(payload),
+                            Ok(Err(e)) => Err(crate::Error::Platform(format!("service ipc: {e}"))),
+                            Err(_elapsed) => {
+                                Err(crate::Error::Platform("service ipc timed out".into()))
+                            }
                         }
-                    }
+                    })
+                }))
+                .unwrap_or_else(|_| {
+                    Err(crate::Error::Platform("service ipc worker panicked".into()))
                 });
                 let _ = resp.send(result);
             }
