@@ -8,7 +8,17 @@ unit-tested. Live on-Windows validation (SCM, named pipe, WinTun routes, tunneli
 hardware; never reported as verified.
 
 ## Status
-- **W1 core Windows routing/kill-switch** — code-complete (branch `fisk/windows-w1-routing`).
+- **W1 core Windows routing/kill-switch** — ✅ **MERGED** (PR #59, squash `5d9b494`). 4 review rounds
+  (caught 2 real bugs: fail-fast mandatory Windows params; unmasked `route delete` would delete the
+  physical default route). All CI green incl. windows-latest test. Windows `RouteManager`:
+  route.exe split-default covers via tun ifindex, blackhole kill-switch (loopback IF 1), netsh
+  adapter DNS (DNS set/cleared before/around route changes so a netsh failure can't leave a bad
+  partial state), ifindex from tun-rs `if_index()` via `with_windows_params` (mandatory).
+- **W2 live spark-service** — in progress (branch `fisk/windows-w2-service` off `5d9b494`).
+- **W3 / W4** — not started.
+
+### W1 detail (superseded by the merged status above)
+- code-complete (branch `fisk/windows-w1-routing`).
   RouteManager Windows path done: route.exe split-default covers via tun ifindex, route-blackhole
   kill-switch (loopback IF 1), netsh adapter DNS. ifindex threaded from tun-rs `if_index()` via
   `RouteManager::with_windows_params(ifindex, resolver)` (no windows-sys dep). Gate green: fmt,
