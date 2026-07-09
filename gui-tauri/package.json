@@ -4,6 +4,12 @@
   "description": "",
   "type": "module",
   "scripts": {
+    "i18n:build": "node scripts/po-to-json.mjs",
+    "predev": "npm run i18n:build",
+    "prebuild": "npm run i18n:build",
+    "precheck": "npm run i18n:build",
+    "pretest": "npm run i18n:build",
+    "test": "vitest run",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
