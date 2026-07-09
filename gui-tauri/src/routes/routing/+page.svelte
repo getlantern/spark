@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
+  import { _ } from "$lib/i18n";
   import { MockBackend, type SparkBackend } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
 
@@ -17,27 +18,27 @@
 
 <main class="app">
   <header class="appbar">
-    <button class="iconbtn" aria-label="Back" onclick={() => goto("/")}>
+    <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/")}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
-    <span class="title">Routing Mode</span>
+    <span class="title">{$_("routing_mode")}</span>
   </header>
 
   <div class="scroll">
-    <div class="card" role="radiogroup" aria-label="Routing mode">
+    <div class="card" role="radiogroup" aria-label={$_("routing_mode")}>
       <button class="row" role="radio" aria-checked={mode === "smart"} onclick={() => choose("smart")}>
-        <div class="meta"><div class="name">Smart Routing</div><div class="sub">Rule-based routing optimized for your region</div></div>
+        <div class="meta"><div class="name">{$_("routing_smart_title")}</div><div class="sub">{$_("region_optimized_routing")}</div></div>
         <span class="radio" class:on={mode === "smart"} aria-hidden="true"></span>
       </button>
       <div class="divider"></div>
       <button class="row" role="radio" aria-checked={mode === "full"} onclick={() => choose("full")}>
-        <div class="meta"><div class="name">Full Tunnel</div><div class="sub">Routes all traffic through VPN</div></div>
+        <div class="meta"><div class="name">{$_("routing_full_title")}</div><div class="sub">{$_("routing_full_desc")}</div></div>
         <span class="radio" class:on={mode === "full"} aria-hidden="true"></span>
       </button>
     </div>
     <div class="note">
       <span class="ic" aria-hidden="true">ⓘ</span>
-      <p>Smart Routing uses region-specific rules to automatically send traffic that needs the VPN through Spark. All other traffic goes direct for speed and reliability.</p>
+      <p>{$_("routing_note")}</p>
     </div>
   </div>
 </main>
@@ -53,6 +54,7 @@
     width: 40px; height: 40px; border: none; background: none; cursor: pointer;
     display: grid; place-items: center; color: var(--text-tertiary); border-radius: 8px;
   }
+  :global([dir="rtl"]) .iconbtn svg { transform: scaleX(-1); }
   .title { font-size: 19px; font-weight: 700; letter-spacing: -0.2px; color: var(--text-primary); }
 
   .scroll { flex: 1; overflow-y: auto; padding: 0 16px 20px; }
@@ -63,7 +65,7 @@
   }
   .row {
     display: flex; align-items: center; gap: 12px; width: 100%; padding: 15px 16px;
-    background: none; border: none; cursor: pointer; font-family: var(--font); text-align: left;
+    background: none; border: none; cursor: pointer; font-family: var(--font); text-align: start;
     transition: background 0.12s ease;
   }
   .row:hover { background: var(--hover); }

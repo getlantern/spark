@@ -24,5 +24,7 @@
   "server_selection": "Server selection",
   "server_smart_location": "Smart location",
   "server_fastest": "Fastest server",
-  "server_all_locations": "All locations"
+  "server_all_locations": "All locations",
+  "back": "Back",
+  "routing_note": "Smart Routing uses region-specific rules to automatically send traffic that needs the VPN through Spark. All other traffic goes direct for speed and reliability."
 }
