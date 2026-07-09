@@ -14,14 +14,27 @@ hardware; never reported as verified.
   route.exe split-default covers via tun ifindex, blackhole kill-switch (loopback IF 1), netsh
   adapter DNS (DNS set/cleared before/around route changes so a netsh failure can't leave a bad
   partial state), ifindex from tun-rs `if_index()` via `with_windows_params` (mandatory).
-- **W2 live spark-service** — in progress; **split into two PRs** for tractable review (each
-  self-contained + testable):
-  - **W2a core-side tunnel wiring** (branch `fisk/windows-w2-service`): `Tun::if_index()` accessor
-    (cfg windows, delegates to tun-rs); thread `RouteManager::with_windows_params(if_index, tun addr)`
-    in `CoreEngine::start` on Windows (engine.rs:146 — install now needs the params); Windows
-    `SocketProtector` in `core/src/net.rs` (`IP_UNICAST_IF`) so the proxy's own dials bypass the
-    tunnel (loop-prevention deferred from W1). Plan: docs/superpowers/plans/2026-07-09-windows-w2a-*.
-  - **W2b service transport live** (later branch): make `pipe.rs` (named-pipe accept + SDDL),
+- **W2 live spark-service** — in progress; **split into three PRs** for tractable review (each
+  self-contained; small untestable-on-host FFI kept isolated):
+  - **W2a core tunnel wiring** (branch `fisk/windows-w2-service`): `Tun::if_index()` accessor
+    (cfg not(android/ios), delegates to tun-rs `DeviceImpl::if_index`); thread
+    `RouteManager::with_windows_params(if_index, config.tun.addr)` in `CoreEngine::start` on Windows
+    (engine.rs:146 — install now needs the mandatory params). This is the piece that makes the
+    merged W1 routing actually install when the service connects. No new deps. Verified by host
+    clippy + `cargo xwin` cross-clippy + existing routing unit tests (they already prove the ifindex
+    reaches the emitted `route.exe` argv). Plan: docs/superpowers/plans/2026-07-09-windows-w2a-*.
+  - **W2b Windows loop-prevention** (later branch): Windows `SocketProtector` so the proxy's own
+    upstream dials bypass the tunnel (deferred from W1). **Refinement discovered during W2a
+    planning:** socket2 0.6.4 does **NOT** expose `bind_device_by_index_v4/v6` on Windows (its cfg
+    gate lists ios/macos/linux/android/etc. and excludes windows — verified in
+    `socket2-0.6.4/src/sys/unix.rs:1996`). So the goal-prompt's "add windows to the `bind_to_index`
+    cfg list" is not possible as written. Windows needs a raw `IP_UNICAST_IF` setsockopt via
+    `windows-sys` (with the **network-byte-order** index quirk that IPv4 requires but IPv6 does not),
+    `interface_index` for Windows (name→index via `if_nametoindex`), Windows `default_physical_interface()`
+    discovery, AND engine `protect_interface` wiring — otherwise the protector is dead code. That is a
+    materially bigger, all-hardware-deferred change with one host-testable pure fn (the byte-order
+    helper); hence its own PR rather than bolted onto W2a.
+  - **W2c live service transport** (later branch): make `pipe.rs` (named-pipe accept + SDDL),
     `winsvc.rs`/`daemon.rs` (SCM), `auth.rs` (Windows peer authz) live — all currently
     "type-checked, never run". `CoreEngine` itself is already the real engine (not a stub).
 - **W3 / W4** — not started.

@@ -57,8 +57,30 @@ reference = WireGuard for Windows.
   `DeviceBuilder` (no tun change).
 
 ### W2 — Live Windows `spark-service` (`service/`)
+Delivered as **three sub-PRs** for tractable review (each self-contained; the untestable-on-host
+FFI is kept isolated):
+
+**W2a — core tunnel wiring** (`core/src/tun/mod.rs`, `service/src/engine.rs`)
+- `Tun::if_index()` accessor (cfg `not(any(android, ios))`, delegates to tun-rs
+  `DeviceImpl::if_index() -> io::Result<u32>`, which `AsyncDevice` re-exposes via `Deref`).
+- `CoreEngine::start`: on Windows, build the route manager as
+  `RouteManager::new(&device).with_windows_params(tun.if_index()?, config.tun.addr)` so W1's
+  **mandatory** Windows params are supplied (install/restore fail fast without them). This is the
+  piece that makes the merged W1 routing actually install when the service connects. No new deps.
+
+**W2b — Windows loop-prevention** (`core/src/net.rs` + engine `protect_interface` wiring)
 - Real `TunnelEngine` Windows path: WinTun up → install W1 routes → run `spark-core`
-  (fd_tunnel/netstack/proxy).
+  (fd_tunnel/netstack/proxy) with the proxy's own upstream dials pinned to the physical interface so
+  they bypass the tunnel (deferred from W1).
+- **Toolchain reality:** socket2 0.6.4 does **not** expose `bind_device_by_index_v4/v6` on Windows
+  (its cfg gate excludes `windows`), so the goal-prompt's "add windows to the `bind_to_index` cfg
+  list" is impossible as written. Windows needs a raw `IP_UNICAST_IF`/`IPV6_UNICAST_IF` setsockopt
+  via `windows-sys` — noting the IPv4 quirk that the index is passed in **network byte order** while
+  IPv6 uses host order — plus `interface_index` for Windows (`if_nametoindex`) and a Windows
+  `default_physical_interface()`. The byte-order transform is a pure fn (host-unit-tested); the
+  setsockopt/discovery are cfg(windows), cross-compiled + hardware-deferred.
+
+**W2c — live service transport** (`service/`)
 - `pipe.rs`: named-pipe accept loop with an **SDDL** granting the interactive user (service is
   LocalSystem); framed `ipc` via `conn::serve_connection`.
 - `winsvc.rs`/`daemon.rs`: SCM start/stop/status; foreground fallback for dev.
