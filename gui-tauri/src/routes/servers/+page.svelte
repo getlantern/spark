@@ -5,6 +5,7 @@
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { selectedIndex } from "$lib/selection";
   import { flagEmoji, serverLabel, latencyClass, protocolLabel } from "$lib/format";
+  import { _ } from "$lib/i18n";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -90,15 +91,15 @@
 
 <main class="app">
   <header class="appbar">
-    <button class="iconbtn" aria-label="Back" onclick={() => goto("/")}>
+    <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/")}>
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
-    <span class="title">Server selection</span>
+    <span class="title">{$_("server_selection")}</span>
   </header>
 
   <div class="scroll">
     <!-- Smart Location (auto) -->
-    <div class="seclabel">Smart location</div>
+    <div class="seclabel">{$_("server_smart_location")}</div>
     <div class="card">
       <button class="row" class:sel={$selectedIndex === null} onclick={() => choose(null)}>
         {#if current}
@@ -112,17 +113,17 @@
           {/if}
         {:else}
           <span class="flag" aria-hidden="true">🌐</span>
-          <div class="meta"><div class="name">Fastest server</div></div>
+          <div class="meta"><div class="name">{$_("server_fastest")}</div></div>
         {/if}
-        <span class="bolt" class:on={$selectedIndex === null} aria-label="Auto">⚡</span>
+        <span class="bolt" class:on={$selectedIndex === null} aria-label={$_("auto")}>⚡</span>
       </button>
     </div>
-    <p class="helper">Automatically chooses the fastest location.</p>
+    <p class="helper">{$_("server_auto_helper")}</p>
 
     {#if loaded && servers.length === 0}
-      <p class="empty">No servers available. Connect first to choose a location.</p>
+      <p class="empty">{$_("no_servers_available")}</p>
     {:else if servers.length > 0}
-      <div class="header">All locations</div>
+      <div class="header">{$_("server_all_locations")}</div>
       <div class="card">
         {#each groups as g, gi (g.country)}
           {#if gi > 0}<div class="divider"></div>{/if}
@@ -137,7 +138,7 @@
               {#if s.latencyMs != null}
                 <span class="pill {latencyClass(s.latencyMs)}">{s.latencyMs} ms</span>
               {/if}
-              {#if $selectedIndex === s.index}<span class="check" aria-label="Selected">✓</span>{/if}
+              {#if $selectedIndex === s.index}<span class="check" aria-label={$_("selected")}>✓</span>{/if}
             </button>
           {:else}
             <!-- Multi-city country: expandable header + indented city rows -->
@@ -159,7 +160,7 @@
                   {#if s.latencyMs != null}
                     <span class="pill {latencyClass(s.latencyMs)}">{s.latencyMs} ms</span>
                   {/if}
-                  {#if $selectedIndex === s.index}<span class="check" aria-label="Selected">✓</span>{/if}
+                  {#if $selectedIndex === s.index}<span class="check" aria-label={$_("selected")}>✓</span>{/if}
                 </button>
               {/each}
             {/if}
@@ -204,12 +205,12 @@
   }
   .row {
     display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 16px;
-    background: none; border: none; cursor: pointer; font-family: var(--font); text-align: left;
+    background: none; border: none; cursor: pointer; font-family: var(--font); text-align: start;
     transition: background 0.12s ease;
   }
   .row:hover { background: var(--hover); }
   .row.sel { background: rgba(0, 189, 214, 0.08); }
-  .row.city { padding-left: 53px; }
+  .row.city { padding-inline-start: 53px; }
   .meta { flex: 1; min-width: 0; }
   .name {
     font-size: 15px; font-weight: 600; color: var(--text-primary);
@@ -237,4 +238,7 @@
   }
   .chev.open { transform: rotate(90deg); }
   .divider { height: 1px; background: var(--border); margin: 0 16px; }
+
+  :global([dir="rtl"]) .iconbtn svg { transform: scaleX(-1); }
+  :global([dir="rtl"]) .chev:not(.open) { transform: scaleX(-1); }
 </style>

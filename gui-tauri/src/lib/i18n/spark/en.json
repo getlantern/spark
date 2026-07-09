@@ -25,6 +25,9 @@
   "server_smart_location": "Smart location",
   "server_fastest": "Fastest server",
   "server_all_locations": "All locations",
+  "selected": "Selected",
+  "no_servers_available": "No servers available. Connect first to choose a location.",
+  "server_auto_helper": "Automatically chooses the fastest location.",
   "back": "Back",
   "routing_note": "Smart Routing uses region-specific rules to automatically send traffic that needs the VPN through Spark. All other traffic goes direct for speed and reliability."
 }
