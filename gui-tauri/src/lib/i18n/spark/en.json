@@ -1,5 +1,10 @@
 {
   "app_name_spark": "SPARK",
+  "menu": "Menu",
+  "toggle_vpn_connection": "Toggle VPN connection",
+  "status_connecting": "Connecting",
+  "status_failed": "Failed",
+  "auto": "Auto",
   "vpn_status": "VPN status",
   "routing_mode": "Routing Mode",
   "routing_smart_title": "Smart Routing",
