@@ -1,14 +1,25 @@
-//! Windows control transport: a named pipe restricted to SYSTEM + Administrators.
+//! Windows control transport: a named pipe for SYSTEM/Administrators (full control) plus the
+//! interactive desktop user (connect + drive).
 //!
-//! Windows has no `SO_PEERCRED`; the privilege boundary is the pipe's **DACL**. We create the
-//! pipe with a security descriptor granting full control only to Local System (`SY`) and the
-//! built-in Administrators group (`BA`), so an unprivileged process cannot open it at all — the
-//! OS refuses the connect. That is the Windows analog of the unix peer-cred check
-//! (process-architecture-and-ipc.md §3), so there is no per-connection credential test here.
-//! The per-connection serve loop ([`crate::conn::serve_connection`]) is shared with unix.
+//! Windows has no `SO_PEERCRED`; the privilege boundary is the pipe's **DACL**. We create the pipe
+//! with a security descriptor granting full control to Local System (`SY`) and the built-in
+//! Administrators group (`BA`), and read/write (connect) to the **Interactive** user (`IU`). Local
+//! System runs the service; `IU` matches whoever is logged on interactively — either a standard
+//! (non-admin) user, or an admin whose desktop process runs with a UAC-filtered token. Neither has
+//! effective `BA`, so granting `IU` explicitly is what lets the *unprivileged* Tauri GUI open the
+//! pipe and drive the tunnel without elevation (the spec's intended model — see the pipe-DACL decision in
+//! docs/superpowers/windows-progress.md). This DACL *is* the authorization boundary (the Windows
+//! analog of the unix peer-cred / `spark`-group check, process-architecture-and-ipc.md §3), so there
+//! is no per-connection credential test here. The per-connection serve loop
+//! ([`crate::conn::serve_connection`]) is shared with unix.
 //!
-//! NB: built and type-checked against the Windows target, but not yet exercised on a real
-//! Windows host — gated with the other privileged live gates.
+//! Security tradeoff (accepted, Option A): any interactive user on the machine can drive the tunnel;
+//! reasonable for a single-user desktop. The alternative (admin-only DACL + an elevated GUI) is noted
+//! in the decision doc.
+//!
+//! NB: built and type-checked against the Windows target, but not yet exercised on a real Windows
+//! host — the exact rights `IU` needs to open + duplex a pipe client are on-device-validated (W4
+//! checklist); if the GUI can't connect, revisit the `IU` access mask.
 
 use std::ffi::{c_void, OsStr};
 use std::io;
@@ -25,22 +36,24 @@ use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use crate::conn::serve_connection;
 use crate::service::Envelope;
 
-/// SDDL granting `GENERIC_ALL` to Local System (`SY`) and Built-in Administrators (`BA`) only;
-/// the DACL is protected (`P`) so no inherited ACEs widen it.
-const ADMIN_ONLY_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+/// SDDL for the control pipe: `GENERIC_ALL` to Local System (`SY`) + Built-in Administrators (`BA`),
+/// and `GENERIC_READ | GENERIC_WRITE` (connect + duplex) to the Interactive user (`IU`) so the
+/// unprivileged desktop GUI can drive the tunnel. The DACL is protected (`P`) so no inherited ACEs
+/// widen it further. (`IU` access mask pending on-Windows validation — see the module doc.)
+const CONTROL_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 /// `SDDL_REVISION_1` — the only defined SDDL revision.
 const SDDL_REVISION_1: u32 = 1;
 
-/// Owns a security descriptor built from [`ADMIN_ONLY_SDDL`] and frees it on drop, and holds the
+/// Owns a security descriptor built from [`CONTROL_PIPE_SDDL`] and frees it on drop, and holds the
 /// `SECURITY_ATTRIBUTES` that point at it for `create_with_security_attributes_raw`.
-struct AdminOnlySecurity {
+struct PipeSecurity {
     descriptor: PSECURITY_DESCRIPTOR,
     attributes: SECURITY_ATTRIBUTES,
 }
 
-impl AdminOnlySecurity {
+impl PipeSecurity {
     fn new() -> io::Result<Self> {
-        let sddl: Vec<u16> = OsStr::new(ADMIN_ONLY_SDDL)
+        let sddl: Vec<u16> = OsStr::new(CONTROL_PIPE_SDDL)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -76,7 +89,7 @@ impl AdminOnlySecurity {
     }
 }
 
-impl Drop for AdminOnlySecurity {
+impl Drop for PipeSecurity {
     fn drop(&mut self) {
         if !self.descriptor.is_null() {
             // SAFETY: `descriptor` came from ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -86,12 +99,12 @@ impl Drop for AdminOnlySecurity {
     }
 }
 
-/// Create one pipe-server instance for `name` with the admin-only DACL. `first` claims the pipe
+/// Create one pipe-server instance for `name` with the control-pipe DACL. `first` claims the pipe
 /// name (set only on the first instance).
 fn make_instance(
     name: &OsStr,
     first: bool,
-    security: &AdminOnlySecurity,
+    security: &PipeSecurity,
 ) -> io::Result<NamedPipeServer> {
     // SAFETY: `as_ptr` points at a live `SECURITY_ATTRIBUTES` whose descriptor is valid for the
     // duration of the call.
@@ -103,10 +116,10 @@ fn make_instance(
 }
 
 /// Accept and serve control connections on the named pipe `name` forever. The DACL is the
-/// authorization gate (only SYSTEM/Administrators can open the pipe), so unauthorized peers
-/// can't connect in the first place — there is no per-connection credential check.
+/// authorization gate (only SYSTEM/Administrators + the interactive desktop user can open the pipe),
+/// so unauthorized peers can't connect in the first place — there is no per-connection credential check.
 pub async fn serve(name: &OsStr, commands: mpsc::Sender<Envelope>) -> io::Result<()> {
-    let security = AdminOnlySecurity::new()?;
+    let security = PipeSecurity::new()?;
     // Pre-create the first instance; after each client connects, immediately create the next so
     // a new client can connect while the current one is served (the tokio named-pipe idiom —
     // otherwise the next client races into ERROR_PIPE_BUSY).
@@ -166,9 +179,9 @@ mod tests {
         }
     }
 
-    /// A client drives connect/status over the real admin-DACL named pipe + `serve_connection`.
-    /// Exercises `AdminOnlySecurity` (the SDDL FFI), the accept loop, and the ipc round-trip in the
-    /// windows-latest CI job. Skips if the CI token can't open the admin pipe.
+    /// A client drives connect/status over the real named pipe (its `CONTROL_PIPE_SDDL` DACL) +
+    /// `serve_connection`. Exercises `PipeSecurity` (the SDDL FFI), the accept loop, and the ipc
+    /// round-trip in the windows-latest CI job. Skips if the CI token can't open the pipe.
     ///
     /// `serve` is run as a sub-future via `select!` rather than spawned: it holds the raw security
     /// descriptor across `.await`, so its future isn't `Send` (production `.await`s it directly in
@@ -191,7 +204,7 @@ mod tests {
         let server = serve(name.as_os_str(), cmd_tx);
         let client_flow = async {
             let Some(pipe) = connect(name.as_os_str()).await else {
-                eprintln!("skipping: cannot open the admin-DACL pipe in this environment");
+                eprintln!("skipping: cannot open the control pipe in this environment");
                 return;
             };
             let mut client = Client::new(pipe);
@@ -208,14 +221,14 @@ mod tests {
         };
 
         tokio::select! {
-            // serve() only returns on error. If it can't create the admin-DACL pipe in a
+            // serve() only returns on error. If it can't create the control pipe in a
             // restricted/UAC-filtered environment, skip (like the client side) rather than fail.
             result = server => match result {
                 Err(e)
                     if e.kind() == std::io::ErrorKind::PermissionDenied
                         || e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) =>
                 {
-                    eprintln!("skipping: cannot create the admin-DACL pipe in this environment: {e}");
+                    eprintln!("skipping: cannot create the control pipe in this environment: {e}");
                 }
                 other => panic!("serve() returned unexpectedly: {other:?}"),
             },

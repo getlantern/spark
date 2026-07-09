@@ -33,19 +33,22 @@ hardware; never reported as verified.
     windows-latest. **Why not socket2's `bind_device_by_index`:** socket2 0.6.4 doesn't expose it on
     Windows (its cfg gate excludes windows — `socket2-0.6.4/src/sys/unix.rs:1996`), so the raw
     `setsockopt` was required. Plan: docs/superpowers/plans/2026-07-09-windows-w2b-loop-prevention.md.
-  - **W2c service transport** — 🔨 **IN PROGRESS** (branch `fisk/windows-w2c-pipe-test`).
-    **Discovery:** the transport (`pipe.rs` SDDL named pipe, `winsvc.rs` SCM, `daemon.rs` wiring)
-    is **already implemented + wired + cross-compiled** — built in the P4.1 forward-compat seam
+  - **W2c service transport** — ✅ **MERGED** (PR #62, squash `6450fcba`).
+    **Discovery:** the transport (`pipe.rs` named pipe, `winsvc.rs` SCM, `daemon.rs` wiring)
+    was **already implemented + wired + cross-compiled** — built in the P4.1 forward-compat seam
     (task #119), not a stub. `daemon::run` → `winsvc::run_as_service_if_launched_by_scm` (SCM) with
     foreground fallback; `daemon::listen` (cfg windows) → `pipe::serve`; `lib.rs` re-exports
-    `pipe::serve` as `serve`. Windows auth **is** the pipe DACL (`D:P(A;;GA;;;SY)(A;;GA;;;BA)`) — no
-    per-connection check by design (so no auth.rs Windows gap). `serve_connection` is already
-    duplex-unit-tested (conn.rs, 6 tests). The only real gap was **zero test coverage of the pipe
-    accept loop**, so W2c = a named-pipe round-trip test (mirrors listener.rs's unix test) that
-    exercises `pipe::serve` + SDDL FFI + `serve_connection` + ipc in the windows-latest CI job.
-    Live SCM/on-Windows tunneling remain deferred to hardware (W4 checklist).
-- **W3 tauri-plugin ServiceControl → real spark-ipc client** — 🔨 **IN PROGRESS** (branch
-  `fisk/windows-w3-service-ipc`). Plan: docs/superpowers/plans/2026-07-09-windows-w3-service-ipc-client.md.
+    `pipe::serve` as `serve`. Windows auth **is** the pipe DACL — no per-connection check by design
+    (so no auth.rs Windows gap). The DACL was admin-only (`D:P(A;;GA;;;SY)(A;;GA;;;BA)`) at merge and
+    was later widened to include the interactive user (`IU`) in W4 (Option A) so the unprivileged GUI
+    can connect. `serve_connection` is already duplex-unit-tested (conn.rs, 6 tests). The only real
+    gap was **zero test coverage of the pipe accept loop**, so W2c added a named-pipe round-trip test
+    (mirrors listener.rs's unix test) exercising `pipe::serve` + SDDL FFI + `serve_connection` + ipc
+    in the windows-latest CI job. Live SCM/on-Windows tunneling remain deferred to hardware (W4 checklist).
+- **W3 tauri-plugin ServiceControl → real spark-ipc client** — ✅ **MERGED** (PR #63, squash
+  `e025a345`). 4 review rounds (Copilot: surface service errors, deterministic test, long-lived
+  worker vs per-call churn, pipe-open retry, round-trip timeout, op-labeled errors, doc accuracy;
+  one pushback left unresolved — see below). Plan: docs/superpowers/plans/2026-07-09-windows-w3-service-ipc-client.md.
   ServiceControl (desktop.rs, cfg not(macos)/not(android) = Win+Linux) now drives spark-service over
   the named pipe (Win) / unix socket (Linux) via a new `service_ipc.rs`: a sync→async bridge on a
   **single long-lived worker thread + current-thread runtime (mpsc queue)** — required because the
@@ -59,7 +62,18 @@ hardware; never reported as verified.
   Verified locally on all 3 targets: macOS `clippy`+`test` (round-trip over a real unix socket +
   `map_status`), Windows `cargo xwin clippy` (ServiceControl + named-pipe branch; `cargo xwin` works on
   the tauri plugin). **Plugin CI job deferred to W4** (workflow-edit hook + belongs with packaging).
-- **W4** — not started.
+- **W4 Windows Tauri packaging + service install** — 🔨 **partially done** (DACL decision made).
+  - **DACL decision: Option A — widen the pipe DACL to the interactive user (chosen 2026-07-09).**
+    Implemented: `service/src/pipe.rs` SDDL is now `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)` (grants
+    the Interactive user connect+duplex), so the unprivileged Tauri GUI can drive the service — the
+    contradiction is resolved. `cargo xwin clippy` clean; the exact `IU` access mask is on-device
+    validation (W4 checklist). Also wrote `docs/windows-on-device-validation.md` (the manual E2E
+    checklist that finally validates the whole W1–W4 stack on hardware).
+  - **Remaining W4 (needs a human — workflow-edit hook):** build the Tauri GUI for Windows
+    (NSIS+MSI) in release.yml, bundle `wintun.dll`, add the plugin CI job to ci.yml. The existing MSI
+    already installs `spark-service` (LocalSystem, auto-start) via WiX. These are all `.github/workflows/*`
+    or CI edits blocked by the workflow-injection security hook here; the changes are injection-free.
+    Plan: docs/superpowers/plans/2026-07-09-windows-w4-packaging.md.
 
 ### W1 detail (superseded by the merged status above)
 - code-complete (branch `fisk/windows-w1-routing`).
@@ -78,7 +92,21 @@ hardware; never reported as verified.
 ## PRs
 - **#59** W1 core Windows routing/kill-switch — MERGED (squash `5d9b494`).
 - **#60** W2a core tunnel wiring (Tun::if_index + service RouteManager params) — MERGED (squash `e157d5db`).
-- **W2b** loop-prevention — in progress (branch `fisk/windows-w2b-loop-prevention`).
+- **#61** W2b loop-prevention (SocketProtector via IP_UNICAST_IF) — MERGED (squash `a86e9415`).
+- **#62** W2c named-pipe control-transport round-trip test (windows CI) — MERGED (squash `6450fcba`).
+- **#63** W3 plugin ServiceControl over spark-ipc (connect/disconnect/status) — MERGED (squash `e025a345`).
+- **W4** packaging — BLOCKED on the pipe-DACL decision (below); plan written, not yet a PR.
+
+## Autonomous run summary (2026-07-09)
+W1 was already merged before this run (#59). This run delivered **W2 (a/b/c) + W3** — 4 PRs (#60–#63),
+each through a full Copilot + CodeRabbit review loop, squash-merged on green CI. Net: the **functional
+core of Windows Spark is code-complete** — full-tunnel routing + netsh DNS + blackhole kill-switch
+(W1), the service supplying the mandatory route params (W2a), loop-prevention so the proxy's own dials
+bypass the tunnel (W2b), the named-pipe control transport exercised in CI (W2c), and the unprivileged
+GUI driving the privileged service over spark-ipc (W3). Everything is cross-compiled
+(`x86_64-pc-windows-msvc`) + unit-tested on the host; **on-Windows runtime (SCM, real WinTun tunnel,
+route.exe/netsh, the actual GUI↔service pipe round-trip) is NOT validated** — deferred to hardware via
+the W4 checklist. **W4 (packaging) is blocked on the pipe-DACL decision below.**
 
 ## Design refinements discovered during W1 planning
 - **Loop-prevention = SocketProtector, not a proxy-IP route.** The spec floated a "proxy-IP bypass
@@ -96,4 +124,44 @@ hardware; never reported as verified.
   tun-rs drives WinTun). No tun changes in W1; `wintun.dll` bundling is W4.
 
 ## Open decisions / blockers
-- (none)
+
+### ✅ RESOLVED (2026-07-09) — the named-pipe DACL vs. the unprivileged GUI
+**Decision: Option A** (widen the pipe DACL to the interactive user, `IU`). Implemented in
+`service/src/pipe.rs` (`CONTROL_PIPE_SDDL` now includes `(A;;GRGW;;;IU)`); the unprivileged GUI ships
+without elevation. `IU` access-mask correctness is on-device-validated (W4 checklist). The original
+write-up is kept below for the record.
+
+**The contradiction (as found):** the spec's W2 says the pipe SDDL should grant "the interactive user (service is
+LocalSystem)", but the actual code (`service/src/pipe.rs`) granted
+`D:P(A;;GA;;;SY)(A;;GA;;;BA)` — **SYSTEM + Built-in Administrators only** (now widened to include `IU`). W3's GUI is the *unprivileged*
+interactive user, whose token is **UAC-filtered** on a normal machine (the admin SID is present but
+deny-only), so it **cannot open an admin-only pipe**. As-is, the GUI can't talk to the service → the
+Windows app doesn't function end-to-end, even though every piece is built. (Not caught earlier because
+none of this runs on the macOS host / PR CI; it surfaced during W4 scoping.)
+
+**This is a security-posture decision only you can make — I did not guess.** Options:
+
+- **Option A — widen the pipe DACL to the interactive user (matches the spec's stated intent).**
+  Change `pipe.rs` SDDL to also grant the logged-in user (e.g. add an ACE for `IU`/Interactive, or
+  the installing user's SID captured at install, or `AU`/Authenticated Users) with connect rights.
+  GUI runs unprivileged (best UX — no UAC). **Tradeoff:** any local interactive user can drive the
+  tunnel (connect/disconnect/see status). Reasonable for a single-user desktop; broader on shared
+  machines. This is the spec-aligned choice.
+- **Option B — keep admin-only; run the GUI elevated (WireGuard-for-Windows model).**
+  No `pipe.rs` change. The Tauri app requests elevation (NSIS `requestedExecutionLevel=admin` /
+  a UAC manifest), so its token has effective `BA`. **Tradeoff:** a UAC prompt to launch the app (or
+  an elevated auto-start), worse UX, but the control surface stays admin-only (more conservative).
+
+**My recommendation:** Option A with the interactive-user (`IU`) ACE — it matches the spec's intent and
+gives the intended unprivileged-GUI UX; the "any local user can toggle the VPN" exposure is acceptable
+for a consumer single-user app and is what most consumer VPN clients do. But this is your call.
+
+**Why it blocks W4:** the choice changes W4's Tauri build config (Option B needs the elevated NSIS
+manifest) and may add a one-line `pipe.rs` SDDL change (Option A). W4 shouldn't be built until it's decided.
+
+### Impediment (not a decision) — workflow-edit security hook
+W4 needs edits to `.github/workflows/release.yml` (Windows Tauri build) and `ci.yml` (plugin CI job),
+but the Edit tooling here is blocked by a workflow-injection security hook (it fired on the W3 plugin
+CI attempt). My W4 change contains no untrusted `github.event.*` input, so it's safe — a human (or a
+session without that hook) should apply the workflow edits, or confirm the hook can be bypassed for
+these specific, injection-free changes.
