@@ -86,6 +86,16 @@ webpki-root-certs = { workspace = true, optional = true }
 # server (ADR 0011). Only the `dns-tunnel` feature pulls it (+ its lz4_flex); base build unaffected.
 dns-tunnel-core = { path = "../dns-tunnel-core", optional = true }
 
+# Windows loop-prevention (W2b): pin the proxy's own upstream sockets to the physical egress
+# interface so they bypass the full-tunnel routes.
+# - windows-sys: raw setsockopt(IP_UNICAST_IF/IPV6_UNICAST_IF) — socket2 0.6 doesn't expose
+#   bind_device_by_index on Windows. Version matches service/ (single 0.61.x in the tree).
+# - getifaddrs: safe interface enumeration (name/index/flags) — avoids hand-written
+#   GetAdaptersAddresses FFI. Already in the tree via tun-rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+getifaddrs = "0.6"
+
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
 wat.workspace = true
