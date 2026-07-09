@@ -144,10 +144,12 @@ mod tests {
     }
 
     /// Connect a client to `name`, retrying the startup race (pipe not yet created) and
-    /// `ERROR_PIPE_BUSY`. Returns `None` if the pipe can't be opened for access reasons (a
-    /// UAC-filtered token on some CI hosts) so the caller can skip rather than fail.
+    /// `ERROR_PIPE_BUSY` until a 5s deadline (generous for slow/loaded Windows CI runners).
+    /// Returns `None` if the pipe can't be opened for access reasons (a UAC-filtered token on some
+    /// CI hosts) so the caller can skip rather than fail.
     async fn connect(name: &std::ffi::OsStr) -> Option<NamedPipeClient> {
-        for _ in 0..50 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
             match ClientOptions::new().open(name) {
                 Ok(client) => return Some(client),
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {}
@@ -156,9 +158,12 @@ mod tests {
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
                 Err(e) => panic!("unexpected pipe open error: {e}"),
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "pipe never became connectable within 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("pipe never became connectable");
     }
 
     /// A client drives connect/status over the real admin-DACL named pipe + `serve_connection`.
@@ -203,7 +208,17 @@ mod tests {
         };
 
         tokio::select! {
-            result = server => panic!("serve() returned unexpectedly: {result:?}"),
+            // serve() only returns on error. If it can't create the admin-DACL pipe in a
+            // restricted/UAC-filtered environment, skip (like the client side) rather than fail.
+            result = server => match result {
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::PermissionDenied
+                        || e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) =>
+                {
+                    eprintln!("skipping: cannot create the admin-DACL pipe in this environment: {e}");
+                }
+                other => panic!("serve() returned unexpectedly: {other:?}"),
+            },
             _ = client_flow => {}
         }
     }
