@@ -23,28 +23,27 @@ hardware; never reported as verified.
     rounds (Copilot caught one real issue: the Windows `if_index()` early-returns didn't tear down
     the started supervisor+TUN like the `install()` failure path — fixed). All CI green incl.
     windows-latest. Plan: docs/superpowers/plans/2026-07-09-windows-w2a-*.
-  - **W2b Windows loop-prevention** — 🔨 **IN PROGRESS** (branch `fisk/windows-w2b-loop-prevention`
-    off merged main). Plan: docs/superpowers/plans/2026-07-09-windows-w2b-loop-prevention.md.
-    Design settled (all APIs verified against crate sources): keep the name-based protector plumbing;
-    Windows `bind_to_index` = raw `setsockopt(IP_UNICAST_IF/IPV6_UNICAST_IF)` via `windows-sys`
-    (IPv4 index in NETWORK byte order — isolated into a host-unit-tested pure helper; IPv6 host
-    order); `interface_index` + `default_physical_interface` via the in-tree `getifaddrs` crate
-    (safe wrapper, avoids raw GetAdaptersAddresses); auto-pin centralized in `transport::from_config`
-    (no engine change). New deps `windows-sys`(WinSock)+`getifaddrs`, both cfg(windows)-only.
-    Windows `SocketProtector` so the proxy's own upstream dials bypass the tunnel (deferred from W1).
-    **Refinement discovered during W2a
-    planning:** socket2 0.6.4 does **NOT** expose `bind_device_by_index_v4/v6` on Windows (its cfg
-    gate lists ios/macos/linux/android/etc. and excludes windows — verified in
-    `socket2-0.6.4/src/sys/unix.rs:1996`). So the goal-prompt's "add windows to the `bind_to_index`
-    cfg list" is not possible as written. Windows needs a raw `IP_UNICAST_IF` setsockopt via
-    `windows-sys` (with the **network-byte-order** index quirk that IPv4 requires but IPv6 does not),
-    `interface_index` for Windows (name→index via `if_nametoindex`), Windows `default_physical_interface()`
-    discovery, AND engine `protect_interface` wiring — otherwise the protector is dead code. That is a
-    materially bigger, all-hardware-deferred change with one host-testable pure fn (the byte-order
-    helper); hence its own PR rather than bolted onto W2a.
-  - **W2c live service transport** (later branch): make `pipe.rs` (named-pipe accept + SDDL),
-    `winsvc.rs`/`daemon.rs` (SCM), `auth.rs` (Windows peer authz) live — all currently
-    "type-checked, never run". `CoreEngine` itself is already the real engine (not a stub).
+  - **W2b Windows loop-prevention** — ✅ **MERGED** (PR #61, squash `a86e9415`). Windows
+    `SocketProtector` via raw `setsockopt(IP_UNICAST_IF/IPV6_UNICAST_IF)` (windows-sys) +
+    `getifaddrs` name→index / physical-interface discovery (safe wrapper, avoids raw
+    GetAdaptersAddresses); auto-pin centralized in `transport::from_config` (no engine change).
+    New deps `windows-sys`(WinSock)+`getifaddrs`, both cfg(windows)-only. IPv4 `IP_UNICAST_IF`
+    index goes in NETWORK byte order (isolated into a host-unit-tested pure helper); IPv6 host order.
+    2 review rounds (Copilot: use `WSAGetLastError`; log-after-success). All CI green incl.
+    windows-latest. **Why not socket2's `bind_device_by_index`:** socket2 0.6.4 doesn't expose it on
+    Windows (its cfg gate excludes windows — `socket2-0.6.4/src/sys/unix.rs:1996`), so the raw
+    `setsockopt` was required. Plan: docs/superpowers/plans/2026-07-09-windows-w2b-loop-prevention.md.
+  - **W2c service transport** — 🔨 **IN PROGRESS** (branch `fisk/windows-w2c-pipe-test`).
+    **Discovery:** the transport (`pipe.rs` SDDL named pipe, `winsvc.rs` SCM, `daemon.rs` wiring)
+    is **already implemented + wired + cross-compiled** — built in the P4.1 forward-compat seam
+    (task #119), not a stub. `daemon::run` → `winsvc::run_as_service_if_launched_by_scm` (SCM) with
+    foreground fallback; `daemon::listen` (cfg windows) → `pipe::serve`; `lib.rs` re-exports
+    `pipe::serve` as `serve`. Windows auth **is** the pipe DACL (`D:P(A;;GA;;;SY)(A;;GA;;;BA)`) — no
+    per-connection check by design (so no auth.rs Windows gap). `serve_connection` is already
+    duplex-unit-tested (conn.rs, 6 tests). The only real gap was **zero test coverage of the pipe
+    accept loop**, so W2c = a named-pipe round-trip test (mirrors listener.rs's unix test) that
+    exercises `pipe::serve` + SDDL FFI + `serve_connection` + ipc in the windows-latest CI job.
+    Live SCM/on-Windows tunneling remain deferred to hardware (W4 checklist).
 - **W3 / W4** — not started.
 
 ### W1 detail (superseded by the merged status above)
