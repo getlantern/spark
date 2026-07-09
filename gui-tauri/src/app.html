@@ -7,6 +7,10 @@
          (Android 15 draws behind the status bar + camera cutout by default; iOS notch). -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Spark</title>
+    <!-- Zero-flash appearance: an EXTERNAL (from 'self') render-blocking script sets data-theme
+         before first paint. External, not inline, to satisfy the Tauri CSP (`script-src 'self'`,
+         no 'unsafe-inline'). See static/theme-init.js. -->
+    <script src="%sveltekit.assets%/theme-init.js"></script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

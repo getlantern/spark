@@ -8,6 +8,7 @@
   import "@fontsource/urbanist/latin-700.css";
 
   import { setupI18n, isRtl, locale, isLoading } from "$lib/i18n";
+  import { theme, resolveTheme } from "$lib/theme";
 
   let { children } = $props();
 
@@ -18,6 +19,19 @@
     const code = $locale ?? "en";
     document.documentElement.lang = code;
     document.documentElement.dir = $isRtl ? "rtl" : "ltr";
+  });
+
+  // Track the OS dark-mode preference reactively so `theme === "system"` follows it live.
+  let prefersDark = $state(false);
+  $effect(() => {
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    prefersDark = mql.matches;
+    const onChange = (e: MediaQueryListEvent) => (prefersDark = e.matches);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  });
+  $effect(() => {
+    document.documentElement.dataset.theme = resolveTheme($theme, prefersDark);
   });
 </script>
 
@@ -53,30 +67,31 @@
     --pill-bg: rgba(0, 0, 0, 0.06); /* count-pill background */
     --font: "Urbanist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  @media (prefers-color-scheme: dark) {
-    :global(:root) {
-      --bg: #16181b;
-      --surface: #1e2124;
-      --brand: #00bdd6;
-      --off: #4b5056;
-      --knob: #ffffff;
-      --text-primary: #f4f6f7;
-      --text-secondary: #c2c7cc;
-      --text-tertiary: #9aa0a6;
-      --border: #2a2e33;
-      --success: #34c759;
-      --indicator-off: #3a3f45;
-      --shadow: rgba(0, 0, 0, 0.45);
-      --bolt: #ffc105;
-      --lat-good: #34c759;
-      --lat-amber: #b7c94a;
-      --lat-slow: #e0a52a;
-      --snack-bg: #2e3439;
-      --switch-off: #4b5056;
-      /* Light-on-dark tints — a black overlay is invisible on the dark surface. */
-      --hover: rgba(255, 255, 255, 0.04);
-      --pill-bg: rgba(255, 255, 255, 0.08);
-    }
+  /* Dark palette applies when the resolved theme is dark (data-theme is set by +layout.svelte and
+     the app.html pre-paint script). 'system' resolves against the OS; explicit Light/Dark force it.
+     Declarations are unchanged from the former prefers-color-scheme block. */
+  :global(:root[data-theme="dark"]) {
+    --bg: #16181b;
+    --surface: #1e2124;
+    --brand: #00bdd6;
+    --off: #4b5056;
+    --knob: #ffffff;
+    --text-primary: #f4f6f7;
+    --text-secondary: #c2c7cc;
+    --text-tertiary: #9aa0a6;
+    --border: #2a2e33;
+    --success: #34c759;
+    --indicator-off: #3a3f45;
+    --shadow: rgba(0, 0, 0, 0.45);
+    --bolt: #ffc105;
+    --lat-good: #34c759;
+    --lat-amber: #b7c94a;
+    --lat-slow: #e0a52a;
+    --snack-bg: #2e3439;
+    --switch-off: #4b5056;
+    /* Light-on-dark tints — a black overlay is invisible on the dark surface. */
+    --hover: rgba(255, 255, 255, 0.04);
+    --pill-bg: rgba(255, 255, 255, 0.08);
   }
   /* border-box everywhere: rows use `width: 100%` + padding, and under the default content-box
      that overflows the card by the padding (32px), whose `overflow: hidden` then clips the

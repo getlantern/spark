@@ -121,7 +121,7 @@
 <main class="app">
   <!-- AppBar: menu · SPARK wordmark · account avatar. -->
   <header class="appbar">
-    <button class="iconbtn" aria-label={$_("menu")}>{@render menu()}</button>
+    <button class="iconbtn" aria-label={$_("menu")} onclick={() => goto("/settings")}>{@render menu()}</button>
     <span class="wordmark">{$_("app_name_spark")}</span>
     <button class="iconbtn" aria-label={$_("account")}>{@render account()}</button>
   </header>

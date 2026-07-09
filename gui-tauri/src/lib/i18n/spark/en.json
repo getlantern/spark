@@ -30,5 +30,6 @@
   "remove_host": "Remove {host}",
   "err_save_changes": "Couldn't save changes",
   "added_sites": "Added {count, plural, one {# site} other {# sites}}",
-  "removed": "Removed"
+  "removed": "Removed",
+  "err_ad_block": "Couldn't update ad blocking"
 }
