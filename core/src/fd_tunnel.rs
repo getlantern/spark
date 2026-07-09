@@ -32,6 +32,13 @@ use crate::proxy;
 use crate::transport;
 use crate::tun::Tun;
 
+/// Worker threads for the tunnel data-path runtime. The data path is I/O-bound (the netstack pump
+/// plus per-flow proxy copies), not CPU-bound — on-device profiling showed ~3% CPU under real
+/// streaming — so tokio's default of one worker per core (e.g. 8 on an 8-core phone) just wastes
+/// thread stacks and wakeups, which matters on low-end devices. Two workers keep the netstack pump
+/// and a proxy task running in parallel without over-subscribing.
+const TUNNEL_WORKER_THREADS: usize = 2;
+
 /// The stop signal of every running tunnel. Each tunnel registers its own [`Notify`] here for its
 /// lifetime: the no-arg [`stop`] (the shim entry) signals them all, while a [`TunnelHandle`] signals
 /// only its own — so independent tunnels tear down independently (replacing the former single
@@ -485,6 +492,7 @@ fn run_with_handle(
     stop: Arc<Notify>,
 ) -> std::io::Result<()> {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(TUNNEL_WORKER_THREADS)
         .enable_all()
         .build()
     {
@@ -791,6 +799,7 @@ pub fn run_fd_lantern_api(
     use crate::config::fetch::{self, FetchEnv};
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(TUNNEL_WORKER_THREADS)
         .enable_all()
         .build()
     {

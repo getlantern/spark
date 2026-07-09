@@ -70,3 +70,26 @@ reclaim any of that while connected.
 
 The Messenger / `onBind` / `bindService` glue is not host-unit-testable (no Robolectric); it is
 validated on-device here (as above), mirroring the Windows SCM/pipe posture.
+
+## Follow-up — release build + tokio worker cap
+
+Profiling the split found the tunnel runtime was spawning **8 `tokio-rt-worker` threads** in the
+`:vpn` process — tokio's default of one worker per core on the 8-core Redmi. The data path is
+I/O-bound (~3% CPU under real streaming), so that's wasted thread stacks + wakeups on low-end
+devices. Capped the two `fd_tunnel` data-path runtimes (Android `:vpn` + Apple NE) and the
+`spark-ffi` control client to **2 workers** (`core/src/fd_tunnel.rs`, `spark-ffi/src/lib.rs`).
+
+Measured on the Redmi with a **release** APK (the earlier numbers above were a debug build):
+
+| Metric | Debug (pre-cap) | Release + 2-worker cap |
+|---|---:|---:|
+| `tokio-rt-worker` threads | 8 | **2** |
+| Total `:vpn` threads | 28 | **20** |
+| `:vpn` TOTAL PSS | ~78 MB | **~45 MB** |
+| `:vpn` SWAP PSS | 0.3 MB | 0.7 MB |
+
+Release `libspark_android.so` (arm64, stripped) = **7.8 MB** (the full JNI lib: core + all
+transports statically linked). Of the 20 remaining `:vpn` threads only 5 are ours (2 tokio
+workers + `spark-tunnel`/`spark-netwatch`/`spark-control`); the rest are unavoidable ART + binder
+baseline. The worker cap is a config change (not host-unit-testable in a stable way) — verified on
+device by the thread count dropping 8 → 2.
