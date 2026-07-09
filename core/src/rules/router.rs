@@ -587,20 +587,57 @@ mod tests {
         });
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         // Default: ad-block on → an ad host is rejected.
-        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
         // Disable ad-block → the ad host is no longer rejected (falls through to Proxy)…
         r.set_ad_block_enabled(false);
-        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Proxy);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Proxy
+        );
         // …but an inline config Reject rule is NOT gated by the ad-block toggle…
         assert_eq!(
-            r.decide("203.0.113.7".parse().unwrap(), None),
+            r.decide(
+                "203.0.113.7".parse().unwrap(),
+                None,
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Reject
         );
         // …and smart-routing Direct still applies.
-        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Direct);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Direct
+        );
         // Re-enable → rejected again (live, no rebuild).
         r.set_ad_block_enabled(true);
-        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
     }
 
     #[test]
@@ -676,10 +713,26 @@ mod tests {
         });
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         // A domain in the reject category is rejected…
-        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
         // …and disabling ad-block does NOT lift it (it lives in `base`, not the ad_block matcher).
         r.set_ad_block_enabled(false);
-        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
     }
 
     #[test]
