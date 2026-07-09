@@ -16,15 +16,23 @@ hardware; never reported as verified.
   partial state), ifindex from tun-rs `if_index()` via `with_windows_params` (mandatory).
 - **W2 live spark-service** — in progress; **split into three PRs** for tractable review (each
   self-contained; small untestable-on-host FFI kept isolated):
-  - **W2a core tunnel wiring** (branch `fisk/windows-w2-service`): `Tun::if_index()` accessor
-    (cfg not(android/ios), delegates to tun-rs `DeviceImpl::if_index`); thread
+  - **W2a core tunnel wiring** — ✅ **MERGED** (PR #60, squash `e157d5db`). `Tun::if_index()`
+    accessor (cfg not(android/ios), delegates to tun-rs `DeviceImpl::if_index`); thread
     `RouteManager::with_windows_params(if_index, config.tun.addr)` in `CoreEngine::start` on Windows
-    (engine.rs:146 — install now needs the mandatory params). This is the piece that makes the
-    merged W1 routing actually install when the service connects. No new deps. Verified by host
-    clippy + `cargo xwin` cross-clippy + existing routing unit tests (they already prove the ifindex
-    reaches the emitted `route.exe` argv). Plan: docs/superpowers/plans/2026-07-09-windows-w2a-*.
-  - **W2b Windows loop-prevention** (later branch): Windows `SocketProtector` so the proxy's own
-    upstream dials bypass the tunnel (deferred from W1). **Refinement discovered during W2a
+    so the merged W1 routing actually installs when the service connects. No new deps. 2 review
+    rounds (Copilot caught one real issue: the Windows `if_index()` early-returns didn't tear down
+    the started supervisor+TUN like the `install()` failure path — fixed). All CI green incl.
+    windows-latest. Plan: docs/superpowers/plans/2026-07-09-windows-w2a-*.
+  - **W2b Windows loop-prevention** — 🔨 **IN PROGRESS** (branch `fisk/windows-w2b-loop-prevention`
+    off merged main). Plan: docs/superpowers/plans/2026-07-09-windows-w2b-loop-prevention.md.
+    Design settled (all APIs verified against crate sources): keep the name-based protector plumbing;
+    Windows `bind_to_index` = raw `setsockopt(IP_UNICAST_IF/IPV6_UNICAST_IF)` via `windows-sys`
+    (IPv4 index in NETWORK byte order — isolated into a host-unit-tested pure helper; IPv6 host
+    order); `interface_index` + `default_physical_interface` via the in-tree `getifaddrs` crate
+    (safe wrapper, avoids raw GetAdaptersAddresses); auto-pin centralized in `transport::from_config`
+    (no engine change). New deps `windows-sys`(WinSock)+`getifaddrs`, both cfg(windows)-only.
+    Windows `SocketProtector` so the proxy's own upstream dials bypass the tunnel (deferred from W1).
+    **Refinement discovered during W2a
     planning:** socket2 0.6.4 does **NOT** expose `bind_device_by_index_v4/v6` on Windows (its cfg
     gate lists ios/macos/linux/android/etc. and excludes windows — verified in
     `socket2-0.6.4/src/sys/unix.rs:1996`). So the goal-prompt's "add windows to the `bind_to_index`
@@ -54,7 +62,9 @@ hardware; never reported as verified.
 - **W4 Windows Tauri packaging + service install** — not started.
 
 ## PRs
-- (none yet)
+- **#59** W1 core Windows routing/kill-switch — MERGED (squash `5d9b494`).
+- **#60** W2a core tunnel wiring (Tun::if_index + service RouteManager params) — MERGED (squash `e157d5db`).
+- **W2b** loop-prevention — in progress (branch `fisk/windows-w2b-loop-prevention`).
 
 ## Design refinements discovered during W1 planning
 - **Loop-prevention = SocketProtector, not a proxy-IP route.** The spec floated a "proxy-IP bypass
