@@ -213,7 +213,8 @@ fn bind_to_index(sock: socket2::SockRef<'_>, index: NonZeroU32, ipv4: bool) -> i
 fn bind_to_index(sock: socket2::SockRef<'_>, index: NonZeroU32, ipv4: bool) -> io::Result<()> {
     use std::os::windows::io::AsRawSocket;
     use windows_sys::Win32::Networking::WinSock::{
-        setsockopt, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IP_UNICAST_IF, SOCKET,
+        setsockopt, WSAGetLastError, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IP_UNICAST_IF,
+        SOCKET,
     };
 
     let s = sock.as_raw_socket() as SOCKET;
@@ -239,7 +240,11 @@ fn bind_to_index(sock: socket2::SockRef<'_>, index: NonZeroU32, ipv4: bool) -> i
         )
     };
     if rc != 0 {
-        return Err(io::Error::last_os_error());
+        // WinSock sets the error via WSASetLastError, so read it with WSAGetLastError (not
+        // GetLastError, which io::Error::last_os_error() would use) for an accurate code.
+        // SAFETY: a plain FFI getter with no arguments and no pointers.
+        let code = unsafe { WSAGetLastError() };
+        return Err(io::Error::from_raw_os_error(code));
     }
     Ok(())
 }

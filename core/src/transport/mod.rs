@@ -373,10 +373,17 @@ pub fn from_config_with_control(
             #[cfg(target_os = "windows")]
             {
                 match crate::net::default_physical_interface() {
-                    Some(name) => {
-                        tracing::debug!(interface = %name, "pinning upstream sockets to physical egress (loop-prevention)");
-                        crate::net::SocketProtector::for_interface(&name).ok()
-                    }
+                    Some(name) => match crate::net::SocketProtector::for_interface(&name) {
+                        Ok(protector) => {
+                            tracing::debug!(interface = %name, "pinned upstream sockets to physical egress (loop-prevention)");
+                            Some(protector)
+                        }
+                        Err(e) => {
+                            // Degrade to unpinned rather than fail bringup, but surface why.
+                            tracing::warn!(interface = %name, error = %e, "could not pin upstream sockets to physical egress; leaving unpinned");
+                            None
+                        }
+                    },
                     None => None,
                 }
             }
