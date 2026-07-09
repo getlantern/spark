@@ -426,6 +426,9 @@ mod tests {
         )); // above 2000::/3
     }
 
+    // Only unix/windows probe real interfaces; the fallback impl returns `true` ("assume v6"), so
+    // the unknown-interface → false expectation is platform-specific. (All CI hosts are unix/windows.)
+    #[cfg(any(unix, windows))]
     #[test]
     fn interface_has_global_ipv6_false_for_unknown_iface() {
         assert!(!interface_has_global_ipv6("definitely-not-an-iface-xyz"));
