@@ -12,6 +12,8 @@ permissions = [
   "allow-set-split-tunnel",
   "allow-get-routing-mode",
   "allow-set-routing-mode",
+  "allow-get-ad-block-enabled",
+  "allow-set-ad-block-enabled",
   "allow-list-installed-apps",
   "allow-get-excluded-apps",
   "allow-set-excluded-apps",

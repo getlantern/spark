@@ -139,15 +139,19 @@ fn parse_dns(raw: &RawRoot) -> DnsConfig {
 /// applied later by the engine; here we just capture what the config declared.
 fn parse_smart_routing(raw: &RawRoot) -> SmartRoutingConfig {
     let mut sr = SmartRoutingConfig::default();
-    // ad_block: every list drops (Reject).
+    // ad_block: every list drops (Reject). Marked `ad_block: true` so the Settings toggle gates
+    // exactly these — never a smart_routing reject category (below).
     for rs in &raw.ad_block {
         sr.rule_sets.push(RuleSetRef {
             action: RouteAction::Reject,
             tag: rs.tag.clone(),
             url: rs.url.clone(),
+            ad_block: true,
         });
     }
-    // smart_routing categories: the category's outbound decides the action (e.g. `direct`).
+    // smart_routing categories: the category's outbound decides the action (e.g. `direct`, or
+    // `reject`/`block`). These are NOT ad-block (`ad_block: false`) even when their action is
+    // Reject — a reject category must stay permanently in force, not become toggleable.
     for cat in &raw.smart_routing {
         let action = route_action(&cat.category, cat.outbounds.first().map(String::as_str));
         for rs in &cat.rule_sets {
@@ -155,6 +159,7 @@ fn parse_smart_routing(raw: &RawRoot) -> SmartRoutingConfig {
                 action,
                 tag: rs.tag.clone(),
                 url: rs.url.clone(),
+                ad_block: false,
             });
         }
     }

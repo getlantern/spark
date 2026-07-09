@@ -139,6 +139,29 @@ pub fn set_routing_mode(_mode: &str) -> bool {
     false
 }
 
+/// Enable/disable ad-block on the running tunnel live (no reconnect). Returns true if applied,
+/// false if no router is active. Called across the platform FFI.
+#[cfg(feature = "smart-routing")]
+pub fn set_ad_block_enabled(enabled: bool) -> bool {
+    let router = active_router()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match router {
+        Some(r) => {
+            r.set_ad_block_enabled(enabled);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Without `smart-routing`, live ad-block updates are unsupported.
+#[cfg(not(feature = "smart-routing"))]
+pub fn set_ad_block_enabled(_enabled: bool) -> bool {
+    false
+}
+
 /// Readiness of the current tunnel's data path, for the platform shim to gate "connected" on. The NE
 /// runs one tunnel per process, so a single global suffices. The shim calls [`mark_connecting`]
 /// **synchronously** before starting the worker thread (a race-free baseline so [`wait_ready`] on

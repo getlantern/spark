@@ -215,6 +215,17 @@ mod ffi {
         }
     }
 
+    /// Enable (`enabled != 0`) or disable (`0`) ad-block on the running tunnel live. Returns 0 if
+    /// applied; -1 if there is no active router (no tunnel, or one without smart-routing).
+    #[no_mangle]
+    pub extern "C" fn spark_set_ad_block_enabled(enabled: c_int) -> c_int {
+        if spark_core::fd_tunnel::set_ad_block_enabled(enabled != 0) {
+            0
+        } else {
+            -1
+        }
+    }
+
     /// Free a string returned by [`spark_servers_json`].
     ///
     /// # Safety

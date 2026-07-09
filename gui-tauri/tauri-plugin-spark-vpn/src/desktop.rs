@@ -308,6 +308,7 @@ mod ne_spike {
         config: Option<String>,
         split_tunnel: Option<String>,
         routing_mode: Option<String>,
+        ad_block: bool,
     ) -> Result<(), String> {
         // No provider can start until the extension is activated + user-approved.
         activate_extension()?;
@@ -317,6 +318,9 @@ mod ne_spike {
         // by the caller and passed in as Option<String>.
         let split_tunnel_json = split_tunnel.unwrap_or_default();
         let routing_mode_str = routing_mode.unwrap_or_default();
+        // providerConfiguration values are strings, so pre-format the bool as "true"/"false"
+        // (the NE parses "false" → off). Owned so the closure can stay `Fn`.
+        let ad_block_str = if ad_block { "true" } else { "false" }.to_owned();
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let outer = RcBlock::new(
             move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
@@ -341,9 +345,9 @@ mod ne_spike {
                 unsafe {
                     proto.setProviderBundleIdentifier(Some(&NSString::from_str(TUNNEL_SYSEXT_ID)));
                     proto.setServerAddress(Some(ns_string!("Spark")));
-                    // Always include splitTunnel and routingMode in providerConfiguration so
-                    // the NE can apply the user's bypass list and routing mode on every
-                    // connect. Also include the optional dev-override config when present.
+                    // Always include splitTunnel, routingMode and adBlock in providerConfiguration
+                    // so the NE can apply the user's bypass list, routing mode and ad-block toggle
+                    // on every connect. Also include the optional dev-override config when present.
                     // providerConfiguration is NSDictionary<NSString, AnyObject>; upcast
                     // each NSString value (NSString → NSObject → AnyObject).
                     let st_val: Retained<AnyObject> = NSString::from_str(&split_tunnel_json)
@@ -352,6 +356,8 @@ mod ne_spike {
                     let rm_val: Retained<AnyObject> = NSString::from_str(&routing_mode_str)
                         .into_super()
                         .into_super();
+                    let ab_val: Retained<AnyObject> =
+                        NSString::from_str(&ad_block_str).into_super().into_super();
                     let dict = if let Some(ref c) = config {
                         let cfg_val: Retained<AnyObject> =
                             NSString::from_str(c).into_super().into_super();
@@ -360,13 +366,18 @@ mod ne_spike {
                                 ns_string!("config"),
                                 ns_string!("splitTunnel"),
                                 ns_string!("routingMode"),
+                                ns_string!("adBlock"),
                             ],
-                            &[cfg_val, st_val, rm_val],
+                            &[cfg_val, st_val, rm_val, ab_val],
                         )
                     } else {
                         NSDictionary::from_retained_objects(
-                            &[ns_string!("splitTunnel"), ns_string!("routingMode")],
-                            &[st_val, rm_val],
+                            &[
+                                ns_string!("splitTunnel"),
+                                ns_string!("routingMode"),
+                                ns_string!("adBlock"),
+                            ],
+                            &[st_val, rm_val, ab_val],
                         )
                     };
                     proto.setProviderConfiguration(Some(&dict));
@@ -669,7 +680,8 @@ impl TunnelControl for AppleControl {
                 Some(m)
             }
         };
-        ne_spike::connect(config, split, mode).map_err(crate::Error::Platform)
+        let ad_block = crate::persist::load_ad_block_enabled(&self.base);
+        ne_spike::connect(config, split, mode, ad_block).map_err(crate::Error::Platform)
     }
 
     fn disconnect(&self) -> crate::Result<()> {
@@ -769,6 +781,25 @@ impl TunnelControl for AppleControl {
         Ok(())
     }
 
+    fn get_ad_block_enabled(&self) -> crate::Result<bool> {
+        Ok(crate::persist::load_ad_block_enabled(&self.base))
+    }
+
+    fn set_ad_block_enabled(&self, enabled: bool) -> crate::Result<()> {
+        crate::persist::save_ad_block_enabled(&self.base, enabled)?;
+        // Best-effort live push: only send when the tunnel is actually up.
+        let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
+        if ne_spike::ui_state(raw) == "connected" {
+            let msg = serde_json::json!({"cmd": "adBlock", "enabled": enabled}).to_string();
+            if let Err(e) = ne_spike::send_provider_message(msg) {
+                ne_spike::ne_debug(&format!(
+                    "ad-block live push failed (persisted; applies next connect): {e}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     // App split tunneling is Android-only for now; the macOS backend lands in a later phase (P3).
     // Reads return an empty catalog so the picker loads cleanly; the write errors (like other
     // not-yet-implemented actions) so a caller isn't told an unsupported change succeeded.
@@ -840,6 +871,14 @@ impl TunnelControl for ServiceControl {
 
     fn set_routing_mode(&self, mode: &str) -> crate::Result<()> {
         crate::persist::save_routing_mode(&self.base, mode)
+    }
+
+    fn get_ad_block_enabled(&self) -> crate::Result<bool> {
+        Ok(crate::persist::load_ad_block_enabled(&self.base))
+    }
+
+    fn set_ad_block_enabled(&self, enabled: bool) -> crate::Result<()> {
+        crate::persist::save_ad_block_enabled(&self.base, enabled)
     }
 
     // App split tunneling is Android-only for now; the desktop backend lands in a later phase.

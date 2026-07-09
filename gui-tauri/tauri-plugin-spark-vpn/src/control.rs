@@ -12,6 +12,8 @@ pub trait TunnelControl: Send + Sync {
     fn set_split_tunnel(&self, json: &str) -> crate::Result<()>;
     fn get_routing_mode(&self) -> crate::Result<String>;
     fn set_routing_mode(&self, mode: &str) -> crate::Result<()>;
+    fn get_ad_block_enabled(&self) -> crate::Result<bool>;
+    fn set_ad_block_enabled(&self, enabled: bool) -> crate::Result<()>;
     /// Installed apps for the exclude picker, as a JSON array string of `{id,name,icon}`.
     fn list_installed_apps(&self) -> crate::Result<String>;
     /// The persisted excluded-app match keys, as a JSON array string.

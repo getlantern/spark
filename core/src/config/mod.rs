@@ -216,6 +216,13 @@ pub struct RuleSetRef {
     pub tag: String,
     /// The `.srs` URL to fetch.
     pub url: String,
+    /// True only for `ad_block[*]` lists — the source the Settings ad-block toggle gates. A
+    /// `smart_routing` category whose outbound is `reject`/`block` also yields `RouteAction::Reject`
+    /// but is **not** ad-block, so it stays `false` and remains permanently in force (compiled into
+    /// `base`), never folded into the toggleable ad-block matcher. `#[serde(default)]` so older
+    /// persisted configs without the field deserialize as non-ad-block.
+    #[serde(default)]
+    pub ad_block: bool,
 }
 
 /// An inline IP/CIDR rule (raw CIDR text, parsed by the engine).
@@ -1012,6 +1019,7 @@ mod tests {
                         action: RouteAction::Reject,
                         tag: "ads".into(),
                         url: "https://x/ads.srs".into(),
+                        ad_block: true,
                     }],
                     inline_ip_rules: vec![InlineIpRule {
                         cidr: "9.9.9.9/32".into(),

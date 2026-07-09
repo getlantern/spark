@@ -134,6 +134,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // Trimmed like the others; nil/empty → NULL (the core's default routing mode).
             let routingMode = (provider?["routingMode"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Read the optional ad-block preference from providerConfiguration["adBlock"] ("true"/
+            // "false"); default on. Applied post-connect (below) via spark_set_ad_block_enabled once
+            // the router exists — mirrors how the app pushes live updates through handleAppMessage.
+            let adBlockEnabled = (provider?["adBlock"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "false"
 
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
             // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C strings
@@ -190,9 +195,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // core fetches config *before* adopting the fd, so reporting up eagerly would blackhole
             // traffic on a cold start (especially offline). Wait (bounded) for the ready signal on a
             // separate thread, then complete — or fail the connection cleanly if it never comes up.
-            let readyWaiter = Thread { [weak self, log = self.log] in
+            let readyWaiter = Thread { [weak self, log = self.log, adBlockEnabled] in
                 let rc = spark_tunnel_wait_ready(30_000) // 30s ceiling
                 if rc == 0 {
+                    // Apply the persisted ad-block preference now the router exists (default on, so
+                    // only a persisted "off" changes anything). Best-effort; -1 just means no router.
+                    if !adBlockEnabled {
+                        let arc = spark_set_ad_block_enabled(0)
+                        log.notice("applied adBlock=false at connect (rc=\(arc))")
+                    }
                     log.notice("tunnel data path ready; reporting connected")
                     self?.finishStart(nil)
                 } else {
@@ -277,6 +288,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let mode = (obj["mode"] as? String) ?? "smart"
             let rc = mode.withCString { spark_set_routing_mode($0) }
             log.notice("handleAppMessage: routingMode rc=\(rc)")
+            completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
+        case "adBlock":
+            // The app sends {"cmd":"adBlock","enabled":true|false}. Missing → true (default on).
+            let enabled = (obj["enabled"] as? Bool) ?? true
+            let rc = spark_set_ad_block_enabled(enabled ? 1 : 0)
+            log.notice("handleAppMessage: adBlock enabled=\(enabled) rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
         default:
             log.error("handleAppMessage: unknown cmd \(cmd)")

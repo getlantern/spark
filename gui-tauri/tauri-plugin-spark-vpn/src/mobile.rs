@@ -14,11 +14,12 @@
 //                      `Vec<ServerInfo>` ("[]" before connect).
 //   - getSplitTunnel → Kotlin resolves `{value: <jsonString>}`   → return `value`.
 //   - getRoutingMode → Kotlin resolves `{value: <modeString>}`   → return `value`.
+//   - getAdBlockEnabled → Kotlin resolves `{value: <bool>}`      → return `value`.
 //   - listInstalledApps/getExcludedApps → Kotlin resolves `{value: <jsonArrayString>}` → return
 //                      `value`.
 //   - selectServer   → Kotlin resolves `{ok: bool}`              → deserialize (ok ignored → ()).
-//   - connect/disconnect/setSplitTunnel/setRoutingMode/setExcludedApps → Kotlin resolves unit
-//     (`null`).
+//   - connect/disconnect/setSplitTunnel/setRoutingMode/setAdBlockEnabled/setExcludedApps → Kotlin
+//     resolves unit (`null`).
 
 #[cfg(target_os = "android")]
 use crate::control::TunnelControl;
@@ -55,11 +56,25 @@ struct ModeArg<'a> {
     mode: &'a str,
 }
 
+/// Command payload for `setAdBlockEnabled`.
+#[cfg(target_os = "android")]
+#[derive(Serialize)]
+struct BoolArg {
+    enabled: bool,
+}
+
 /// The `{value: String}` wrapper Kotlin resolves for `servers`/`getSplitTunnel`/`getRoutingMode`.
 #[cfg(target_os = "android")]
 #[derive(Deserialize)]
 struct ValueString {
     value: String,
+}
+
+/// The `{value: bool}` wrapper Kotlin resolves for `getAdBlockEnabled`.
+#[cfg(target_os = "android")]
+#[derive(Deserialize)]
+struct ValueBool {
+    value: bool,
 }
 
 /// The `{ok: bool}` reply Kotlin resolves for `selectServer` (the flag is informational only).
@@ -130,6 +145,15 @@ impl<R: Runtime> TunnelControl for AndroidControl<R> {
 
     fn set_routing_mode(&self, mode: &str) -> crate::Result<()> {
         self.call::<()>("setRoutingMode", ModeArg { mode })
+    }
+
+    fn get_ad_block_enabled(&self) -> crate::Result<bool> {
+        let wrapped: ValueBool = self.call("getAdBlockEnabled", ())?;
+        Ok(wrapped.value)
+    }
+
+    fn set_ad_block_enabled(&self, enabled: bool) -> crate::Result<()> {
+        self.call::<()>("setAdBlockEnabled", BoolArg { enabled })
     }
 
     fn list_installed_apps(&self) -> crate::Result<String> {

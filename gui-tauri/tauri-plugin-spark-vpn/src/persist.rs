@@ -8,6 +8,7 @@
 //! The on-disk layout mirrors what `gui-tauri/src-tauri/src/config.rs` writes today:
 //!   `<base>/split_tunnel.json`
 //!   `<base>/routing_mode.txt`
+//!   `<base>/ad_block.txt`
 //!
 //! Validation/canonicalization is byte-for-byte identical to `config.rs`.
 
@@ -99,6 +100,33 @@ pub fn save_routing_mode(base: &Path, mode: &str) -> crate::Result<()> {
     Ok(())
 }
 
+// ── Ad-block persistence ──────────────────────────────────────────────────────
+
+/// Read the persisted ad-block toggle from `<base>/ad_block.txt`.
+///
+/// Returns `true` (ad-block on) unless the file holds `"false"` (trimmed, case-insensitive);
+/// a missing/unreadable file or any other contents default to on.
+pub fn load_ad_block_enabled(base: &Path) -> bool {
+    std::fs::read_to_string(base.join("ad_block.txt"))
+        .ok()
+        // Only an explicit "false" turns ad-block off; anything else (incl. missing) stays on.
+        // Compare the trimmed &str directly (no allocation) and case-insensitively.
+        .map(|s| !s.trim().eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+/// Persist the ad-block toggle to `<base>/ad_block.txt` as `"true"`/`"false"`.
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_ad_block_enabled(base: &Path, enabled: bool) -> crate::Result<()> {
+    std::fs::create_dir_all(base)?;
+    std::fs::write(
+        base.join("ad_block.txt"),
+        if enabled { "true" } else { "false" },
+    )?;
+    Ok(())
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -157,6 +185,19 @@ mod tests {
         assert_eq!(load_routing_mode(&base), "smart");
     }
 
+    // (b') ad-block round-trip: save(false) → load()==false, save(true) → load()==true.
+    #[test]
+    fn ad_block_round_trip() {
+        let base = tmp("ad_block_round_trip");
+        let _ = std::fs::remove_dir_all(&base);
+
+        save_ad_block_enabled(&base, false).expect("save_ad_block_enabled(false)");
+        assert!(!load_ad_block_enabled(&base));
+
+        save_ad_block_enabled(&base, true).expect("save_ad_block_enabled(true)");
+        assert!(load_ad_block_enabled(&base));
+    }
+
     // (c) split-tunnel round-trip: save a non-trivial object then load returns canonical JSON.
     #[test]
     fn split_tunnel_round_trip() {
@@ -192,6 +233,10 @@ mod tests {
             load_routing_mode(&base),
             "smart",
             "load_routing_mode must return smart on missing dir"
+        );
+        assert!(
+            load_ad_block_enabled(&base),
+            "load_ad_block_enabled must default to on (true) on missing dir"
         );
     }
 }
