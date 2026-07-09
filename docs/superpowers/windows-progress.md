@@ -61,13 +61,18 @@ hardware; never reported as verified.
   Verified locally on all 3 targets: macOS `clippy`+`test` (round-trip over a real unix socket +
   `map_status`), Windows `cargo xwin clippy` (ServiceControl + named-pipe branch; `cargo xwin` works on
   the tauri plugin). **Plugin CI job deferred to W4** (workflow-edit hook + belongs with packaging).
-- **W4 Windows Tauri packaging + service install** — ⛔ **BLOCKED on a user decision** (the pipe-DACL
-  security posture — see "Open decisions / blockers" below) + partly impeded by the workflow-edit
-  security hook (release.yml/ci.yml can't be edited via the tooling here). The existing MSI already
-  installs `spark-service` (LocalSystem, auto-start) via WiX; what remains is DACL-dependent (build
-  the Tauri GUI for Windows with the right execution level, bundle `wintun.dll`, plugin CI job,
-  on-device checklist). Plan: docs/superpowers/plans/2026-07-09-windows-w4-packaging.md — ready to
-  execute once the DACL decision is made (and by someone who can run/validate a Windows release build).
+- **W4 Windows Tauri packaging + service install** — 🔨 **partially done** (DACL decision made).
+  - **DACL decision: Option A — widen the pipe DACL to the interactive user (chosen 2026-07-09).**
+    Implemented: `service/src/pipe.rs` SDDL is now `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)` (grants
+    the Interactive user connect+duplex), so the unprivileged Tauri GUI can drive the service — the
+    contradiction is resolved. `cargo xwin clippy` clean; the exact `IU` access mask is on-device
+    validation (W4 checklist). Also wrote `docs/windows-on-device-validation.md` (the manual E2E
+    checklist that finally validates the whole W1–W4 stack on hardware).
+  - **Remaining W4 (needs a human — workflow-edit hook):** build the Tauri GUI for Windows
+    (NSIS+MSI) in release.yml, bundle `wintun.dll`, add the plugin CI job to ci.yml. The existing MSI
+    already installs `spark-service` (LocalSystem, auto-start) via WiX. These are all `.github/workflows/*`
+    or CI edits blocked by the workflow-injection security hook here; the changes are injection-free.
+    Plan: docs/superpowers/plans/2026-07-09-windows-w4-packaging.md.
 
 ### W1 detail (superseded by the merged status above)
 - code-complete (branch `fisk/windows-w1-routing`).
@@ -119,8 +124,13 @@ the W4 checklist. **W4 (packaging) is blocked on the pipe-DACL decision below.**
 
 ## Open decisions / blockers
 
-### ⛔ BLOCKER (user decision) — the named-pipe DACL vs. the unprivileged GUI
-**The contradiction:** the spec's W2 says the pipe SDDL should grant "the interactive user (service is
+### ✅ RESOLVED (2026-07-09) — the named-pipe DACL vs. the unprivileged GUI
+**Decision: Option A** (widen the pipe DACL to the interactive user, `IU`). Implemented in
+`service/src/pipe.rs` (`CONTROL_PIPE_SDDL` now includes `(A;;GRGW;;;IU)`); the unprivileged GUI ships
+without elevation. `IU` access-mask correctness is on-device-validated (W4 checklist). The original
+write-up is kept below for the record.
+
+**The contradiction (as found):** the spec's W2 says the pipe SDDL should grant "the interactive user (service is
 LocalSystem)", but the actual code (`service/src/pipe.rs`, `ADMIN_ONLY_SDDL`) grants
 `D:P(A;;GA;;;SY)(A;;GA;;;BA)` — **SYSTEM + Built-in Administrators only**. W3's GUI is the *unprivileged*
 interactive user, whose token is **UAC-filtered** on a normal machine (the admin SID is present but
