@@ -818,33 +818,58 @@ impl TunnelControl for AppleControl {
     }
 }
 
-// ── Windows/Linux: ServiceControl over spark-ipc — future. ───────────────────
+// ── Windows/Linux: ServiceControl over spark-ipc. ────────────────────────────
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 pub(crate) struct ServiceControl {
     pub(crate) base: PathBuf,
+    ipc: crate::service_ipc::IpcClient,
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+impl ServiceControl {
+    pub(crate) fn new(base: PathBuf) -> Self {
+        let ipc = crate::service_ipc::IpcClient::new(crate::service_ipc::default_control_addr());
+        Self { base, ipc }
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
 impl TunnelControl for ServiceControl {
     fn connect(&self) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
-        ))
+        match self
+            .ipc
+            .request(spark_ipc::message::RequestPayload::Connect)?
+        {
+            spark_ipc::message::ResponsePayload::Ack => Ok(()),
+            other => Err(crate::Error::Platform(format!(
+                "connect: unexpected reply {other:?}"
+            ))),
+        }
     }
 
     fn disconnect(&self) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
-        ))
+        match self
+            .ipc
+            .request(spark_ipc::message::RequestPayload::Disconnect)?
+        {
+            spark_ipc::message::ResponsePayload::Ack => Ok(()),
+            other => Err(crate::Error::Platform(format!(
+                "disconnect: unexpected reply {other:?}"
+            ))),
+        }
     }
 
     fn status(&self) -> crate::Result<Status> {
-        Ok(Status {
-            state: "disconnected".into(),
-            protocol: "AnyTLS".into(),
-            fail_open: false,
-        })
+        match self
+            .ipc
+            .request(spark_ipc::message::RequestPayload::GetStatus)?
+        {
+            spark_ipc::message::ResponsePayload::Status(s) => Ok(crate::service_ipc::map_status(s)),
+            other => Err(crate::Error::Platform(format!(
+                "status: unexpected reply {other:?}"
+            ))),
+        }
     }
 
     fn servers(&self) -> crate::Result<Vec<ServerInfo>> {
@@ -853,7 +878,7 @@ impl TunnelControl for ServiceControl {
 
     fn select_server(&self, _index: i32) -> crate::Result<()> {
         Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
+            "server selection is not supported by the desktop service yet".into(),
         ))
     }
 
@@ -882,8 +907,8 @@ impl TunnelControl for ServiceControl {
     }
 
     // App split tunneling is Android-only for now; the desktop backend lands in a later phase.
-    // Reads return an empty catalog so the picker loads; the write errors (like the other
-    // not-yet-implemented ServiceControl actions) rather than falsely reporting success.
+    // Reads return an empty catalog so the picker loads; the write errors rather than falsely
+    // reporting success.
     fn list_installed_apps(&self) -> crate::Result<String> {
         Ok("[]".to_string())
     }
@@ -894,7 +919,7 @@ impl TunnelControl for ServiceControl {
 
     fn set_excluded_apps(&self, _json: &str) -> crate::Result<()> {
         Err(crate::Error::Platform(
-            "desktop service: not yet implemented (spark-ipc)".into(),
+            "per-app split tunneling is not supported by the desktop service yet".into(),
         ))
     }
 }
