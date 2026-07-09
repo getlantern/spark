@@ -124,3 +124,87 @@ pub async fn serve(name: &OsStr, commands: mpsc::Sender<Envelope>) -> io::Result
         });
     }
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::engine::test_support::FakeEngine;
+    use crate::service::{channel, run_service, BackendInfo};
+    use spark_ipc::{Client, RequestPayload, ResponsePayload, TunnelState, PROTOCOL_VERSION};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
+    };
+
+    /// A unique pipe name per test process so parallel/rerun tests don't collide.
+    fn temp_pipe(tag: &str) -> std::ffi::OsString {
+        std::ffi::OsString::from(format!(r"\\.\pipe\spark-test-{}-{tag}", std::process::id()))
+    }
+
+    /// Connect a client to `name`, retrying the startup race (pipe not yet created) and
+    /// `ERROR_PIPE_BUSY`. Returns `None` if the pipe can't be opened for access reasons (a
+    /// UAC-filtered token on some CI hosts) so the caller can skip rather than fail.
+    async fn connect(name: &std::ffi::OsStr) -> Option<NamedPipeClient> {
+        for _ in 0..50 {
+            match ClientOptions::new().open(name) {
+                Ok(client) => return Some(client),
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {}
+                Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {}
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => return None,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+                Err(e) => panic!("unexpected pipe open error: {e}"),
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("pipe never became connectable");
+    }
+
+    /// A client drives connect/status over the real admin-DACL named pipe + `serve_connection`.
+    /// Exercises `AdminOnlySecurity` (the SDDL FFI), the accept loop, and the ipc round-trip in the
+    /// windows-latest CI job. Skips if the CI token can't open the admin pipe.
+    ///
+    /// `serve` is run as a sub-future via `select!` rather than spawned: it holds the raw security
+    /// descriptor across `.await`, so its future isn't `Send` (production `.await`s it directly in
+    /// `daemon::serve_daemon`, never spawns it). The client flow completing cancels the serve loop.
+    #[tokio::test]
+    async fn client_drives_the_service_over_the_pipe() {
+        let name = temp_pipe("ok");
+
+        let (cmd_tx, cmd_rx) = channel();
+        let engine = FakeEngine::default();
+        let running = engine.running.clone();
+        tokio::spawn(run_service(
+            engine,
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+            None,
+        ));
+
+        let server = serve(name.as_os_str(), cmd_tx);
+        let client_flow = async {
+            let Some(pipe) = connect(name.as_os_str()).await else {
+                eprintln!("skipping: cannot open the admin-DACL pipe in this environment");
+                return;
+            };
+            let mut client = Client::new(pipe);
+            assert_eq!(client.handshake().await.unwrap(), PROTOCOL_VERSION);
+            assert!(matches!(
+                client.request(RequestPayload::Connect).await.unwrap(),
+                ResponsePayload::Ack
+            ));
+            assert!(running.load(Ordering::SeqCst), "engine should be started");
+            match client.request(RequestPayload::GetStatus).await.unwrap() {
+                ResponsePayload::Status(s) => assert_eq!(s.state, TunnelState::Connected),
+                other => panic!("unexpected status reply: {other:?}"),
+            }
+        };
+
+        tokio::select! {
+            result = server => panic!("serve() returned unexpectedly: {result:?}"),
+            _ = client_flow => {}
+        }
+    }
+}

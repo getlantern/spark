@@ -42,9 +42,21 @@ hardware; never reported as verified.
     discovery, AND engine `protect_interface` wiring — otherwise the protector is dead code. That is a
     materially bigger, all-hardware-deferred change with one host-testable pure fn (the byte-order
     helper); hence its own PR rather than bolted onto W2a.
-  - **W2c live service transport** (later branch): make `pipe.rs` (named-pipe accept + SDDL),
-    `winsvc.rs`/`daemon.rs` (SCM), `auth.rs` (Windows peer authz) live — all currently
-    "type-checked, never run". `CoreEngine` itself is already the real engine (not a stub).
+  - **W2b Windows loop-prevention** — ✅ **MERGED** (PR #61, squash `a86e9415`). Windows
+    `SocketProtector` via raw `setsockopt(IP_UNICAST_IF/IPV6_UNICAST_IF)` (windows-sys) +
+    `getifaddrs` discovery/index; auto-pin in `transport::from_config`. 2 review rounds (Copilot:
+    use `WSAGetLastError`; log-after-success). All CI green incl. windows-latest.
+  - **W2c service transport** — 🔨 **IN PROGRESS** (branch `fisk/windows-w2c-pipe-test`).
+    **Discovery:** the transport (`pipe.rs` SDDL named pipe, `winsvc.rs` SCM, `daemon.rs` wiring)
+    is **already implemented + wired + cross-compiled** — built in the P4.1 forward-compat seam
+    (task #119), not a stub. `daemon::run` → `winsvc::run_as_service_if_launched_by_scm` (SCM) with
+    foreground fallback; `daemon::listen` (cfg windows) → `pipe::serve`; `lib.rs` re-exports
+    `pipe::serve` as `serve`. Windows auth **is** the pipe DACL (`D:P(A;;GA;;;SY)(A;;GA;;;BA)`) — no
+    per-connection check by design (so no auth.rs Windows gap). `serve_connection` is already
+    duplex-unit-tested (conn.rs, 6 tests). The only real gap was **zero test coverage of the pipe
+    accept loop**, so W2c = a named-pipe round-trip test (mirrors listener.rs's unix test) that
+    exercises `pipe::serve` + SDDL FFI + `serve_connection` + ipc in the windows-latest CI job.
+    Live SCM/on-Windows tunneling remain deferred to hardware (W4 checklist).
 - **W3 / W4** — not started.
 
 ### W1 detail (superseded by the merged status above)
