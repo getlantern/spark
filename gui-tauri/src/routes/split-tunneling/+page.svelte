@@ -7,8 +7,12 @@
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
   let st = $state<SplitTunnel>({ enabled: false, domains: [], ips: [] });
+  let appCount = $state(0);
 
-  onMount(async () => { try { st = await backend.getSplitTunnel(); } catch {} });
+  onMount(async () => {
+    try { st = await backend.getSplitTunnel(); } catch {}
+    try { appCount = (await backend.getExcludedApps()).length; } catch {}
+  });
 
   async function toggle() {
     st = { ...st, enabled: !st.enabled };
@@ -38,6 +42,7 @@
         <button class="row" onclick={() => goto("/split-tunneling/apps")}>
           <span class="ic" aria-hidden="true">▦</span>
           <div class="meta"><div class="name">{$_("apps")}</div></div>
+          <span class="pill">{$_("apps_count", { values: { count: appCount } })}</span>
           <span class="chev">›</span>
         </button>
         <div class="divider"></div>
