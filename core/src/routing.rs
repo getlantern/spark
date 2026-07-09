@@ -147,8 +147,11 @@ impl RouteManager {
     pub async fn install(&mut self) -> io::Result<()> {
         let w = self.windows_params()?;
         debug!(tun = %self.tun, ifindex = %w.ifindex, resolver = %w.resolver, "installing full-tunnel routes");
-        let mut ops = install_ops(&w.ifindex);
-        ops.push(dns_set_op(&w.ifindex, &w.resolver));
+        // Set DNS FIRST, then the covers: `run` stops at the first required-op failure, so a failed
+        // `netsh` aborts before any route change — never leaving full-tunnel routes up with DNS still
+        // pointed at the physical resolver. On success the order is immaterial.
+        let mut ops = vec![dns_set_op(&w.ifindex, &w.resolver)];
+        ops.extend(install_ops(&w.ifindex));
         run(ops).await
     }
 
@@ -259,12 +262,13 @@ fn blackhole_op(half: &str) -> RouteOp {
 }
 
 // --- Windows (`route.exe`) --------------------------------------------------------------
-// Windows `route.exe` takes an explicit dest+mask (no CIDR) and routes on-link via an
-// interface index (not a name), so the halves are translated with `half_to_dest_mask` and the
-// `tun` argument carries the resolved interface **index** string (RouteManager formats the
-// index into the `tun` field on Windows — see `RouteManager` below). VALIDATION-DEFERRED: the
-// exact `route add … 0.0.0.0 … IF <idx>` gateway/interface form is per Microsoft docs and is
-// flagged for on-Windows validation (macOS host cannot exercise it).
+// Windows `route.exe` takes an explicit dest+mask (no CIDR) and routes on-link via an interface
+// index (not a name), so the halves are translated with `half_to_dest_mask` and the `tun` argument
+// to these builders carries the resolved interface **index** string. (RouteManager keeps its `tun`
+// field as the device name and passes `windows_params().ifindex` into `install_ops`/`via_tun_op` —
+// it does not mutate `tun`.) VALIDATION-DEFERRED: the exact `route add … 0.0.0.0 … IF <idx>`
+// gateway/interface form is per Microsoft docs and flagged for on-Windows validation (macOS host
+// cannot exercise it).
 
 /// Delete the cover for `half` (used to clear stale covers before re-installing; ignorable).
 /// The `mask` is REQUIRED: `route delete 0.0.0.0` (no mask) would also match the real `0.0.0.0/0`
@@ -362,9 +366,8 @@ fn block_ops() -> Vec<RouteOp> {
 /// Translate one of the split-default `HALVES` (`"0.0.0.0/1"` / `"128.0.0.0/1"`) to the
 /// `(dest, mask)` pair Windows `route.exe` wants. Only ever called with the two `HALVES`
 /// constants, so the `/1` mask is fixed at `128.0.0.0`; returns static strs.
-// Only wired into runtime callers on Windows (the `route.exe` builders, added in a later
-// task); on macOS/Linux it is exercised solely by the unit tests, so the non-test lib build
-// would otherwise flag it as dead code.
+// Runtime callers are the Windows `route.exe`/`netsh` builders above; on macOS/Linux it is
+// exercised solely by the unit tests, so the non-test lib build would otherwise flag it as dead code.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn half_to_dest_mask(half: &str) -> (&'static str, &'static str) {
     match half {
