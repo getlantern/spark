@@ -31,10 +31,25 @@ tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["block2", "NSData"] }
+objc2-foundation = { version = "0.3", features = [
+    "block2",
+    "NSData",
+    "NSString",
+    "NSDictionary", # empty properties dict for NSBitmapImageRep PNG encoding
+] }
 objc2-network-extension = { version = "0.3", features = ["block2"] }
 objc2-system-extensions = { version = "0.3", features = ["dispatch2"] }
 dispatch2 = "0.3"
+# Icon fallback for apps with no usable standalone `.icns` — asset-catalog system apps (Calendar)
+# and stub-`.icns` apps (Books), whose real icon is in Assets.car. NSWorkspace renders the true
+# Finder icon; NSBitmapImageRep encodes it to PNG (sips mis-decodes NSWorkspace's multi-rep TIFF).
+# Already compiled in via tauri/muda/wry, so this direct declaration adds no new external surface —
+# same objc2 family already used above.
+objc2-app-kit = { version = "0.3", features = [
+    "NSWorkspace",
+    "NSImage",
+    "NSBitmapImageRep",
+] }
 
 # Windows: named-pipe transient-error codes (ERROR_FILE_NOT_FOUND / ERROR_PIPE_BUSY) for the
 # ServiceControl connect retry. Version matches the rest of the tree.

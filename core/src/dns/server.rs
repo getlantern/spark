@@ -189,8 +189,8 @@ mod tests {
         match ip {
             IpAddr::V4(v4) => {
                 let o = v4.octets();
-                assert_eq!(o[0], 198);
-                assert!(o[1] == 18 || o[1] == 19, "in 198.18.0.0/15");
+                assert_eq!(o[0], 28);
+                assert!(o[1] == 0 || o[1] == 1, "in 28.0.0.0/15");
             }
             IpAddr::V6(_) => panic!("A query must yield a v4 fake IP"),
         }
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn aaaa_query_gets_a_ula_fake_ip() {
+    fn aaaa_query_gets_a_global_unicast_fake_ip() {
         let pool = shared_pool(Duration::from_secs(300), 100);
         let srv = DnsServer::new(Arc::clone(&pool), 30);
         let resp = srv
@@ -210,7 +210,7 @@ mod tests {
             .unwrap();
         let ip = first_answer(&resp).expect("a AAAA answer");
         match ip {
-            IpAddr::V6(v6) => assert_eq!((v6.segments()[0], v6.segments()[1]), (0xfd00, 0x2018)),
+            IpAddr::V6(v6) => assert_eq!((v6.segments()[0], v6.segments()[1]), (0x3000, 0x2018)),
             IpAddr::V4(_) => panic!("AAAA query must yield a v6 fake IP"),
         }
         assert_eq!(recover_domain(&pool, ip), Some("example.com".to_string()));

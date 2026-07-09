@@ -308,6 +308,7 @@ mod ne_spike {
         config: Option<String>,
         split_tunnel: Option<String>,
         routing_mode: Option<String>,
+        app_bypass: Option<String>,
         ad_block: bool,
     ) -> Result<(), String> {
         // No provider can start until the extension is activated + user-approved.
@@ -318,6 +319,13 @@ mod ne_spike {
         // by the caller and passed in as Option<String>.
         let split_tunnel_json = split_tunnel.unwrap_or_default();
         let routing_mode_str = routing_mode.unwrap_or_default();
+        // App-bypass list (JSON array of canonical `.app` bundle-root paths — the core matches by
+        // bundle-root prefix so in-bundle helpers are caught) for desktop app split tunneling,
+        // delivered at start via providerConfiguration["appBypass"] (live pushes go through
+        // set_excluded_apps → sendProviderMessage). `AppleControl::connect` supplies the persisted
+        // canonical array ("[]" when nothing is excluded); `unwrap_or_default()` only yields "" if a
+        // caller passes `None`, which the NE reads the same as "[]" (no bypass).
+        let app_bypass_json = app_bypass.unwrap_or_default();
         // providerConfiguration values are strings, so pre-format the bool as "true"/"false"
         // (the NE parses "false" → off). Owned so the closure can stay `Fn`.
         let ad_block_str = if ad_block { "true" } else { "false" }.to_owned();
@@ -345,18 +353,22 @@ mod ne_spike {
                 unsafe {
                     proto.setProviderBundleIdentifier(Some(&NSString::from_str(TUNNEL_SYSEXT_ID)));
                     proto.setServerAddress(Some(ns_string!("Spark")));
-                    // Always include splitTunnel, routingMode and adBlock in providerConfiguration
-                    // so the NE can apply the user's bypass list, routing mode and ad-block toggle
-                    // on every connect. Also include the optional dev-override config when present.
-                    // providerConfiguration is NSDictionary<NSString, AnyObject>; upcast
-                    // each NSString value (NSString → NSObject → AnyObject).
+                    // Always include splitTunnel, routingMode, appBypass, and adBlock in
+                    // providerConfiguration so the NE can apply the user's domain bypass list,
+                    // routing mode, app-bypass list, and ad-block toggle on every connect. Also
+                    // include the optional dev-override config when present. providerConfiguration
+                    // is NSDictionary<NSString, AnyObject>; upcast each NSString value
+                    // (NSString → NSObject → AnyObject).
                     let st_val: Retained<AnyObject> = NSString::from_str(&split_tunnel_json)
                         .into_super()
                         .into_super();
                     let rm_val: Retained<AnyObject> = NSString::from_str(&routing_mode_str)
                         .into_super()
                         .into_super();
-                    let ab_val: Retained<AnyObject> =
+                    let ab_val: Retained<AnyObject> = NSString::from_str(&app_bypass_json)
+                        .into_super()
+                        .into_super();
+                    let adb_val: Retained<AnyObject> =
                         NSString::from_str(&ad_block_str).into_super().into_super();
                     let dict = if let Some(ref c) = config {
                         let cfg_val: Retained<AnyObject> =
@@ -366,18 +378,20 @@ mod ne_spike {
                                 ns_string!("config"),
                                 ns_string!("splitTunnel"),
                                 ns_string!("routingMode"),
+                                ns_string!("appBypass"),
                                 ns_string!("adBlock"),
                             ],
-                            &[cfg_val, st_val, rm_val, ab_val],
+                            &[cfg_val, st_val, rm_val, ab_val, adb_val],
                         )
                     } else {
                         NSDictionary::from_retained_objects(
                             &[
                                 ns_string!("splitTunnel"),
                                 ns_string!("routingMode"),
+                                ns_string!("appBypass"),
                                 ns_string!("adBlock"),
                             ],
-                            &[st_val, rm_val, ab_val],
+                            &[st_val, rm_val, ab_val, adb_val],
                         )
                     };
                     proto.setProviderConfiguration(Some(&dict));
@@ -680,8 +694,17 @@ impl TunnelControl for AppleControl {
                 Some(m)
             }
         };
+        let app_bypass = {
+            let a = crate::persist::load_excluded_apps(&self.base);
+            let a = a.trim().to_owned();
+            if a.is_empty() {
+                None
+            } else {
+                Some(a)
+            }
+        };
         let ad_block = crate::persist::load_ad_block_enabled(&self.base);
-        ne_spike::connect(config, split, mode, ad_block).map_err(crate::Error::Platform)
+        ne_spike::connect(config, split, mode, app_bypass, ad_block).map_err(crate::Error::Platform)
     }
 
     fn disconnect(&self) -> crate::Result<()> {
@@ -800,21 +823,32 @@ impl TunnelControl for AppleControl {
         Ok(())
     }
 
-    // App split tunneling is Android-only for now; the macOS backend lands in a later phase (P3).
-    // Reads return an empty catalog so the picker loads cleanly; the write errors (like other
-    // not-yet-implemented actions) so a caller isn't told an unsupported change succeeded.
+    // App split tunneling: the macOS installed-apps catalog + excluded-apps persistence, with a
+    // best-effort live push to the running NE (mirroring set_split_tunnel).
     fn list_installed_apps(&self) -> crate::Result<String> {
-        Ok("[]".to_string())
+        Ok(crate::apps_darwin::list_installed_apps(&self.base))
     }
 
     fn get_excluded_apps(&self) -> crate::Result<String> {
-        Ok("[]".to_string())
+        Ok(crate::persist::load_excluded_apps(&self.base))
     }
 
-    fn set_excluded_apps(&self, _json: &str) -> crate::Result<()> {
-        Err(crate::Error::Platform(
-            "app split tunneling is not yet supported on macOS".into(),
-        ))
+    fn set_excluded_apps(&self, json: &str) -> crate::Result<()> {
+        crate::persist::save_excluded_apps(&self.base, json)?;
+        // Push the canonical (trimmed/deduped/blank-stripped) value, not the raw `json`, so a live
+        // apply matches exactly what a reconnect would apply from the persisted file.
+        let canonical = crate::persist::load_excluded_apps(&self.base);
+        // Best-effort live push: only send when the tunnel is actually up.
+        let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
+        if ne_spike::ui_state(raw) == "connected" {
+            let msg = serde_json::json!({"cmd": "appBypass", "list": canonical}).to_string();
+            if let Err(e) = ne_spike::send_provider_message(msg) {
+                ne_spike::ne_debug(&format!(
+                    "app-bypass live push failed (persisted; applies next connect): {e}"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

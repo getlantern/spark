@@ -100,6 +100,53 @@ pub fn save_routing_mode(base: &Path, mode: &str) -> crate::Result<()> {
     Ok(())
 }
 
+// ── Excluded-apps persistence (desktop app split tunneling) ───────────────────
+
+/// Read the persisted excluded-apps list from `<base>/excluded_apps.json`.
+///
+/// The list is a JSON array of app match keys (macOS: canonical `.app` bundle-root paths,
+/// matched by prefix so in-bundle helpers match — not executable paths).  Returns the canonical
+/// (re-serialized) array, or the empty-array default `"[]"` if the file is missing, unreadable,
+/// or doesn't deserialize into an array of strings.
+pub fn load_excluded_apps(base: &Path) -> String {
+    std::fs::read_to_string(base.join("excluded_apps.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .map(canonicalize_excluded)
+        // Re-serialize the validated shape so the returned string is always a canonical array.
+        .and_then(|list| serde_json::to_string(&list).ok())
+        .unwrap_or_else(|| "[]".to_string())
+}
+
+/// Persist the excluded-apps list to `<base>/excluded_apps.json`.
+///
+/// Validates that the input is a JSON **array of strings**, canonicalizes it (trim, drop
+/// blanks, dedupe while preserving first-seen order), then writes the canonical array.
+/// Returns [`crate::Error::Platform`] on wrong-shape input (not an array / non-string
+/// elements) so a bad caller surfaces a save failure to the UI rather than writing garbage
+/// that a later `load_excluded_apps` would silently discard.
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_excluded_apps(base: &Path, json: &str) -> crate::Result<()> {
+    let list: Vec<String> = serde_json::from_str(json)
+        .map_err(|e| crate::Error::Platform(format!("invalid excluded-apps JSON: {e}")))?;
+    let canonical = serde_json::to_string(&canonicalize_excluded(list))
+        .map_err(|e| crate::Error::Platform(e.to_string()))?;
+    std::fs::create_dir_all(base)?;
+    std::fs::write(base.join("excluded_apps.json"), canonical)?;
+    Ok(())
+}
+
+/// Trim each entry, drop blanks, and dedupe while preserving first-seen order.
+fn canonicalize_excluded(list: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    list.into_iter()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
 // ── Ad-block persistence ──────────────────────────────────────────────────────
 
 /// Read the persisted ad-block toggle from `<base>/ad_block.txt`.
@@ -234,9 +281,69 @@ mod tests {
             "smart",
             "load_routing_mode must return smart on missing dir"
         );
+        assert_eq!(
+            load_excluded_apps(&base),
+            "[]",
+            "load_excluded_apps must return empty array on missing dir"
+        );
         assert!(
             load_ad_block_enabled(&base),
             "load_ad_block_enabled must default to on (true) on missing dir"
+        );
+    }
+
+    // (e) excluded-apps round-trip: save an array, load returns a canonical array with the entries.
+    #[test]
+    fn excluded_apps_round_trip() {
+        let base = tmp("excluded_apps_round_trip");
+        let _ = std::fs::remove_dir_all(&base);
+
+        let input = r#"["/Applications/Firefox.app"]"#;
+        save_excluded_apps(&base, input).expect("save_excluded_apps");
+        let loaded = load_excluded_apps(&base);
+        assert!(
+            loaded.contains("/Applications/Firefox.app"),
+            "loaded JSON must preserve the excluded `.app` bundle-root path: {loaded}"
+        );
+    }
+
+    // (f) canonicalization: blanks dropped, duplicates removed, first-seen order kept.
+    #[test]
+    fn excluded_apps_canonicalizes() {
+        let base = tmp("excluded_apps_canonicalizes");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // "  b  " trims to "b"; the trailing "a"/"" are a dup and a blank.
+        let input = r#"["a", "  b  ", "a", ""]"#;
+        save_excluded_apps(&base, input).expect("save_excluded_apps");
+        assert_eq!(
+            load_excluded_apps(&base),
+            r#"["a","b"]"#,
+            "excluded-apps must be trimmed, deduped, and blank-stripped in first-seen order"
+        );
+    }
+
+    // (g) save_excluded_apps rejects non-array / wrong-shape JSON without writing anything.
+    #[test]
+    fn excluded_apps_rejects_non_array() {
+        let base = tmp("excluded_apps_rejects_non_array");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            save_excluded_apps(&base, r#"{"not":"an array"}"#).is_err(),
+            "save_excluded_apps must reject a JSON object"
+        );
+        assert!(
+            save_excluded_apps(&base, r#"[1, 2, 3]"#).is_err(),
+            "save_excluded_apps must reject an array of non-strings"
+        );
+        assert!(
+            save_excluded_apps(&base, "not json").is_err(),
+            "save_excluded_apps must reject invalid JSON"
+        );
+        assert!(
+            !base.exists(),
+            "save_excluded_apps must not touch the filesystem on invalid input"
         );
     }
 }

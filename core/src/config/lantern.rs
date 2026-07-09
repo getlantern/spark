@@ -509,7 +509,7 @@ mod tests {
             "dns": { "servers": [
               { "type": "https", "tag": "dns_remote", "detour": "auto", "server": "9.9.9.9", "server_port": 443, "path": "/dns-query" },
               { "type": "https", "tag": "dns_local", "server": "9.9.9.9", "path": "/dns-query" },
-              { "type": "fakeip", "tag": "dns_fakeip", "inet4_range": "198.18.0.0/15" },
+              { "type": "fakeip", "tag": "dns_fakeip", "inet4_range": "28.0.0.0/15" },
               { "type": "https", "tag": "dns_hostname", "server": "dns.quad9.net" }
             ] },
             "outbounds": [

@@ -35,6 +35,16 @@ pub struct Router {
     /// The routing mode. Full = suppress base Direct/Proxy and proxy everything not user-bypassed
     /// (ad-block Reject still honored). Swapped live like `user_bypass`.
     mode: RwLock<crate::routing_mode::RoutingMode>,
+    /// Live app split-tunnel bypass: **canonical bundle-root paths** (e.g.
+    /// `/Applications/Google Chrome.app`) whose flows route Direct (absolute). A flow matches when
+    /// its resolved executable path is the bundle root or lives underneath it — this catches the
+    /// helper/child processes real apps make their network connections from (Chrome's renderers
+    /// inside the bundle; and, after canonicalization, symlinked bundles like Safari's Cryptexes
+    /// target). Swapped via [`set_app_bypass`](Router::set_app_bypass). Empty/None = no app bypass.
+    app_bypass: RwLock<Option<Vec<String>>>,
+    /// Platform process resolver (macOS in P1; None elsewhere until P4). Consulted only when
+    /// `app_bypass` is non-empty, so non-resolver platforms pay nothing.
+    resolver: RwLock<Option<std::sync::Arc<dyn crate::process::ProcessResolver>>>,
 }
 
 impl Router {
@@ -50,6 +60,8 @@ impl Router {
             ad_block_enabled: RwLock::new(true),
             user_bypass: RwLock::new(None),
             mode: RwLock::new(crate::routing_mode::RoutingMode::default()),
+            app_bypass: RwLock::new(None),
+            resolver: RwLock::new(None),
         }
     }
 
@@ -81,6 +93,38 @@ impl Router {
     /// Set the routing mode live (poison-tolerant recovery, like `set_user_bypass`).
     pub fn set_mode(&self, mode: crate::routing_mode::RoutingMode) {
         *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
+    }
+
+    /// Replace the live app-bypass list of bundle-root paths. Empty clears it. Poison-tolerant.
+    ///
+    /// Each entry is **trimmed** first (leading/trailing whitespace is easy to introduce across the
+    /// FFI boundary and would otherwise make `canonicalize` fail and store an unmatchable string),
+    /// blank entries are dropped, then it is **canonicalized** ([`std::fs::canonicalize`]) so
+    /// symlinked bundles resolve to their real location — e.g. `/Applications/Safari.app` → its
+    /// `/System/…/Cryptexes/…` target — which is what the process resolver reports for in-bundle
+    /// helper processes. If canonicalization fails (path missing, permissions), the trimmed string
+    /// is kept so the caller's intent isn't silently dropped. An all-blank list clears the bypass.
+    pub fn set_app_bypass(&self, paths: &[String]) {
+        let list: Vec<String> = paths
+            .iter()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                std::fs::canonicalize(p)
+                    .map(|c| c.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| p.to_owned())
+            })
+            .collect();
+        *self.app_bypass.write().unwrap_or_else(|e| e.into_inner()) =
+            (!list.is_empty()).then_some(list);
+    }
+
+    /// Install (or clear) the platform process resolver. Called once at tunnel build on macOS.
+    pub fn set_process_resolver(
+        &self,
+        r: Option<std::sync::Arc<dyn crate::process::ProcessResolver>>,
+    ) {
+        *self.resolver.write().unwrap_or_else(|e| e.into_inner()) = r;
     }
 
     /// Build a router from the parsed [`SmartRoutingConfig`]. `load` supplies each rule-set's raw
@@ -131,6 +175,8 @@ impl Router {
             ad_block_enabled: RwLock::new(true),
             user_bypass: RwLock::new(None),
             mode: RwLock::new(crate::routing_mode::RoutingMode::default()),
+            app_bypass: RwLock::new(None),
+            resolver: RwLock::new(None),
         }
     }
 
@@ -138,7 +184,13 @@ impl Router {
     /// otherwise the base rules decide, and an unmatched flow is proxied (`route.final`). `domain`
     /// is `Some` once the fake-IP DNS layer recovers it (M4); at L3 it is `None`, so only IP/CIDR
     /// rules (base or bypass) can match.
-    pub fn decide(&self, ip: IpAddr, domain: Option<&str>) -> Action {
+    pub fn decide(
+        &self,
+        ip: IpAddr,
+        domain: Option<&str>,
+        src: std::net::SocketAddr,
+        proto: crate::process::Protocol,
+    ) -> Action {
         // Recover from a poisoned lock (`into_inner`) rather than silently skipping the bypass — the
         // inner matcher is always consistent, so a poisoning event must not quietly disable
         // split-tunnel bypass (and this per-flow path must not log-spam on every call).
@@ -147,6 +199,43 @@ impl Router {
             if let Some(m) = guard.as_ref() {
                 if m.lookup(domain, ip).is_some() {
                     return Action::Direct;
+                }
+            }
+        }
+        // App split tunneling: if the flow's owning process (resolved from its source endpoint)
+        // lives inside a bypassed app bundle, route Direct (absolute — like the user bypass above,
+        // and checked before ad-block: a wholly-bypassed app's traffic leaves the tunnel untouched).
+        // We match by **bundle-root prefix**, not exact exe equality: real apps open their network
+        // connections from helper / child processes (Chrome's renderers inside its `.app`), so the
+        // resolved exe is deeper than the app's main binary. Only resolve when the list is non-empty
+        // (the resolve is a kernel scan). Unresolved → fall through (fail open: the flow is tunneled,
+        // never leaked).
+        {
+            let bypass = self.app_bypass.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(roots) = bypass.as_ref() {
+                if !roots.is_empty() {
+                    let resolver = self.resolver.read().unwrap_or_else(|e| e.into_inner());
+                    if let Some(r) = resolver.as_ref() {
+                        if let Some(exe) = r.resolve(src, proto) {
+                            // A flow matches when its exe is a bundle root or lives under one
+                            // (`root` followed by a path separator), catching in-bundle helpers.
+                            // `strip_prefix` avoids the per-flow `format!("{root}/")` allocation in
+                            // this hot path — check the boundary is a real path separator.
+                            let matched = roots.iter().any(|root| {
+                                exe == *root
+                                    || exe
+                                        .strip_prefix(root.as_str())
+                                        .is_some_and(|rest| rest.starts_with('/'))
+                            });
+                            // Log only on a match, at `debug` (off in release): avoids a per-flow
+                            // line for every non-matching flow and never emits an unmatched exe path
+                            // (log hygiene — see `docs/GOAL.md`).
+                            if matched {
+                                tracing::debug!(proc = %exe, "app split-tunnel: flow matched a bypassed app bundle");
+                                return Action::Direct;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -194,10 +283,16 @@ impl Router {
 /// onto the proxy's `Decision`. Lets the (feature-agnostic) TCP forwarder consult the rules engine
 /// without depending on it.
 impl crate::proxy::FlowRouter for Router {
-    fn decide(&self, ip: IpAddr, domain: Option<&str>) -> crate::proxy::Decision {
+    fn decide(
+        &self,
+        ip: IpAddr,
+        domain: Option<&str>,
+        src: std::net::SocketAddr,
+        proto: crate::process::Protocol,
+    ) -> crate::proxy::Decision {
         // Call the inherent `Router::decide` explicitly — a bare `self.decide(..)` would resolve to
         // this trait method and recurse forever.
-        match Router::decide(self, ip, domain) {
+        match Router::decide(self, ip, domain, src, proto) {
             Action::Proxy => crate::proxy::Decision::Proxy,
             Action::Direct => crate::proxy::Decision::Direct,
             Action::Reject => crate::proxy::Decision::Reject,
@@ -252,6 +347,68 @@ fn parse_cidr(s: &str) -> Option<IpCidr> {
 mod tests {
     use super::*;
 
+    /// Test helper: the source endpoint is irrelevant for the non-app-bypass tests (no resolver is
+    /// installed, so the app-bypass block is a no-op). A fixed dummy keeps the existing assertions
+    /// unchanged after the `src` param was threaded into `decide`.
+    fn dummy_src() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([10, 0, 0, 2], 1))
+    }
+
+    #[test]
+    fn app_bypass_routes_matched_exe_direct_else_proxy() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::Arc;
+
+        // A stub resolver returning helper-process paths (the real-world case: apps open network
+        // flows from child processes deep inside their bundle, not the main exe). Port 5555 → a
+        // helper inside Excluded.app; port 7777 → a helper inside a *different* app's bundle.
+        const EXCLUDED_HELPER: &str =
+            "/Applications/Excluded.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper";
+        const OTHER_HELPER: &str = "/Applications/Other.app/Contents/MacOS/Other Helper";
+        struct StubResolver;
+        impl crate::process::ProcessResolver for StubResolver {
+            fn resolve(&self, src: SocketAddr, _proto: crate::process::Protocol) -> Option<String> {
+                match src.port() {
+                    5555 => Some(EXCLUDED_HELPER.into()),
+                    7777 => Some(OTHER_HELPER.into()),
+                    _ => None,
+                }
+            }
+        }
+
+        let router = Router::new(Matcher::build(vec![])); // empty base → default Proxy
+        router.set_process_resolver(Some(Arc::new(StubResolver)));
+        // Bypass the bundle *root*; canonicalize no-ops on this non-existent test path and falls back
+        // to the literal string, so the prefix match below still exercises the intended behavior.
+        router.set_app_bypass(&["/Applications/Excluded.app".to_string()]);
+
+        let dst = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let excluded_src = SocketAddr::from(([10, 0, 0, 2], 5555));
+        let other_src = SocketAddr::from(([10, 0, 0, 2], 7777));
+        let unresolved_src = SocketAddr::from(([10, 0, 0, 2], 6666));
+        // A helper inside the bypassed bundle → Direct (bundle-prefix match, absolute).
+        assert_eq!(
+            router.decide(dst, None, excluded_src, crate::process::Protocol::Tcp),
+            Action::Direct
+        );
+        // A helper inside a different app / unresolved → falls through (Proxy here).
+        assert_eq!(
+            router.decide(dst, None, other_src, crate::process::Protocol::Tcp),
+            Action::Proxy
+        );
+        assert_eq!(
+            router.decide(dst, None, unresolved_src, crate::process::Protocol::Tcp),
+            Action::Proxy
+        );
+
+        // Empty app-bypass → never Direct via app path.
+        router.set_app_bypass(&[]);
+        assert_eq!(
+            router.decide(dst, None, excluded_src, crate::process::Protocol::Tcp),
+            Action::Proxy
+        );
+    }
+
     fn fixture(name: &str) -> RuleSet {
         let bytes = std::fs::read(format!("tests/fixtures/srs/{name}.srs"))
             .unwrap_or_else(|e| panic!("read fixture {name}: {e}"));
@@ -275,19 +432,31 @@ mod tests {
         let r = router();
         // An ad domain → Reject (ad_block).
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Reject
         );
         // A smart-routing common domain → Direct.
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Direct
         );
         // An unlisted domain → Proxy (route.final).
         assert_eq!(
             r.decide(
                 "1.2.3.4".parse().unwrap(),
-                Some("example-unlisted-xyz.test")
+                Some("example-unlisted-xyz.test"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
             ),
             Action::Proxy
         );
@@ -298,7 +467,12 @@ mod tests {
         let r = router();
         // No domain (the L3 case) and an unlisted IP → Proxy.
         assert_eq!(
-            r.decide("203.0.113.7".parse().unwrap(), None),
+            r.decide(
+                "203.0.113.7".parse().unwrap(),
+                None,
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Proxy
         );
     }
@@ -338,13 +512,45 @@ mod tests {
         });
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         // ad_block list (Reject) beat everything.
-        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
         // smart_routing common list → Direct.
-        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Direct);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Direct
+        );
         // inline route.rule: Quad9 IP → Direct even with no domain (L3).
-        assert_eq!(r.decide("9.9.9.9".parse().unwrap(), None), Action::Direct);
+        assert_eq!(
+            r.decide(
+                "9.9.9.9".parse().unwrap(),
+                None,
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Direct
+        );
         // unlisted → Proxy.
-        assert_eq!(r.decide(ip, Some("nope-unlisted.test")), Action::Proxy);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("nope-unlisted.test"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Proxy
+        );
     }
 
     #[test]
@@ -381,20 +587,57 @@ mod tests {
         });
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         // Default: ad-block on → an ad host is rejected.
-        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
         // Disable ad-block → the ad host is no longer rejected (falls through to Proxy)…
         r.set_ad_block_enabled(false);
-        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Proxy);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Proxy
+        );
         // …but an inline config Reject rule is NOT gated by the ad-block toggle…
         assert_eq!(
-            r.decide("203.0.113.7".parse().unwrap(), None),
+            r.decide(
+                "203.0.113.7".parse().unwrap(),
+                None,
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Reject
         );
         // …and smart-routing Direct still applies.
-        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Direct);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Direct
+        );
         // Re-enable → rejected again (live, no rebuild).
         r.set_ad_block_enabled(true);
-        assert_eq!(r.decide(ip, Some("doubleclick.net")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
     }
 
     #[test]
@@ -470,10 +713,26 @@ mod tests {
         });
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         // A domain in the reject category is rejected…
-        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
         // …and disabling ad-block does NOT lift it (it lives in `base`, not the ad_block matcher).
         r.set_ad_block_enabled(false);
-        assert_eq!(r.decide(ip, Some("app.discord.com")), Action::Reject);
+        assert_eq!(
+            r.decide(
+                ip,
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Reject
+        );
     }
 
     #[test]
@@ -482,7 +741,12 @@ mod tests {
         let r = router(); // has doubleclick.net at Reject (ad_block)
                           // Before: an ad domain is Reject.
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Reject
         );
         // Add it to the bypass list -> Direct (absolute, wins over Reject).
@@ -492,23 +756,43 @@ mod tests {
             ips: vec![],
         }));
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Direct
         );
         // Subdomain of a bypass entry also Direct.
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("ads.doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("ads.doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Direct
         );
         // A non-bypassed domain still follows base rules.
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Direct
         ); // base
            // Removing the bypass restores base behavior.
         r.set_user_bypass(None);
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Reject
         );
     }
@@ -523,7 +807,12 @@ mod tests {
             ips: vec![],
         }));
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Reject
         );
         r.set_user_bypass(Some(&SplitTunnel {
@@ -532,7 +821,12 @@ mod tests {
             ips: vec![],
         }));
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Reject
         );
     }
@@ -547,7 +841,12 @@ mod tests {
             ips: vec!["203.0.113.7".into()],
         }));
         assert_eq!(
-            r.decide("203.0.113.7".parse().unwrap(), None),
+            r.decide(
+                "203.0.113.7".parse().unwrap(),
+                None,
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Direct
         );
     }
@@ -562,9 +861,25 @@ mod tests {
             ips: vec!["10.0.0.0/8".into()],
         }));
         // An address inside the bypassed CIDR routes Direct.
-        assert_eq!(r.decide("10.1.2.3".parse().unwrap(), None), Action::Direct);
+        assert_eq!(
+            r.decide(
+                "10.1.2.3".parse().unwrap(),
+                None,
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Direct
+        );
         // An address outside it follows base rules (unlisted => Proxy).
-        assert_eq!(r.decide("192.0.2.1".parse().unwrap(), None), Action::Proxy);
+        assert_eq!(
+            r.decide(
+                "192.0.2.1".parse().unwrap(),
+                None,
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
+            Action::Proxy
+        );
     }
 
     #[test]
@@ -582,7 +897,12 @@ mod tests {
         // Loader returns None for everything → the router builds with no rules; all flows proxy.
         let r = Router::build(&sr, |_| None);
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Proxy
         );
     }
@@ -595,12 +915,22 @@ mod tests {
         r.set_mode(RoutingMode::Full);
         // A base-Direct domain is forced to Proxy in Full Tunnel.
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Proxy
         );
         // Ad-block Reject still applies.
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("doubleclick.net")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("doubleclick.net"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Reject
         );
         // Split-tunnel bypass still routes Direct even in Full Tunnel.
@@ -610,14 +940,24 @@ mod tests {
             ips: vec![],
         }));
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Direct
         );
         // Back to Smart → base rules again (bypass cleared).
         r.set_user_bypass(None);
         r.set_mode(RoutingMode::Smart);
         assert_eq!(
-            r.decide("1.2.3.4".parse().unwrap(), Some("app.discord.com")),
+            r.decide(
+                "1.2.3.4".parse().unwrap(),
+                Some("app.discord.com"),
+                dummy_src(),
+                crate::process::Protocol::Tcp
+            ),
             Action::Direct
         );
     }

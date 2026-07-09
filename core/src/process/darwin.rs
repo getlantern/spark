@@ -1,12 +1,17 @@
-//! macOS backend: `sysctl(net.inet.tcp.pcblist_n)` → match local endpoint → `so_last_pid` →
+//! macOS backend: `sysctl(net.inet.{tcp,udp}.pcblist_n)` → match local endpoint → `so_last_pid` →
 //! `proc_pidpath`. Ported from sing-box `common/process/searcher_darwin.go`. The kernel returns a
 //! packed list of per-socket blobs; each blob is a sequence of TLV-tagged sub-structs
 //! (`xinpcb_n`, `xsocket_n`, `xsockbuf_n` ×2, `xsockstat_n`, and for TCP a `xtcpcb_n`). Rather than
 //! hard-code the total blob stride (which is version-sensitive), we walk the sub-structs by their
 //! self-described length (`xNN_len`, the first `u32` of each), keyed by the `xNN_kind` tag. This is
 //! how the XNU userspace tooling (`netstat`) reads the same table and is robust across releases.
+//!
+//! The TCP and UDP tables share the same `xinpcb_n`/`xsocket_n` TLV layout — only the sysctl name
+//! differs — so the parser below is protocol-agnostic; [`resolve`] just picks the table by
+//! [`Protocol`]. This matters for split tunneling because browsers carry most traffic over QUIC
+//! (UDP), which never appears in the TCP table.
 
-use super::ProcessInfo;
+use super::{ProcessInfo, Protocol};
 use std::net::IpAddr;
 
 // libc gives us sysctlbyname + proc_pidpath. `c_char` is `u8` on aarch64-apple-darwin.
@@ -38,9 +43,13 @@ struct Pcb {
     last_pid: u32,
 }
 
-/// Read the whole `net.inet.tcp.pcblist_n` blob via the two-call size-then-read `sysctlbyname`.
-fn read_pcblist() -> std::io::Result<Vec<u8>> {
-    let name = b"net.inet.tcp.pcblist_n\0";
+/// Read the whole `net.inet.{tcp,udp}.pcblist_n` blob via the two-call size-then-read
+/// `sysctlbyname`. The table is chosen by `proto`; both share the same TLV blob layout.
+fn read_pcblist(proto: Protocol) -> std::io::Result<Vec<u8>> {
+    let name: &[u8] = match proto {
+        Protocol::Tcp => b"net.inet.tcp.pcblist_n\0",
+        Protocol::Udp => b"net.inet.udp.pcblist_n\0",
+    };
 
     // First call with a null buffer just fills in the required size.
     let mut needed: libc::size_t = 0;
@@ -177,7 +186,8 @@ const OFF_LADDR6: usize = 64;
 /// Offset of `so_last_pid` (pid_t) within `xsocket_n`. Validated by the test.
 const OFF_SO_LAST_PID: usize = 68;
 
-/// Resolve the process owning the TCP socket whose local endpoint is `(ip, port)`.
+/// Resolve the process owning the socket whose local endpoint is `(ip, port)`, reading the pcblist
+/// table for `proto` (TCP or UDP/QUIC).
 ///
 /// Returns `Ok(None)` if no PCB matches; `Err` only on a `sysctl` failure. The `ip` may be a
 /// wildcard/loopback source as reported by [`std::net::TcpStream::local_addr`].
@@ -186,29 +196,42 @@ const OFF_SO_LAST_PID: usize = 68;
 ///
 /// ```no_run
 /// use std::net::Ipv4Addr;
-/// let owner = spark_core::process::resolve_tcp(Ipv4Addr::LOCALHOST.into(), 12345)?;
+/// use spark_core::process::Protocol;
+/// let owner = spark_core::process::resolve(Ipv4Addr::LOCALHOST.into(), 12345, Protocol::Tcp)?;
 /// # Ok::<(), std::io::Error>(())
 /// ```
-pub fn resolve_tcp(ip: IpAddr, port: u16) -> std::io::Result<Option<ProcessInfo>> {
-    let buf = read_pcblist()?;
+pub fn resolve(ip: IpAddr, port: u16, proto: Protocol) -> std::io::Result<Option<ProcessInfo>> {
+    let buf = read_pcblist(proto)?;
     let target_lport_be = port.to_be();
     let is_ipv4 = ip.is_ipv4();
 
+    // A UDP socket is frequently bound to the wildcard address (0.0.0.0 / ::) even while sending —
+    // Chrome's QUIC sockets are — so `udp.pcblist_n` reports `inp_laddr` as unspecified while the
+    // netstack surfaces the flow's *concrete* source IP. An exact-laddr match then misses the owner,
+    // so QUIC never attributes to the app and app split tunneling silently skips it. Prefer an exact
+    // laddr match, but fall back to a wildcard-bound socket on the same lport. UDP only: a wildcard
+    // TCP laddr is a *listener*, not the outbound flow's owner, so matching it would misattribute.
+    let mut wildcard_pid: Option<u32> = None;
     for pcb in parse_pcbs(&buf) {
         if pcb.lport_be != target_lport_be {
             continue;
         }
-        let matches = if is_ipv4 && pcb.vflag & 0x1 != 0 {
-            IpAddr::from(pcb.laddr4) == ip
+        let laddr = if is_ipv4 && pcb.vflag & 0x1 != 0 {
+            IpAddr::from(pcb.laddr4)
         } else if !is_ipv4 && pcb.vflag & 0x2 != 0 {
-            IpAddr::from(pcb.laddr6) == ip
+            IpAddr::from(pcb.laddr6)
         } else {
-            false
+            continue; // address family doesn't match the flow
         };
-        if !matches {
-            continue;
+        if laddr == ip {
+            let pid = pcb.last_pid;
+            return Ok(exe_path(pid).map(|exe_path| ProcessInfo { pid, exe_path }));
         }
-        let pid = pcb.last_pid;
+        if proto == Protocol::Udp && laddr.is_unspecified() {
+            wildcard_pid.get_or_insert(pcb.last_pid); // first wildcard-bound socket on this lport
+        }
+    }
+    if let Some(pid) = wildcard_pid {
         return Ok(exe_path(pid).map(|exe_path| ProcessInfo { pid, exe_path }));
     }
     Ok(None)
@@ -244,7 +267,7 @@ fn exe_path(pid: u32) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{TcpListener, TcpStream, UdpSocket};
 
     // Open a real loopback TCP connection, take the CLIENT socket's local endpoint, and assert the
     // resolver maps it back to THIS test process (pid + an exe path ending in the test binary).
@@ -258,7 +281,7 @@ mod tests {
         client.write_all(b"x").expect("write");
         let local = client.local_addr().expect("local");
 
-        let info = resolve_tcp(local.ip(), local.port())
+        let info = resolve(local.ip(), local.port(), Protocol::Tcp)
             .expect("sysctl/parse ok")
             .expect("our socket is in the PCB table");
         assert_eq!(info.pid, std::process::id(), "must resolve to this process");
@@ -269,5 +292,58 @@ mod tests {
         );
         let _ = server.write(b"y");
         drop(server);
+    }
+
+    // Bind a UDP socket and `connect` it to a peer so it has a concrete local endpoint, then assert
+    // the UDP-table resolver (`net.inet.udp.pcblist_n`) maps that endpoint back to THIS process —
+    // the QUIC/UDP path that the TCP-only resolver missed. The same TLV parser reads both tables.
+    #[test]
+    fn resolves_our_own_udp_socket() {
+        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind");
+        // A peer to connect to, so the kernel pins a local endpoint we can look up.
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        sock.connect(peer_addr).expect("connect");
+        // Send one datagram: on some stacks a UDP PCB isn't reliably present in `udp.pcblist_n`
+        // until the socket has actually transmitted, so this avoids a flaky lookup. Assert the send
+        // succeeds — a silent failure here would surface later as a confusing "not in PCB table".
+        sock.send(b"x")
+            .expect("send datagram to force a UDP PCB entry");
+        let local = sock.local_addr().expect("local");
+
+        let info = resolve(local.ip(), local.port(), Protocol::Udp)
+            .expect("sysctl/parse ok")
+            .expect("our udp socket is in the UDP PCB table");
+        assert_eq!(info.pid, std::process::id(), "must resolve to this process");
+        assert!(
+            !info.exe_path.is_empty(),
+            "exe path must be non-empty, got {:?}",
+            info.exe_path
+        );
+    }
+
+    // A UDP socket bound to the wildcard address (0.0.0.0) — as Chrome's QUIC sockets are — keeps
+    // `inp_laddr = 0.0.0.0` in `udp.pcblist_n` even while sending. The netstack surfaces the flow's
+    // *concrete* source IP, so an exact-laddr match misses it; the resolver must fall back to the
+    // wildcard-bound socket on the same lport. Without that fallback, Chrome's QUIC never attributes
+    // to the app and app split tunneling silently misses it (regression this guards).
+    #[test]
+    fn resolves_wildcard_bound_udp_socket_by_concrete_ip() {
+        // Bind to the wildcard so `inp_laddr` stays 0.0.0.0 (unconnected → the kernel doesn't pin a
+        // local address the way `connect` does).
+        let sock = UdpSocket::bind("0.0.0.0:0").expect("bind wildcard");
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        // Transmit (unconnected) to force a PCB entry, without pinning a concrete local address.
+        sock.send_to(b"x", peer_addr)
+            .expect("send_to to force a UDP PCB entry");
+        let port = sock.local_addr().expect("local").port();
+
+        // Query by a CONCRETE source IP (what the netstack surfaces for a real flow) + the socket's
+        // port. Exact-laddr matching would fail (0.0.0.0 != 127.0.0.1); the wildcard fallback wins.
+        let info = resolve("127.0.0.1".parse().unwrap(), port, Protocol::Udp)
+            .expect("sysctl/parse ok")
+            .expect("a wildcard-bound udp socket must resolve by concrete src IP");
+        assert_eq!(info.pid, std::process::id(), "must resolve to this process");
     }
 }

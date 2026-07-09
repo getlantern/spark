@@ -12,6 +12,10 @@ pub(crate) mod persist;
 #[cfg(not(target_os = "android"))]
 mod desktop;
 
+// macOS installed-apps catalog for desktop app-based split tunneling (AppleControl uses it).
+#[cfg(target_os = "macos")]
+mod apps_darwin;
+
 // Desktop control over spark-ipc (Windows named pipe / Linux unix socket). Compiled off android;
 // on macOS it provides the transport-agnostic ipc client that AppleControl doesn't use but which
 // unit-tests here (its unix path == the Linux path).

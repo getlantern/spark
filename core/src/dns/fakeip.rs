@@ -1,12 +1,13 @@
 //! Fake-IP allocator + bidirectional `domain ⇄ fakeip` map with TTL and an LRU cap.
 //!
-//! Every A/AAAA query gets a synthetic IP from a reserved range — IPv4 `198.18.0.0/15` (RFC 2544
-//! benchmarking space, never real traffic) and an IPv6 ULA — recorded so the connecting flow's fake
-//! destination recovers its domain. A domain gets **one fake IP per family** (an A and a AAAA query
-//! for the same host yield distinct v4/v6 fakes that both recover the same domain).
+//! Every A/AAAA query gets a synthetic IP from a dedicated range — IPv4 `28.0.0.0/15` (dark DoD
+//! space; see [`V4_BASE`] for why not the usual 198.18/15) and an IPv6 slice of dark global unicast (see `V6_BASE`) — recorded so the
+//! connecting flow's fake destination recovers its domain. A domain gets **one fake IP per family**
+//! (an A and a AAAA query for the same host yield distinct v4/v6 fakes that both recover the same
+//! domain).
 //!
-//! Loop safety: the pool only ever returns addresses from its reserved ranges, never a real IP, so a
-//! recovered-direct flow's real dial can't re-enter the fake-IP map.
+//! Loop safety: the pool only ever returns addresses from its fake ranges, never a routable IP a
+//! user would reach, so a recovered-direct flow's real dial can't re-enter the fake-IP map.
 //!
 //! Time is passed in (`now: Instant`) rather than read from the clock, so TTL/LRU behavior is
 //! deterministic under test. The type is not internally synchronized; share it behind a `Mutex`
@@ -16,12 +17,40 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
-/// IPv4 fake-IP base — `198.18.0.0/15` (RFC 2544), matching the config's `dns_fakeip` intent.
-pub const V4_BASE: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 0);
+/// IPv4 fake-IP base — `28.0.0.0/15`, a slice of the US-DoD-allocated `28.0.0.0/8`. Chosen
+/// deliberately over the conventional `198.18.0.0/15` (RFC 2544): browsers (Chromium's Local
+/// Network Access) classify 198.18/15 — and every other reserved range — as the **local** address
+/// space, and then block cross-origin subresource fetches from a public document to those "local"
+/// fake IPs (observed: Google News thumbnails on `encrypted-tbn*.gstatic.com` failing with
+/// "Permission was denied … access the `local` address space"). 28.0.0.0/8 is a real, globally
+/// registered allocation (so Chrome treats it as **public**) that, empirically, is not announced on
+/// the public Internet (a US-DoD block used only on internal/private networks) — so squatting it as
+/// fake-IP space is very unlikely to collide with anything a user would actually reach. Best-effort
+/// observation, not a guarantee; revisit if it ever starts appearing in the global routing table.
+pub const V4_BASE: Ipv4Addr = Ipv4Addr::new(28, 0, 0, 0);
 /// Address count in the `/15` (131072).
 pub const V4_COUNT: u128 = 1 << 17;
-/// IPv6 fake-IP base — a ULA prefix (`fd00:2018::/32`), well clear of real routable space.
-pub const V6_BASE: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2018, 0, 0, 0, 0, 0, 0);
+/// IPv6 fake-IP base — `3000:2018::`, a slice of global unicast (`2000::/3`) that is currently
+/// IANA-unassigned. Chosen over the conventional ULA (`fd00::/…`) for the same reason as the IPv4
+/// range (see [`V4_BASE`]): Chromium's Local Network Access maps `fc00::/7` (ULA), `fe80::/10`,
+/// `fec0::/10`, and the IPv6 documentation ranges to the **local** address space and blocks
+/// cross-origin subresource fetches to them from a public document. This block is classified
+/// **public** by Chrome (it is not in Chrome's non-public table). `3000::/4` sits within global
+/// unicast but is, at present, unallocated and not seen in the global routing table — so a collision
+/// with anything a user would actually reach is very unlikely. Best-effort observation, not a
+/// guarantee (IANA could allocate it later); revisit if it starts being announced.
+pub const V6_BASE: Ipv6Addr = Ipv6Addr::new(0x3000, 0x2018, 0, 0, 0, 0, 0, 0);
+
+/// Whether `addr` lies inside the IPv6 fake-IP pool (`[V6_BASE, V6_BASE + V6_COUNT)`).
+///
+/// The netstack uses this to tell *fake* v6 destinations (allocated by our DNS, recoverable to a
+/// domain, deliverable) apart from *real* ones (e.g. from a browser's own DoH), which the tunnel
+/// cannot currently egress — see `netstack::allow_flow_dst`.
+pub fn is_fake_v6(addr: &Ipv6Addr) -> bool {
+    let n = u128::from(*addr);
+    let base = u128::from(V6_BASE);
+    n >= base && n < base + V6_COUNT
+}
 /// IPv6 fake-IP address count offered (1M — far above any live-mapping cap; bounds arithmetic).
 pub const V6_COUNT: u128 = 1 << 20;
 
@@ -246,6 +275,53 @@ mod tests {
     }
 
     #[test]
+    fn is_fake_v6_accepts_only_the_fake_range() {
+        // In range: the base and the last allocatable address.
+        assert!(is_fake_v6(&V6_BASE));
+        let last = Ipv6Addr::from(u128::from(V6_BASE) + V6_COUNT - 1);
+        assert!(is_fake_v6(&last));
+        // Out of range: one past the pool, a real global address, link-local, a ULA, and the
+        // unspecified address.
+        let past = Ipv6Addr::from(u128::from(V6_BASE) + V6_COUNT);
+        assert!(!is_fake_v6(&past));
+        assert!(!is_fake_v6(&"2607:f8b0:400f:807::2001".parse().unwrap()));
+        assert!(!is_fake_v6(&"fe80::1".parse().unwrap()));
+        assert!(!is_fake_v6(&"fd00::1".parse().unwrap()));
+        assert!(!is_fake_v6(&Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn v6_fake_base_is_public_global_unicast_not_local() {
+        // Chrome's Local Network Access classifies fc00::/7 (ULA), fe80::/10, fec0::/10, and the
+        // IPv6 documentation ranges as the "local" address space, and blocks cross-origin
+        // subresource fetches to them from a public document — exactly the failure the IPv4 range
+        // move fixed. So the v6 fake base MUST be global unicast (2000::/3) and MUST NOT be ULA.
+        let bytes = V6_BASE.octets();
+        assert_eq!(
+            bytes[0] & 0xE0,
+            0x20,
+            "v6 fake base must be in global unicast 2000::/3"
+        );
+        assert_ne!(
+            bytes[0] & 0xFE,
+            0xFC,
+            "v6 fake base must not be a ULA (fc00::/7)"
+        );
+    }
+
+    #[test]
+    fn allocated_v6_fakes_are_recognized() {
+        let mut p = pool();
+        let t0 = Instant::now();
+        for d in ["a.com", "b.com", "c.com"] {
+            match p.allocate(d, true, t0) {
+                IpAddr::V6(a) => assert!(is_fake_v6(&a), "allocated fake {a} must be in range"),
+                IpAddr::V4(a) => panic!("want_v6 allocation returned v4 {a}"),
+            }
+        }
+    }
+
+    #[test]
     fn allocation_is_stable_per_domain_within_ttl() {
         let mut p = pool();
         let t0 = Instant::now();
@@ -276,15 +352,15 @@ mod tests {
         assert_ne!(v4, v6);
         assert_eq!(p.recover(v4, t0), Some("d.com".to_string()));
         assert_eq!(p.recover(v6, t0), Some("d.com".to_string()));
-        // v4 in 198.18.0.0/15; v6 under fd00:2018::/32.
+        // v4 in 28.0.0.0/15; v6 under 3000:2018::/… (dark global unicast).
         if let IpAddr::V4(a) = v4 {
             let o = a.octets();
-            assert_eq!(o[0], 198);
-            assert!(o[1] == 18 || o[1] == 19);
+            assert_eq!(o[0], 28);
+            assert!(o[1] == 0 || o[1] == 1);
         }
         if let IpAddr::V6(a) = v6 {
             let s = a.segments();
-            assert_eq!((s[0], s[1]), (0xfd00, 0x2018));
+            assert_eq!((s[0], s[1]), (0x3000, 0x2018));
         }
     }
 
