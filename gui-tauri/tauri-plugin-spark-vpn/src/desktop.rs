@@ -665,6 +665,34 @@ fn servers_from_config() -> Vec<ServerInfo> {
         .collect()
 }
 
+/// The shared app-group container dir where the NE caches `config_raw.json`. On macOS the app +
+/// extension share `group.org.getlantern.spark`; for the non-sandboxed app (same user) this is
+/// `~/Library/Group Containers/group.org.getlantern.spark/config`. Returns `None` if `$HOME` is
+/// unset or on platforms without a resolved shared dir yet (Windows/Linux — a Phase-1 follow-up).
+fn shared_config_cache_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(PathBuf::from(home).join("Library/Group Containers/group.org.getlantern.spark/config"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Location list read from the NE's shared `config_raw.json` cache, or empty if there's no cache
+/// yet (never fetched) or it can't be read/parsed.
+fn servers_from_cache() -> Vec<ServerInfo> {
+    let Some(dir) = shared_config_cache_dir() else {
+        return Vec::new();
+    };
+    match std::fs::read_to_string(dir.join("config_raw.json")) {
+        Ok(raw) => servers_from_cache_json(&raw),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Parse a fetched `config_raw.json` body (Lantern shape) into the static location list. The
 /// top-level `servers` array carries geo entries (`country`/`country_code`/`city`); index by
 /// position, matching `servers_from_config`. No live fields are invented (healthy=false, etc.).
