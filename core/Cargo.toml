@@ -99,6 +99,8 @@ getifaddrs = "0.6"
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
 wat.workspace = true
+# `test-util` enables `tokio::time::pause/advance` and `start_paused` — needed by stall-guard tests.
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 # AnyTLS-over-BoringSSL transport (ADR 0001). Off by default so the base build stays rustls/ring-only

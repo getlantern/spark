@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// The pool's per-member outcome recorder. Implemented by `SelectingTransport`.
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 pub(crate) trait StallSink: Send + Sync {
     /// A flow through `member` stalled (was active, then flatlined past the window).
     fn record_stall(&self, member: usize);
@@ -20,6 +21,7 @@ pub(crate) trait StallSink: Send + Sync {
 
 /// Per-flow progress state, shared (via `Arc`) by a flow's guard(s). Lock-free: a TCP flow has one
 /// guard, a UDP flow has two (sink + source) that touch this concurrently.
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 pub(crate) struct StallTracker {
     sink: Arc<dyn StallSink>,
     member: usize,
@@ -32,6 +34,7 @@ pub(crate) struct StallTracker {
     done: AtomicBool,
 }
 
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 impl StallTracker {
     pub(crate) fn new(sink: Arc<dyn StallSink>, member: usize, window: Duration) -> Arc<Self> {
         Arc::new(Self {
@@ -94,6 +97,105 @@ impl Drop for StallTracker {
     }
 }
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::{sleep, Sleep};
+
+/// Wraps a member's TCP stream. Any read/write is progress and resets a `Sleep(window)`; if the sleep
+/// fires while the flow is `ever_active` (no progress in *either* direction for the window), it reports
+/// a stall and errors so `copy_bidirectional` ends and the flow resets. `S: Unpin` (all `BoxedStream`s
+/// are), so we project via `get_mut`.
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
+pub(crate) struct StreamStallGuard<S> {
+    inner: S,
+    tracker: Arc<StallTracker>,
+    window: Duration,
+    deadline: Pin<Box<Sleep>>,
+    armed: bool,
+}
+
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
+impl<S> StreamStallGuard<S> {
+    pub(crate) fn new(inner: S, tracker: Arc<StallTracker>, window: Duration) -> Self {
+        Self {
+            inner,
+            tracker,
+            window,
+            deadline: Box::pin(sleep(window)),
+            armed: false,
+        }
+    }
+
+    /// Note progress in either direction: mark active, and reset the idle deadline.
+    fn on_progress(&mut self) {
+        self.tracker.mark_active();
+        self.armed = true;
+        self.deadline.as_mut().reset(Instant::now() + self.window);
+    }
+
+    /// Poll the idle deadline when the inner I/O is Pending. Fires a stall once armed.
+    fn poll_deadline<T>(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<T>> {
+        if !self.armed {
+            return Poll::Pending; // never fire before the flow was ever active
+        }
+        match self.deadline.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(self.tracker.report_stall())),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for StreamStallGuard<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                if buf.filled().len() > before {
+                    this.on_progress();
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => this.poll_deadline(cx),
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for StreamStallGuard<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_write(cx, data) {
+            Poll::Ready(Ok(n)) => {
+                if n > 0 {
+                    this.on_progress();
+                }
+                Poll::Ready(Ok(n))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => this.poll_deadline(cx),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +245,42 @@ mod tests {
         let t = StallTracker::new(sink.clone(), 1, Duration::from_secs(15));
         drop(t); // never marked active
         assert!(sink.oks.lock().unwrap().is_empty());
+        assert!(sink.stalls.lock().unwrap().is_empty());
+    }
+
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_guard_fires_after_active_then_silent() {
+        let sink = Arc::new(RecordingSink::default());
+        let tracker = StallTracker::new(sink.clone(), 7, Duration::from_secs(15));
+        // `peer` feeds the guarded side; we send one byte (activity), then go silent.
+        let (mut peer, inner): (DuplexStream, DuplexStream) = duplex(64);
+        let mut guard = StreamStallGuard::new(inner, tracker, Duration::from_secs(15));
+        peer.write_all(b"x").await.unwrap();
+        let mut b = [0u8; 8];
+        assert_eq!(guard.read(&mut b).await.unwrap(), 1); // progress → armed
+                                                          // Now silent. Advance past the window; the next read must surface a stall error.
+        tokio::time::advance(Duration::from_secs(16)).await;
+        let err = guard.read(&mut b).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(*sink.stalls.lock().unwrap(), vec![7]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_guard_idle_from_start_does_not_fire() {
+        let sink = Arc::new(RecordingSink::default());
+        let tracker = StallTracker::new(sink.clone(), 0, Duration::from_secs(15));
+        let (_peer, inner): (DuplexStream, DuplexStream) = duplex(64);
+        let mut guard = StreamStallGuard::new(inner, tracker, Duration::from_secs(15));
+        let mut b = [0u8; 8];
+        // Never any data. Advance well past the window; read stays pending (not a stall), so race it
+        // against a timer and assert the read did NOT resolve to an error.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::select! {
+            r = guard.read(&mut b) => panic!("idle-from-start read resolved: {r:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
         assert!(sink.stalls.lock().unwrap().is_empty());
     }
 }
