@@ -59,7 +59,7 @@ pub(crate) fn connect_item(state: &str) -> (&'static str, &'static str, bool) {
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuItem, MenuItemBuilder, Submenu, SubmenuBuilder},
     tray::TrayIconBuilder,
-    AppHandle, Manager, Runtime,
+    AppHandle, Emitter, Manager, Runtime,
 };
 
 /// Build the system tray from current state and register it + its handles. Called once from setup.
@@ -284,8 +284,6 @@ fn read_state<R: Runtime>(
     (status, servers, routing, adblock, selected)
 }
 
-use tauri::Emitter;
-
 /// Tray menu-event handler: run the corresponding control action, then refresh + notify the window.
 fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
     let id = event.id().as_ref().to_string();
@@ -309,8 +307,9 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) 
             let _ = ctl.set_routing_mode("full");
         }
         "adblock" => {
-            let enabled = ctl.get_ad_block_enabled().unwrap_or(true);
-            let _ = ctl.set_ad_block_enabled(!enabled);
+            if let Ok(enabled) = ctl.get_ad_block_enabled() {
+                let _ = ctl.set_ad_block_enabled(!enabled);
+            }
         }
         "split" => {
             show_main_window(app);
