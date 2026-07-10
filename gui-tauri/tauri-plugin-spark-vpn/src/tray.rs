@@ -84,14 +84,30 @@ pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     }
 
     let icon = tauri::include_image!("icons/tray.png");
-    TrayIconBuilder::with_id("spark-tray")
+    let builder = TrayIconBuilder::with_id("spark-tray")
         .icon(icon)
         .icon_as_template(true)
         .tooltip("Spark")
         .menu(&menu)
-        .show_menu_on_left_click(true)
-        .on_menu_event(on_menu_event)
-        .build(app)?;
+        .on_menu_event(on_menu_event);
+    // Click convention differs by platform: macOS/Linux open the menu on left-click; Windows opens
+    // the menu on right-click and reveals the window on left-click (the Windows tray convention).
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    #[cfg(not(target_os = "windows"))]
+    let builder = builder.show_menu_on_left_click(true);
+    builder.build(app)?;
 
     // Light poll so the tray reflects autonomous tunnel state changes (the NE/service connecting or
     // dropping on its own — no command fired). `refresh` is cheap and marshals menu updates to the
@@ -320,6 +336,15 @@ fn read_state<R: Runtime>(
 }
 
 /// Tray menu-event handler: run the corresponding control action, then refresh + notify the window.
+/// Log a failed tray action and surface it to the window (a `spark://error` the UI can toast) so
+/// tray-initiated failures aren't silent. The menu stays responsive regardless.
+fn report_tray_action<R: Runtime>(app: &AppHandle<R>, action: &str, result: crate::Result<()>) {
+    if let Err(e) = result {
+        eprintln!("[spark-tray] {action} failed: {e}");
+        let _ = app.emit("spark://error", format!("{action} failed: {e}"));
+    }
+}
+
 fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
     let id = event.id().as_ref().to_string();
     let ctl = app.state::<Box<dyn crate::TunnelControl>>();
@@ -333,35 +358,39 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) 
                 .map(|s| s.state == "connected")
                 .unwrap_or(false);
             if connected {
-                let _ = ctl.disconnect();
+                report_tray_action(app, "disconnect", ctl.disconnect());
             } else {
-                let _ = ctl.connect();
+                report_tray_action(app, "connect", ctl.connect());
             }
         }
         "routing:smart" => {
-            let _ = ctl.set_routing_mode("smart");
+            report_tray_action(app, "set routing mode", ctl.set_routing_mode("smart"))
         }
-        "routing:full" => {
-            let _ = ctl.set_routing_mode("full");
-        }
-        "adblock" => {
-            if let Ok(enabled) = ctl.get_ad_block_enabled() {
-                let _ = ctl.set_ad_block_enabled(!enabled);
+        "routing:full" => report_tray_action(app, "set routing mode", ctl.set_routing_mode("full")),
+        "adblock" => match ctl.get_ad_block_enabled() {
+            Ok(enabled) => {
+                report_tray_action(app, "set ad-block", ctl.set_ad_block_enabled(!enabled))
             }
-        }
+            Err(e) => report_tray_action(app, "read ad-block", Err(e)),
+        },
         "split" => {
             show_main_window(app);
             let _ = app.emit("spark://navigate", "/split-tunneling");
         }
         "show" => show_main_window(app),
         "quit" => {
+            // Best-effort teardown; we're exiting regardless, so logging a failure adds no value.
             let _ = ctl.disconnect();
             app.exit(0);
             return;
         }
         other => {
             if let Some(pin) = parse_loc_menu_id(other) {
-                let _ = ctl.select_server(crate::tray_pin_to_i32(pin));
+                report_tray_action(
+                    app,
+                    "select server",
+                    ctl.select_server(crate::tray_pin_to_i32(pin)),
+                );
                 *app.state::<crate::commands::SelectedServer>()
                     .0
                     .lock()

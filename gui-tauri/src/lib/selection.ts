@@ -20,6 +20,8 @@ export async function initSelectedIndex(): Promise<void> {
   try {
     selectedIndex.set(await backend.getSelectedServer());
   } catch (err) {
-    console.error("[selection] getSelectedServer failed, defaulting to auto:", err);
+    // Keep the current value on a transient read failure rather than clobbering a good pin. The
+    // store already defaults to null (auto) on first load, so a failure there leaves it at auto.
+    console.error("[selection] getSelectedServer failed, keeping current value:", err);
   }
 }
