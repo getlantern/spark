@@ -5,7 +5,7 @@ derived assets.
 
 ## Icon — "Spark Bolt"
 
-`spark-icon.svg` — a lightning **bolt** (amber gradient `#ffd54a → #f2a900`) on a cyan squircle
+`spark-icon.svg` — a lightning **bolt** (amber gradient `#ffe07a → #f8bd10 → #f0a500`) on a cyan squircle
 (`#18d4ea → #009cb4`) with a modern macOS treatment (rounded-rect container, top sheen, soft depth
 shadow on the bolt). It literally reads "Spark," stays crisp down to 16 px, and uses the brand palette
 already in the app UI (cyan `#00bdd6` + amber "bolt" `#f5b800`).

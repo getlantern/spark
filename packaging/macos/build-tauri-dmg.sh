@@ -127,7 +127,13 @@ cp "$GUI/src-tauri/icons/icon.icns" "$STAGE/.VolumeIcon.icns"
 RW="$WORK/rw.dmg"
 hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDRW "$RW" >/dev/null
 if MNT="$(hdiutil attach -readwrite -noverify -noautoopen "$RW" 2>/dev/null | grep -Eo '/Volumes/[^"]+$' | head -1)" && [[ -n "$MNT" ]]; then
-  SetFile -a C "$MNT" 2>/dev/null || true   # honor the custom .VolumeIcon.icns
+  # Set the Finder "custom icon" bit so .VolumeIcon.icns is honored. Non-fatal, but warn
+  # loudly if SetFile is missing/fails so we don't silently ship an unbranded volume icon.
+  if command -v SetFile >/dev/null 2>&1; then
+    SetFile -a C "$MNT" || log "WARN: SetFile failed — volume icon may not show (DMG still valid)"
+  else
+    log "WARN: SetFile not found (install Xcode command-line tools) — volume icon skipped"
+  fi
   if osascript >/dev/null 2>&1 <<EOF
 tell application "Finder"
   tell disk "$VOLNAME"
