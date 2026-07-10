@@ -75,15 +75,7 @@ pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .tooltip("Spark")
         .menu(&menu)
         .show_menu_on_left_click(true)
-        // Placeholder handler (show/quit only); Task 6 replaces this with `on_menu_event`.
-        .on_menu_event(move |app, event| match event.id().as_ref() {
-            "show" => show_main_window(app),
-            "quit" => {
-                let _ = app.state::<Box<dyn crate::TunnelControl>>().disconnect();
-                app.exit(0);
-            }
-            _ => {}
-        })
+        .on_menu_event(on_menu_event)
         .build(app)?;
     Ok(())
 }
@@ -290,6 +282,59 @@ fn read_state<R: Runtime>(
         .lock()
         .expect("pin lock");
     (status, servers, routing, adblock, selected)
+}
+
+use tauri::Emitter;
+
+/// Tray menu-event handler: run the corresponding control action, then refresh + notify the window.
+fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
+    let id = event.id().as_ref().to_string();
+    let ctl = app.state::<Box<dyn crate::TunnelControl>>();
+
+    match id.as_str() {
+        // The toggle's id is stable ("toggle"); decide the action from live status, not the id
+        // (a muda item's id can't change, so it can't encode connect-vs-disconnect).
+        "toggle" => {
+            let connected = ctl.status().map(|s| s.state == "connected").unwrap_or(false);
+            if connected {
+                let _ = ctl.disconnect();
+            } else {
+                let _ = ctl.connect();
+            }
+        }
+        "routing:smart" => {
+            let _ = ctl.set_routing_mode("smart");
+        }
+        "routing:full" => {
+            let _ = ctl.set_routing_mode("full");
+        }
+        "adblock" => {
+            let enabled = ctl.get_ad_block_enabled().unwrap_or(true);
+            let _ = ctl.set_ad_block_enabled(!enabled);
+        }
+        "split" => {
+            show_main_window(app);
+            let _ = app.emit("spark://navigate", "/split-tunneling");
+        }
+        "show" => show_main_window(app),
+        "quit" => {
+            let _ = ctl.disconnect();
+            app.exit(0);
+            return;
+        }
+        other => {
+            if let Some(pin) = parse_loc_menu_id(other) {
+                let _ = ctl.select_server(crate::tray_pin_to_i32(pin));
+                *app.state::<crate::commands::SelectedServer>()
+                    .0
+                    .lock()
+                    .expect("pin lock") = pin;
+            }
+        }
+    }
+
+    refresh(app);
+    let _ = app.emit("spark://state", ());
 }
 
 #[cfg(test)]
