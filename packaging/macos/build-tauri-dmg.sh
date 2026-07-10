@@ -125,8 +125,17 @@ cp "$GUI/src-tauri/icons/icon.icns" "$STAGE/.VolumeIcon.icns"
 # automation is unavailable (headless CI without an Aqua session / Automation TCC grant), fall
 # back to the default layout so the build still produces a working DMG.
 RW="$WORK/rw.dmg"
+# Detach any stale volume of this name first. A lingering /Volumes/$VOLNAME (e.g. a previously-mounted
+# DMG) makes the new RW image mount as "$VOLNAME 1", and the Finder layout below — which targets the
+# volume by name — would then style the WRONG volume, yielding a DMG with no .DS_Store (no styling).
+for v in /Volumes/"$VOLNAME" /Volumes/"$VOLNAME "[0-9]*; do
+  [[ -e "$v" ]] && hdiutil detach "$v" -force >/dev/null 2>&1 || true
+done
 hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDRW "$RW" >/dev/null
 if MNT="$(hdiutil attach -readwrite -noverify -noautoopen "$RW" 2>/dev/null | grep -Eo '/Volumes/[^"]+$' | head -1)" && [[ -n "$MNT" ]]; then
+  # Target the ACTUAL mounted volume by name (not the fixed $VOLNAME) so a name collision can't
+  # misdirect the layout osascript to a different volume.
+  VOL="$(basename "$MNT")"
   # Set the Finder "custom icon" bit so .VolumeIcon.icns is honored. Non-fatal, but warn
   # loudly if SetFile is missing/fails so we don't silently ship an unbranded volume icon.
   if command -v SetFile >/dev/null 2>&1; then
@@ -136,7 +145,7 @@ if MNT="$(hdiutil attach -readwrite -noverify -noautoopen "$RW" 2>/dev/null | gr
   fi
   if osascript >/dev/null 2>&1 <<EOF
 tell application "Finder"
-  tell disk "$VOLNAME"
+  tell disk "$VOL"
     open
     set current view of container window to icon view
     set toolbar visible of container window to false
