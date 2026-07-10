@@ -99,6 +99,39 @@ struct Selection {
     pinned: Option<usize>,
 }
 
+/// Per-member liveness state driven by stall reports (separate from the latency `Selection`).
+#[allow(dead_code)] // OnTrial + fields used in Tasks 8-9
+#[derive(Clone)]
+enum MemberState {
+    Healthy,
+    /// Quarantined until this instant; `strikes` counts consecutive quarantines (backoff).
+    Quarantined {
+        until: tokio::time::Instant,
+        strikes: u32,
+    },
+    /// On trial: re-admitted, needs `clean_needed` clean flows to fully recover; `strikes` retained
+    /// so a failed trial backs off further.
+    OnTrial {
+        clean_needed: u32,
+        strikes: u32,
+    },
+}
+
+struct MemberHealth {
+    state: MemberState,
+    /// Millis-since-pool-start of recent stalls (for the K-in-window count).
+    recent_stalls: std::collections::VecDeque<u64>,
+}
+
+impl MemberHealth {
+    fn new() -> Self {
+        Self {
+            state: MemberState::Healthy,
+            recent_stalls: std::collections::VecDeque::new(),
+        }
+    }
+}
+
 /// A latency-selecting transport over a pool of [`Member`]s.
 ///
 /// When no member can serve a flow (the pool is all-unhealthy, or every dial in the current order
@@ -125,6 +158,12 @@ pub struct SelectingTransport {
     direct_udp: Arc<dyn UdpTransport>,
     /// Stall-detection tunables (zero window = disabled).
     stall: StallConfig,
+    /// Per-member health state (stall accounting). LOCK ORDER: `health` is NEVER held at the same
+    /// time as `selection` — `record_stall` locks only `health`; the dial path locks only
+    /// `selection`. Keeping them separate avoids deadlock.
+    health: Mutex<Vec<MemberHealth>>,
+    /// Epoch base for computing millis-since-pool-start in stall timestamps.
+    health_base: tokio::time::Instant,
     /// Weak self-reference so the guard helpers can obtain an `Arc<Self>` for the `StallSink` impl
     /// without a reference cycle. Set by `build_selecting` immediately after `Arc::new`.
     pub(crate) me: std::sync::OnceLock<std::sync::Weak<Self>>,
@@ -176,6 +215,8 @@ impl SelectingTransport {
             direct_tcp,
             direct_udp,
             stall,
+            health: Mutex::new((0..len).map(|_| MemberHealth::new()).collect()),
+            health_base: tokio::time::Instant::now(),
             me: std::sync::OnceLock::new(),
         }
     }
@@ -416,11 +457,57 @@ impl SelectingTransport {
         tracing::info!(members = n, "pool reloaded from refreshed config");
         self.reprobe.notify_one();
     }
+
+    /// Test-only: returns `true` if member `i` is currently quarantined.
+    #[cfg(test)]
+    pub(crate) fn is_quarantined(&self, i: usize) -> bool {
+        matches!(
+            self.health.lock().unwrap_or_else(|e| e.into_inner())[i].state,
+            MemberState::Quarantined { .. }
+        )
+    }
 }
 
 impl StallSink for SelectingTransport {
     fn record_stall(&self, member: usize) {
-        tracing::debug!(member, "flow stalled through pool member");
+        let now_ms = tokio::time::Instant::now()
+            .duration_since(self.health_base)
+            .as_millis() as u64;
+        let window_ms = self.stall.demote_window.as_millis() as u64;
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(h) = health.get_mut(member) else {
+            return;
+        };
+        h.recent_stalls.push_back(now_ms);
+        while let Some(&front) = h.recent_stalls.front() {
+            if now_ms.saturating_sub(front) > window_ms {
+                h.recent_stalls.pop_front();
+            } else {
+                break;
+            }
+        }
+        let strikes = match h.state {
+            MemberState::Quarantined { strikes, .. } | MemberState::OnTrial { strikes, .. } => {
+                strikes
+            }
+            MemberState::Healthy => 0,
+        };
+        let trial_stall = matches!(h.state, MemberState::OnTrial { .. });
+        if trial_stall || h.recent_stalls.len() as u32 >= self.stall.demote_count {
+            let n = strikes.saturating_add(1);
+            let shift = (n - 1).min(16);
+            let backoff = self
+                .stall
+                .quarantine
+                .saturating_mul(1u32 << shift)
+                .min(self.stall.quarantine_max);
+            h.state = MemberState::Quarantined {
+                until: tokio::time::Instant::now() + backoff,
+                strikes: n,
+            };
+            h.recent_stalls.clear();
+            tracing::info!(member, strikes = n, "pool member quarantined (stalls)");
+        }
     }
     fn record_flow_ok(&self, _member: usize) {}
 }
@@ -928,6 +1015,8 @@ mod tests {
             direct_tcp,
             direct_udp,
             stall: test_stall_cfg(),
+            health: Mutex::new((0..n).map(|_| MemberHealth::new()).collect()),
+            health_base: tokio::time::Instant::now(),
             me: std::sync::OnceLock::new(),
         }
     }
@@ -1167,6 +1256,18 @@ mod tests {
             "empty refreshed server set is rejected"
         );
         assert_eq!(t.snapshot().len(), 1, "current pool is preserved");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn member_quarantines_after_k_stalls() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        // Below threshold: 2 stalls (default K=3) → still healthy.
+        StallSink::record_stall(&t, 0);
+        StallSink::record_stall(&t, 0);
+        assert!(!t.is_quarantined(0));
+        StallSink::record_stall(&t, 0); // 3rd within window → quarantined
+        assert!(t.is_quarantined(0));
+        assert!(!t.is_quarantined(1), "other member unaffected");
     }
 
     #[cfg(feature = "multi-server")]
