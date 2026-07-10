@@ -19,8 +19,8 @@ notice today:
 
 Detect an **actively-stalled** flow at runtime, abort it (the app retries, as it already does on any
 reset), attribute repeated stalls to the pool member that served them, and **quarantine a throttled
-member** so traffic reroutes to a healthy server — restoring the member only once an **active
-bandwidth probe** confirms real throughput.
+member** so traffic reroutes to a healthy server — restoring the member only once it carries real
+**trial flows** again without stalling.
 
 ## Scope (v1)
 
@@ -41,8 +41,16 @@ bandwidth probe** confirms real throughput.
 - **Member penalty:** *threshold* — one stall just aborts that flow; a member is quarantined only
   after **K stalls within a window** (distinguishes a throttled proxy, which stalls many flows at
   once, from a single slow origin).
-- **Recovery:** *active bandwidth probe* (in v1) — a quarantined member is restored only once a
-  bandwidth probe confirms real goodput, not on a blind timer.
+- **Recovery:** *passive trial-flow recovery* — after a cooldown, a quarantined member is re-admitted
+  **on trial**; it's restored only once it carries a few real flows again *without* stalling, and
+  re-quarantined (with exponential backoff) if a trial flow stalls. No blind timer, and no active
+  bandwidth probe.
+  - *Why not an active bandwidth probe:* the only per-arm URL the config provides is the **bandit
+    callback** (`bandit_url_overrides` → `https://api.iantem.io/v1/bandit/callback?token=…`), which is
+    a tiny, tokened, ~`poll_interval+30s`-expiring control-plane endpoint — unusable as a
+    throughput target. A true active probe would need a new lantern-box download/echo endpoint
+    (backend work). Passive trial recovery needs no new endpoint and measures the real server with
+    real traffic, reusing the same `StallGuard` signal.
 
 ## Architecture
 
@@ -101,21 +109,34 @@ Stall timestamps use **`tokio::time::Instant`** (not `std::time::Instant`) so to
 (`tokio::time::pause` + `advance`) drives the `StallGuard` deadline **and** the stall accounting
 deterministically in one place — no wall-clock flakiness, no hand-rolled clock injection.
 
-### Component 3 — active bandwidth recovery probe
+### Component 3 — passive trial-flow recovery
 
-The background prober (`prober_loop`, `select.rs`) already runs each `probe_interval`. Extend it:
-- **Healthy (non-quarantined) members:** the existing cheap callback probe (health + latency ranking) — unchanged.
-- **Quarantined members:** an **active bandwidth probe** instead — dial the member, GET the configured
-  `bandwidth_probe_url`, read up to `bandwidth_probe_max_bytes` (cap, e.g. 512 KiB) under a deadline,
-  and compute goodput (KiB/s). If goodput ≥ `stall_recover_min_kbps`, **un-quarantine** the member
-  (fresh chance; the prober re-ranks it normally next round). Otherwise it stays quarantined and is
-  re-tested next round.
+No active probe and no new endpoint. A quarantined member walks a small state machine, all under the
+`selection` lock:
 
-Cost is bounded: bandwidth-probe traffic is spent **only** on members already suspected of
-throttling, not the whole pool. If `bandwidth_probe_url` is unset, fall back to a cooldown timer
-(`stall_quarantine_secs`) so the feature still degrades gracefully without a configured URL. The
-bandwidth probe reuses `probe.rs`'s hand-rolled HTTP(S)-through-a-transport client (extended to read a
-capped body and time it) — no new HTTP dependency.
+```
+Healthy ──(≥ K stalls in window)──▶ Quarantined(until = now + cooldown)
+Quarantined ──(cooldown elapsed)──▶ OnTrial(clean_needed = stall_trial_flows)
+OnTrial ──(a trial flow stalls)──▶ Quarantined(cooldown ×2, capped)   // exponential backoff
+OnTrial ──(clean_needed trial flows finish without stalling)──▶ Healthy   // backoff reset
+```
+
+- **Quarantined** members are excluded from the dial order (new flows avoid them). The
+  cooldown-elapsed → **OnTrial** transition is checked lazily in `members_and_order()` (no timer):
+  when a quarantined member's `until` has passed, it flips to `OnTrial`.
+- **OnTrial** members are re-admitted to the dial order but deliberately handed a *bounded* number of
+  real flows so we get a signal: while any member is `OnTrial` with trial slots left, selection routes
+  the next new flow to it (decrementing its slots) instead of the ranked best. Its `StallGuard`
+  watches those flows.
+- **Outcome reporting via `StallGuard::Drop`:** the guard already calls `record_stall(i)` on a stall.
+  On drop of a guard that was `ever_active` and did **not** stall, it calls `record_flow_ok(i)`. During
+  trial, each `record_flow_ok` decrements `clean_needed`; reaching zero **restores** the member
+  (backoff reset). Any `record_stall` during trial **re-quarantines** it with doubled cooldown
+  (capped at `stall_quarantine_max_secs`). Outside trial, `record_flow_ok` just clears the member's
+  stall ring so transient single stalls age out.
+
+The background prober (`prober_loop`) is **unchanged** — it keeps doing the cheap callback probe for
+latency/health ranking; recovery is driven entirely by selection + `StallGuard` outcomes, not a probe.
 
 ## Config
 
@@ -127,10 +148,9 @@ New `TransportConfig` fields (plumbed from the lantern config alongside `probe_i
 | `stall_window_secs` | 15 | no-progress-after-active → flow stall. **`0` disables the whole feature.** |
 | `stall_demote_count` | 3 | stalls within the window before a member is quarantined |
 | `stall_demote_window_secs` | 30 | the window for counting stalls |
-| `stall_quarantine_secs` | 60 | cooldown fallback when no `bandwidth_probe_url` is set |
-| `bandwidth_probe_url` | none | URL of a sizeable resource fetched through a quarantined member to confirm recovery |
-| `bandwidth_probe_max_bytes` | 524288 | cap on bytes read during a bandwidth probe |
-| `stall_recover_min_kbps` | 200 | min goodput (KiB/s) to un-quarantine a member |
+| `stall_quarantine_secs` | 60 | base cooldown before a quarantined member goes on trial |
+| `stall_quarantine_max_secs` | 600 | cap for the exponential backoff on repeated quarantine |
+| `stall_trial_flows` | 2 | clean (non-stalling, ever-active) trial flows needed to restore a member |
 
 ## Data flow (worked example)
 
@@ -139,28 +159,30 @@ New `TransportConfig` fields (plumbed from the lantern config alongside `probe_i
    `copy_bidirectional` ends → flow reset → app retries.
 3. Retry dials the pool again; member `i` is still eligible (only 1 stall), so it may be tried again.
 4. As the censor throttles more flows through `i`, it accrues ≥3 stalls in 30 s → member `i`
-   **quarantined** → dropped from the dial order → new flows route to a healthy member.
-5. Each prober round runs a bandwidth probe against `i`; while it stays slow, `i` stays quarantined.
-6. When `i` recovers (or the block lifts), a bandwidth probe measures ≥200 KiB/s → `i` un-quarantined
-   and re-ranked normally.
+   **quarantined** for 60 s → dropped from the dial order → new flows route to a healthy member.
+5. After 60 s, `i` flips to **OnTrial**; selection hands it the next couple of real flows. If a trial
+   flow stalls again → `i` re-quarantined for 120 s (backoff), and so on (capped at 600 s).
+6. When `i` actually recovers (block lifts), its trial flows run without stalling; after
+   `stall_trial_flows` clean flows it's **restored** to Healthy and re-ranked normally (backoff reset).
 
 ## Files
 
-**Add:** `core/src/transport/stall.rs` — the `StallGuard` adapter + its unit tests.
+**Add:** `core/src/transport/stall.rs` — the `StallGuard` adapter (`AsyncRead + AsyncWrite`,
+reset-on-progress deadline, `record_stall` on stall, `record_flow_ok` on clean `Drop`) + its unit tests.
 
 **Modify:**
 - `core/src/transport/select.rs` — wrap dialed member streams in `StallGuard`; per-member stall
-  accounting + `record_stall` + quarantine; exclude quarantined members from `order`/`snapshot`;
-  clear on `reload`; bandwidth-probe branch in `prober_loop`.
-- `core/src/transport/probe.rs` — a `bandwidth_probe(transport, url, max_bytes, deadline) -> kbps`
-  helper reusing the existing through-transport HTTP client.
-- `core/src/transport/mod.rs` — thread the stall handle from `build_selecting`; `build_members`
-  unaffected.
+  accounting + quarantine/trial state machine (`record_stall`/`record_flow_ok`); exclude quarantined
+  members from `order`/`snapshot`, route trial flows to `OnTrial` members, flip cooldown→trial lazily
+  in `members_and_order()`; clear all stall state on `reload`. `prober_loop` **unchanged**.
+- `core/src/transport/mod.rs` — give each `StallGuard` a handle back to the pool's stall recorder when
+  `build_selecting` builds the `SelectingTransport`; `build_members` unaffected.
 - `core/src/config/mod.rs` + `core/src/config/lantern.rs` — the new `TransportConfig` fields + adapter
   mapping (defaults; `lantern.rs` maps any server-provided values).
 
-**Reuse:** the `SelectingTransport` selection lock + `demote`/`order` machinery, `prober_loop`, the
-`probe.rs` through-transport HTTP client, `CountingStream` (the metrics wrapper stays the outer layer).
+**Reuse:** the `SelectingTransport` selection lock + `demote`/`order`/`members_and_order` machinery,
+`CountingStream` (the metrics wrapper stays the outer layer). No `probe.rs` change (recovery is
+passive — no bandwidth probe).
 
 ## Testing
 
@@ -171,9 +193,12 @@ Deterministic with `tokio::time` pause/advance:
 - **Quarantine:** a member quarantines after `K` stalls within the window but not below it; a single
   stall does not quarantine; `order()`/`members_and_order()`/`snapshot()` exclude a quarantined
   member; `reload()` clears stall state.
-- **Recovery:** a quarantined member with a bandwidth probe ≥ threshold is un-quarantined; below
-  threshold stays quarantined; with no `bandwidth_probe_url`, the cooldown fallback restores it.
-- **Bandwidth probe:** goodput math over a fake fixed-size body under a controlled clock.
+- **Recovery:** after cooldown a quarantined member flips to `OnTrial`; `stall_trial_flows` clean
+  (`record_flow_ok`) trial flows restore it; a `record_stall` during trial re-quarantines it with
+  doubled (capped) cooldown; `StallGuard::Drop` reports `record_flow_ok` only when `ever_active` and
+  not stalled.
+- **Trial routing:** `members_and_order()` hands new flows to an `OnTrial` member until its slots are
+  spent, then reverts to ranked order.
 - **Whole-workspace gate** (spark-core API touch): base build (no `multi-server`) clean, clippy
   all-targets/`config-fetch`, and the spark-android JNI target (`cargo ndk clippy`).
 
@@ -183,7 +208,7 @@ Deterministic with `tokio::time` pause/advance:
 - Manual/staging: point a member at a server that accepts the connection then throttles (e.g. a `tc`
   netem rate limit, or a proxy that stalls after N bytes); confirm flows abort within
   `stall_window`, the member quarantines after `K` stalls, new flows route to a healthy member, and
-  the member is restored once the rate limit is lifted (bandwidth probe passes).
+  once the rate limit is lifted the member's trial flows run clean and it's restored to the pool.
 
 ## Phased rollout
 
@@ -191,7 +216,8 @@ Deterministic with `tokio::time` pause/advance:
   abort (app retries). No member penalty yet. Independently shippable + testable.
 - **Phase 2 — quarantine:** per-member stall accounting + `record_stall` + exclude quarantined from
   selection + clear on reload. New flows route away from a throttled member.
-- **Phase 3 — active bandwidth recovery:** the `bandwidth_probe` helper + the quarantined-member
-  branch in `prober_loop`; cooldown fallback when unconfigured.
+- **Phase 3 — passive trial recovery:** the cooldown→trial→restore/re-quarantine state machine,
+  `StallGuard::Drop` → `record_flow_ok`, trial-flow routing in `members_and_order()`, and exponential
+  backoff. A recovered member rejoins the pool without a reconnect.
 - **Phase 4 — config plumbing + gate:** `TransportConfig` fields + `lantern.rs` mapping; whole-
   workspace gate; PR + review loop.
