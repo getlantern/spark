@@ -278,31 +278,36 @@ impl SelectingTransport {
     /// ([`crate::transport::build_members`]) is that feature.
     #[cfg(feature = "multi-server")]
     pub(crate) fn reload(&self, mut new_members: Vec<Member>) {
-        // Prior best working proxy + the manual pin's identity, read together under the selection
-        // lock. Snapshot `old` *inside* the lock (selection → members order, matching the swap below)
-        // and index it with `.get()` so a racing reload can't make a `sel` index panic here.
-        let (prior, pinned_label) = {
-            let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
-            let old = self.members();
-            let idx = sel
-                .pinned
-                .filter(|&p| p < old.len())
-                .or_else(|| sel.ranked.first().copied());
-            let prior = idx.and_then(|i| {
-                let m = old.get(i)?;
-                let oc = sel.latest.get(i).copied().flatten();
-                match oc {
-                    Some(o) if o.healthy && !m.label.is_empty() => Some((m.clone(), o)),
-                    _ => None,
-                }
-            });
-            let pinned_label = sel
-                .pinned
-                .and_then(|p| old.get(p))
-                .map(|m| m.label.clone())
-                .filter(|l| !l.is_empty());
-            (prior, pinned_label)
-        };
+        // Hold `selection` for the WHOLE reload (selection → members order), so:
+        //  - a concurrent set_pin/dial/snapshot sees either the pre- or post-reload state, never a
+        //    torn mix, and the pin identity we preserve can't be clobbered by a set_pin racing
+        //    between its capture and its re-apply;
+        //  - the member swap + epoch bump happen together under the `members` lock, so the prober
+        //    (which reads members + epoch under that same lock) can't pair one generation's members
+        //    with another's epoch.
+        // `old` is snapshotted under the lock and indexed with `.get()` for defence in depth.
+        let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+        let old = self.members();
+        // Prior best working proxy: the pin (if valid) else the ranked best; must be healthy. Keyed
+        // by `label` (stable `"{protocol} {addr}"` server identity).
+        let idx = sel
+            .pinned
+            .filter(|&p| p < old.len())
+            .or_else(|| sel.ranked.first().copied());
+        let prior = idx.and_then(|i| {
+            let m = old.get(i)?;
+            let oc = sel.latest.get(i).copied().flatten();
+            match oc {
+                Some(o) if o.healthy && !m.label.is_empty() => Some((m.clone(), o)),
+                _ => None,
+            }
+        });
+        // The current manual pin's server identity, to re-apply if it survives the refresh.
+        let pinned_label = sel
+            .pinned
+            .and_then(|p| old.get(p))
+            .map(|m| m.label.clone())
+            .filter(|l| !l.is_empty());
         // Carry the proven server over if the refreshed config no longer lists it.
         let mut carried: Option<(usize, ProbeOutcome)> = None;
         if let Some((m, oc)) = prior {
@@ -319,28 +324,27 @@ impl SelectingTransport {
         }
         let new_arc = Arc::new(new_members);
         let n = new_arc.len();
+        // Swap members + bump the epoch atomically under the members lock, so the prober reads a
+        // consistent (members, epoch) pair and a round that straddles this reload is discarded.
         {
-            // selection → members lock order (the only site holding both), matching all readers.
-            let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
-            *self.members.lock().unwrap_or_else(|e| e.into_inner()) = Arc::clone(&new_arc);
-            // Carried-best leads (continuity), then the rest in config order.
-            let mut ranked = Vec::with_capacity(n);
-            if let Some((ci, _)) = carried {
-                ranked.push(ci);
-            }
-            ranked.extend((0..n).filter(|&i| carried.map(|(ci, _)| ci) != Some(i)));
-            sel.ranked = ranked.into();
-            sel.latest = vec![None; n];
-            if let Some((ci, oc)) = carried {
-                sel.latest[ci] = Some(oc);
-            }
-            // Keep the manual pin only if that exact server survived the refresh.
-            sel.pinned = pinned_label.and_then(|lbl| new_arc.iter().position(|m| m.label == lbl));
-            // Bump the epoch under the same lock as the swap, so a prober round that started before
-            // this reload discards its (now stale-generation) outcomes instead of clobbering the
-            // reset above.
+            let mut m = self.members.lock().unwrap_or_else(|e| e.into_inner());
+            *m = Arc::clone(&new_arc);
             self.epoch.fetch_add(1, Ordering::Relaxed);
         }
+        // Reset the selection for the new pool: carried-best leads (continuity), then config order.
+        let mut ranked = Vec::with_capacity(n);
+        if let Some((ci, _)) = carried {
+            ranked.push(ci);
+        }
+        ranked.extend((0..n).filter(|&i| carried.map(|(ci, _)| ci) != Some(i)));
+        sel.ranked = ranked.into();
+        sel.latest = vec![None; n];
+        if let Some((ci, oc)) = carried {
+            sel.latest[ci] = Some(oc);
+        }
+        // Keep the manual pin only if that exact server survived the refresh.
+        sel.pinned = pinned_label.and_then(|lbl| new_arc.iter().position(|m| m.label == lbl));
+        drop(sel);
         tracing::info!(members = n, "pool reloaded from refreshed config");
         self.reprobe.notify_one();
     }
@@ -523,11 +527,14 @@ async fn prober_loop(
     let per_probe = interval.min(std::time::Duration::from_secs(10));
     let mut measured = false;
     loop {
-        // Snapshot the live member set + its generation for this round. A `reload` mid-round is
-        // picked up on the next round (and wakes us early via `reprobe`), so a refreshed pool is
-        // probed promptly.
-        let members = members.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let gen = epoch.load(Ordering::Relaxed);
+        // Snapshot the live member set + its generation for this round, both read under the members
+        // lock so they're a consistent pair (reload swaps members + bumps the epoch under that same
+        // lock). A `reload` mid-round is caught by the post-probe epoch re-check and re-probed
+        // promptly (reload wakes us via `reprobe`).
+        let (members, gen) = {
+            let guard = members.lock().unwrap_or_else(|e| e.into_inner());
+            (guard.clone(), epoch.load(Ordering::Relaxed))
+        };
         let outcomes = flint_dial::probe_windowed(members.len(), window, |i| {
             // Clone the (cheap) Arc + CallbackUrl into the future so it borrows nothing from `members`.
             let transport = Arc::clone(&members[i].transport);
