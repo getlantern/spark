@@ -82,9 +82,11 @@ pub(crate) fn tray_pin(index: i32) -> Option<usize> {
     }
 }
 
-/// Convert a pin back to the i32 wire value (None → -1).
+/// Convert a pin back to the i32 wire value (None → -1). A pin is a small pool index by
+/// construction, but use a checked conversion rather than `as i32` so an out-of-range value can
+/// never silently wrap into a wrong server index — it falls back to auto (-1) instead.
 pub(crate) fn tray_pin_to_i32(pin: Option<usize>) -> i32 {
-    pin.map_or(-1, |i| i as i32)
+    pin.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1)
 }
 
 /// Initialise the `spark-vpn` plugin. Wire this into the Tauri builder via

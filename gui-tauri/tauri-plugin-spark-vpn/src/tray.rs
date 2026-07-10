@@ -430,6 +430,8 @@ mod tests {
         assert_eq!(crate::tray_pin(5), Some(5));
         assert_eq!(crate::tray_pin_to_i32(None), -1);
         assert_eq!(crate::tray_pin_to_i32(Some(5)), 5);
+        // Out-of-range pin (can't happen with a real pool index) falls back to auto, never wraps.
+        assert_eq!(crate::tray_pin_to_i32(Some(usize::MAX)), -1);
     }
 
     #[test]
