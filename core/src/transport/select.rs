@@ -238,6 +238,76 @@ impl SelectingTransport {
         tracing::debug!(?index, "server selection pin updated");
         true
     }
+
+    /// Live-replace the pool's members with `new_members` (built from a refreshed config), so new
+    /// servers are probed and surfaced without a reconnect. Retains the **best prior working proxy**
+    /// so traffic never gaps while the new set is measured: the current best *healthy* member (the
+    /// pin if valid, else the latency-ranked best) is identified by its `label` (a stable
+    /// `"{protocol} {addr}"` server identity); if the refreshed config dropped it, its `Member` is
+    /// carried over as a fallback. That member is seeded first in the ranking with its last-good
+    /// outcome so it stays "current" until the immediate re-probe re-ranks (hysteresis lets a clearly
+    /// better new server take over; an unhealthy carried member drops out on the next round). A
+    /// manual pin is preserved by identity only if that exact server survives the refresh.
+    pub(crate) fn reload(&self, mut new_members: Vec<Member>) {
+        let old = self.members();
+        // Prior best working proxy + the manual pin's identity, read together under the selection lock.
+        let (prior, pinned_label) = {
+            let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+            let idx = sel
+                .pinned
+                .filter(|&p| p < old.len())
+                .or_else(|| sel.ranked.first().copied());
+            let prior = idx.and_then(|i| {
+                let oc = sel.latest.get(i).copied().flatten();
+                match oc {
+                    Some(o) if o.healthy && !old[i].label.is_empty() => Some((old[i].clone(), o)),
+                    _ => None,
+                }
+            });
+            let pinned_label = sel
+                .pinned
+                .and_then(|p| old.get(p))
+                .map(|m| m.label.clone())
+                .filter(|l| !l.is_empty());
+            (prior, pinned_label)
+        };
+        // Carry the proven server over if the refreshed config no longer lists it.
+        let mut carried: Option<(usize, ProbeOutcome)> = None;
+        if let Some((m, oc)) = prior {
+            match new_members
+                .iter()
+                .position(|nm| !nm.label.is_empty() && nm.label == m.label)
+            {
+                Some(pos) => carried = Some((pos, oc)),
+                None => {
+                    new_members.push(m);
+                    carried = Some((new_members.len() - 1, oc));
+                }
+            }
+        }
+        let new_arc = Arc::new(new_members);
+        let n = new_arc.len();
+        {
+            // selection → members lock order (the only site holding both), matching all readers.
+            let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+            *self.members.lock().unwrap_or_else(|e| e.into_inner()) = Arc::clone(&new_arc);
+            // Carried-best leads (continuity), then the rest in config order.
+            let mut ranked = Vec::with_capacity(n);
+            if let Some((ci, _)) = carried {
+                ranked.push(ci);
+            }
+            ranked.extend((0..n).filter(|&i| carried.map(|(ci, _)| ci) != Some(i)));
+            sel.ranked = ranked.into();
+            sel.latest = vec![None; n];
+            if let Some((ci, oc)) = carried {
+                sel.latest[ci] = Some(oc);
+            }
+            // Keep the manual pin only if that exact server survived the refresh.
+            sel.pinned = pinned_label.and_then(|lbl| new_arc.iter().position(|m| m.label == lbl));
+        }
+        tracing::info!(members = n, "pool reloaded from refreshed config");
+        self.reprobe.notify_one();
+    }
 }
 
 /// The dyn-dispatched control surface the fd-path tunnel registers for the platform FFI. Delegates
@@ -643,6 +713,10 @@ mod tests {
             ..Default::default()
         }
     }
+    // A member with a stable `label` server-identity (what `reload` matches on to retain/dedup).
+    fn member_labeled(ok: bool, meta: ServerMeta, label: &str) -> Member {
+        member_with_meta(ok, meta).with_label(label.to_string())
+    }
     // A selecting transport with a healthy direct fallback (TCP + UDP both succeed), so the tests
     // that exercise fail-open observe a successful direct dial.
     fn selecting(members: Vec<Member>, ranked: Vec<usize>) -> SelectingTransport {
@@ -793,6 +867,104 @@ mod tests {
         let snap = t.snapshot();
         assert!(!snap[0].is_current);
         assert!(snap[1].is_current, "the pinned member is current");
+    }
+
+    #[tokio::test]
+    async fn reload_replaces_members() {
+        let t = selecting(vec![member_with_meta(true, meta("old", "US"))], vec![0]);
+        t.reload(vec![
+            member_with_meta(true, meta("newA", "GB")),
+            member_with_meta(true, meta("newB", "DE")),
+        ]);
+        let snap = t.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].meta.name.as_deref(), Some("newA"));
+        assert_eq!(snap[1].meta.name.as_deref(), Some("newB"));
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_best_prior_working_proxy() {
+        // A healthy, labeled incumbent that the refreshed config omits must be carried over.
+        let t = selecting(
+            vec![member_labeled(
+                true,
+                meta("keep", "US"),
+                "samizdat 1.1.1.1:443",
+            )],
+            vec![0],
+        );
+        {
+            let mut sel = t.selection.lock().unwrap();
+            sel.latest = vec![Some(ProbeOutcome {
+                latency: Duration::from_millis(30),
+                healthy: true,
+            })];
+        }
+        t.reload(vec![member_labeled(
+            true,
+            meta("fresh", "GB"),
+            "hysteria2 2.2.2.2:443",
+        )]);
+        let snap = t.snapshot();
+        let kept = snap
+            .iter()
+            .find(|s| s.meta.name.as_deref() == Some("keep"))
+            .expect("proven server carried over");
+        assert!(
+            kept.is_current,
+            "carried best leads new flows until re-probe"
+        );
+        assert!(kept.healthy, "carried best keeps its last-good health");
+        assert_eq!(kept.latency_ms, Some(30), "and its last-good latency");
+    }
+
+    #[tokio::test]
+    async fn reload_dedups_retained_best_when_present() {
+        // When the refreshed config still lists the prior best, don't duplicate it.
+        let t = selecting(
+            vec![member_labeled(
+                true,
+                meta("keep", "US"),
+                "samizdat 1.1.1.1:443",
+            )],
+            vec![0],
+        );
+        {
+            let mut sel = t.selection.lock().unwrap();
+            sel.latest = vec![Some(ProbeOutcome {
+                latency: Duration::from_millis(30),
+                healthy: true,
+            })];
+        }
+        t.reload(vec![
+            member_labeled(true, meta("keep", "US"), "samizdat 1.1.1.1:443"),
+            member_labeled(true, meta("fresh", "GB"), "hysteria2 2.2.2.2:443"),
+        ]);
+        let snap = t.snapshot();
+        assert_eq!(snap.len(), 2, "no duplicate of the retained server");
+        assert_eq!(snap[0].meta.name.as_deref(), Some("keep"));
+        assert!(snap[0].is_current, "retained best still leads");
+    }
+
+    #[tokio::test]
+    async fn reload_drops_pin_when_server_gone() {
+        // A manual pin is preserved by identity only if that exact server survives the refresh.
+        let t = selecting(
+            vec![
+                member_labeled(true, meta("a", "US"), "samizdat 1.1.1.1:443"),
+                member_labeled(true, meta("b", "GB"), "hysteria2 2.2.2.2:443"),
+            ],
+            vec![0, 1],
+        );
+        t.set_pin(Some(1)); // pin "b"
+                            // Refresh drops "b"; only "c" remains. The pin must not carry to a different server.
+        t.reload(vec![member_labeled(
+            true,
+            meta("c", "DE"),
+            "shadowsocks 3.3.3.3:443",
+        )]);
+        let sel = t.selection.lock().unwrap();
+        assert_eq!(sel.pinned, None, "pin dropped: the pinned server is gone");
     }
 
     #[test]
