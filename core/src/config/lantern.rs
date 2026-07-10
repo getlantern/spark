@@ -68,6 +68,25 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
     if raw.poll_interval_seconds > 0 {
         cfg.transport.probe_interval_secs = raw.poll_interval_seconds;
     }
+    // Stall-detection knobs: absent ⇒ TransportConfig defaults hold; present ⇒ override.
+    if let Some(v) = raw.stall_window_seconds {
+        cfg.transport.stall_window_secs = v;
+    }
+    if let Some(v) = raw.stall_demote_count {
+        cfg.transport.stall_demote_count = v;
+    }
+    if let Some(v) = raw.stall_demote_window_seconds {
+        cfg.transport.stall_demote_window_secs = v;
+    }
+    if let Some(v) = raw.stall_quarantine_seconds {
+        cfg.transport.stall_quarantine_secs = v;
+    }
+    if let Some(v) = raw.stall_quarantine_max_seconds {
+        cfg.transport.stall_quarantine_max_secs = v;
+    }
+    if let Some(v) = raw.stall_trial_flows {
+        cfg.transport.stall_trial_flows = v;
+    }
     for ob in &raw.options.outbounds {
         let Some(spec) = map_outbound(ob) else {
             tracing::warn!(
@@ -314,6 +333,19 @@ struct RawRoot {
     /// Ad/malware/phishing rule-sets to drop.
     #[serde(default)]
     ad_block: Vec<RawRuleSetRef>,
+    // Stall-detection knobs — absent today; present fields override TransportConfig defaults.
+    #[serde(default)]
+    stall_window_seconds: Option<u64>,
+    #[serde(default)]
+    stall_demote_count: Option<u32>,
+    #[serde(default)]
+    stall_demote_window_seconds: Option<u64>,
+    #[serde(default)]
+    stall_quarantine_seconds: Option<u64>,
+    #[serde(default)]
+    stall_quarantine_max_seconds: Option<u64>,
+    #[serde(default)]
+    stall_trial_flows: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -792,5 +824,41 @@ mod tests {
             { "type": "hysteria2", "tag": "noport", "server": "198.51.100.9", "password": "x" }
         ]}}"#;
         from_config_raw_json(raw).expect_err("zero-port outbound must not form a pool entry");
+    }
+
+    #[test]
+    fn stall_defaults_preserved_when_absent() {
+        // SAMPLE has no stall_* fields; Config::default() values must survive unchanged.
+        let c = parse();
+        assert_eq!(c.transport.stall_window_secs, 15);
+        assert_eq!(c.transport.stall_demote_count, 3);
+        assert_eq!(c.transport.stall_demote_window_secs, 30);
+        assert_eq!(c.transport.stall_quarantine_secs, 60);
+        assert_eq!(c.transport.stall_quarantine_max_secs, 600);
+        assert_eq!(c.transport.stall_trial_flows, 2);
+    }
+
+    #[test]
+    fn stall_override_maps_from_wire() {
+        // A config_raw payload that carries stall_* fields must override the defaults.
+        let raw = r#"{
+          "stall_window_seconds": 42,
+          "stall_demote_count": 7,
+          "stall_demote_window_seconds": 90,
+          "stall_quarantine_seconds": 120,
+          "stall_quarantine_max_seconds": 1200,
+          "stall_trial_flows": 5,
+          "options": { "outbounds": [
+            { "type": "samizdat", "tag": "sz-1", "server": "198.51.100.10", "server_port": 8443,
+              "public_key": "aa11bb22", "short_id": "00ff00ff", "server_name": "cover.example.com" }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("stall-override config_raw adapts");
+        assert_eq!(cfg.transport.stall_window_secs, 42);
+        assert_eq!(cfg.transport.stall_demote_count, 7);
+        assert_eq!(cfg.transport.stall_demote_window_secs, 90);
+        assert_eq!(cfg.transport.stall_quarantine_secs, 120);
+        assert_eq!(cfg.transport.stall_quarantine_max_secs, 1200);
+        assert_eq!(cfg.transport.stall_trial_flows, 5);
     }
 }
