@@ -8,6 +8,7 @@ mod udp;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
@@ -66,6 +67,25 @@ pub enum Hysteria2Error {
 /// unknown", which tells the server to use BBR congestion control instead of a fixed Brutal rate.
 fn rx_bps(down_mbps: u32) -> u64 {
     (down_mbps as u64) * 125_000
+}
+
+/// QUIC keep-alive interval for hysteria2 connections.
+///
+/// quinn's default `keep_alive_interval` is `None` (the client sends no PINGs) and its default
+/// `max_idle_timeout` is 30s. Without a keep-alive, a hysteria2 QUIC connection that goes idle
+/// between bursts (e.g. while the user reads a page) is silently torn down after 30s of silence;
+/// the next flow that reuses the cached connection then fails with `connection lost` / `timed out`,
+/// forcing a failover on every burst after a reading pause (observed on device, uncensored network).
+/// The reference apernet/hysteria client sets a keep-alive for exactly this reason. This must stay
+/// comfortably below the idle timeout so a mostly-idle connection is held open.
+const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Build the quinn transport config for hysteria2 connections: quinn's defaults plus a keep-alive
+/// interval (see [`QUIC_KEEP_ALIVE_INTERVAL`]). The 30s default `max_idle_timeout` is left as-is.
+fn quic_transport_config() -> quinn::TransportConfig {
+    let mut tc = quinn::TransportConfig::default();
+    tc.keep_alive_interval(Some(QUIC_KEEP_ALIVE_INTERVAL));
+    tc
 }
 
 /// Lowercase-hex encode `bytes` without pulling in a `hex` dependency. Used only to render a
@@ -271,7 +291,9 @@ async fn connect(
     let tls = rustls_client_config(cfg)?;
     let quic =
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| Hysteria2Error::Tls)?;
-    let client_config = quinn::ClientConfig::new(Arc::new(quic));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
+    // Attach a keep-alive so an idle connection isn't torn down after quinn's 30s idle timeout.
+    client_config.transport_config(Arc::new(quic_transport_config()));
 
     // A UDP socket bound to 0.0.0.0:0 (family from `server`), pinned to the physical interface when a
     // protector is set so the QUIC data plane bypasses the tunnel route. Already non-blocking, as both
@@ -853,6 +875,30 @@ mod tests {
         assert_eq!(rx_bps(0), 0); // 0 = "unknown" → server uses BBR
         assert_eq!(rx_bps(1), 125_000);
         assert_eq!(rx_bps(100), 12_500_000);
+    }
+
+    #[test]
+    fn quic_transport_config_enables_keepalive_below_idle_timeout() {
+        // Regression guard for the on-device bug where hysteria2 (QUIC) connections were silently
+        // torn down after quinn's 30s default idle timeout: with no keep-alive PING an idle
+        // connection dies, and the next reused-connection dial fails with "connection lost" /
+        // "timed out", forcing a failover on every burst after a reading pause. The reference
+        // apernet/hysteria client sets a keep-alive; so must we. The interval must be non-zero and
+        // strictly below the idle timeout so a mostly-idle connection is held open.
+        assert!(QUIC_KEEP_ALIVE_INTERVAL > Duration::ZERO);
+        // quinn's default max_idle_timeout is 30s (quinn-proto TransportConfig::default); the
+        // keep-alive must stay comfortably under it.
+        assert!(QUIC_KEEP_ALIVE_INTERVAL < Duration::from_secs(30));
+        // The interval actually lands in the produced config (quinn's manual Debug prints the field).
+        let rendered = format!("{:?}", quic_transport_config());
+        assert!(
+            !rendered.contains("keep_alive_interval: None"),
+            "keep_alive_interval must be set, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("keep_alive_interval: Some("),
+            "keep_alive_interval must be set, got: {rendered}"
+        );
     }
 
     #[test]
