@@ -22,7 +22,6 @@ use crate::transport::{
 use crate::BoxedStream;
 
 /// Stall-detection tunables captured from `TransportConfig` at pool build.
-#[allow(dead_code)] // used in Tasks 6-9
 #[derive(Clone, Copy)]
 pub(crate) struct StallConfig {
     pub(crate) window: std::time::Duration,
@@ -100,9 +99,8 @@ struct Selection {
 }
 
 /// Per-member liveness state driven by stall reports (separate from the latency `Selection`).
-#[allow(dead_code)] // OnTrial + fields used in Tasks 8-9
 #[derive(Clone)]
-enum MemberState {
+pub(crate) enum MemberState {
     Healthy,
     /// Quarantined until this instant; `strikes` counts consecutive quarantines (backoff).
     Quarantined {
@@ -549,6 +547,13 @@ impl SelectingTransport {
             MemberState::Quarantined { .. }
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn member_state(&self, i: usize) -> MemberState {
+        self.health.lock().unwrap_or_else(|e| e.into_inner())[i]
+            .state
+            .clone()
+    }
 }
 
 impl StallSink for SelectingTransport {
@@ -592,7 +597,25 @@ impl StallSink for SelectingTransport {
             tracing::info!(member, strikes = n, "pool member quarantined (stalls)");
         }
     }
-    fn record_flow_ok(&self, _member: usize) {}
+    fn record_flow_ok(&self, member: usize) {
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(h) = health.get_mut(member) else {
+            return;
+        };
+        match &mut h.state {
+            MemberState::OnTrial { clean_needed, .. } => {
+                *clean_needed = clean_needed.saturating_sub(1);
+                if *clean_needed == 0 {
+                    h.state = MemberState::Healthy;
+                    h.recent_stalls.clear();
+                    tracing::info!(member, "pool member restored after clean trial flows");
+                }
+            }
+            // Outside trial, a clean flow ages out transient stalls.
+            MemberState::Healthy => h.recent_stalls.clear(),
+            MemberState::Quarantined { .. } => {}
+        }
+    }
 }
 
 /// The dyn-dispatched control surface the fd-path tunnel registers for the platform FFI. Delegates
@@ -1395,6 +1418,38 @@ mod tests {
             order.first().copied(),
             Some(0),
             "trial member gets the next flow"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trial_restores_after_clean_flows() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let _ = t.members_and_order(); // promotes to OnTrial (clean_needed = 2)
+        StallSink::record_flow_ok(&t, 0);
+        StallSink::record_flow_ok(&t, 0); // 2 clean trial flows → restored
+        assert!(matches!(t.member_state(0), MemberState::Healthy));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trial_stall_requarantines_with_backoff() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let _ = t.members_and_order(); // OnTrial, strikes = 1
+        StallSink::record_stall(&t, 0); // a trial-flow stall → re-quarantine (strikes = 2)
+        assert!(t.is_quarantined(0));
+        // Backoff doubled: still quarantined after the first 60s cooldown, cleared only after ~120s.
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let _ = t.members_and_order();
+        assert!(
+            t.is_quarantined(0),
+            "second-strike cooldown is ~120s, not 60s"
         );
     }
 
