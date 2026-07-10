@@ -18,6 +18,9 @@ use crate::transport::{
 use crate::BoxedStream;
 
 /// A built pool member: its transport pair, the callback URL used to probe it, and UI metadata.
+/// `Clone` is cheap — the transports are `Arc`s — and lets [`SelectingTransport::reload`] carry a
+/// proven member across a live config swap.
+#[derive(Clone)]
 pub(crate) struct Member {
     pub(crate) transport: Arc<dyn Transport>,
     pub(crate) udp: Arc<dyn UdpTransport>,
@@ -79,7 +82,11 @@ struct Selection {
 /// When no member can serve a flow (the pool is all-unhealthy, or every dial in the current order
 /// fails), the transport **fails open to direct** rather than erroring — see [`Self::dial`].
 pub struct SelectingTransport {
-    members: Arc<Vec<Member>>,
+    /// The live member list. Wrapped in a mutex-guarded `Arc` so [`Self::reload`] can atomically
+    /// swap in a refreshed set (new flows/probes pick it up) without disturbing in-flight dials —
+    /// mirrors the `selection` mutex discipline (short lock, never held across `.await`). Readers
+    /// take a cheap `Arc` clone via [`Self::members`].
+    members: Arc<Mutex<Arc<Vec<Member>>>>,
     selection: Arc<Mutex<Selection>>,
     reprobe: Arc<tokio::sync::Notify>,
     prober: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -103,14 +110,15 @@ impl SelectingTransport {
         direct_tcp: Arc<dyn Transport>,
         direct_udp: Arc<dyn UdpTransport>,
     ) -> Self {
-        let members = Arc::new(members);
+        let len = members.len();
+        let members = Arc::new(Mutex::new(Arc::new(members)));
         // Seed with config order so flows can dial (with failover) before the first probe round;
         // without it, startup flows would fail open to direct (below) before the pool ever got a
         // chance to prove itself.
-        let seeded: Arc<[usize]> = (0..members.len()).collect();
+        let seeded: Arc<[usize]> = (0..len).collect();
         let selection = Arc::new(Mutex::new(Selection {
             ranked: seeded,
-            latest: vec![None; members.len()],
+            latest: vec![None; len],
             pinned: None,
         }));
         let reprobe = Arc::new(tokio::sync::Notify::new());
@@ -133,16 +141,27 @@ impl SelectingTransport {
         }
     }
 
+    /// A cheap snapshot of the current member list (short lock, never held across `.await`). Callers
+    /// index it with `.get(i)` because a concurrent [`Self::reload`] may have shrunk the pool since
+    /// the `selection` indices were computed.
+    fn members(&self) -> Arc<Vec<Member>> {
+        self.members
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// The order in which `dial` tries members for a new flow: the pinned member first (if any),
     /// then the latency-ranked rest. On auto (no pin) this is just the ranked order. Snapshot; the
     /// lock is never held across `.await`. The common (unpinned) path returns a cheap `Arc` clone.
     fn order(&self) -> Arc<[usize]> {
+        let len = self.members().len();
         let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         match sel.pinned {
             // Pin first, then the ranked rest (minus the pin). Even an unhealthy pin (not in
             // `ranked`) is tried first — the user chose it — then we fail over to healthy members.
-            Some(p) if p < self.members.len() => {
-                let mut v = Vec::with_capacity(self.members.len());
+            Some(p) if p < len => {
+                let mut v = Vec::with_capacity(len);
                 v.push(p);
                 v.extend(sel.ranked.iter().copied().filter(|&i| i != p));
                 v.into()
@@ -172,19 +191,20 @@ impl SelectingTransport {
     /// one new flows currently dial first — for the server-selection UI. Reads the live state under
     /// the short selection lock (never across `.await`); ordered by pool index (the UI groups/sorts).
     pub fn snapshot(&self) -> Vec<MemberStatus> {
+        let members = self.members();
         let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         // The member new flows dial first: the pin if valid, else the latency-ranked best.
         let current = match sel.pinned {
-            Some(p) if p < self.members.len() => Some(p),
+            Some(p) if p < members.len() => Some(p),
             _ => sel.ranked.first().copied(),
         };
-        (0..self.members.len())
+        (0..members.len())
             .map(|i| {
                 let outcome = sel.latest.get(i).copied().flatten();
                 MemberStatus {
                     index: i,
-                    meta: self.members[i].meta.clone(),
-                    protocol: self.members[i].protocol.clone(),
+                    meta: members[i].meta.clone(),
+                    protocol: members[i].protocol.clone(),
                     // Latency is only meaningful for a healthy probe (`latency` is `Duration::MAX`
                     // on failure), so report `None` unless healthy.
                     latency_ms: outcome
@@ -207,12 +227,9 @@ impl SelectingTransport {
     /// instead of always reporting success.
     pub fn set_pin(&self, index: Option<usize>) -> bool {
         if let Some(i) = index {
-            if i >= self.members.len() {
-                tracing::warn!(
-                    index = i,
-                    pool = self.members.len(),
-                    "set_pin ignored: index out of range"
-                );
+            let len = self.members().len();
+            if i >= len {
+                tracing::warn!(index = i, pool = len, "set_pin ignored: index out of range");
                 return false;
             }
         }
@@ -242,9 +259,12 @@ impl Transport for SelectingTransport {
     /// open to a direct dial** (loudly logged) so traffic degrades to a direct connection rather
     /// than blackholing (issue #11; arch doc §5 fail-open default).
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        let members = self.members();
         let order = self.order();
         for &i in order.iter() {
-            match self.members[i].transport.dial(target).await {
+            // Bounds-guard: a concurrent `reload` may have shrunk the pool since `order` was read.
+            let Some(m) = members.get(i) else { continue };
+            match m.transport.dial(target).await {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     self.demote(i);
@@ -254,17 +274,19 @@ impl Transport for SelectingTransport {
         }
         tracing::warn!(
             %target,
-            pool = self.members.len(),
+            pool = members.len(),
             "no pool member could serve the flow; failing open to a direct dial"
         );
         self.direct_tcp.dial(target).await
     }
 
     async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        let members = self.members();
         let order = self.order();
         let mut last_err = None;
         for &i in order.iter() {
-            match self.members[i].transport.dial_addr(target.clone()).await {
+            let Some(m) = members.get(i) else { continue };
+            match m.transport.dial_addr(target.clone()).await {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     // Don't demote a member that merely can't carry a domain target (`Unsupported`) —
@@ -284,7 +306,7 @@ impl Transport for SelectingTransport {
             Address::Ip(sa) => {
                 tracing::warn!(
                     %sa,
-                    pool = self.members.len(),
+                    pool = members.len(),
                     "no pool member could serve the flow; failing open to a direct dial"
                 );
                 self.direct_tcp.dial(sa).await
@@ -303,9 +325,11 @@ impl UdpTransport for SelectingTransport {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        let members = self.members();
         let order = self.order();
         for &i in order.iter() {
-            match self.members[i].udp.dial_udp(target).await {
+            let Some(m) = members.get(i) else { continue };
+            match m.udp.dial_udp(target).await {
                 Ok(p) => return Ok(p),
                 Err(e) => {
                     self.demote(i);
@@ -315,7 +339,7 @@ impl UdpTransport for SelectingTransport {
         }
         tracing::warn!(
             %target,
-            pool = self.members.len(),
+            pool = members.len(),
             "no pool member could serve the udp flow; failing open to a direct dial"
         );
         self.direct_udp.dial_udp(target).await
@@ -329,9 +353,11 @@ impl UdpTransport for SelectingTransport {
         &self,
         target: Address,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        let members = self.members();
         let order = self.order();
         for &i in order.iter() {
-            match self.members[i].udp.dial_udp_addr(target.clone()).await {
+            let Some(m) = members.get(i) else { continue };
+            match m.udp.dial_udp_addr(target.clone()).await {
                 Ok(p) => return Ok(p),
                 Err(e) if e.kind() == io::ErrorKind::Unsupported => {
                     tracing::debug!(
@@ -361,7 +387,7 @@ impl Drop for SelectingTransport {
 /// wait `interval` (or until a demotion wakes it early) and repeat. Per-probe deadline = `interval`
 /// capped at 10s so a slow server can't stall a whole round on a short interval.
 async fn prober_loop(
-    members: Arc<Vec<Member>>,
+    members: Arc<Mutex<Arc<Vec<Member>>>>,
     selection: Arc<Mutex<Selection>>,
     reprobe: Arc<tokio::sync::Notify>,
     interval: std::time::Duration,
@@ -371,6 +397,9 @@ async fn prober_loop(
     let per_probe = interval.min(std::time::Duration::from_secs(10));
     let mut measured = false;
     loop {
+        // Snapshot the live member set for this round. A `reload` mid-round is picked up on the next
+        // round (and wakes us early via `reprobe`), so a refreshed pool is probed promptly.
+        let members = members.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let outcomes = flint_dial::probe_windowed(members.len(), window, |i| {
             // Clone the (cheap) Arc + CallbackUrl into the future so it borrows nothing from `members`.
             let transport = Arc::clone(&members[i].transport);
@@ -632,7 +661,7 @@ mod tests {
     ) -> SelectingTransport {
         let n = members.len();
         SelectingTransport {
-            members: Arc::new(members),
+            members: Arc::new(Mutex::new(Arc::new(members))),
             selection: Arc::new(Mutex::new(Selection {
                 ranked: ranked.into(),
                 latest: vec![None; n],
