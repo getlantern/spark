@@ -62,16 +62,13 @@ use tauri::{
     AppHandle, Manager, Runtime,
 };
 
-/// The tray icon PNG, embedded at compile time.
-const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray.png");
-
 /// Build the system tray and register it. Called once from the plugin `.setup()`.
 pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let show = MenuItemBuilder::with_id("show", "Show Spark").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Spark").build(app)?;
     let menu = MenuBuilder::new(app).item(&show).item(&quit).build()?;
 
-    let icon = tauri::image::Image::from_bytes(TRAY_ICON_PNG)?;
+    let icon = tauri::include_image!("icons/tray.png");
     TrayIconBuilder::with_id("spark-tray")
         .icon(icon)
         .icon_as_template(true) // macOS: adapt to light/dark menu bar; ignored elsewhere
