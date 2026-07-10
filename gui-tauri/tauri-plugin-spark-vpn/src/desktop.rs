@@ -788,6 +788,11 @@ impl TunnelControl for AppleControl {
     fn servers(&self) -> crate::Result<Vec<ServerInfo>> {
         // Static list from config first, so the screen shows the pool even before connecting.
         let mut list = servers_from_config();
+        // No TOML dev-override → fall back to the NE's shared config_raw.json cache so the location
+        // list shows before connecting (and persists between sessions).
+        if list.is_empty() {
+            list = servers_from_cache();
+        }
         // Overlay live latency / health / current — but only when actually connected, else
         // sendProviderMessage to a down session just burns the 5s timeout on every poll.
         let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
