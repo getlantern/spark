@@ -16,8 +16,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 # Parse the resolved config.toml dev override for the static server list (servers_from_config).
-# Used only on macOS (cfg-gated in desktop.rs) but listed as a non-platform dep to avoid
-# a conditional dep block; it's a compile-only dependency with no runtime cost on other targets.
+# Used only on the Apple targets — macOS + iOS (cfg-gated in desktop.rs) — but listed as a
+# non-platform dep to avoid a conditional dep block; a compile-only dependency with no runtime cost
+# on other targets.
 toml = "0.8"
 
 # Windows/Linux desktop: talk to the privileged spark-service over spark-ipc (W3). Gated off

@@ -303,9 +303,11 @@ mod ne_spike {
     /// final verdict. `config` is the resolved data-path config (TOML/host:port),
     /// handed to the extension via providerConfiguration["config"].
     ///
-    /// First activates the org.getlantern.spark.tunnel system extension (U1b-2b-ii,
-    /// prompting approval on first run) so there's a provider to start, then runs the
-    /// save/start chain. Needs the NE entitlement (present in the signed product build).
+    /// On macOS, first activates the org.getlantern.spark.tunnel *system extension* (U1b-2b-ii,
+    /// prompting approval on first run) so there's a provider to start. On iOS the NE is a bundled
+    /// app-extension — no activation step; consent is the "Allow VPN configuration" prompt raised
+    /// by saveToPreferences. Then runs the save/start chain. Needs the NE entitlement (present in
+    /// the signed product build).
     ///
     /// The one adaptation from the app's version: instead of reading split-tunnel /
     /// routing-mode from the app's config module internally, they are passed in as
