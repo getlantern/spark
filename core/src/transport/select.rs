@@ -269,24 +269,56 @@ impl SelectingTransport {
             .clone()
     }
 
+    /// Indices currently excluded from new flows: quarantined members whose cooldown hasn't elapsed.
+    /// Locks ONLY `health` — never call while the `selection` guard is alive.
+    fn excluded(&self) -> std::collections::HashSet<usize> {
+        let now = tokio::time::Instant::now();
+        let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        health
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| match h.state {
+                MemberState::Quarantined { until, .. } if until > now => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// A **consistent** `(members, dial-order)` pair, read under a single `selection`-lock hold
     /// (selection → members order) so a racing [`Self::reload`] — which swaps both under the same
     /// lock — can't pair a new order with old members (or vice-versa) for one flow. The order is the
     /// pinned member first (if any), then the latency-ranked rest; on auto it's just the ranking.
-    /// Neither lock is held across `.await`.
+    /// Quarantined members are filtered out AFTER the selection lock is released, then `health` is
+    /// locked — the two locks are never held simultaneously. Neither lock is held across `.await`.
     fn members_and_order(&self) -> (Arc<Vec<Member>>, Arc<[usize]>) {
-        let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
-        let members = self.members();
-        let order = match sel.pinned {
-            // Pin first, then the ranked rest (minus the pin). Even an unhealthy pin (not in
-            // `ranked`) is tried first — the user chose it — then we fail over to healthy members.
-            Some(p) if p < members.len() => {
-                let mut v = Vec::with_capacity(members.len());
-                v.push(p);
-                v.extend(sel.ranked.iter().copied().filter(|&i| i != p));
-                v.into()
-            }
-            _ => sel.ranked.clone(),
+        // Scope the selection lock so it drops before we call excluded() (which locks health).
+        let (members, order) = {
+            let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+            let members = self.members();
+            let order: Arc<[usize]> = match sel.pinned {
+                // Pin first, then the ranked rest (minus the pin). Even an unhealthy pin (not in
+                // `ranked`) is tried first — the user chose it — then we fail over to healthy members.
+                Some(p) if p < members.len() => {
+                    let mut v = Vec::with_capacity(members.len());
+                    v.push(p);
+                    v.extend(sel.ranked.iter().copied().filter(|&i| i != p));
+                    v.into()
+                }
+                _ => sel.ranked.clone(),
+            };
+            (members, order)
+            // `sel` (selection guard) is dropped here — before excluded() below.
+        };
+        // Lock only `health` now (selection guard already dropped above).
+        let excluded = self.excluded();
+        let order: Arc<[usize]> = if excluded.is_empty() {
+            order
+        } else {
+            order
+                .iter()
+                .copied()
+                .filter(|i| !excluded.contains(i))
+                .collect()
         };
         (members, order)
     }
@@ -318,7 +350,11 @@ impl SelectingTransport {
     /// A point-in-time view of every pool member — metadata, last-probe latency/health, and which
     /// one new flows currently dial first — for the server-selection UI. Reads the live state under
     /// the short selection lock (never across `.await`); ordered by pool index (the UI groups/sorts).
+    /// Quarantined members are reported as unhealthy. `excluded()` is called before the `selection`
+    /// lock is taken so that `health` and `selection` are never held simultaneously.
     pub fn snapshot(&self) -> Vec<MemberStatus> {
+        // Compute excluded BEFORE taking selection lock (locks only `health`).
+        let excluded = self.excluded();
         // Read members under the selection lock (selection → members order) so a racing `reload`
         // can't pair one generation's members with another's ranking/latency.
         let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
@@ -331,6 +367,7 @@ impl SelectingTransport {
         (0..members.len())
             .map(|i| {
                 let outcome = sel.latest.get(i).copied().flatten();
+                let probe_healthy = outcome.map(|o| o.healthy).unwrap_or(false);
                 MemberStatus {
                     index: i,
                     meta: members[i].meta.clone(),
@@ -340,7 +377,8 @@ impl SelectingTransport {
                     latency_ms: outcome
                         .filter(|o| o.healthy)
                         .map(|o| o.latency.as_millis() as u64),
-                    healthy: outcome.map(|o| o.healthy).unwrap_or(false),
+                    // Quarantined members are reported unhealthy even if probe said otherwise.
+                    healthy: probe_healthy && !excluded.contains(&i),
                     is_current: Some(i) == current,
                 }
             })
@@ -454,6 +492,10 @@ impl SelectingTransport {
         // Keep the manual pin only if that exact server survived the refresh.
         sel.pinned = pinned_label.and_then(|lbl| new_arc.iter().position(|m| m.label == lbl));
         drop(sel);
+        // Reset health to all-Healthy OUTSIDE the selection-locked region (sel already dropped
+        // above) so health and selection are never held at the same time.
+        *self.health.lock().unwrap_or_else(|e| e.into_inner()) =
+            (0..n).map(|_| MemberHealth::new()).collect();
         tracing::info!(members = n, "pool reloaded from refreshed config");
         self.reprobe.notify_one();
     }
@@ -1268,6 +1310,33 @@ mod tests {
         StallSink::record_stall(&t, 0); // 3rd within window → quarantined
         assert!(t.is_quarantined(0));
         assert!(!t.is_quarantined(1), "other member unaffected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quarantined_member_excluded_from_order() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        assert!(t.is_quarantined(0));
+        let (_members, order) = t.members_and_order();
+        assert!(
+            !order.contains(&0),
+            "quarantined member is not offered to new flows"
+        );
+        assert!(order.contains(&1));
+    }
+
+    #[cfg(feature = "multi-server")]
+    #[tokio::test(start_paused = true)]
+    async fn reload_clears_quarantine() {
+        let t = selecting(vec![member_with_meta(true, meta("a", "US"))], vec![0]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        assert!(t.is_quarantined(0));
+        t.reload(vec![member_with_meta(true, meta("a2", "US"))]);
+        assert!(!t.is_quarantined(0), "reload resets member health");
     }
 
     #[cfg(feature = "multi-server")]
