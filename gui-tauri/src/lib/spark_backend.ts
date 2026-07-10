@@ -55,6 +55,8 @@ export interface SparkBackend {
   servers(): Promise<ServerInfo[]>;
   /** Pin a server by index, or pass null for auto (fastest). */
   selectServer(index: number | null): Promise<void>;
+  /** Return the currently-pinned server index, or null for auto. */
+  getSelectedServer(): Promise<number | null>;
   getSplitTunnel(): Promise<SplitTunnel>;
   setSplitTunnel(st: SplitTunnel): Promise<void>;
   getRoutingMode(): Promise<"smart" | "full">;
@@ -142,6 +144,7 @@ export class MockBackend implements SparkBackend {
   async selectServer(index: number | null): Promise<void> {
     mockState.pinned = index;
   }
+  async getSelectedServer(): Promise<number | null> { return mockState.pinned; }
 
   async getSplitTunnel(): Promise<SplitTunnel> { return structuredClone(mockState.split); }
   async setSplitTunnel(st: SplitTunnel): Promise<void> { mockState.split = structuredClone(st); }

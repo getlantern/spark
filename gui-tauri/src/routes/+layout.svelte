@@ -9,6 +9,9 @@
 
   import { setupI18n, isRtl, locale, isLoading } from "$lib/i18n";
   import { theme, resolveTheme } from "$lib/theme";
+  import { listen } from "@tauri-apps/api/event";
+  import { goto } from "$app/navigation";
+  import { initSelectedIndex } from "$lib/selection";
 
   let { children } = $props();
 
@@ -32,6 +35,18 @@
   });
   $effect(() => {
     document.documentElement.dataset.theme = resolveTheme($theme, prefersDark);
+  });
+
+  // Tray ↔ window sync: pull the pin on load + whenever the tray changes state; handle tray-driven
+  // navigation. In a plain browser (no Tauri), `listen` still resolves; the events simply never fire.
+  $effect(() => {
+    initSelectedIndex();
+    const state = listen("spark://state", () => initSelectedIndex());
+    const nav = listen<string>("spark://navigate", (e) => goto(e.payload));
+    return () => {
+      state.then((f) => f());
+      nav.then((f) => f());
+    };
   });
 </script>
 

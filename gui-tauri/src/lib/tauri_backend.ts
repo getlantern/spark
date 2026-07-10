@@ -26,6 +26,11 @@ export class TauriBackend implements SparkBackend {
     // The plugin command takes a plain i32; -1 means auto (the pool has no negative indices).
     await invoke("plugin:spark-vpn|select_server", { index: index ?? -1 });
   }
+  async getSelectedServer(): Promise<number | null> {
+    // -1 (Smart/auto) maps back to null; any non-negative index is a pin.
+    const i = await invoke<number>("plugin:spark-vpn|get_selected_server");
+    return i < 0 ? null : i;
+  }
   async getSplitTunnel(): Promise<SplitTunnel> {
     return JSON.parse(await invoke<string>("plugin:spark-vpn|get_split_tunnel"));
   }
