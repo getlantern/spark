@@ -116,6 +116,10 @@ targets:
       path: SparkTunnel/Info.plist
       properties:
         CFBundleDisplayName: Spark Tunnel
+        # Must match the containing app's version (0.1.0) — App Store rejects a mismatch, and Xcode
+        # warns on it. Keep in sync with the gui-tauri_iOS app target's CFBundle*Version.
+        CFBundleShortVersionString: 0.1.0
+        CFBundleVersion: "0.1.0"
         # iOS NE app-extensions declare an NSExtension dict (vs the macOS system-extension's
         # NetworkExtension dict + NEMachServiceName). The principal class is the entry point.
         NSExtension:

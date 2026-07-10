@@ -10,6 +10,7 @@
 		13EE2A82127CC63920FC24E5 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 35227EF9FE48284E67590F7D /* Security.framework */; };
 		28A2D2205AB3530113451546 /* SparkTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 03C3228FA9B5448F41CA976F /* SparkTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3DB4C8590D7DFCC222BF4CAC /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 36B1D547379ECD57C41D3D86 /* Metal.framework */; };
+		51119129F5C0021C6046F49C /* libapp.a in Resources */ = {isa = PBXBuildFile; fileRef = D7C9F31F2BE1151E06466D6B /* libapp.a */; };
 		5ACA6482F363F4900CF537C9 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D86BDA2CB6EDE7585F81BBD /* QuartzCore.framework */; };
 		6CC913FD6E9ECE3194EE8049 /* SparkCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 123B085A28DF2E490C22A73E /* SparkCore.xcframework */; };
 		7933768E57F9E4285635D2DF /* FdResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44C5064960F0AD7EE6FA091B /* FdResolver.swift */; };
@@ -70,6 +71,7 @@
 		A62C6D70D1E0136342D8CBD5 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		A7F155BCA9B1B9D3D7367F76 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
 		C4FF3C3B77BAD21D2C63B3B9 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		D7C9F31F2BE1151E06466D6B /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		F544A2431FAD7FC53F100456 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F7013D54026B3B0C5BC62722 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
@@ -118,6 +120,14 @@
 				F544A2431FAD7FC53F100456 /* Info.plist */,
 			);
 			path = "gui-tauri_iOS";
+			sourceTree = "<group>";
+		};
+		1D59F8E5D88E06CEA45262A8 /* debug */ = {
+			isa = PBXGroup;
+			children = (
+				D7C9F31F2BE1151E06466D6B /* libapp.a */,
+			);
+			path = debug;
 			sourceTree = "<group>";
 		};
 		2D9B4276E48B914CCA210408 /* Products */ = {
@@ -174,6 +184,7 @@
 		9CB7C668492EA63DEDA5856B /* Externals */ = {
 			isa = PBXGroup;
 			children = (
+				CF78015EBBEA78C5A09E4A01 /* arm64 */,
 			);
 			path = Externals;
 			sourceTree = "<group>";
@@ -185,6 +196,14 @@
 				5DF68D4C6F48D6628E3AEA47 /* bindings */,
 			);
 			path = "gui-tauri";
+			sourceTree = "<group>";
+		};
+		CF78015EBBEA78C5A09E4A01 /* arm64 */ = {
+			isa = PBXGroup;
+			children = (
+				1D59F8E5D88E06CEA45262A8 /* debug */,
+			);
+			path = arm64;
 			sourceTree = "<group>";
 		};
 		FA75C32DC783A5CB38EC7DE0 = {
@@ -201,6 +220,13 @@
 				88F419D1CEE35A3A3797C967 /* Frameworks */,
 				2D9B4276E48B914CCA210408 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		"TEMP_B7C22FE7-0985-4FCD-AA16-E2CE7144F511" /* x86_64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = x86_64;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -293,6 +319,7 @@
 				B640D806249B11991835DDAC /* Assets.xcassets in Resources */,
 				BAB0E7A826EAE4E392F61F79 /* LaunchScreen.storyboard in Resources */,
 				82B8997FB4887E7E22B3FE7D /* assets in Resources */,
+				51119129F5C0021C6046F49C /* libapp.a in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
