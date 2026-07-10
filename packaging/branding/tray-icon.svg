@@ -1,0 +1,7 @@
+<svg width="44" height="44" viewBox="164 142 740 740" xmlns="http://www.w3.org/2000/svg">
+  <!-- macOS menu-bar TEMPLATE icon: the Spark bolt in solid black on a transparent background.
+       Template mode keeps only the alpha, so the OS draws it black in a light bar / white in a
+       dark bar. viewBox is cropped tight to the bolt (bbox 360,168–708,856; center 534,512) with
+       light padding so it reads as a bolt, not a blob. Source: packaging/branding/spark-icon.svg. -->
+  <path d="M604 168 L360 556 L502 556 L430 856 L708 452 L560 452 L604 168 Z" fill="#000000"/>
+</svg>

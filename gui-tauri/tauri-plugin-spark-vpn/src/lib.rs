@@ -16,6 +16,10 @@ mod desktop;
 #[cfg(target_os = "macos")]
 mod apps_darwin;
 
+// Desktop system tray (macOS menu bar / Windows + Linux tray). Desktop-only.
+#[cfg(desktop)]
+mod tray;
+
 // Desktop control over spark-ipc (Windows named pipe / Linux unix socket). Compiled off android;
 // on macOS it provides the transport-agnostic ipc client that AppleControl doesn't use but which
 // unit-tests here (its unix path == the Linux path).
@@ -68,6 +72,23 @@ mod platform {
     }
 }
 
+/// Convert the `select_server` i32 arg to a pin (negative → auto/None). Lives here (not in the
+/// desktop-only `tray` module) so the commands, which run on mobile too, can use it.
+pub(crate) fn tray_pin(index: i32) -> Option<usize> {
+    if index < 0 {
+        None
+    } else {
+        Some(index as usize)
+    }
+}
+
+/// Convert a pin back to the i32 wire value (None → -1). A pin is a small pool index by
+/// construction, but use a checked conversion rather than `as i32` so an out-of-range value can
+/// never silently wrap into a wrong server index — it falls back to auto (-1) instead.
+pub(crate) fn tray_pin_to_i32(pin: Option<usize>) -> i32 {
+    pin.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1)
+}
+
 /// Initialise the `spark-vpn` plugin. Wire this into the Tauri builder via
 /// `.plugin(tauri_plugin_spark_vpn::init())`.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
@@ -78,6 +99,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::status,
             commands::servers,
             commands::select_server,
+            commands::get_selected_server,
             commands::get_split_tunnel,
             commands::set_split_tunnel,
             commands::get_routing_mode,
@@ -89,6 +111,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::set_excluded_apps,
         ])
         .setup(|app, _api| {
+            app.manage(commands::SelectedServer::default());
             #[cfg(target_os = "android")]
             {
                 // Register the Kotlin plugin (SparkVpnPlugin, package org.getlantern.spark.vpn) and
@@ -105,6 +128,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 let ctl = platform::control(app)?;
                 app.manage(ctl);
             }
+            #[cfg(desktop)]
+            tray::init(app)?;
             Ok(())
         })
         .build()
