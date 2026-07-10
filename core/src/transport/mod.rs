@@ -100,6 +100,10 @@ pub mod select;
 /// `blake3` nor `aes`.
 #[cfg(feature = "shadowsocks")]
 pub mod shadowsocks;
+/// Runtime stall detection for the multi-server pool: lock-free per-flow outcome tracking.
+/// Gated behind `multi-server` alongside the pool it serves.
+#[cfg(feature = "multi-server")]
+pub(crate) mod stall;
 pub mod tcp_tunnel;
 
 /// A dial target that may be an unresolved domain: the fake-IP proxy path recovers a domain from a
