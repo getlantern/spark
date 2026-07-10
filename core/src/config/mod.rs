@@ -379,6 +379,45 @@ pub struct TransportConfig {
     pub probe_interval_secs: u64,
     /// Max probes in flight at once (bounded concurrency for large pools).
     pub probe_window: usize,
+    /// Runtime stall detection: a flow that was flowing and then flatlines for this many seconds is
+    /// aborted and counted against its pool member. `0` disables stall detection entirely.
+    #[serde(default = "default_stall_window_secs")]
+    pub stall_window_secs: u64,
+    /// Stalls a member may accrue within `stall_demote_window_secs` before it is quarantined.
+    #[serde(default = "default_stall_demote_count")]
+    pub stall_demote_count: u32,
+    /// The sliding window (seconds) over which `stall_demote_count` is measured.
+    #[serde(default = "default_stall_demote_window_secs")]
+    pub stall_demote_window_secs: u64,
+    /// Base cooldown (seconds) a quarantined member waits before going on trial. Doubles on each
+    /// repeated quarantine, capped at `stall_quarantine_max_secs`.
+    #[serde(default = "default_stall_quarantine_secs")]
+    pub stall_quarantine_secs: u64,
+    /// Cap (seconds) for the exponential quarantine backoff.
+    #[serde(default = "default_stall_quarantine_max_secs")]
+    pub stall_quarantine_max_secs: u64,
+    /// Clean (non-stalling, ever-active) trial flows required to restore a quarantined member.
+    #[serde(default = "default_stall_trial_flows")]
+    pub stall_trial_flows: u32,
+}
+
+fn default_stall_window_secs() -> u64 {
+    15
+}
+fn default_stall_demote_count() -> u32 {
+    3
+}
+fn default_stall_demote_window_secs() -> u64 {
+    30
+}
+fn default_stall_quarantine_secs() -> u64 {
+    60
+}
+fn default_stall_quarantine_max_secs() -> u64 {
+    600
+}
+fn default_stall_trial_flows() -> u32 {
+    2
 }
 
 impl Default for TransportConfig {
@@ -398,6 +437,12 @@ impl Default for TransportConfig {
             callback_url: None,
             probe_interval_secs: 300,
             probe_window: 8,
+            stall_window_secs: default_stall_window_secs(),
+            stall_demote_count: default_stall_demote_count(),
+            stall_demote_window_secs: default_stall_demote_window_secs(),
+            stall_quarantine_secs: default_stall_quarantine_secs(),
+            stall_quarantine_max_secs: default_stall_quarantine_max_secs(),
+            stall_trial_flows: default_stall_trial_flows(),
         }
     }
 }
@@ -1007,6 +1052,12 @@ mod tests {
                     callback_url: None,
                     probe_interval_secs: 300,
                     probe_window: 8,
+                    stall_window_secs: 15,
+                    stall_demote_count: 3,
+                    stall_demote_window_secs: 30,
+                    stall_quarantine_secs: 60,
+                    stall_quarantine_max_secs: 600,
+                    stall_trial_flows: 2,
                 },
                 udp: UdpConfig {
                     idle_timeout_secs: 30,
@@ -1505,5 +1556,13 @@ city = \"San Francisco\"
         // The optional fields round-trip through serialization.
         let back = Config::from_toml_str(&c.to_toml_string().unwrap()).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn transport_config_has_stall_defaults() {
+        let c = TransportConfig::default();
+        assert_eq!(c.stall_window_secs, 15);
+        assert_eq!(c.stall_demote_count, 3);
+        assert_eq!(c.stall_trial_flows, 2);
     }
 }
