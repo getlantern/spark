@@ -19,7 +19,7 @@ export async function initSelectedIndex(): Promise<void> {
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
   try {
     selectedIndex.set(await backend.getSelectedServer());
-  } catch {
-    // leave the default (null = auto) on any error
+  } catch (err) {
+    console.error("[selection] getSelectedServer failed, defaulting to auto:", err);
   }
 }

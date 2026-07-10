@@ -40,12 +40,12 @@
   // Tray ↔ window sync: pull the pin on load + whenever the tray changes state; handle tray-driven
   // navigation. In a plain browser (no Tauri), `listen` still resolves; the events simply never fire.
   $effect(() => {
-    initSelectedIndex();
-    const state = listen("spark://state", () => initSelectedIndex());
+    void initSelectedIndex();
+    const state = listen("spark://state", () => void initSelectedIndex());
     const nav = listen<string>("spark://navigate", (e) => goto(e.payload));
     return () => {
-      state.then((f) => f());
-      nav.then((f) => f());
+      state.then((f) => f()).catch((e) => console.error("[layout] unlisten spark://state:", e));
+      nav.then((f) => f()).catch((e) => console.error("[layout] unlisten spark://navigate:", e));
     };
   });
 </script>
