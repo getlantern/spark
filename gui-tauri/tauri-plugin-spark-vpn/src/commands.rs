@@ -15,12 +15,18 @@ type Ctl = Box<dyn TunnelControl>;
 
 #[tauri::command]
 pub(crate) async fn connect<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
-    app.state::<Ctl>().connect()
+    app.state::<Ctl>().connect()?;
+    #[cfg(desktop)]
+    crate::tray::refresh(&app);
+    Ok(())
 }
 
 #[tauri::command]
 pub(crate) async fn disconnect<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
-    app.state::<Ctl>().disconnect()
+    app.state::<Ctl>().disconnect()?;
+    #[cfg(desktop)]
+    crate::tray::refresh(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -37,6 +43,8 @@ pub(crate) async fn servers<R: Runtime>(app: AppHandle<R>) -> crate::Result<Vec<
 pub(crate) async fn select_server<R: Runtime>(app: AppHandle<R>, index: i32) -> crate::Result<()> {
     app.state::<Ctl>().select_server(index)?;
     *app.state::<SelectedServer>().0.lock().expect("pin lock") = crate::tray_pin(index);
+    #[cfg(desktop)]
+    crate::tray::refresh(&app);
     Ok(())
 }
 
@@ -71,7 +79,10 @@ pub(crate) async fn set_routing_mode<R: Runtime>(
     app: AppHandle<R>,
     mode: String,
 ) -> crate::Result<()> {
-    app.state::<Ctl>().set_routing_mode(&mode)
+    app.state::<Ctl>().set_routing_mode(&mode)?;
+    #[cfg(desktop)]
+    crate::tray::refresh(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -84,7 +95,10 @@ pub(crate) async fn set_ad_block_enabled<R: Runtime>(
     app: AppHandle<R>,
     enabled: bool,
 ) -> crate::Result<()> {
-    app.state::<Ctl>().set_ad_block_enabled(enabled)
+    app.state::<Ctl>().set_ad_block_enabled(enabled)?;
+    #[cfg(desktop)]
+    crate::tray::refresh(&app);
+    Ok(())
 }
 
 #[tauri::command]
