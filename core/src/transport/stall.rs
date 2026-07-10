@@ -43,7 +43,7 @@ impl StallTracker {
             window,
             base: Instant::now(),
             ever_active: AtomicBool::new(false),
-            last_outbound_ms: AtomicU64::new(0),
+            last_outbound_ms: AtomicU64::new(u64::MAX), // u64::MAX = sentinel for "never sent"
             stalled: AtomicBool::new(false),
             done: AtomicBool::new(false),
         })
@@ -70,10 +70,18 @@ impl StallTracker {
 
     /// UDP gate: was there outbound activity within the last `window`? (i.e. the app is still trying,
     /// so inbound silence is a throttle rather than an idle flow).
+    ///
+    /// `last_outbound_ms` is initialised to `u64::MAX` as a sentinel for "never sent"; the
+    /// saturating subtraction makes that case return 0, which is always ≤ any window — so we
+    /// short-circuit on the sentinel first. Uses `<=` rather than `<` so a send recorded at t=0
+    /// is still counted as recent when the timeout fires at exactly t=window (the common case
+    /// with a paused clock or when send and timeout align in production).
     pub(crate) fn recently_sent(&self) -> bool {
-        self.elapsed_ms()
-            .saturating_sub(self.last_outbound_ms.load(Ordering::Relaxed))
-            < self.window.as_millis() as u64
+        let last = self.last_outbound_ms.load(Ordering::Relaxed);
+        if last == u64::MAX {
+            return false; // never sent
+        }
+        self.elapsed_ms().saturating_sub(last) <= self.window.as_millis() as u64
     }
 
     /// Report a stall to the pool exactly once, and return the error the guard surfaces to the pump.
@@ -196,6 +204,82 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StreamStallGuard<S> {
     }
 }
 
+use crate::transport::{BoxedPacketSink, BoxedPacketSource, PacketSink, PacketSource};
+use async_trait::async_trait;
+use tokio::time::timeout;
+
+/// Wraps a member's outbound datagram half: every send marks outbound activity (the "still sending"
+/// gate the source uses to tell throttle from idle).
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
+pub(crate) struct PacketSinkGuard {
+    inner: BoxedPacketSink,
+    tracker: Arc<StallTracker>,
+}
+
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
+impl PacketSinkGuard {
+    pub(crate) fn new(inner: BoxedPacketSink, tracker: Arc<StallTracker>) -> Self {
+        Self { inner, tracker }
+    }
+}
+
+#[async_trait]
+impl PacketSink for PacketSinkGuard {
+    async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
+        self.tracker.mark_outbound();
+        self.inner.send(payload).await
+    }
+}
+
+/// Wraps a member's inbound datagram half. A received datagram marks the flow active and resets the
+/// window; if `window` elapses with no datagram while the flow is active AND the app is still sending
+/// (`recently_sent`), it reports a stall and errors so the reply pump ends and the association is
+/// reclaimed. UDP `send` has no backpressure, so this "sending, nothing coming back" test is the
+/// throttle signal — not bidirectional silence.
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
+pub(crate) struct PacketSourceGuard {
+    inner: BoxedPacketSource,
+    tracker: Arc<StallTracker>,
+    window: Duration,
+}
+
+#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
+impl PacketSourceGuard {
+    pub(crate) fn new(
+        inner: BoxedPacketSource,
+        tracker: Arc<StallTracker>,
+        window: Duration,
+    ) -> Self {
+        Self {
+            inner,
+            tracker,
+            window,
+        }
+    }
+}
+
+#[async_trait]
+impl PacketSource for PacketSourceGuard {
+    async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match timeout(self.window, self.inner.recv(buf)).await {
+                Ok(Ok(n)) => {
+                    self.tracker.mark_active();
+                    return Ok(n);
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_elapsed) => {
+                    // No inbound datagram for `window`. Stall only if the flow was working and the app
+                    // is still sending — otherwise it's idle/done; loop for a fresh window.
+                    if self.tracker.ever_active() && self.tracker.recently_sent() {
+                        return Err(self.tracker.report_stall());
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +364,60 @@ mod tests {
         tokio::select! {
             r = guard.read(&mut b) => panic!("idle-from-start read resolved: {r:?}"),
             _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+        assert!(sink.stalls.lock().unwrap().is_empty());
+    }
+
+    // A source that yields `n` datagrams (1 byte each) then blocks forever.
+    struct BurstThenSilent {
+        remaining: usize,
+    }
+    #[async_trait]
+    impl PacketSource for BurstThenSilent {
+        async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.remaining > 0 {
+                self.remaining -= 1;
+                buf[0] = 1;
+                Ok(1)
+            } else {
+                std::future::pending().await // silent forever
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn packet_source_fires_when_sending_but_silent() {
+        let sink = Arc::new(RecordingSink::default());
+        let tracker = StallTracker::new(sink.clone(), 9, Duration::from_secs(15));
+        tracker.mark_outbound(); // app is sending
+        let mut src = PacketSourceGuard::new(
+            Box::new(BurstThenSilent { remaining: 1 }),
+            tracker,
+            Duration::from_secs(15),
+        );
+        let mut b = [0u8; 8];
+        assert_eq!(src.recv(&mut b).await.unwrap(), 1); // one datagram → active
+                                                        // Now the source is silent; the recv timeout should fire a stall (still recently_sent).
+        let err = src.recv(&mut b).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(*sink.stalls.lock().unwrap(), vec![9]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn packet_source_idle_when_not_sending_does_not_fire() {
+        let sink = Arc::new(RecordingSink::default());
+        let tracker = StallTracker::new(sink.clone(), 3, Duration::from_secs(15));
+        // Received once, but the app is NOT sending (no recent mark_outbound) → idle, not a stall.
+        let mut src = PacketSourceGuard::new(
+            Box::new(BurstThenSilent { remaining: 1 }),
+            tracker,
+            Duration::from_secs(15),
+        );
+        let mut b = [0u8; 8];
+        assert_eq!(src.recv(&mut b).await.unwrap(), 1);
+        tokio::select! {
+            r = src.recv(&mut b) => panic!("idle recv resolved: {r:?}"),
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
         }
         assert!(sink.stalls.lock().unwrap().is_empty());
     }
