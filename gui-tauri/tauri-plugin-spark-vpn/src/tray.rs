@@ -89,6 +89,16 @@ pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(on_menu_event)
         .build(app)?;
+
+    // Light poll so the tray reflects autonomous tunnel state changes (the NE/service connecting or
+    // dropping on its own — no command fired). `refresh` is cheap and marshals menu updates to the
+    // main thread itself, so a plain background thread is fine. ~1.5s balances freshness vs. cost.
+    let poll_app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        refresh(&poll_app);
+    });
+
     Ok(())
 }
 
