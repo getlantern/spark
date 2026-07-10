@@ -829,8 +829,9 @@ mod tests {
     #[test]
     fn stall_defaults_preserved_when_absent() {
         // SAMPLE has no stall_* fields; Config::default() values must survive unchanged.
+        // Stall detection ships OFF by default (window 0) pending the signal redesign.
         let c = parse();
-        assert_eq!(c.transport.stall_window_secs, 15);
+        assert_eq!(c.transport.stall_window_secs, 0);
         assert_eq!(c.transport.stall_demote_count, 3);
         assert_eq!(c.transport.stall_demote_window_secs, 30);
         assert_eq!(c.transport.stall_quarantine_secs, 60);
