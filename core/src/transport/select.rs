@@ -247,6 +247,11 @@ impl SelectingTransport {
     /// out-of-range index was ignored — so the FFI/UI layer can distinguish a real pin from a no-op
     /// instead of always reporting success.
     pub fn set_pin(&self, index: Option<usize>) -> bool {
+        // Take `selection` first, then read `members.len()` while holding it — uniform selection →
+        // members lock order with reload/members_and_order/snapshot. (`self.members()` already
+        // releases the members lock before returning, so there was no actual inversion, but keeping
+        // the order uniform removes any doubt.)
+        let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(i) = index {
             let len = self.members().len();
             if i >= len {
@@ -254,7 +259,6 @@ impl SelectingTransport {
                 return false;
             }
         }
-        let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         sel.pinned = index;
         tracing::debug!(?index, "server selection pin updated");
         true
