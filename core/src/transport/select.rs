@@ -12,11 +12,31 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::transport::probe::{CallbackUrl, ProbeOutcome};
+use crate::transport::stall::{
+    PacketSinkGuard, PacketSourceGuard, StallSink, StallTracker, StreamStallGuard,
+};
 use crate::transport::{
     Address, BoxedPacketSink, BoxedPacketSource, MemberStatus, PoolControl, ServerMeta, Transport,
     UdpTransport,
 };
 use crate::BoxedStream;
+
+/// Stall-detection tunables captured from `TransportConfig` at pool build.
+#[derive(Clone, Copy)]
+pub(crate) struct StallConfig {
+    pub(crate) window: std::time::Duration,
+    pub(crate) demote_count: u32,
+    pub(crate) demote_window: std::time::Duration,
+    pub(crate) quarantine: std::time::Duration,
+    pub(crate) quarantine_max: std::time::Duration,
+    pub(crate) trial_flows: u32,
+}
+
+impl StallConfig {
+    pub(crate) fn enabled(&self) -> bool {
+        !self.window.is_zero()
+    }
+}
 
 /// A built pool member: its transport pair, the callback URL used to probe it, and UI metadata.
 /// `Clone` is cheap — the transports are `Arc`s — and lets [`SelectingTransport::reload`] carry a
@@ -78,6 +98,38 @@ struct Selection {
     pinned: Option<usize>,
 }
 
+/// Per-member liveness state driven by stall reports (separate from the latency `Selection`).
+#[derive(Clone)]
+pub(crate) enum MemberState {
+    Healthy,
+    /// Quarantined until this instant; `strikes` counts consecutive quarantines (backoff).
+    Quarantined {
+        until: tokio::time::Instant,
+        strikes: u32,
+    },
+    /// On trial: re-admitted, needs `clean_needed` clean flows to fully recover; `strikes` retained
+    /// so a failed trial backs off further.
+    OnTrial {
+        clean_needed: u32,
+        strikes: u32,
+    },
+}
+
+struct MemberHealth {
+    state: MemberState,
+    /// Millis-since-pool-start of recent stalls (for the K-in-window count).
+    recent_stalls: std::collections::VecDeque<u64>,
+}
+
+impl MemberHealth {
+    fn new() -> Self {
+        Self {
+            state: MemberState::Healthy,
+            recent_stalls: std::collections::VecDeque::new(),
+        }
+    }
+}
+
 /// A latency-selecting transport over a pool of [`Member`]s.
 ///
 /// When no member can serve a flow (the pool is all-unhealthy, or every dial in the current order
@@ -102,6 +154,17 @@ pub struct SelectingTransport {
     /// pool, so the direct dial still bypasses the tunnel route.
     direct_tcp: Arc<dyn Transport>,
     direct_udp: Arc<dyn UdpTransport>,
+    /// Stall-detection tunables (zero window = disabled).
+    stall: StallConfig,
+    /// Per-member health state (stall accounting). LOCK ORDER: `health` is NEVER held at the same
+    /// time as `selection` — `record_stall` locks only `health`; the dial path locks only
+    /// `selection`. Keeping them separate avoids deadlock.
+    health: Mutex<Vec<MemberHealth>>,
+    /// Epoch base for computing millis-since-pool-start in stall timestamps.
+    health_base: tokio::time::Instant,
+    /// Weak self-reference so the guard helpers can obtain an `Arc<Self>` for the `StallSink` impl
+    /// without a reference cycle. Set by `build_selecting` immediately after `Arc::new`.
+    pub(crate) me: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 impl SelectingTransport {
@@ -109,12 +172,14 @@ impl SelectingTransport {
     /// a tokio runtime (as `from_config`'s callers are). The prober runs an initial round immediately,
     /// then re-probes every `interval`; `window` bounds probe concurrency. `direct_tcp`/`direct_udp`
     /// are the fail-open fallback dialed when no member can serve a flow (see the struct doc).
+    /// `stall` controls per-flow stall detection (zero window = disabled).
     pub(crate) fn new(
         members: Vec<Member>,
         interval: std::time::Duration,
         window: usize,
         direct_tcp: Arc<dyn Transport>,
         direct_udp: Arc<dyn UdpTransport>,
+        stall: StallConfig,
     ) -> Self {
         let len = members.len();
         let members = Arc::new(Mutex::new(Arc::new(members)));
@@ -147,7 +212,49 @@ impl SelectingTransport {
             prober: Mutex::new(Some(task)),
             direct_tcp,
             direct_udp,
+            stall,
+            health: Mutex::new((0..len).map(|_| MemberHealth::new()).collect()),
+            health_base: tokio::time::Instant::now(),
+            me: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Obtain an `Arc<Self>` from the weak self-reference set by `build_selecting`. Returns `None`
+    /// before `me` is initialised (only during `new`, before the `Arc` is constructed).
+    fn arc(&self) -> Option<Arc<Self>> {
+        self.me.get().and_then(|w| w.upgrade())
+    }
+
+    /// Wrap a member's TCP stream in a stall guard (no-op when disabled).
+    fn guard_stream(self: &Arc<Self>, member: usize, s: BoxedStream) -> BoxedStream {
+        if !self.stall.enabled() {
+            return s;
+        }
+        let sink: Arc<dyn StallSink> = self.clone();
+        let tracker = StallTracker::new(sink, member, self.stall.window);
+        Box::new(StreamStallGuard::new(s, tracker, self.stall.window))
+    }
+
+    /// Wrap a member's datagram halves in stall guards (no-op when disabled).
+    fn guard_udp(
+        self: &Arc<Self>,
+        member: usize,
+        sink_half: BoxedPacketSink,
+        source_half: BoxedPacketSource,
+    ) -> (BoxedPacketSink, BoxedPacketSource) {
+        if !self.stall.enabled() {
+            return (sink_half, source_half);
+        }
+        let sink: Arc<dyn StallSink> = self.clone();
+        let tracker = StallTracker::new(sink, member, self.stall.window);
+        (
+            Box::new(PacketSinkGuard::new(sink_half, tracker.clone())),
+            Box::new(PacketSourceGuard::new(
+                source_half,
+                tracker,
+                self.stall.window,
+            )),
+        )
     }
 
     /// A cheap snapshot of the current member list (short lock, never held across `.await`). Callers
@@ -160,25 +267,98 @@ impl SelectingTransport {
             .clone()
     }
 
+    /// Indices currently excluded from new flows: quarantined members whose cooldown hasn't elapsed.
+    /// Locks ONLY `health` — never call while the `selection` guard is alive.
+    fn excluded(&self) -> std::collections::HashSet<usize> {
+        let now = tokio::time::Instant::now();
+        let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        health
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| match h.state {
+                MemberState::Quarantined { until, .. } if until > now => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// A **consistent** `(members, dial-order)` pair, read under a single `selection`-lock hold
     /// (selection → members order) so a racing [`Self::reload`] — which swaps both under the same
     /// lock — can't pair a new order with old members (or vice-versa) for one flow. The order is the
     /// pinned member first (if any), then the latency-ranked rest; on auto it's just the ranking.
-    /// Neither lock is held across `.await`.
+    /// Quarantined members whose cooldown has elapsed are lazily promoted to `OnTrial` here.
+    /// Quarantined members are filtered out AFTER the selection lock is released, then `health` is
+    /// locked — the two locks are never held simultaneously. Neither lock is held across `.await`.
+    /// An `OnTrial` member (not excluded) is moved to the front so the next flow proves it first.
+    /// `health` is locked in up to three short scopes (promotion, excluded, trial-position); the
+    /// `selection` lock occupies one scope — NONE of these four scopes overlap.
     fn members_and_order(&self) -> (Arc<Vec<Member>>, Arc<[usize]>) {
-        let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
-        let members = self.members();
-        let order = match sel.pinned {
-            // Pin first, then the ranked rest (minus the pin). Even an unhealthy pin (not in
-            // `ranked`) is tried first — the user chose it — then we fail over to healthy members.
-            Some(p) if p < members.len() => {
-                let mut v = Vec::with_capacity(members.len());
-                v.push(p);
-                v.extend(sel.ranked.iter().copied().filter(|&i| i != p));
+        // 1. Promotion: lazily advance any elapsed quarantine to OnTrial (health lock only).
+        {
+            let now = tokio::time::Instant::now();
+            let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+            for h in health.iter_mut() {
+                if let MemberState::Quarantined { until, strikes } = h.state {
+                    if until <= now {
+                        h.state = MemberState::OnTrial {
+                            clean_needed: self.stall.trial_flows,
+                            strikes,
+                        };
+                    }
+                }
+            }
+        } // health guard dropped here, before the selection block below.
+
+        // 2. Scope the selection lock so it drops before we call excluded() (which locks health).
+        let (members, order) = {
+            let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+            let members = self.members();
+            let order: Arc<[usize]> = match sel.pinned {
+                // Pin first, then the ranked rest (minus the pin). Even an unhealthy pin (not in
+                // `ranked`) is tried first — the user chose it — then we fail over to healthy members.
+                Some(p) if p < members.len() => {
+                    let mut v = Vec::with_capacity(members.len());
+                    v.push(p);
+                    v.extend(sel.ranked.iter().copied().filter(|&i| i != p));
+                    v.into()
+                }
+                _ => sel.ranked.clone(),
+            };
+            (members, order)
+            // `sel` (selection guard) is dropped here — before excluded() below.
+        };
+
+        // 3. Lock only `health` now (selection guard already dropped above).
+        let excluded = self.excluded();
+        let order: Arc<[usize]> = if excluded.is_empty() {
+            order
+        } else {
+            order
+                .iter()
+                .copied()
+                .filter(|i| !excluded.contains(i))
+                .collect()
+        };
+
+        // 4. Trial routing: if any member is OnTrial (not excluded → present in order), lead the
+        //    order with it so the next flow is handed to it for re-admission proof (health lock only;
+        //    selection guard already dropped in step 2).
+        let trial = {
+            let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+            health
+                .iter()
+                .position(|h| matches!(h.state, MemberState::OnTrial { .. }))
+        };
+        let order: Arc<[usize]> = match trial {
+            Some(tm) if order.contains(&tm) => {
+                let mut v = Vec::with_capacity(order.len());
+                v.push(tm);
+                v.extend(order.iter().copied().filter(|&i| i != tm));
                 v.into()
             }
-            _ => sel.ranked.clone(),
+            _ => order,
         };
+
         (members, order)
     }
 
@@ -209,7 +389,11 @@ impl SelectingTransport {
     /// A point-in-time view of every pool member — metadata, last-probe latency/health, and which
     /// one new flows currently dial first — for the server-selection UI. Reads the live state under
     /// the short selection lock (never across `.await`); ordered by pool index (the UI groups/sorts).
+    /// Quarantined members are reported as unhealthy. `excluded()` is called before the `selection`
+    /// lock is taken so that `health` and `selection` are never held simultaneously.
     pub fn snapshot(&self) -> Vec<MemberStatus> {
+        // Compute excluded BEFORE taking selection lock (locks only `health`).
+        let excluded = self.excluded();
         // Read members under the selection lock (selection → members order) so a racing `reload`
         // can't pair one generation's members with another's ranking/latency.
         let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
@@ -222,6 +406,7 @@ impl SelectingTransport {
         (0..members.len())
             .map(|i| {
                 let outcome = sel.latest.get(i).copied().flatten();
+                let probe_healthy = outcome.map(|o| o.healthy).unwrap_or(false);
                 MemberStatus {
                     index: i,
                     meta: members[i].meta.clone(),
@@ -231,7 +416,8 @@ impl SelectingTransport {
                     latency_ms: outcome
                         .filter(|o| o.healthy)
                         .map(|o| o.latency.as_millis() as u64),
-                    healthy: outcome.map(|o| o.healthy).unwrap_or(false),
+                    // Quarantined members are reported unhealthy even if probe said otherwise.
+                    healthy: probe_healthy && !excluded.contains(&i),
                     is_current: Some(i) == current,
                 }
             })
@@ -345,8 +531,90 @@ impl SelectingTransport {
         // Keep the manual pin only if that exact server survived the refresh.
         sel.pinned = pinned_label.and_then(|lbl| new_arc.iter().position(|m| m.label == lbl));
         drop(sel);
+        // Reset health to all-Healthy OUTSIDE the selection-locked region (sel already dropped
+        // above) so health and selection are never held at the same time.
+        *self.health.lock().unwrap_or_else(|e| e.into_inner()) =
+            (0..n).map(|_| MemberHealth::new()).collect();
         tracing::info!(members = n, "pool reloaded from refreshed config");
         self.reprobe.notify_one();
+    }
+
+    /// Test-only: returns `true` if member `i` is currently quarantined.
+    #[cfg(test)]
+    pub(crate) fn is_quarantined(&self, i: usize) -> bool {
+        matches!(
+            self.health.lock().unwrap_or_else(|e| e.into_inner())[i].state,
+            MemberState::Quarantined { .. }
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn member_state(&self, i: usize) -> MemberState {
+        self.health.lock().unwrap_or_else(|e| e.into_inner())[i]
+            .state
+            .clone()
+    }
+}
+
+impl StallSink for SelectingTransport {
+    fn record_stall(&self, member: usize) {
+        let now_ms = tokio::time::Instant::now()
+            .duration_since(self.health_base)
+            .as_millis() as u64;
+        let window_ms = self.stall.demote_window.as_millis() as u64;
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(h) = health.get_mut(member) else {
+            return;
+        };
+        h.recent_stalls.push_back(now_ms);
+        while let Some(&front) = h.recent_stalls.front() {
+            if now_ms.saturating_sub(front) > window_ms {
+                h.recent_stalls.pop_front();
+            } else {
+                break;
+            }
+        }
+        let strikes = match h.state {
+            MemberState::Quarantined { strikes, .. } | MemberState::OnTrial { strikes, .. } => {
+                strikes
+            }
+            MemberState::Healthy => 0,
+        };
+        let trial_stall = matches!(h.state, MemberState::OnTrial { .. });
+        if trial_stall || h.recent_stalls.len() as u32 >= self.stall.demote_count {
+            let n = strikes.saturating_add(1);
+            let shift = (n - 1).min(16);
+            let backoff = self
+                .stall
+                .quarantine
+                .saturating_mul(1u32 << shift)
+                .min(self.stall.quarantine_max);
+            h.state = MemberState::Quarantined {
+                until: tokio::time::Instant::now() + backoff,
+                strikes: n,
+            };
+            h.recent_stalls.clear();
+            tracing::info!(member, strikes = n, "pool member quarantined (stalls)");
+        }
+    }
+    fn record_flow_ok(&self, member: usize) {
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(h) = health.get_mut(member) else {
+            return;
+        };
+        match &mut h.state {
+            MemberState::OnTrial { clean_needed, .. } => {
+                *clean_needed = clean_needed.saturating_sub(1);
+                if *clean_needed == 0 {
+                    h.state = MemberState::Healthy;
+                    h.recent_stalls.clear();
+                    tracing::info!(member, "pool member restored after clean trial flows");
+                }
+            }
+            // Outside trial, a clean flow ages out transient stalls.
+            MemberState::Healthy => h.recent_stalls.clear(),
+            MemberState::Quarantined { .. } => {}
+        }
     }
 }
 
@@ -397,7 +665,12 @@ impl Transport for SelectingTransport {
             // belt-and-suspenders guard.
             let Some(m) = members.get(i) else { continue };
             match m.transport.dial(target).await {
-                Ok(s) => return Ok(s),
+                Ok(s) => {
+                    return Ok(match self.arc() {
+                        Some(me) => me.guard_stream(i, s),
+                        None => s,
+                    });
+                }
                 Err(e) => {
                     self.demote(i);
                     tracing::debug!(member = i, error = %e, "pool member dial failed; failing over");
@@ -418,7 +691,12 @@ impl Transport for SelectingTransport {
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
             match m.transport.dial_addr(target.clone()).await {
-                Ok(s) => return Ok(s),
+                Ok(s) => {
+                    return Ok(match self.arc() {
+                        Some(me) => me.guard_stream(i, s),
+                        None => s,
+                    });
+                }
                 Err(e) => {
                     // Don't demote a member that merely can't carry a domain target (`Unsupported`) —
                     // it's healthy for the IP-based retry path. Demote only on a real dial failure.
@@ -460,7 +738,12 @@ impl UdpTransport for SelectingTransport {
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
             match m.udp.dial_udp(target).await {
-                Ok(p) => return Ok(p),
+                Ok(p) => {
+                    return Ok(match self.arc() {
+                        Some(me) => me.guard_udp(i, p.0, p.1),
+                        None => p,
+                    });
+                }
                 Err(e) => {
                     self.demote(i);
                     tracing::debug!(member = i, error = %e, "pool member udp dial failed; failing over");
@@ -487,7 +770,12 @@ impl UdpTransport for SelectingTransport {
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
             match m.udp.dial_udp_addr(target.clone()).await {
-                Ok(p) => return Ok(p),
+                Ok(p) => {
+                    return Ok(match self.arc() {
+                        Some(me) => me.guard_udp(i, p.0, p.1),
+                        None => p,
+                    });
+                }
                 Err(e) if e.kind() == io::ErrorKind::Unsupported => {
                     tracing::debug!(
                         member = i,
@@ -639,6 +927,17 @@ mod tests {
     use super::*;
     use crate::transport::{PacketSink, PacketSource};
 
+    fn test_stall_cfg() -> StallConfig {
+        StallConfig {
+            window: std::time::Duration::from_secs(15),
+            demote_count: 3,
+            demote_window: std::time::Duration::from_secs(30),
+            quarantine: std::time::Duration::from_secs(60),
+            quarantine_max: std::time::Duration::from_secs(600),
+            trial_flows: 2,
+        }
+    }
+
     struct Serve204;
     #[async_trait]
     impl Transport for Serve204 {
@@ -679,6 +978,7 @@ mod tests {
             8,
             Arc::new(FakeT { ok: true }),
             Arc::new(NoUdp),
+            test_stall_cfg(),
         );
         assert_eq!(&*st.order(), &[0usize, 1][..]); // seeded synchronously; prober hasn't run yet
     }
@@ -698,6 +998,7 @@ mod tests {
             8,
             Arc::new(FakeT { ok: true }),
             Arc::new(NoUdp),
+            test_stall_cfg(),
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while st.order().as_ref() != [0usize].as_slice() && std::time::Instant::now() < deadline {
@@ -819,6 +1120,10 @@ mod tests {
             prober: Mutex::new(None),
             direct_tcp,
             direct_udp,
+            stall: test_stall_cfg(),
+            health: Mutex::new((0..n).map(|_| MemberHealth::new()).collect()),
+            health_base: tokio::time::Instant::now(),
+            me: std::sync::OnceLock::new(),
         }
     }
 
@@ -1057,6 +1362,95 @@ mod tests {
             "empty refreshed server set is rejected"
         );
         assert_eq!(t.snapshot().len(), 1, "current pool is preserved");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn member_quarantines_after_k_stalls() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        // Below threshold: 2 stalls (default K=3) → still healthy.
+        StallSink::record_stall(&t, 0);
+        StallSink::record_stall(&t, 0);
+        assert!(!t.is_quarantined(0));
+        StallSink::record_stall(&t, 0); // 3rd within window → quarantined
+        assert!(t.is_quarantined(0));
+        assert!(!t.is_quarantined(1), "other member unaffected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quarantined_member_excluded_from_order() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        assert!(t.is_quarantined(0));
+        let (_members, order) = t.members_and_order();
+        assert!(
+            !order.contains(&0),
+            "quarantined member is not offered to new flows"
+        );
+        assert!(order.contains(&1));
+    }
+
+    #[cfg(feature = "multi-server")]
+    #[tokio::test(start_paused = true)]
+    async fn reload_clears_quarantine() {
+        let t = selecting(vec![member_with_meta(true, meta("a", "US"))], vec![0]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        assert!(t.is_quarantined(0));
+        t.reload(vec![member_with_meta(true, meta("a2", "US"))]);
+        assert!(!t.is_quarantined(0), "reload resets member health");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quarantine_elapses_to_trial_and_offers_flows() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        // Before cooldown: excluded.
+        assert!(!t.members_and_order().1.contains(&0));
+        // After the 60s base cooldown: member 0 goes on trial and is offered the next flow first.
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let (_m, order) = t.members_and_order();
+        assert_eq!(
+            order.first().copied(),
+            Some(0),
+            "trial member gets the next flow"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trial_restores_after_clean_flows() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let _ = t.members_and_order(); // promotes to OnTrial (clean_needed = 2)
+        StallSink::record_flow_ok(&t, 0);
+        StallSink::record_flow_ok(&t, 0); // 2 clean trial flows → restored
+        assert!(matches!(t.member_state(0), MemberState::Healthy));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trial_stall_requarantines_with_backoff() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let _ = t.members_and_order(); // OnTrial, strikes = 1
+        StallSink::record_stall(&t, 0); // a trial-flow stall → re-quarantine (strikes = 2)
+        assert!(t.is_quarantined(0));
+        // Backoff doubled: still quarantined after the first 60s cooldown, cleared only after ~120s.
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let _ = t.members_and_order();
+        assert!(
+            t.is_quarantined(0),
+            "second-strike cooldown is ~120s, not 60s"
+        );
     }
 
     #[cfg(feature = "multi-server")]
