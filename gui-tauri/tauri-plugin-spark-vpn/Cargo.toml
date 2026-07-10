@@ -27,24 +27,24 @@ toml = "0.8"
 spark-ipc = { path = "../../ipc", features = ["stream"] }
 tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
 
-# macOS: the plugin's AppleControl talks to the NE via objc2 (ne_spike moves here in a later task).
-[target.'cfg(target_os = "macos")'.dependencies]
+# Apple (macOS + iOS): AppleControl drives the NE via objc2 (NETunnelProviderManager). Shared by
+# both Apple targets — iOS reuses the same control path, minus the system-extension activation.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
     "block2",
     "NSData",
     "NSString",
-    "NSDictionary", # empty properties dict for NSBitmapImageRep PNG encoding
+    "NSDictionary",
 ] }
 objc2-network-extension = { version = "0.3", features = ["block2"] }
-objc2-system-extensions = { version = "0.3", features = ["dispatch2"] }
 dispatch2 = "0.3"
-# Icon fallback for apps with no usable standalone `.icns` — asset-catalog system apps (Calendar)
-# and stub-`.icns` apps (Books), whose real icon is in Assets.car. NSWorkspace renders the true
-# Finder icon; NSBitmapImageRep encodes it to PNG (sips mis-decodes NSWorkspace's multi-rep TIFF).
-# Already compiled in via tauri/muda/wry, so this direct declaration adds no new external surface —
-# same objc2 family already used above.
+
+# macOS-only: system-extension activation (no system extensions on iOS) and the AppKit icon
+# renderer used by the macOS app-based split-tunnel picker (apps_darwin, macOS-only).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-system-extensions = { version = "0.3", features = ["dispatch2"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSWorkspace",
     "NSImage",

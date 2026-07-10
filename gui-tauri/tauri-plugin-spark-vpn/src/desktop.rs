@@ -5,7 +5,7 @@ use crate::models::{ServerInfo, Status};
 
 // ── macOS NE control (relocated verbatim from gui-tauri/src-tauri/src/lib.rs) ─
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod ne_spike {
     use objc2_network_extension::NETunnelProviderManager;
 
@@ -162,6 +162,7 @@ mod ne_spike {
         ns_string, NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString,
     };
     use objc2_network_extension::NETunnelProviderProtocol;
+    #[cfg(target_os = "macos")]
     use objc2_system_extensions::{
         OSSystemExtensionManager, OSSystemExtensionProperties, OSSystemExtensionReplacementAction,
         OSSystemExtensionRequest, OSSystemExtensionRequestDelegate, OSSystemExtensionRequestResult,
@@ -177,10 +178,12 @@ mod ne_spike {
 
     /// Ivars for the activation delegate: a channel to report the terminal outcome
     /// (Ok once activated, Err on failure) back to the waiting worker thread.
+    #[cfg(target_os = "macos")]
     struct ActIvars {
         tx: Sender<Result<(), String>>,
     }
 
+    #[cfg(target_os = "macos")]
     define_class!(
         // SAFETY: plain NSObject subclass — no subclassing requirements, no Drop.
         #[unsafe(super(NSObject))]
@@ -247,6 +250,7 @@ mod ne_spike {
         }
     );
 
+    #[cfg(target_os = "macos")]
     impl ActDelegate {
         fn new(tx: Sender<Result<(), String>>) -> Retained<Self> {
             let this = Self::alloc().set_ivars(ActIvars { tx });
@@ -262,6 +266,7 @@ mod ne_spike {
     /// Returns Ok once the extension is active; once approved this completes
     /// immediately on subsequent calls. Needs the `system-extension.install` +
     /// packet-tunnel entitlements (present in the signed product build).
+    #[cfg(target_os = "macos")]
     pub fn activate_extension() -> Result<(), String> {
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let delegate = ActDelegate::new(tx);
@@ -311,7 +316,10 @@ mod ne_spike {
         app_bypass: Option<String>,
         ad_block: bool,
     ) -> Result<(), String> {
-        // No provider can start until the extension is activated + user-approved.
+        // macOS system extension must be activated + user-approved before a provider can start. iOS
+        // ships the NE as a bundled app-extension — no activation; the "Allow VPN configuration"
+        // consent comes from saveToPreferences during connect below.
+        #[cfg(target_os = "macos")]
         activate_extension()?;
         // Resolve the optional strings to owned values before entering the block so
         // the closure can be `Fn` (RcBlock requires Fn, not FnOnce). The original
@@ -599,7 +607,7 @@ mod ne_spike {
 
 /// Resolve a deliberate dev override config string, or `None` for the normal daemon-fetch path.
 /// Reads `SPARK_CONFIG` (base64 TOML) → `SPARK_PROXY` (host:port) → `None`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn resolve() -> Option<String> {
     resolve_with(
         std::env::var("SPARK_CONFIG").ok(),
@@ -607,7 +615,7 @@ pub(crate) fn resolve() -> Option<String> {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn resolve_with(baked: Option<String>, proxy: Option<String>) -> Option<String> {
     [baked, proxy]
         .into_iter()
@@ -619,7 +627,7 @@ fn resolve_with(baked: Option<String>, proxy: Option<String>) -> Option<String> 
 /// Parse the static pool list from an explicit TOML dev override (`resolve()`).
 /// Empty in the normal (daemon-fetch) path — the pool is only known after the extension
 /// fetches it, so the live snapshot fills the UI on connect.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn servers_from_config() -> Vec<ServerInfo> {
     use serde::Deserialize;
 
@@ -665,14 +673,14 @@ fn servers_from_config() -> Vec<ServerInfo> {
         .collect()
 }
 
-// ── macOS: AppleControl (cross-process NE). ───────────────────────────────────
+// ── Apple (macOS + iOS): AppleControl (cross-process NE). ────────────────────
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) struct AppleControl {
     pub(crate) base: PathBuf,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl TunnelControl for AppleControl {
     fn connect(&self) -> crate::Result<()> {
         let config = resolve(); // dev-override or None (daemon self-fetches)
@@ -826,7 +834,12 @@ impl TunnelControl for AppleControl {
     // App split tunneling: the macOS installed-apps catalog + excluded-apps persistence, with a
     // best-effort live push to the running NE (mirroring set_split_tunnel).
     fn list_installed_apps(&self) -> crate::Result<String> {
-        Ok(crate::apps_darwin::list_installed_apps(&self.base))
+        // apps_darwin uses AppKit (NSWorkspace) which is macOS-only. On iOS the picker
+        // is not yet implemented; return an empty catalog so the command doesn't error.
+        #[cfg(target_os = "macos")]
+        return Ok(crate::apps_darwin::list_installed_apps(&self.base));
+        #[cfg(not(target_os = "macos"))]
+        Ok("[]".to_string())
     }
 
     fn get_excluded_apps(&self) -> crate::Result<String> {
@@ -854,13 +867,21 @@ impl TunnelControl for AppleControl {
 
 // ── Windows/Linux: ServiceControl over spark-ipc. ────────────────────────────
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 pub(crate) struct ServiceControl {
     pub(crate) base: PathBuf,
     ipc: crate::service_ipc::IpcClient,
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 impl ServiceControl {
     pub(crate) fn new(base: PathBuf) -> Self {
         let ipc = crate::service_ipc::IpcClient::new(crate::service_ipc::default_control_addr());
@@ -896,7 +917,11 @@ impl ServiceControl {
     }
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 impl TunnelControl for ServiceControl {
     fn connect(&self) -> crate::Result<()> {
         self.ack("connect", spark_ipc::message::RequestPayload::Connect)
