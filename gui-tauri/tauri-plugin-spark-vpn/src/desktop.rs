@@ -665,6 +665,43 @@ fn servers_from_config() -> Vec<ServerInfo> {
         .collect()
 }
 
+/// Parse a fetched `config_raw.json` body (Lantern shape) into the static location list. The
+/// top-level `servers` array carries geo entries (`country`/`country_code`/`city`); index by
+/// position, matching `servers_from_config`. No live fields are invented (healthy=false, etc.).
+fn servers_from_cache_json(raw: &str) -> Vec<ServerInfo> {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    struct Root {
+        #[serde(default)]
+        servers: Vec<Entry>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        country: Option<String>,
+        country_code: Option<String>,
+        city: Option<String>,
+    }
+    let root: Root = match serde_json::from_str(raw) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    root.servers
+        .into_iter()
+        .enumerate()
+        .map(|(i, e)| ServerInfo {
+            index: i,
+            name: None,
+            country: e.country,
+            country_code: e.country_code,
+            city: e.city,
+            protocol: None,
+            latency_ms: None,
+            healthy: false,
+            is_current: false,
+        })
+        .collect()
+}
+
 // ── macOS: AppleControl (cross-process NE). ───────────────────────────────────
 
 #[cfg(target_os = "macos")]
@@ -967,5 +1004,39 @@ impl TunnelControl for ServiceControl {
         Err(crate::Error::Platform(
             "per-app split tunneling is not supported by the desktop service yet".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::servers_from_cache_json;
+
+    #[test]
+    fn parses_top_level_servers_geo_into_serverinfo() {
+        let raw = r#"{
+            "servers": [
+                {"country": "U.S.A.", "country_code": "US", "city": "Ashburn", "latitude": 1.0, "longitude": 2.0},
+                {"country": "Germany", "country_code": "DE", "city": "Frankfurt"}
+            ],
+            "options": {}
+        }"#;
+        let list = servers_from_cache_json(raw);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].index, 0);
+        assert_eq!(list[0].country.as_deref(), Some("U.S.A."));
+        assert_eq!(list[0].country_code.as_deref(), Some("US"));
+        assert_eq!(list[0].city.as_deref(), Some("Ashburn"));
+        assert_eq!(list[1].index, 1);
+        assert_eq!(list[1].city.as_deref(), Some("Frankfurt"));
+        assert!(!list[0].healthy);
+        assert!(list[0].latency_ms.is_none());
+        assert!(!list[0].is_current);
+    }
+
+    #[test]
+    fn empty_or_invalid_json_yields_empty_list() {
+        assert!(servers_from_cache_json("").is_empty());
+        assert!(servers_from_cache_json("not json").is_empty());
+        assert!(servers_from_cache_json(r#"{"options":{}}"#).is_empty());
     }
 }
