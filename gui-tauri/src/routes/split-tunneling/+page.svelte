@@ -21,7 +21,10 @@
       } catch {}
     }
     try { st = await backend.getSplitTunnel(); } catch {}
-    try { appCount = (await backend.getExcludedApps()).length; } catch {}
+    // The Apps row is hidden on iOS, so skip the excluded-apps round-trip there (appCount unused).
+    if (!isIos) {
+      try { appCount = (await backend.getExcludedApps()).length; } catch {}
+    }
   });
 
   async function toggle() {

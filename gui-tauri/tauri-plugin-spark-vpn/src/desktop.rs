@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use crate::control::TunnelControl;
 use crate::models::{ServerInfo, Status};
 
-// ── macOS NE control (relocated verbatim from gui-tauri/src-tauri/src/lib.rs) ─
+// ── Apple (macOS + iOS) NE control (relocated verbatim from gui-tauri/src-tauri/src/lib.rs;
+//    the NETunnelProviderManager path is shared, macOS additionally does system-extension activation) ─
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod ne_spike {
