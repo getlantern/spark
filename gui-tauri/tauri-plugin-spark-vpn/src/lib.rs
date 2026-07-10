@@ -72,6 +72,21 @@ mod platform {
     }
 }
 
+/// Convert the `select_server` i32 arg to a pin (negative → auto/None). Mirrors `tray::parse_pin`
+/// but available on all targets (the command runs on mobile too).
+pub(crate) fn tray_pin(index: i32) -> Option<usize> {
+    if index < 0 {
+        None
+    } else {
+        Some(index as usize)
+    }
+}
+
+/// Convert a pin back to the i32 wire value (None → -1).
+pub(crate) fn tray_pin_to_i32(pin: Option<usize>) -> i32 {
+    pin.map_or(-1, |i| i as i32)
+}
+
 /// Initialise the `spark-vpn` plugin. Wire this into the Tauri builder via
 /// `.plugin(tauri_plugin_spark_vpn::init())`.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
@@ -82,6 +97,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::status,
             commands::servers,
             commands::select_server,
+            commands::get_selected_server,
             commands::get_split_tunnel,
             commands::set_split_tunnel,
             commands::get_routing_mode,
@@ -93,6 +109,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::set_excluded_apps,
         ])
         .setup(|app, _api| {
+            app.manage(commands::SelectedServer::default());
             #[cfg(target_os = "android")]
             {
                 // Register the Kotlin plugin (SparkVpnPlugin, package org.getlantern.spark.vpn) and
