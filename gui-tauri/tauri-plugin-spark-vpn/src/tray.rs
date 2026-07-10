@@ -56,6 +56,48 @@ pub(crate) fn connect_item(state: &str) -> (&'static str, &'static str, bool) {
     }
 }
 
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::TrayIconBuilder,
+    AppHandle, Manager, Runtime,
+};
+
+/// The tray icon PNG, embedded at compile time.
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray.png");
+
+/// Build the system tray and register it. Called once from the plugin `.setup()`.
+pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let show = MenuItemBuilder::with_id("show", "Show Spark").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit Spark").build(app)?;
+    let menu = MenuBuilder::new(app).item(&show).item(&quit).build()?;
+
+    let icon = tauri::image::Image::from_bytes(TRAY_ICON_PNG)?;
+    TrayIconBuilder::with_id("spark-tray")
+        .icon(icon)
+        .icon_as_template(true) // macOS: adapt to light/dark menu bar; ignored elsewhere
+        .tooltip("Spark")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(move |app, event| match event.id().as_ref() {
+            "show" => show_main_window(app),
+            "quit" => {
+                let _ = app.state::<Box<dyn crate::TunnelControl>>().disconnect();
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Show + focus the main window.
+fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

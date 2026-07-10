@@ -126,6 +126,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 let ctl = platform::control(app)?;
                 app.manage(ctl);
             }
+            #[cfg(desktop)]
+            tray::init(app)?;
             Ok(())
         })
         .build()
