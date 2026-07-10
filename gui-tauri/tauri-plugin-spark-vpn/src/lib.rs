@@ -16,6 +16,10 @@ mod desktop;
 #[cfg(target_os = "macos")]
 mod apps_darwin;
 
+// Desktop system tray (macOS menu bar / Windows + Linux tray). Desktop-only.
+#[cfg(desktop)]
+mod tray;
+
 // Desktop control over spark-ipc (Windows named pipe / Linux unix socket). Compiled off android;
 // on macOS it provides the transport-agnostic ipc client that AppleControl doesn't use but which
 // unit-tests here (its unix path == the Linux path).
