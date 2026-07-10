@@ -5,6 +5,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -88,6 +89,11 @@ pub struct SelectingTransport {
     /// take a cheap `Arc` clone via [`Self::members`].
     members: Arc<Mutex<Arc<Vec<Member>>>>,
     selection: Arc<Mutex<Selection>>,
+    /// Bumped by [`Self::reload`] each time the member set is swapped. The prober captures it with
+    /// its member snapshot and re-checks after probing: if it changed, a reload landed mid-round, so
+    /// the prober discards its now-stale outcomes rather than writing them over the freshly-reset
+    /// selection (which would leave latency/ranking pointing at the wrong generation of servers).
+    epoch: Arc<AtomicU64>,
     reprobe: Arc<tokio::sync::Notify>,
     prober: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Fail-open fallback (issue #11; the product fail-open default, `docs/process-architecture-and-ipc.md`
@@ -122,11 +128,13 @@ impl SelectingTransport {
             pinned: None,
         }));
         let reprobe = Arc::new(tokio::sync::Notify::new());
+        let epoch = Arc::new(AtomicU64::new(0));
         // Clamp to ≥1s so a misconfigured `probe_interval_secs = 0` can't spin the prober.
         let interval = interval.max(std::time::Duration::from_secs(1));
         let task = tokio::spawn(prober_loop(
             Arc::clone(&members),
             Arc::clone(&selection),
+            Arc::clone(&epoch),
             Arc::clone(&reprobe),
             interval,
             window.max(1),
@@ -134,6 +142,7 @@ impl SelectingTransport {
         SelectingTransport {
             members,
             selection,
+            epoch,
             reprobe,
             prober: Mutex::new(Some(task)),
             direct_tcp,
@@ -151,23 +160,33 @@ impl SelectingTransport {
             .clone()
     }
 
-    /// The order in which `dial` tries members for a new flow: the pinned member first (if any),
-    /// then the latency-ranked rest. On auto (no pin) this is just the ranked order. Snapshot; the
-    /// lock is never held across `.await`. The common (unpinned) path returns a cheap `Arc` clone.
-    fn order(&self) -> Arc<[usize]> {
-        let len = self.members().len();
+    /// A **consistent** `(members, dial-order)` pair, read under a single `selection`-lock hold
+    /// (selection → members order) so a racing [`Self::reload`] — which swaps both under the same
+    /// lock — can't pair a new order with old members (or vice-versa) for one flow. The order is the
+    /// pinned member first (if any), then the latency-ranked rest; on auto it's just the ranking.
+    /// Neither lock is held across `.await`.
+    fn members_and_order(&self) -> (Arc<Vec<Member>>, Arc<[usize]>) {
         let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
-        match sel.pinned {
+        let members = self.members();
+        let order = match sel.pinned {
             // Pin first, then the ranked rest (minus the pin). Even an unhealthy pin (not in
             // `ranked`) is tried first — the user chose it — then we fail over to healthy members.
-            Some(p) if p < len => {
-                let mut v = Vec::with_capacity(len);
+            Some(p) if p < members.len() => {
+                let mut v = Vec::with_capacity(members.len());
                 v.push(p);
                 v.extend(sel.ranked.iter().copied().filter(|&i| i != p));
                 v.into()
             }
             _ => sel.ranked.clone(),
-        }
+        };
+        (members, order)
+    }
+
+    /// Just the dial-order (see [`Self::members_and_order`]); test-only, since production dials take
+    /// the paired `(members, order)` snapshot for consistency.
+    #[cfg(test)]
+    fn order(&self) -> Arc<[usize]> {
+        self.members_and_order().1
     }
 
     /// Move a failed member to the back of the ranking (so new flows stop trying it first) and wake
@@ -191,8 +210,10 @@ impl SelectingTransport {
     /// one new flows currently dial first — for the server-selection UI. Reads the live state under
     /// the short selection lock (never across `.await`); ordered by pool index (the UI groups/sorts).
     pub fn snapshot(&self) -> Vec<MemberStatus> {
-        let members = self.members();
+        // Read members under the selection lock (selection → members order) so a racing `reload`
+        // can't pair one generation's members with another's ranking/latency.
         let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+        let members = self.members();
         // The member new flows dial first: the pin if valid, else the latency-ranked best.
         let current = match sel.pinned {
             Some(p) if p < members.len() => Some(p),
@@ -311,6 +332,10 @@ impl SelectingTransport {
             }
             // Keep the manual pin only if that exact server survived the refresh.
             sel.pinned = pinned_label.and_then(|lbl| new_arc.iter().position(|m| m.label == lbl));
+            // Bump the epoch under the same lock as the swap, so a prober round that started before
+            // this reload discards its (now stale-generation) outcomes instead of clobbering the
+            // reset above.
+            self.epoch.fetch_add(1, Ordering::Relaxed);
         }
         tracing::info!(members = n, "pool reloaded from refreshed config");
         self.reprobe.notify_one();
@@ -358,10 +383,10 @@ impl Transport for SelectingTransport {
     /// open to a direct dial** (loudly logged) so traffic degrades to a direct connection rather
     /// than blackholing (issue #11; arch doc §5 fail-open default).
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
-        let members = self.members();
-        let order = self.order();
+        let (members, order) = self.members_and_order();
         for &i in order.iter() {
-            // Bounds-guard: a concurrent `reload` may have shrunk the pool since `order` was read.
+            // Consistent (members, order) pair from `members_and_order`; `.get` stays as a cheap
+            // belt-and-suspenders guard.
             let Some(m) = members.get(i) else { continue };
             match m.transport.dial(target).await {
                 Ok(s) => return Ok(s),
@@ -380,8 +405,7 @@ impl Transport for SelectingTransport {
     }
 
     async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
-        let members = self.members();
-        let order = self.order();
+        let (members, order) = self.members_and_order();
         let mut last_err = None;
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
@@ -424,8 +448,7 @@ impl UdpTransport for SelectingTransport {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        let members = self.members();
-        let order = self.order();
+        let (members, order) = self.members_and_order();
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
             match m.udp.dial_udp(target).await {
@@ -452,8 +475,7 @@ impl UdpTransport for SelectingTransport {
         &self,
         target: Address,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        let members = self.members();
-        let order = self.order();
+        let (members, order) = self.members_and_order();
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
             match m.udp.dial_udp_addr(target.clone()).await {
@@ -488,6 +510,7 @@ impl Drop for SelectingTransport {
 async fn prober_loop(
     members: Arc<Mutex<Arc<Vec<Member>>>>,
     selection: Arc<Mutex<Selection>>,
+    epoch: Arc<AtomicU64>,
     reprobe: Arc<tokio::sync::Notify>,
     interval: std::time::Duration,
     window: usize,
@@ -496,9 +519,11 @@ async fn prober_loop(
     let per_probe = interval.min(std::time::Duration::from_secs(10));
     let mut measured = false;
     loop {
-        // Snapshot the live member set for this round. A `reload` mid-round is picked up on the next
-        // round (and wakes us early via `reprobe`), so a refreshed pool is probed promptly.
+        // Snapshot the live member set + its generation for this round. A `reload` mid-round is
+        // picked up on the next round (and wakes us early via `reprobe`), so a refreshed pool is
+        // probed promptly.
         let members = members.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let gen = epoch.load(Ordering::Relaxed);
         let outcomes = flint_dial::probe_windowed(members.len(), window, |i| {
             // Clone the (cheap) Arc + CallbackUrl into the future so it borrows nothing from `members`.
             let transport = Arc::clone(&members[i].transport);
@@ -516,22 +541,29 @@ async fn prober_loop(
         .await;
         {
             let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
-            // Record the latest per-member outcome for `snapshot()` before re-ranking.
-            if sel.latest.len() != members.len() {
-                sel.latest = vec![None; members.len()];
-            }
-            for (i, o) in &outcomes {
-                if let Some(slot) = sel.latest.get_mut(*i) {
-                    *slot = Some(*o);
+            // Discard outcomes if a `reload` swapped the pool while we were probing — writing them
+            // would clobber the reset selection with the wrong generation's latency/ranking. reload
+            // queued a `reprobe`, so the wait below returns immediately and re-probes the new set.
+            if epoch.load(Ordering::Relaxed) == gen {
+                // Record the latest per-member outcome for `snapshot()` before re-ranking.
+                if sel.latest.len() != members.len() {
+                    sel.latest = vec![None; members.len()];
                 }
-            }
-            sel.ranked = if measured {
-                next_order(&sel.ranked, &outcomes).into()
+                for (i, o) in &outcomes {
+                    if let Some(slot) = sel.latest.get_mut(*i) {
+                        *slot = Some(*o);
+                    }
+                }
+                sel.ranked = if measured {
+                    next_order(&sel.ranked, &outcomes).into()
+                } else {
+                    rank(&outcomes).into()
+                };
+                measured = true;
             } else {
-                rank(&outcomes).into()
-            };
+                tracing::debug!("pool reloaded mid-probe; discarding stale-generation outcomes");
+            }
         }
-        measured = true;
         tracing::debug!(
             healthy = outcomes.iter().filter(|(_, o)| o.healthy).count(),
             pool = members.len(),
@@ -771,6 +803,7 @@ mod tests {
                 latest: vec![None; n],
                 pinned: None,
             })),
+            epoch: Arc::new(AtomicU64::new(0)),
             reprobe: Arc::new(tokio::sync::Notify::new()),
             prober: Mutex::new(None),
             direct_tcp,
@@ -1013,6 +1046,27 @@ mod tests {
             "empty refreshed server set is rejected"
         );
         assert_eq!(t.snapshot().len(), 1, "current pool is preserved");
+    }
+
+    #[cfg(feature = "multi-server")]
+    #[tokio::test]
+    async fn members_and_order_pair_is_consistent_after_reload() {
+        // The dial-path invariant: the (members, order) pair is from one generation, so every order
+        // index is valid for the paired members snapshot (no stale new-order-vs-old-members panic).
+        let t = selecting(
+            vec![
+                member_with_meta(true, meta("a", "US")),
+                member_with_meta(true, meta("b", "GB")),
+            ],
+            vec![0, 1],
+        );
+        t.reload(vec![member_with_meta(true, meta("c", "DE"))]);
+        let (members, order) = t.members_and_order();
+        assert_eq!(members.len(), 1, "members reflect the reloaded set");
+        assert!(
+            order.iter().all(|&i| i < members.len()),
+            "every dial-order index is in range for the paired members"
+        );
     }
 
     #[test]
