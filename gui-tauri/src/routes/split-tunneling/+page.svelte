@@ -4,6 +4,9 @@
   import { _ } from "$lib/i18n";
   import { MockBackend, type SparkBackend, type SplitTunnel } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
+  import { platform } from "@tauri-apps/plugin-os";
+
+  const isIos = isTauri() && platform() === "ios";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
   let st = $state<SplitTunnel>({ enabled: false, domains: [], ips: [] });
@@ -39,6 +42,7 @@
 
     {#if st.enabled}
       <div class="card" style="margin-top:12px">
+        {#if !isIos}
         <button class="row" onclick={() => goto("/split-tunneling/apps")}>
           <span class="ic" aria-hidden="true">▦</span>
           <div class="meta"><div class="name">{$_("apps")}</div></div>
@@ -46,6 +50,7 @@
           <span class="chev">›</span>
         </button>
         <div class="divider"></div>
+        {/if}
         <button class="row" onclick={() => goto("/split-tunneling/websites")}>
           <span class="ic" aria-hidden="true">🌐</span>
           <div class="meta"><div class="name">{$_("websites")}</div></div>
