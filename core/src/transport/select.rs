@@ -253,18 +253,21 @@ impl SelectingTransport {
     /// ([`crate::transport::build_members`]) is that feature.
     #[cfg(feature = "multi-server")]
     pub(crate) fn reload(&self, mut new_members: Vec<Member>) {
-        let old = self.members();
-        // Prior best working proxy + the manual pin's identity, read together under the selection lock.
+        // Prior best working proxy + the manual pin's identity, read together under the selection
+        // lock. Snapshot `old` *inside* the lock (selection → members order, matching the swap below)
+        // and index it with `.get()` so a racing reload can't make a `sel` index panic here.
         let (prior, pinned_label) = {
             let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+            let old = self.members();
             let idx = sel
                 .pinned
                 .filter(|&p| p < old.len())
                 .or_else(|| sel.ranked.first().copied());
             let prior = idx.and_then(|i| {
+                let m = old.get(i)?;
                 let oc = sel.latest.get(i).copied().flatten();
                 match oc {
-                    Some(o) if o.healthy && !old[i].label.is_empty() => Some((old[i].clone(), o)),
+                    Some(o) if o.healthy && !m.label.is_empty() => Some((m.clone(), o)),
                     _ => None,
                 }
             });
