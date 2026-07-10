@@ -17,20 +17,6 @@ pub(crate) fn flag_emoji(cc: &str) -> String {
         .collect()
 }
 
-/// Convert the `select_server` i32 arg to a pin: negative → auto (None).
-pub(crate) fn parse_pin(index: i32) -> Option<usize> {
-    if index < 0 {
-        None
-    } else {
-        Some(index as usize)
-    }
-}
-
-/// Convert a pin back to the i32 wire value (None → -1).
-pub(crate) fn pin_to_i32(pin: Option<usize>) -> i32 {
-    pin.map_or(-1, |i| i as i32)
-}
-
 /// Menu id for a location item. `None` → Smart/auto.
 pub(crate) fn loc_menu_id(index: Option<usize>) -> String {
     match index {
@@ -91,11 +77,11 @@ mod tests {
 
     #[test]
     fn pin_round_trips_through_i32() {
-        assert_eq!(parse_pin(-1), None);
-        assert_eq!(parse_pin(0), Some(0));
-        assert_eq!(parse_pin(5), Some(5));
-        assert_eq!(pin_to_i32(None), -1);
-        assert_eq!(pin_to_i32(Some(5)), 5);
+        assert_eq!(crate::tray_pin(-1), None);
+        assert_eq!(crate::tray_pin(0), Some(0));
+        assert_eq!(crate::tray_pin(5), Some(5));
+        assert_eq!(crate::tray_pin_to_i32(None), -1);
+        assert_eq!(crate::tray_pin_to_i32(Some(5)), 5);
     }
 
     #[test]
