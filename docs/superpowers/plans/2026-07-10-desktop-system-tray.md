@@ -387,7 +387,7 @@ In `lib.rs` `.setup()`, add at the end of the closure (before `Ok(())`):
 - [ ] **Step 5: Build to verify it compiles**
 
 Run: `cargo build --manifest-path gui-tauri/tauri-plugin-spark-vpn/Cargo.toml`
-Expected: builds clean. (If `items(&[...])` or `icon_as_template` name differs in 2.11.x, adjust to the compiler's suggestion — the API family is confirmed present.)
+Expected: builds clean. (`MenuItemBuilder::with_id/build`, `MenuBuilder::new/item/build`, `TrayIconBuilder::with_id/icon/icon_as_template/tooltip/menu/show_menu_on_left_click/on_menu_event/build`, and `Image::from_bytes` are all verified present in tauri-2.11.x.)
 
 - [ ] **Step 6: Manual smoke (macOS)**
 
@@ -959,7 +959,7 @@ Then add a run-once `$effect` (empty dep set → runs on mount, returns a cleanu
   });
 ```
 
-(Adjust imports to the file's existing style; if `onMount` already exists, merge into it. `core:default` in `capabilities/default.json` already permits `listen`.)
+(`core:default` in `capabilities/default.json` already permits `listen`, so no capability change is needed. The `$effect` sits alongside the layout's existing `$effect`s for i18n/theme.)
 
 - [ ] **Step 4: Type-check the frontend**
 
