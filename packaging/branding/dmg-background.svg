@@ -29,10 +29,12 @@
     <text x="120" y="110" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="96" font-weight="700" letter-spacing="2" fill="#1b1c1d">Spark</text>
   </g>
 
-  <!-- drag arrow from app slot toward Applications slot (icons sit at y=470) -->
+  <!-- drag arrow from app slot toward Applications slot (icons sit at y=470). One cohesive shape:
+       a 20px rounded shaft whose right end overlaps a proportional 40px arrowhead (2× the shaft),
+       so head and shaft read as a single arrow with no gap. -->
   <g transform="translate(0,470)">
-    <rect x="576" y="-9" width="248" height="18" rx="9" fill="url(#arrow)"/>
-    <path d="M824 -34 L892 0 L824 34 Z" fill="#00bdd6"/>
+    <rect x="576" y="-10" width="272" height="20" rx="10" fill="url(#arrow)"/>
+    <path d="M844 -20 L884 0 L844 20 Z" fill="#00bdd6"/>
   </g>
 
   <!-- instruction -->
