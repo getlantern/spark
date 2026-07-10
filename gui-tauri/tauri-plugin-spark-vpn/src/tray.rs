@@ -386,15 +386,16 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) 
         }
         other => {
             if let Some(pin) = parse_loc_menu_id(other) {
-                report_tray_action(
-                    app,
-                    "select server",
-                    ctl.select_server(crate::tray_pin_to_i32(pin)),
-                );
-                *app.state::<crate::commands::SelectedServer>()
-                    .0
-                    .lock()
-                    .expect("pin lock") = pin;
+                let result = ctl.select_server(crate::tray_pin_to_i32(pin));
+                // Only record the pin if the selection actually took, so the tray/window check-mark
+                // can't drift from the live tunnel selection on a failed call.
+                if result.is_ok() {
+                    *app.state::<crate::commands::SelectedServer>()
+                        .0
+                        .lock()
+                        .expect("pin lock") = pin;
+                }
+                report_tray_action(app, "select server", result);
             }
         }
     }

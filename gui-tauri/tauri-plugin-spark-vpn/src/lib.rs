@@ -72,8 +72,8 @@ mod platform {
     }
 }
 
-/// Convert the `select_server` i32 arg to a pin (negative → auto/None). Mirrors `tray::parse_pin`
-/// but available on all targets (the command runs on mobile too).
+/// Convert the `select_server` i32 arg to a pin (negative → auto/None). Lives here (not in the
+/// desktop-only `tray` module) so the commands, which run on mobile too, can use it.
 pub(crate) fn tray_pin(index: i32) -> Option<usize> {
     if index < 0 {
         None
