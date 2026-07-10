@@ -274,10 +274,37 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
     }
 }
 
-/// Build a `SelectingTransport` over `config.transport.servers`. Each entry's callback URL is its
-/// per-entry override or the global `transport.callback_url`. Members that can't be built (notably a
-/// transport whose feature isn't compiled in) are **skipped** — a partial pool still connects, and a
-/// future protocol in a fetched config can't brick the tunnel; the pool must end up non-empty.
+/// Build pool [`select::Member`]s from `config.transport.servers`, returning the buildable members
+/// and the skip reasons. Each entry's callback URL is its per-entry override or the global
+/// `transport.callback_url`. Members that can't be built (notably a transport whose feature isn't
+/// compiled in) are **skipped** (reason collected) — a partial pool still connects, and a future
+/// protocol in a fetched config can't brick the tunnel. Shared by initial construction
+/// ([`build_selecting`]) and live reload ([`select::SelectingTransport::reload`] via
+/// [`PoolControl::reload_from_config`]).
+#[cfg(feature = "multi-server")]
+fn build_members(
+    config: &Config,
+    protector: Option<&SocketProtector>,
+) -> (Vec<crate::transport::select::Member>, Vec<String>) {
+    let wire = wire_plan_from_config(&config.transport.shaping);
+    let mut members = Vec::with_capacity(config.transport.servers.len());
+    let mut skipped: Vec<String> = Vec::new();
+    for entry in &config.transport.servers {
+        // Skip (don't propagate) a member we can't build, mirroring the config_raw adapter skipping
+        // outbounds it can't represent. The reason is logged and aggregated into the empty-pool error.
+        match build_member(entry, config, protector, &wire) {
+            Ok(m) => members.push(m),
+            Err(e) => {
+                let who = entry.name.as_deref().unwrap_or("<unnamed>");
+                tracing::warn!(server = who, error = %e, "transport.servers: skipping un-buildable pool member");
+                skipped.push(format!("{who}: {e}"));
+            }
+        }
+    }
+    (members, skipped)
+}
+
+/// Build a `SelectingTransport` over `config.transport.servers`. The pool must end up non-empty.
 #[cfg(feature = "multi-server")]
 #[allow(clippy::type_complexity)]
 fn build_selecting(
@@ -289,21 +316,7 @@ fn build_selecting(
     Option<Arc<dyn PoolControl>>,
 )> {
     use crate::transport::select::SelectingTransport;
-    let wire = wire_plan_from_config(&config.transport.shaping);
-    let mut members = Vec::with_capacity(config.transport.servers.len());
-    let mut skipped: Vec<String> = Vec::new();
-    for entry in &config.transport.servers {
-        // Skip (don't propagate) a member we can't build, mirroring the config_raw adapter skipping
-        // outbounds it can't represent. The reason is logged and aggregated into the empty-pool error.
-        match build_member(entry, config, protector.as_ref(), &wire) {
-            Ok(m) => members.push(m),
-            Err(e) => {
-                let who = entry.name.as_deref().unwrap_or("<unnamed>");
-                tracing::warn!(server = who, error = %e, "transport.servers: skipping un-buildable pool member");
-                skipped.push(format!("{who}: {e}"));
-            }
-        }
-    }
+    let (members, skipped) = build_members(config, protector.as_ref());
     if members.is_empty() {
         return Err(io::Error::other(format!(
             "transport.servers: no buildable pool members ({} skipped — {})",
@@ -965,6 +978,15 @@ pub trait PoolControl: Send + Sync {
     /// returns to auto. New flows only; in-flight unaffected. Returns `true` if applied, `false` if
     /// an out-of-range index was ignored (so callers can report a real failure instead of a no-op).
     fn set_pin(&self, index: Option<usize>) -> bool;
+
+    /// Live-rebuild the pool from a refreshed config: new servers are probed + surfaced without a
+    /// reconnect, and the best prior working proxy is retained (see
+    /// [`select::SelectingTransport::reload`]). Default is a no-op; only the multi-server pool
+    /// implements it. Returns `io::Result` so the caller can log and keep the current pool when the
+    /// refreshed server set builds nothing.
+    fn reload_from_config(&self, _config: &Config) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// JSON-escape a string for [`snapshot_to_json`] (only the characters JSON requires: quote,

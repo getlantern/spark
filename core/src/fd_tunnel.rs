@@ -871,13 +871,35 @@ pub fn run_fd_lantern_api(
             servers = config.transport.servers.len(),
             "lantern-api: boot config ready, bringing tunnel up"
         );
-        // Background refresh: warms the cache for the next connect; ends when stop fires.
+        // Background refresh: on each new config, live-reload the running server pool (new servers
+        // get probed + surfaced without a reconnect; the best prior working proxy is retained) and
+        // warm the cache for the next connect. Ends when stop fires.
         let loop_dir = data_dir.clone();
         let loop_stop = Arc::clone(&waiter);
+        // A fetched config carries no `protect_interface`; reuse the one discovered at bringup so a
+        // rebuilt pool pins its sockets identically (UDP/QUIC tunnel bypass, above).
+        let reload_iface = config.transport.protect_interface.clone();
         tokio::spawn(async move {
             let env = FetchEnv::from_env();
+            let on_config = move |mut cfg: Config| {
+                cfg.transport.protect_interface = reload_iface.clone();
+                // No live pool (direct/tunnel/single-transport) → the refresh still warmed the
+                // on-disk cache for the next connect, as before.
+                if let Some(pool) = current_pool() {
+                    match pool.reload_from_config(&cfg) {
+                        Ok(()) => info!(
+                            servers = cfg.transport.servers.len(),
+                            "config-fetch: live-reloaded the server pool"
+                        ),
+                        Err(e) => warn!(
+                            error = %e,
+                            "config-fetch: pool reload failed; keeping the current pool"
+                        ),
+                    }
+                }
+            };
             tokio::select! {
-                _ = fetch::run_loop(&loop_dir, &env, |_cfg| {}, || false) => {}
+                _ = fetch::run_loop(&loop_dir, &env, on_config, || false) => {}
                 _ = loop_stop.notified() => {}
             }
         });
