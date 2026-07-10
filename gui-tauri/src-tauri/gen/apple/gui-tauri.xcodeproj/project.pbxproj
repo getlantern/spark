@@ -8,10 +8,14 @@
 
 /* Begin PBXBuildFile section */
 		13EE2A82127CC63920FC24E5 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 35227EF9FE48284E67590F7D /* Security.framework */; };
+		28A2D2205AB3530113451546 /* SparkTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 03C3228FA9B5448F41CA976F /* SparkTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3DB4C8590D7DFCC222BF4CAC /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 36B1D547379ECD57C41D3D86 /* Metal.framework */; };
 		5ACA6482F363F4900CF537C9 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D86BDA2CB6EDE7585F81BBD /* QuartzCore.framework */; };
+		6CC913FD6E9ECE3194EE8049 /* SparkCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 123B085A28DF2E490C22A73E /* SparkCore.xcframework */; };
+		7933768E57F9E4285635D2DF /* FdResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44C5064960F0AD7EE6FA091B /* FdResolver.swift */; };
 		82B8997FB4887E7E22B3FE7D /* assets in Resources */ = {isa = PBXBuildFile; fileRef = F7013D54026B3B0C5BC62722 /* assets */; };
 		8DF04324C81F4E071C38A713 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 29E602CC7FDC9C2793EC322F /* WebKit.framework */; };
+		93AEBD4B29956D2BD9C895B9 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF3C3B77BAD21D2C63B3B9 /* PacketTunnelProvider.swift */; };
 		94DC8FED1DA69785E66A87D7 /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 16A1412300754BC16A36A582 /* libapp.a */; };
 		A35EF32930631C68AFD7C3B0 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = A7F155BCA9B1B9D3D7367F76 /* main.mm */; };
 		A3D3F67C6238BF5856E82449 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 30948B02872F51FB0B3CEC11 /* UIKit.framework */; };
@@ -21,7 +25,33 @@
 		E6563DDD8154AE2124ADF435 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B99315FA7ACB7F6AD719C36 /* MetalKit.framework */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		F11AC36611276CF267D8D4AE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2FB22D7B1F42263DFBDCC417 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4FE910604B87E1BF149B2DBA;
+			remoteInfo = SparkTunnel;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		F6438E072C48F2222BB89A9E /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				28A2D2205AB3530113451546 /* SparkTunnel.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		03C3228FA9B5448F41CA976F /* SparkTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = SparkTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		123B085A28DF2E490C22A73E /* SparkCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = SparkCore.xcframework; path = ../../../../platforms/apple/SparkCore.xcframework; sourceTree = "<group>"; };
 		16A1412300754BC16A36A582 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		291CCED6CC744F1E826FF1F9 /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
 		29E602CC7FDC9C2793EC322F /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
@@ -30,6 +60,7 @@
 		35227EF9FE48284E67590F7D /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		36B1D547379ECD57C41D3D86 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		3D86BDA2CB6EDE7585F81BBD /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		44C5064960F0AD7EE6FA091B /* FdResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FdResolver.swift; sourceTree = "<group>"; };
 		4D3065B6CB282B499D9A3598 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
 		5CA662B2B94E1A9AFC0C2102 /* gui-tauri_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "gui-tauri_iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B99315FA7ACB7F6AD719C36 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
@@ -38,6 +69,7 @@
 		A3C5A3CDFB0C40ECB5EBACAF /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
 		A62C6D70D1E0136342D8CBD5 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		A7F155BCA9B1B9D3D7367F76 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
+		C4FF3C3B77BAD21D2C63B3B9 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		F544A2431FAD7FC53F100456 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F7013D54026B3B0C5BC62722 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
@@ -55,6 +87,14 @@
 				13EE2A82127CC63920FC24E5 /* Security.framework in Frameworks */,
 				A3D3F67C6238BF5856E82449 /* UIKit.framework in Frameworks */,
 				8DF04324C81F4E071C38A713 /* WebKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EB619BA2443DA5D1FE121BCC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6CC913FD6E9ECE3194EE8049 /* SparkCore.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -84,6 +124,7 @@
 			isa = PBXGroup;
 			children = (
 				5CA662B2B94E1A9AFC0C2102 /* gui-tauri_iOS.app */,
+				03C3228FA9B5448F41CA976F /* SparkTunnel.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -113,10 +154,21 @@
 				6B99315FA7ACB7F6AD719C36 /* MetalKit.framework */,
 				3D86BDA2CB6EDE7585F81BBD /* QuartzCore.framework */,
 				35227EF9FE48284E67590F7D /* Security.framework */,
+				123B085A28DF2E490C22A73E /* SparkCore.xcframework */,
 				30948B02872F51FB0B3CEC11 /* UIKit.framework */,
 				29E602CC7FDC9C2793EC322F /* WebKit.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		9ABE3F201A5C1515CF0BA754 /* SparkNE */ = {
+			isa = PBXGroup;
+			children = (
+				44C5064960F0AD7EE6FA091B /* FdResolver.swift */,
+				C4FF3C3B77BAD21D2C63B3B9 /* PacketTunnelProvider.swift */,
+			);
+			name = SparkNE;
+			path = ../../../../platforms/apple/Sources/SparkNE;
 			sourceTree = "<group>";
 		};
 		9CB7C668492EA63DEDA5856B /* Externals */ = {
@@ -144,6 +196,7 @@
 				9CB7C668492EA63DEDA5856B /* Externals */,
 				0CF5757A5D2020027789B377 /* gui-tauri_iOS */,
 				6EAC7577FEE6F42BEA32C5BF /* Sources */,
+				9ABE3F201A5C1515CF0BA754 /* SparkNE */,
 				0B2AE0DC1195DB1C59A16491 /* src */,
 				88F419D1CEE35A3A3797C967 /* Frameworks */,
 				2D9B4276E48B914CCA210408 /* Products */,
@@ -153,6 +206,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		4FE910604B87E1BF149B2DBA /* SparkTunnel */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B261CB9B0662F7955A22C361 /* Build configuration list for PBXNativeTarget "SparkTunnel" */;
+			buildPhases = (
+				BB0DDAC5385F27F59E8FCCFA /* Sources */,
+				EB619BA2443DA5D1FE121BCC /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SparkTunnel;
+			packageProductDependencies = (
+			);
+			productName = SparkTunnel;
+			productReference = 03C3228FA9B5448F41CA976F /* SparkTunnel.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		9FCA804A4C0D92147B4B4EBD /* gui-tauri_iOS */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = ACAEC3E28EC6A9FE6D92BE48 /* Build configuration list for PBXNativeTarget "gui-tauri_iOS" */;
@@ -161,10 +232,12 @@
 				9F877735281CC931BB29BEB2 /* Sources */,
 				53A41B1CA70D62F882720793 /* Resources */,
 				C86F9A25DAB307E4E633382E /* Frameworks */,
+				F6438E072C48F2222BB89A9E /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				60DAC7C889573238E458A0A9 /* PBXTargetDependency */,
 			);
 			name = "gui-tauri_iOS";
 			packageProductDependencies = (
@@ -182,6 +255,14 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					4FE910604B87E1BF149B2DBA = {
+						DevelopmentTeam = ACZRKC3LQ9;
+						ProvisioningStyle = Automatic;
+					};
+					9FCA804A4C0D92147B4B4EBD = {
+						DevelopmentTeam = ACZRKC3LQ9;
+						ProvisioningStyle = Automatic;
+					};
 				};
 			};
 			buildConfigurationList = 427F4C6B3DCB4F519CB77F94 /* Build configuration list for PBXProject "gui-tauri" */;
@@ -198,6 +279,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				4FE910604B87E1BF149B2DBA /* SparkTunnel */,
 				9FCA804A4C0D92147B4B4EBD /* gui-tauri_iOS */,
 			);
 		};
@@ -249,7 +331,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BB0DDAC5385F27F59E8FCCFA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7933768E57F9E4285635D2DF /* FdResolver.swift in Sources */,
+				93AEBD4B29956D2BD9C895B9 /* PacketTunnelProvider.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		60DAC7C889573238E458A0A9 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4FE910604B87E1BF149B2DBA /* SparkTunnel */;
+			targetProxy = F11AC36611276CF267D8D4AE /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		1483D2BA23FFD8555449EA1C /* release */ = {
@@ -285,8 +384,10 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = ACZRKC3LQ9;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -336,6 +437,56 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
+			};
+			name = release;
+		};
+		A6E26183947B5ADC4079B23A /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = (
+					arm64,
+				);
+				CODE_SIGN_ENTITLEMENTS = SparkTunnel/SparkTunnel.entitlements;
+				ENABLE_BITCODE = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../../../platforms/apple\"",
+				);
+				INFOPLIST_FILE = SparkTunnel/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.getlantern.spark.tunnel;
+				PRODUCT_NAME = SparkTunnel;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = debug;
+		};
+		D75F5A0361F6BB382489D5E0 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = (
+					arm64,
+				);
+				CODE_SIGN_ENTITLEMENTS = SparkTunnel/SparkTunnel.entitlements;
+				ENABLE_BITCODE = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"../../../../platforms/apple\"",
+				);
+				INFOPLIST_FILE = SparkTunnel/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.getlantern.spark.tunnel;
+				PRODUCT_NAME = SparkTunnel;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = release;
 		};
@@ -403,8 +554,10 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = ACZRKC3LQ9;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -450,6 +603,15 @@
 			buildConfigurations = (
 				DBBE79CF4DCDD972C1AC1636 /* debug */,
 				759DEEBDB0A165A643F2ED6D /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		B261CB9B0662F7955A22C361 /* Build configuration list for PBXNativeTarget "SparkTunnel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A6E26183947B5ADC4079B23A /* debug */,
+				D75F5A0361F6BB382489D5E0 /* release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = debug;

@@ -7,6 +7,12 @@ fileGroups: [../../src]
 configs:
   debug: debug
   release: release
+settings:
+  base:
+    # Automatic signing can provision the iOS packet-tunnel-provider entitlement for a paid account
+    # (unlike macOS Developer-ID). Applies to both the app and the NE app-extension target.
+    DEVELOPMENT_TEAM: ACZRKC3LQ9
+    CODE_SIGN_STYLE: Automatic
 settingGroups:
   app:
     base:
@@ -55,6 +61,13 @@ targets:
         CFBundleVersion: "0.1.0"
     entitlements:
       path: gui-tauri_iOS/gui-tauri_iOS.entitlements
+      properties:
+        # App-Store `packet-tunnel-provider` flavor (NOT the macOS `-systemextension`); shares the
+        # provider config + self-fetch cache with the NE via the App Group.
+        "com.apple.developer.networking.networkextension":
+          - packet-tunnel-provider
+        "com.apple.security.application-groups":
+          - group.org.getlantern.spark
     scheme:
       environmentVariables:
         RUST_BACKTRACE: full
@@ -79,6 +92,9 @@ targets:
       - sdk: Security.framework
       - sdk: UIKit.framework
       - sdk: WebKit.framework
+      # Embed the Packet Tunnel Provider app-extension into the app bundle's PlugIns/.
+      - target: SparkTunnel
+        embed: true
     preBuildScripts:
       - script: npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
@@ -86,3 +102,40 @@ targets:
         outputFiles:
           - $(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a
           - $(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a
+
+  SparkTunnel:
+    # iOS Packet Tunnel Provider — an APP-EXTENSION (not a macOS system-extension). Reuses the same
+    # shared PacketTunnelProvider.swift / FdResolver.swift as macOS (referenced from platforms/apple),
+    # linking the Rust core via SparkCore.xcframework (iOS slice). No main.swift: the NSExtension
+    # principal class in Info.plist is the entry point.
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ../../../../platforms/apple/Sources/SparkNE
+    info:
+      path: SparkTunnel/Info.plist
+      properties:
+        CFBundleDisplayName: Spark Tunnel
+        # iOS NE app-extensions declare an NSExtension dict (vs the macOS system-extension's
+        # NetworkExtension dict + NEMachServiceName). The principal class is the entry point.
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    entitlements:
+      path: SparkTunnel/SparkTunnel.entitlements
+      properties:
+        "com.apple.developer.networking.networkextension":
+          - packet-tunnel-provider
+        "com.apple.security.application-groups":
+          - group.org.getlantern.spark
+    settings:
+      base:
+        PRODUCT_NAME: SparkTunnel
+        PRODUCT_BUNDLE_IDENTIFIER: org.getlantern.spark.tunnel
+        ENABLE_BITCODE: false
+        ARCHS: [arm64]
+    dependencies:
+      # Link (don't embed) the Rust core static-lib xcframework — provides the `SparkCore` module.
+      - framework: ../../../../platforms/apple/SparkCore.xcframework
+        embed: false
+        link: true
