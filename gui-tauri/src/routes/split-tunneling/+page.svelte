@@ -4,15 +4,22 @@
   import { _ } from "$lib/i18n";
   import { MockBackend, type SparkBackend, type SplitTunnel } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
-  import { platform } from "@tauri-apps/plugin-os";
-
-  const isIos = isTauri() && platform() === "ios";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
   let st = $state<SplitTunnel>({ enabled: false, domains: [], ips: [] });
   let appCount = $state(0);
+  // App-based split tunneling is impossible on iOS — hide that option there. Resolve the platform
+  // via a dynamic import inside onMount (the repo's convention for @tauri-apps/plugin-os, see
+  // lib/i18n/index.ts) so the plugin isn't loaded eagerly in web/MockBackend mode.
+  let isIos = $state(false);
 
   onMount(async () => {
+    if (isTauri()) {
+      try {
+        const os = await import("@tauri-apps/plugin-os");
+        isIos = os.platform() === "ios";
+      } catch {}
+    }
     try { st = await backend.getSplitTunnel(); } catch {}
     try { appCount = (await backend.getExcludedApps()).length; } catch {}
   });
