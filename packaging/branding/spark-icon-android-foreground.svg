@@ -1,0 +1,26 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Android adaptive-icon FOREGROUND layer: the amber bolt only, on a transparent
+       background (the cyan comes from the adaptive background layer). The bolt is scaled
+       to ~0.8 and centered so it stays within the 66/108 adaptive safe zone under any
+       launcher mask (circle, squircle, rounded-square). Derived from spark-icon.svg. -->
+  <defs>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe07a"/>
+      <stop offset="0.55" stop-color="#f8bd10"/>
+      <stop offset="1" stop-color="#f0a500"/>
+    </linearGradient>
+  </defs>
+  <!-- bolt center is (534,512); recenter horizontally to 512 and scale 0.8 about canvas center -->
+  <g transform="translate(512 512) scale(0.8) translate(-534 -512)">
+    <path d="M604 168
+             L360 556
+             L502 556
+             L430 856
+             L708 452
+             L560 452
+             L604 168 Z"
+          fill="url(#bolt)"/>
+    <!-- crisp top-left edge highlight on the bolt -->
+    <path d="M604 168 L360 556 L502 556 L500 520 L430 520 L604 250 Z" fill="#ffffff" opacity="0.22"/>
+  </g>
+</svg>
