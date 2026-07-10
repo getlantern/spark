@@ -106,22 +106,22 @@ pub(crate) fn refresh<R: Runtime>(app: &AppHandle<R>) {
     let _ = handles.adblock.set_checked(adblock);
 
     // Location check-marks: patch in place if the pool is unchanged, else rebuild the submenu's
-    // children in place (remove the stored old items, append freshly built ones).
+    // children. Hold `pool_sig` across the whole rebuild so two concurrent refreshes (poll thread +
+    // menu-event thread) can't both see "changed" and double-remove/append. Lock order is always
+    // pool_sig → locations (never reversed), so no deadlock.
     let new_sig: Vec<String> = servers.iter().map(server_sig).collect();
-    let pool_changed = *handles.pool_sig.lock().expect("sig lock") != new_sig;
-    if pool_changed {
+    let mut sig = handles.pool_sig.lock().expect("sig lock");
+    if *sig != new_sig {
         if let Ok(items) = build_location_items(app, &servers, selected) {
-            {
-                let mut stored = handles.locations.lock().expect("loc lock");
-                for (_, old) in stored.iter() {
-                    let _ = handles.location_submenu.remove(old); // CheckMenuItem: IsMenuItem
-                }
-                for (_, it) in &items {
-                    let _ = handles.location_submenu.append(it);
-                }
-                *stored = items;
+            let mut stored = handles.locations.lock().expect("loc lock");
+            for (_, old) in stored.iter() {
+                let _ = handles.location_submenu.remove(old); // CheckMenuItem: IsMenuItem
             }
-            *handles.pool_sig.lock().expect("sig lock") = new_sig;
+            for (_, it) in &items {
+                let _ = handles.location_submenu.append(it);
+            }
+            *stored = items;
+            *sig = new_sig;
         }
     } else {
         for (pin, item) in handles.locations.lock().expect("loc lock").iter() {
@@ -212,8 +212,10 @@ fn build_menu<R: Runtime>(
         .enabled(false)
         .build(app)?;
 
-    let (t_label, t_id, t_enabled) = connect_item(&status.state);
-    let toggle = MenuItemBuilder::with_id(t_id, t_label)
+    // Stable id: a muda MenuItem's id can't change after build, so `refresh` only updates the label/
+    // enabled. The event handler (Task 6) branches on live status, not this id.
+    let (t_label, _t_id, t_enabled) = connect_item(&status.state);
+    let toggle = MenuItemBuilder::with_id("toggle", t_label)
         .enabled(t_enabled)
         .build(app)?;
 
