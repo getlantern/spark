@@ -248,6 +248,10 @@ impl SelectingTransport {
     /// outcome so it stays "current" until the immediate re-probe re-ranks (hysteresis lets a clearly
     /// better new server take over; an unhealthy carried member drops out on the next round). A
     /// manual pin is preserved by identity only if that exact server survives the refresh.
+    ///
+    /// Gated on `multi-server` — the only place members are rebuilt from config
+    /// ([`crate::transport::build_members`]) is that feature.
+    #[cfg(feature = "multi-server")]
     pub(crate) fn reload(&self, mut new_members: Vec<Member>) {
         let old = self.members();
         // Prior best working proxy + the manual pin's identity, read together under the selection lock.
@@ -319,6 +323,28 @@ impl PoolControl for SelectingTransport {
     }
     fn set_pin(&self, index: Option<usize>) -> bool {
         SelectingTransport::set_pin(self, index)
+    }
+
+    /// Rebuild the pool from a refreshed config and hand the new members to [`Self::reload`] (which
+    /// retains the best prior working proxy). Uses the same socket protector the initial pool used —
+    /// derived from `config.transport.protect_interface`, which the fd-path re-applies to a fetched
+    /// config before calling. Keeps the current pool (returns `Err`) if the refreshed set builds
+    /// nothing. `multi-server`-only; without it the trait's no-op default applies.
+    #[cfg(feature = "multi-server")]
+    fn reload_from_config(&self, config: &crate::config::Config) -> std::io::Result<()> {
+        let protector = match config.transport.protect_interface.as_deref() {
+            Some(name) => Some(crate::transport::SocketProtector::for_interface(name)?),
+            None => None,
+        };
+        let (members, skipped) = crate::transport::build_members(config, protector.as_ref());
+        if members.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "reload: no buildable pool members ({} skipped)",
+                skipped.len()
+            )));
+        }
+        self.reload(members);
+        Ok(())
     }
 }
 
@@ -714,6 +740,7 @@ mod tests {
         }
     }
     // A member with a stable `label` server-identity (what `reload` matches on to retain/dedup).
+    #[cfg(feature = "multi-server")]
     fn member_labeled(ok: bool, meta: ServerMeta, label: &str) -> Member {
         member_with_meta(ok, meta).with_label(label.to_string())
     }
@@ -869,6 +896,7 @@ mod tests {
         assert!(snap[1].is_current, "the pinned member is current");
     }
 
+    #[cfg(feature = "multi-server")]
     #[tokio::test]
     async fn reload_replaces_members() {
         let t = selecting(vec![member_with_meta(true, meta("old", "US"))], vec![0]);
@@ -882,6 +910,7 @@ mod tests {
         assert_eq!(snap[1].meta.name.as_deref(), Some("newB"));
     }
 
+    #[cfg(feature = "multi-server")]
     #[tokio::test]
     async fn reload_keeps_best_prior_working_proxy() {
         // A healthy, labeled incumbent that the refreshed config omits must be carried over.
@@ -918,6 +947,7 @@ mod tests {
         assert_eq!(kept.latency_ms, Some(30), "and its last-good latency");
     }
 
+    #[cfg(feature = "multi-server")]
     #[tokio::test]
     async fn reload_dedups_retained_best_when_present() {
         // When the refreshed config still lists the prior best, don't duplicate it.
@@ -946,6 +976,7 @@ mod tests {
         assert!(snap[0].is_current, "retained best still leads");
     }
 
+    #[cfg(feature = "multi-server")]
     #[tokio::test]
     async fn reload_drops_pin_when_server_gone() {
         // A manual pin is preserved by identity only if that exact server survives the refresh.
@@ -965,6 +996,20 @@ mod tests {
         )]);
         let sel = t.selection.lock().unwrap();
         assert_eq!(sel.pinned, None, "pin dropped: the pinned server is gone");
+    }
+
+    #[cfg(feature = "multi-server")]
+    #[tokio::test]
+    async fn reload_from_config_rejects_empty_server_set() {
+        // A refreshed config that builds no members must NOT wipe the live pool — keep the current
+        // one and surface the error so the caller logs it (fd_tunnel keeps serving).
+        let t = selecting(vec![member_with_meta(true, meta("live", "US"))], vec![0]);
+        let cfg = crate::config::Config::default(); // no transport.servers
+        assert!(
+            PoolControl::reload_from_config(&t, &cfg).is_err(),
+            "empty refreshed server set is rejected"
+        );
+        assert_eq!(t.snapshot().len(), 1, "current pool is preserved");
     }
 
     #[test]
