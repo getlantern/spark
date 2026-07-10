@@ -288,10 +288,30 @@ impl SelectingTransport {
     /// (selection → members order) so a racing [`Self::reload`] — which swaps both under the same
     /// lock — can't pair a new order with old members (or vice-versa) for one flow. The order is the
     /// pinned member first (if any), then the latency-ranked rest; on auto it's just the ranking.
+    /// Quarantined members whose cooldown has elapsed are lazily promoted to `OnTrial` here.
     /// Quarantined members are filtered out AFTER the selection lock is released, then `health` is
     /// locked — the two locks are never held simultaneously. Neither lock is held across `.await`.
+    /// An `OnTrial` member (not excluded) is moved to the front so the next flow proves it first.
+    /// `health` is locked in up to three short scopes (promotion, excluded, trial-position); the
+    /// `selection` lock occupies one scope — NONE of these four scopes overlap.
     fn members_and_order(&self) -> (Arc<Vec<Member>>, Arc<[usize]>) {
-        // Scope the selection lock so it drops before we call excluded() (which locks health).
+        // 1. Promotion: lazily advance any elapsed quarantine to OnTrial (health lock only).
+        {
+            let now = tokio::time::Instant::now();
+            let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+            for h in health.iter_mut() {
+                if let MemberState::Quarantined { until, strikes } = h.state {
+                    if until <= now {
+                        h.state = MemberState::OnTrial {
+                            clean_needed: self.stall.trial_flows,
+                            strikes,
+                        };
+                    }
+                }
+            }
+        } // health guard dropped here, before the selection block below.
+
+        // 2. Scope the selection lock so it drops before we call excluded() (which locks health).
         let (members, order) = {
             let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
             let members = self.members();
@@ -309,7 +329,8 @@ impl SelectingTransport {
             (members, order)
             // `sel` (selection guard) is dropped here — before excluded() below.
         };
-        // Lock only `health` now (selection guard already dropped above).
+
+        // 3. Lock only `health` now (selection guard already dropped above).
         let excluded = self.excluded();
         let order: Arc<[usize]> = if excluded.is_empty() {
             order
@@ -320,6 +341,26 @@ impl SelectingTransport {
                 .filter(|i| !excluded.contains(i))
                 .collect()
         };
+
+        // 4. Trial routing: if any member is OnTrial (not excluded → present in order), lead the
+        //    order with it so the next flow is handed to it for re-admission proof (health lock only;
+        //    selection guard already dropped in step 2).
+        let trial = {
+            let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+            health
+                .iter()
+                .position(|h| matches!(h.state, MemberState::OnTrial { .. }))
+        };
+        let order: Arc<[usize]> = match trial {
+            Some(tm) if order.contains(&tm) => {
+                let mut v = Vec::with_capacity(order.len());
+                v.push(tm);
+                v.extend(order.iter().copied().filter(|&i| i != tm));
+                v.into()
+            }
+            _ => order,
+        };
+
         (members, order)
     }
 
@@ -1337,6 +1378,24 @@ mod tests {
         assert!(t.is_quarantined(0));
         t.reload(vec![member_with_meta(true, meta("a2", "US"))]);
         assert!(!t.is_quarantined(0), "reload resets member health");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quarantine_elapses_to_trial_and_offers_flows() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        // Before cooldown: excluded.
+        assert!(!t.members_and_order().1.contains(&0));
+        // After the 60s base cooldown: member 0 goes on trial and is offered the next flow first.
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let (_m, order) = t.members_and_order();
+        assert_eq!(
+            order.first().copied(),
+            Some(0),
+            "trial member gets the next flow"
+        );
     }
 
     #[cfg(feature = "multi-server")]
