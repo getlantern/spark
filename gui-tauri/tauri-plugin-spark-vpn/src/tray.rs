@@ -56,6 +56,25 @@ pub(crate) fn connect_item(state: &str) -> (&'static str, &'static str, bool) {
     }
 }
 
+/// The disabled top-of-menu header: connection status plus the selected location. A manual pin
+/// (`Some(index)`) shows that server's label; `None` is "Smart Location" — Spark auto-choosing —
+/// which is never shown for a manually picked location.
+fn header_label(
+    status: &crate::models::Status,
+    servers: &[crate::models::ServerInfo],
+    selected: Option<usize>,
+) -> String {
+    let location = match selected {
+        Some(i) => servers
+            .iter()
+            .find(|s| s.index == i)
+            .map(server_label)
+            .unwrap_or_else(|| "Selected location".to_string()),
+        None => "Smart Location".to_string(),
+    };
+    format!("{} · {}", header_text(&status.state), location)
+}
+
 use tauri::{
     menu::{
         CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuItem, MenuItemBuilder, Submenu,
@@ -130,7 +149,9 @@ pub(crate) fn refresh<R: Runtime>(app: &AppHandle<R>) {
     };
     let (status, servers, routing, adblock, selected) = read_state(app);
 
-    let _ = handles.header.set_text(header_text(&status.state));
+    let _ = handles
+        .header
+        .set_text(header_label(&status, &servers, selected));
     let (t_label, _t_id, t_enabled) = connect_item(&status.state);
     let _ = handles.toggle.set_text(t_label);
     let _ = handles.toggle.set_enabled(t_enabled);
@@ -245,7 +266,7 @@ fn build_menu<R: Runtime>(
     adblock: bool,
     selected: Option<usize>,
 ) -> tauri::Result<(Menu<R>, TrayHandles<R>)> {
-    let header = MenuItemBuilder::with_id("header", header_text(&status.state))
+    let header = MenuItemBuilder::with_id("header", header_label(status, servers, selected))
         .enabled(false)
         .build(app)?;
 
@@ -347,61 +368,87 @@ fn report_tray_action<R: Runtime>(app: &AppHandle<R>, action: &str, result: crat
 
 fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
     let id = event.id().as_ref().to_string();
-    let ctl = app.state::<Box<dyn crate::TunnelControl>>();
 
+    // Window / exit actions involve no blocking IPC — run them promptly on the current (main) thread.
     match id.as_str() {
-        // The toggle's id is stable ("toggle"); decide the action from live status, not the id
-        // (a muda item's id can't change, so it can't encode connect-vs-disconnect).
-        "toggle" => {
-            let connected = ctl
-                .status()
-                .map(|s| s.state == "connected")
-                .unwrap_or(false);
-            if connected {
-                report_tray_action(app, "disconnect", ctl.disconnect());
-            } else {
-                report_tray_action(app, "connect", ctl.connect());
-            }
+        "show" => {
+            show_main_window(app);
+            return;
         }
-        "routing:smart" => {
-            report_tray_action(app, "set routing mode", ctl.set_routing_mode("smart"))
-        }
-        "routing:full" => report_tray_action(app, "set routing mode", ctl.set_routing_mode("full")),
-        "adblock" => match ctl.get_ad_block_enabled() {
-            Ok(enabled) => {
-                report_tray_action(app, "set ad-block", ctl.set_ad_block_enabled(!enabled))
-            }
-            Err(e) => report_tray_action(app, "read ad-block", Err(e)),
-        },
         "split" => {
             show_main_window(app);
             let _ = app.emit("spark://navigate", "/split-tunneling");
+            return;
         }
-        "show" => show_main_window(app),
         "quit" => {
-            // Best-effort teardown; we're exiting regardless, so logging a failure adds no value.
-            let _ = ctl.disconnect();
+            // Best-effort teardown; we're exiting regardless, so a failure needs no logging.
+            let _ = app.state::<Box<dyn crate::TunnelControl>>().disconnect();
             app.exit(0);
             return;
         }
-        other => {
-            if let Some(pin) = parse_loc_menu_id(other) {
-                let result = ctl.select_server(crate::tray_pin_to_i32(pin));
-                // Only record the pin if the selection actually took, so the tray/window check-mark
-                // can't drift from the live tunnel selection on a failed call.
-                if result.is_ok() {
-                    *app.state::<crate::commands::SelectedServer>()
-                        .0
-                        .lock()
-                        .expect("pin lock") = pin;
-                }
-                report_tray_action(app, "select server", result);
+        _ => {}
+    }
+
+    // Optimistically move the location check-mark on click so the menu feels instant; the off-thread
+    // work below reconciles it (and a later `refresh` reverts it if the selection call fails).
+    if let Some(pin) = parse_loc_menu_id(&id) {
+        if let Some(h) = app.try_state::<TrayHandles<R>>() {
+            for (p, item) in h.locations.lock().expect("loc lock").iter() {
+                let _ = item.set_checked(*p == pin);
             }
         }
     }
 
-    refresh(app);
-    let _ = app.emit("spark://state", ());
+    // Everything else hits the control (blocking IPC). Run it off the main thread so the menu /
+    // event loop doesn't stall — the synchronous IPC here caused the click-to-switch hiccup.
+    // `refresh` and the menu setters marshal back to the main thread internally.
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let ctl = app.state::<Box<dyn crate::TunnelControl>>();
+        match id.as_str() {
+            // Stable id "toggle": decide the action from live status, not the id (a muda item's id
+            // can't change, so it can't encode connect-vs-disconnect).
+            "toggle" => {
+                let connected = ctl
+                    .status()
+                    .map(|s| s.state == "connected")
+                    .unwrap_or(false);
+                if connected {
+                    report_tray_action(&app, "disconnect", ctl.disconnect());
+                } else {
+                    report_tray_action(&app, "connect", ctl.connect());
+                }
+            }
+            "routing:smart" => {
+                report_tray_action(&app, "set routing mode", ctl.set_routing_mode("smart"))
+            }
+            "routing:full" => {
+                report_tray_action(&app, "set routing mode", ctl.set_routing_mode("full"))
+            }
+            "adblock" => match ctl.get_ad_block_enabled() {
+                Ok(enabled) => {
+                    report_tray_action(&app, "set ad-block", ctl.set_ad_block_enabled(!enabled))
+                }
+                Err(e) => report_tray_action(&app, "read ad-block", Err(e)),
+            },
+            other => {
+                if let Some(pin) = parse_loc_menu_id(other) {
+                    let result = ctl.select_server(crate::tray_pin_to_i32(pin));
+                    // Only record the pin if the selection took, so the tray/window check-mark can't
+                    // drift from the live tunnel selection on a failed call.
+                    if result.is_ok() {
+                        *app.state::<crate::commands::SelectedServer>()
+                            .0
+                            .lock()
+                            .expect("pin lock") = pin;
+                    }
+                    report_tray_action(&app, "select server", result);
+                }
+            }
+        }
+        refresh(&app);
+        let _ = app.emit("spark://state", ());
+    });
 }
 
 #[cfg(test)]
@@ -455,5 +502,37 @@ mod tests {
             ("Disconnect", "disconnect", true)
         );
         assert!(!connect_item("connecting").2);
+    }
+
+    fn status(state: &str) -> crate::models::Status {
+        crate::models::Status {
+            state: state.into(),
+            protocol: String::new(),
+            fail_open: false,
+        }
+    }
+
+    #[test]
+    fn header_label_distinguishes_smart_from_manual() {
+        // No pin → Spark auto-choosing ("Smart Location").
+        assert_eq!(
+            header_label(&status("disconnected"), &[], None),
+            "Disconnected · Smart Location"
+        );
+        // A manual pin shows that location — never "Smart Location".
+        let s = crate::models::ServerInfo {
+            index: 2,
+            name: None,
+            country: Some("U.S.A.".into()),
+            country_code: Some("US".into()),
+            city: Some("Ashburn".into()),
+            protocol: None,
+            latency_ms: None,
+            healthy: true,
+            is_current: false,
+        };
+        let label = header_label(&status("connected"), &[s], Some(2));
+        assert_eq!(label, "Connected · 🇺🇸 U.S.A. — Ashburn");
+        assert!(!label.contains("Smart"));
     }
 }
