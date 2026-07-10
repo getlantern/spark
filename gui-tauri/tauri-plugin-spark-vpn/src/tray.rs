@@ -57,7 +57,7 @@ pub(crate) fn connect_item(state: &str) -> (&'static str, &'static str, bool) {
 }
 
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
+    menu::{CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuItem, MenuItemBuilder, Submenu, SubmenuBuilder},
     tray::TrayIconBuilder,
     AppHandle, Manager, Runtime,
 };
@@ -93,6 +93,158 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         let _ = win.show();
         let _ = win.set_focus();
     }
+}
+
+/// Menu-item handles kept so `refresh` can patch them in place instead of rebuilding the menu.
+/// Managed as Tauri state. The location submenu items are rebuilt only when the server pool changes.
+pub(crate) struct TrayHandles<R: Runtime> {
+    pub header: MenuItem<R>,
+    pub toggle: MenuItem<R>,
+    pub routing_smart: CheckMenuItem<R>,
+    pub routing_full: CheckMenuItem<R>,
+    pub adblock: CheckMenuItem<R>,
+    /// (pin, item) for each location entry incl. Smart (pin = None).
+    pub locations: std::sync::Mutex<Vec<(Option<usize>, CheckMenuItem<R>)>>,
+    /// Server pool signature (index+cc+city) used to detect when the submenu must be rebuilt.
+    pub pool_sig: std::sync::Mutex<Vec<String>>,
+    pub location_submenu: Submenu<R>,
+}
+
+/// A stable signature for one server, so we can tell when the pool actually changed.
+fn server_sig(s: &crate::models::ServerInfo) -> String {
+    format!(
+        "{}|{}|{}",
+        s.index,
+        s.country_code.as_deref().unwrap_or(""),
+        s.city.as_deref().unwrap_or("")
+    )
+}
+
+/// Human label for a server: "🇦🇺 Australia — Melbourne" (flag omitted if no country code).
+fn server_label(s: &crate::models::ServerInfo) -> String {
+    let flag = s.country_code.as_deref().map(flag_emoji).unwrap_or_default();
+    let country = s.country.as_deref().unwrap_or("Unknown");
+    let mut label = if flag.is_empty() {
+        country.to_string()
+    } else {
+        format!("{flag} {country}")
+    };
+    if let Some(city) = s.city.as_deref() {
+        label.push_str(" — ");
+        label.push_str(city);
+    }
+    label
+}
+
+/// Build the location check-items (Smart + one per server), `selected` marking the checked one.
+fn build_location_items<R: Runtime>(
+    app: &AppHandle<R>,
+    servers: &[crate::models::ServerInfo],
+    selected: Option<usize>,
+) -> tauri::Result<Vec<(Option<usize>, CheckMenuItem<R>)>> {
+    let mut items: Vec<(Option<usize>, CheckMenuItem<R>)> = Vec::with_capacity(servers.len() + 1);
+    let smart = CheckMenuItemBuilder::with_id(loc_menu_id(None), "Smart Location")
+        .checked(selected.is_none())
+        .build(app)?;
+    items.push((None, smart));
+    for s in servers {
+        let item = CheckMenuItemBuilder::with_id(loc_menu_id(Some(s.index)), server_label(s))
+            .checked(selected == Some(s.index))
+            .build(app)?;
+        items.push((Some(s.index), item));
+    }
+    Ok(items)
+}
+
+/// Build the whole tray menu from current control state, returning the menu + the handle store.
+fn build_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    status: &crate::models::Status,
+    servers: &[crate::models::ServerInfo],
+    routing: &str,
+    adblock: bool,
+    selected: Option<usize>,
+) -> tauri::Result<(Menu<R>, TrayHandles<R>)> {
+    let header = MenuItemBuilder::with_id("header", header_text(&status.state))
+        .enabled(false)
+        .build(app)?;
+
+    let (t_label, t_id, t_enabled) = connect_item(&status.state);
+    let toggle = MenuItemBuilder::with_id(t_id, t_label)
+        .enabled(t_enabled)
+        .build(app)?;
+
+    let locations = build_location_items(app, servers, selected)?;
+    let mut loc_builder = SubmenuBuilder::with_id(app, "submenu-location", "Select Location");
+    for (_, item) in &locations {
+        loc_builder = loc_builder.item(item);
+    }
+    let location_submenu = loc_builder.build()?;
+    let pool_sig: Vec<String> = servers.iter().map(server_sig).collect();
+
+    let routing_smart = CheckMenuItemBuilder::with_id("routing:smart", "Smart")
+        .checked(routing == "smart")
+        .build(app)?;
+    let routing_full = CheckMenuItemBuilder::with_id("routing:full", "Full")
+        .checked(routing == "full")
+        .build(app)?;
+    let routing_submenu = SubmenuBuilder::with_id(app, "submenu-routing", "Routing Mode")
+        .item(&routing_smart)
+        .item(&routing_full)
+        .build()?;
+
+    let adblock_item = CheckMenuItemBuilder::with_id("adblock", "Ad Blocking")
+        .checked(adblock)
+        .build(app)?;
+    let split = MenuItemBuilder::with_id("split", "Split Tunneling…").build(app)?;
+    let show = MenuItemBuilder::with_id("show", "Show Spark").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit Spark").build(app)?;
+
+    let menu = MenuBuilder::new(app)
+        .item(&header)
+        .item(&toggle)
+        .separator()
+        .item(&location_submenu)
+        .item(&routing_submenu)
+        .item(&adblock_item)
+        .item(&split)
+        .separator()
+        .item(&show)
+        .item(&quit)
+        .build()?;
+
+    let handles = TrayHandles {
+        header,
+        toggle,
+        routing_smart,
+        routing_full,
+        adblock: adblock_item,
+        locations: std::sync::Mutex::new(locations),
+        pool_sig: std::sync::Mutex::new(pool_sig),
+        location_submenu,
+    };
+    Ok((menu, handles))
+}
+
+/// Read the current UI-relevant state from the control (best-effort; errors → sensible defaults).
+fn read_state<R: Runtime>(
+    app: &AppHandle<R>,
+) -> (crate::models::Status, Vec<crate::models::ServerInfo>, String, bool, Option<usize>) {
+    let ctl = app.state::<Box<dyn crate::TunnelControl>>();
+    let status = ctl.status().unwrap_or(crate::models::Status {
+        state: "disconnected".into(),
+        protocol: String::new(),
+        fail_open: false,
+    });
+    let servers = ctl.servers().unwrap_or_default();
+    let routing = ctl.get_routing_mode().unwrap_or_else(|_| "smart".into());
+    let adblock = ctl.get_ad_block_enabled().unwrap_or(true);
+    let selected = *app
+        .state::<crate::commands::SelectedServer>()
+        .0
+        .lock()
+        .expect("pin lock");
+    (status, servers, routing, adblock, selected)
 }
 
 #[cfg(test)]
