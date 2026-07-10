@@ -62,19 +62,20 @@ use tauri::{
     AppHandle, Manager, Runtime,
 };
 
-/// Build the system tray and register it. Called once from the plugin `.setup()`.
+/// Build the system tray from current state and register it + its handles. Called once from setup.
 pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let show = MenuItemBuilder::with_id("show", "Show Spark").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit Spark").build(app)?;
-    let menu = MenuBuilder::new(app).item(&show).item(&quit).build()?;
+    let (status, servers, routing, adblock, selected) = read_state(app);
+    let (menu, handles) = build_menu(app, &status, &servers, &routing, adblock, selected)?;
+    app.manage(handles);
 
     let icon = tauri::include_image!("icons/tray.png");
     TrayIconBuilder::with_id("spark-tray")
         .icon(icon)
-        .icon_as_template(true) // macOS: adapt to light/dark menu bar; ignored elsewhere
+        .icon_as_template(true)
         .tooltip("Spark")
         .menu(&menu)
         .show_menu_on_left_click(true)
+        // Placeholder handler (show/quit only); Task 6 replaces this with `on_menu_event`.
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "show" => show_main_window(app),
             "quit" => {
@@ -85,6 +86,48 @@ pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Patch the tray's dynamic items in place from current control state. Cheap; safe to call often.
+/// The location submenu is rebuilt only when the server pool actually changed.
+pub(crate) fn refresh<R: Runtime>(app: &AppHandle<R>) {
+    let handles = match app.try_state::<TrayHandles<R>>() {
+        Some(h) => h,
+        None => return, // tray not built yet
+    };
+    let (status, servers, routing, adblock, selected) = read_state(app);
+
+    let _ = handles.header.set_text(header_text(&status.state));
+    let (t_label, _t_id, t_enabled) = connect_item(&status.state);
+    let _ = handles.toggle.set_text(t_label);
+    let _ = handles.toggle.set_enabled(t_enabled);
+    let _ = handles.routing_smart.set_checked(routing == "smart");
+    let _ = handles.routing_full.set_checked(routing == "full");
+    let _ = handles.adblock.set_checked(adblock);
+
+    // Location check-marks: patch in place if the pool is unchanged, else rebuild the submenu's
+    // children in place (remove the stored old items, append freshly built ones).
+    let new_sig: Vec<String> = servers.iter().map(server_sig).collect();
+    let pool_changed = *handles.pool_sig.lock().expect("sig lock") != new_sig;
+    if pool_changed {
+        if let Ok(items) = build_location_items(app, &servers, selected) {
+            {
+                let mut stored = handles.locations.lock().expect("loc lock");
+                for (_, old) in stored.iter() {
+                    let _ = handles.location_submenu.remove(old); // CheckMenuItem: IsMenuItem
+                }
+                for (_, it) in &items {
+                    let _ = handles.location_submenu.append(it);
+                }
+                *stored = items;
+            }
+            *handles.pool_sig.lock().expect("sig lock") = new_sig;
+        }
+    } else {
+        for (pin, item) in handles.locations.lock().expect("loc lock").iter() {
+            let _ = item.set_checked(*pin == selected);
+        }
+    }
 }
 
 /// Show + focus the main window.
