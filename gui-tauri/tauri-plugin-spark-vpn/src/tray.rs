@@ -57,7 +57,10 @@ pub(crate) fn connect_item(state: &str) -> (&'static str, &'static str, bool) {
 }
 
 use tauri::{
-    menu::{CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuItem, MenuItemBuilder, Submenu, SubmenuBuilder},
+    menu::{
+        CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuItem, MenuItemBuilder, Submenu,
+        SubmenuBuilder,
+    },
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, Runtime,
 };
@@ -179,7 +182,11 @@ fn server_sig(s: &crate::models::ServerInfo) -> String {
 
 /// Human label for a server: "🇦🇺 Australia — Melbourne" (flag omitted if no country code).
 fn server_label(s: &crate::models::ServerInfo) -> String {
-    let flag = s.country_code.as_deref().map(flag_emoji).unwrap_or_default();
+    let flag = s
+        .country_code
+        .as_deref()
+        .map(flag_emoji)
+        .unwrap_or_default();
     let country = s.country.as_deref().unwrap_or("Unknown");
     let mut label = if flag.is_empty() {
         country.to_string()
@@ -288,7 +295,13 @@ fn build_menu<R: Runtime>(
 /// Read the current UI-relevant state from the control (best-effort; errors → sensible defaults).
 fn read_state<R: Runtime>(
     app: &AppHandle<R>,
-) -> (crate::models::Status, Vec<crate::models::ServerInfo>, String, bool, Option<usize>) {
+) -> (
+    crate::models::Status,
+    Vec<crate::models::ServerInfo>,
+    String,
+    bool,
+    Option<usize>,
+) {
     let ctl = app.state::<Box<dyn crate::TunnelControl>>();
     let status = ctl.status().unwrap_or(crate::models::Status {
         state: "disconnected".into(),
@@ -315,7 +328,10 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) 
         // The toggle's id is stable ("toggle"); decide the action from live status, not the id
         // (a muda item's id can't change, so it can't encode connect-vs-disconnect).
         "toggle" => {
-            let connected = ctl.status().map(|s| s.state == "connected").unwrap_or(false);
+            let connected = ctl
+                .status()
+                .map(|s| s.state == "connected")
+                .unwrap_or(false);
             if connected {
                 let _ = ctl.disconnect();
             } else {
@@ -402,7 +418,10 @@ mod tests {
         assert_eq!(header_text("disconnected"), "Disconnected");
         assert_eq!(header_text("weird"), "Disconnected");
         assert_eq!(connect_item("disconnected"), ("Connect", "connect", true));
-        assert_eq!(connect_item("connected"), ("Disconnect", "disconnect", true));
-        assert_eq!(connect_item("connecting").2, false);
+        assert_eq!(
+            connect_item("connected"),
+            ("Disconnect", "disconnect", true)
+        );
+        assert!(!connect_item("connecting").2);
     }
 }
