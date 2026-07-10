@@ -24,20 +24,28 @@ member** so traffic reroutes to a healthy server — restoring the member only o
 
 ## Scope (v1)
 
-- **TCP flows through the multi-server pool** (`SelectingTransport`). The lantern path always builds a
-  pool, so this covers the real deployment.
-- **Out of scope for v1:** UDP/QUIC stall detection (datagram semantics differ; QUIC has its own
-  loss/congestion signals), direct/single-transport dials (no pool to reroute within), and
-  transparent per-flow retry (a live TCP flow can't be migrated mid-stream).
+- **Both TCP and UDP flows through the multi-server pool** (`SelectingTransport`). UDP is essential,
+  not optional: much of the pool is `hysteria2` (QUIC-over-UDP) and modern web is increasingly
+  HTTP/3 (also UDP), so those throttle-prone protocols must be covered. Detection differs per
+  transport (stream vs. datagram, see below) but the member-level penalty/recovery policy is shared.
+- **Out of scope for v1:** direct/single-transport dials (no pool to reroute within) and transparent
+  per-flow retry (a live flow can't be migrated mid-stream — we abort + let the app retry).
 - `multi-server`-gated, consistent with where the pool lives.
 
 ## Decisions (confirmed with stakeholder)
 
 - **Reaction:** abort the stalled flow + demote/quarantine its member (not transparent per-flow
   retry — TCP can't migrate mid-stream).
-- **Stall signal:** *active-stall* — a flow counts as stalled only if it recently moved bytes and
-  then moved **zero** bytes in either direction for a stall window. Idle-from-start flows (keepalive,
-  long-poll, SSE, websockets sitting quiet) are never aborted. Lowest false-positive.
+- **Stall signal:** *active-stall* — a flow counts as stalled only if it was flowing and then went
+  quiet for a stall window, so idle-from-start flows (keepalive, long-poll, SSE, sockets sitting
+  quiet) are never aborted. The exact predicate is transport-appropriate:
+  - **TCP:** recently moved bytes, then **zero bytes in either direction** for the window (a stalled
+    read blocks and writes hit backpressure, so bidirectional silence is the signal).
+  - **UDP:** received datagrams before, then **no inbound datagrams while still sending outbound**
+    for the window. UDP `send()` has no backpressure — the app (and QUIC's own retransmits) keep
+    firing into the void when throttled — so bidirectional silence is the *wrong* test; "still
+    sending, nothing coming back" is the throttle signature (and exactly what a squeezed QUIC/
+    hysteria2 connection looks like).
 - **Member penalty:** *threshold* — one stall just aborts that flow; a member is quarantined only
   after **K stalls within a window** (distinguishes a throttled proxy, which stalls many flows at
   once, from a single slow origin).
@@ -77,20 +85,39 @@ app flow ──accept──▶ proxy/tcp.rs::forward ──dial──▶ Selecti
         member i if it's now quarantined (K stalls) → routes to a healthy member
 ```
 
-### Component 1 — `StallGuard` stream adapter (detection)
+The diagram shows the **TCP** path (`StreamStallGuard`). **UDP** is the datagram-symmetric
+equivalent: `proxy/udp.rs`'s reply pump relays a member's `PacketStallGuard`-wrapped
+sink/source; on stall it records against member `i` and errors the reply pump, tearing down the
+association so the app's resend re-selects the (now possibly quarantined) pool. Below, "`StallGuard`"
+is shorthand for whichever adapter (stream or packet) applies.
 
-A stream wrapper (`AsyncRead + AsyncWrite`) that `SelectingTransport::dial` puts around the chosen
-member's stream before returning it. It holds:
-- a pinned reset-on-progress deadline (`tokio::time::Sleep`) of `stall_window`,
-- an `ever_active` flag,
-- the member index + an `Arc`/`Weak` handle to the pool's stall recorder.
+### Component 1 — stall detection adapters
 
-On each `poll_read`/`poll_write`: if bytes moved, reset the deadline and set `ever_active`. Poll the
-deadline alongside the inner I/O; if it fires with **zero progress since the last reset and
-`ever_active == true`**, call `pool.record_stall(member_idx)` and return
-`Err(io::ErrorKind::TimedOut, "flow stalled")`. Because both directions of `copy_bidirectional` pass
-through the member/upstream stream, wrapping just that stream captures all progress. Idle-from-start
-flows never set `ever_active`, so their deadline firing is a no-op (reset and keep waiting).
+A shared **`StallTracker`** holds the per-flow state and both outcome hooks: `ever_active`, the last
+inbound/last outbound `tokio::time::Instant`, the member index, and an `Arc`/`Weak` handle to the
+pool's recorder. It exposes `on_inbound()` / `on_outbound()` (called as bytes/datagrams move),
+`is_stalled(now) -> bool` (the transport-appropriate predicate), and `record_stall()` /
+`record_flow_ok()` (the latter on clean drop). Two thin adapters wrap the tracker:
+
+- **`StreamStallGuard`** (TCP) — an `AsyncRead + AsyncWrite` wrapper `SelectingTransport::dial` puts
+  around the chosen member's stream. Any read or write is progress (`on_inbound`/`on_outbound` + set
+  `ever_active`); a pinned `Sleep(stall_window)` is polled alongside the inner I/O and reset on
+  progress. If it fires while `ever_active` with zero progress in **either** direction, it calls
+  `record_stall(i)` and returns `Err(io::ErrorKind::TimedOut, "flow stalled")`. `copy_bidirectional`
+  propagates the error → flow reset. (Both directions pass through the member stream, so wrapping just
+  it captures all progress.)
+
+- **`PacketStallGuard`** (UDP) — wraps the `(BoxedPacketSink, BoxedPacketSource)` that
+  `SelectingTransport::dial_udp`/`dial_udp_addr` return. The sink calls `on_outbound()` per datagram
+  sent; the source calls `on_inbound()` per datagram received (and sets `ever_active`). The source's
+  `recv` is polled against a `Sleep(stall_window)` reset only by **inbound** datagrams; if it fires
+  while `ever_active` and there was recent **outbound** activity (the app is still trying) but no
+  inbound for the window, it calls `record_stall(i)` and returns an error, ending the flow's reply
+  pump (`proxy/udp.rs`) so the association is reclaimed and the app's resend re-selects the pool. This
+  is the UDP predicate — inbound-silence-while-sending — not bidirectional silence.
+
+Both adapters are `multi-server`-only and live in `core/src/transport/stall.rs`. Idle-from-start
+flows never set `ever_active`, so neither adapter ever fires on them.
 
 ### Component 2 — member stall accounting + quarantine (policy)
 
@@ -167,14 +194,17 @@ New `TransportConfig` fields (plumbed from the lantern config alongside `probe_i
 
 ## Files
 
-**Add:** `core/src/transport/stall.rs` — the `StallGuard` adapter (`AsyncRead + AsyncWrite`,
-reset-on-progress deadline, `record_stall` on stall, `record_flow_ok` on clean `Drop`) + its unit tests.
+**Add:** `core/src/transport/stall.rs` — the shared `StallTracker` plus the `StreamStallGuard` (TCP,
+`AsyncRead + AsyncWrite`) and `PacketStallGuard` (UDP, wraps `BoxedPacketSink`/`BoxedPacketSource`)
+adapters; `record_stall` on stall, `record_flow_ok` on clean `Drop` + unit tests.
 
 **Modify:**
-- `core/src/transport/select.rs` — wrap dialed member streams in `StallGuard`; per-member stall
-  accounting + quarantine/trial state machine (`record_stall`/`record_flow_ok`); exclude quarantined
-  members from `order`/`snapshot`, route trial flows to `OnTrial` members, flip cooldown→trial lazily
-  in `members_and_order()`; clear all stall state on `reload`. `prober_loop` **unchanged**.
+- `core/src/transport/select.rs` — wrap dialed member **streams** (`dial`/`dial_addr`) in
+  `StreamStallGuard` and member **datagram halves** (`dial_udp`/`dial_udp_addr`) in `PacketStallGuard`;
+  per-member stall accounting + quarantine/trial state machine (`record_stall`/`record_flow_ok`);
+  exclude quarantined members from `order`/`snapshot`, route trial flows to `OnTrial` members, flip
+  cooldown→trial lazily in `members_and_order()` (which already backs **both** TCP and UDP dial, so
+  quarantine reroutes both); clear all stall state on `reload`. `prober_loop` **unchanged**.
 - `core/src/transport/mod.rs` — give each `StallGuard` a handle back to the pool's stall recorder when
   `build_selecting` builds the `SelectingTransport`; `build_members` unaffected.
 - `core/src/config/mod.rs` + `core/src/config/lantern.rs` — the new `TransportConfig` fields + adapter
@@ -187,9 +217,12 @@ passive — no bandwidth probe).
 ## Testing
 
 Deterministic with `tokio::time` pause/advance:
-- **StallGuard:** progress resets the deadline; no-progress-after-active fires (records stall +
-  errors); idle-from-start never fires; a fake stream that goes silent mid-stream triggers exactly
-  one stall.
+- **StreamStallGuard (TCP):** progress resets the deadline; no-progress-after-active fires (records
+  stall + errors); idle-from-start never fires; a fake stream that goes silent mid-stream triggers
+  exactly one stall.
+- **PacketStallGuard (UDP):** inbound datagrams reset the deadline; a fake source that goes silent
+  while the sink keeps sending fires (records stall + errors the reply pump); inbound-then-fully-idle
+  (app also stops sending) does **not** fire; idle-from-start never fires.
 - **Quarantine:** a member quarantines after `K` stalls within the window but not below it; a single
   stall does not quarantine; `order()`/`members_and_order()`/`snapshot()` exclude a quarantined
   member; `reload()` clears stall state.
@@ -212,8 +245,9 @@ Deterministic with `tokio::time` pause/advance:
 
 ## Phased rollout
 
-- **Phase 1 — detection + abort:** `StallGuard` + wire into `SelectingTransport::dial`; stalled flows
-  abort (app retries). No member penalty yet. Independently shippable + testable.
+- **Phase 1 — detection + abort:** the shared `StallTracker` + `StreamStallGuard` (wired into
+  `dial`/`dial_addr`) + `PacketStallGuard` (wired into `dial_udp`/`dial_udp_addr`); stalled TCP and
+  UDP flows abort (app retries). No member penalty yet. Independently shippable + testable.
 - **Phase 2 — quarantine:** per-member stall accounting + `record_stall` + exclude quarantined from
   selection + clear on reload. New flows route away from a throttled member.
 - **Phase 3 — passive trial recovery:** the cooldown→trial→restore/re-quarantine state machine,
