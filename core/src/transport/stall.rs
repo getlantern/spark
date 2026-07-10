@@ -11,7 +11,6 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// The pool's per-member outcome recorder. Implemented by `SelectingTransport`.
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 pub(crate) trait StallSink: Send + Sync {
     /// A flow through `member` stalled (was active, then flatlined past the window).
     fn record_stall(&self, member: usize);
@@ -21,7 +20,6 @@ pub(crate) trait StallSink: Send + Sync {
 
 /// Per-flow progress state, shared (via `Arc`) by a flow's guard(s). Lock-free: a TCP flow has one
 /// guard, a UDP flow has two (sink + source) that touch this concurrently.
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 pub(crate) struct StallTracker {
     sink: Arc<dyn StallSink>,
     member: usize,
@@ -34,7 +32,6 @@ pub(crate) struct StallTracker {
     done: AtomicBool,
 }
 
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 impl StallTracker {
     pub(crate) fn new(sink: Arc<dyn StallSink>, member: usize, window: Duration) -> Arc<Self> {
         Arc::new(Self {
@@ -115,7 +112,6 @@ use tokio::time::{sleep, Sleep};
 /// fires while the flow is `ever_active` (no progress in *either* direction for the window), it reports
 /// a stall and errors so `copy_bidirectional` ends and the flow resets. `S: Unpin` (all `BoxedStream`s
 /// are), so we project via `get_mut`.
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 pub(crate) struct StreamStallGuard<S> {
     inner: S,
     tracker: Arc<StallTracker>,
@@ -124,7 +120,6 @@ pub(crate) struct StreamStallGuard<S> {
     armed: bool,
 }
 
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 impl<S> StreamStallGuard<S> {
     pub(crate) fn new(inner: S, tracker: Arc<StallTracker>, window: Duration) -> Self {
         Self {
@@ -210,13 +205,11 @@ use tokio::time::timeout;
 
 /// Wraps a member's outbound datagram half: every send marks outbound activity (the "still sending"
 /// gate the source uses to tell throttle from idle).
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 pub(crate) struct PacketSinkGuard {
     inner: BoxedPacketSink,
     tracker: Arc<StallTracker>,
 }
 
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 impl PacketSinkGuard {
     pub(crate) fn new(inner: BoxedPacketSink, tracker: Arc<StallTracker>) -> Self {
         Self { inner, tracker }
@@ -236,14 +229,12 @@ impl PacketSink for PacketSinkGuard {
 /// (`recently_sent`), it reports a stall and errors so the reply pump ends and the association is
 /// reclaimed. UDP `send` has no backpressure, so this "sending, nothing coming back" test is the
 /// throttle signal — not bidirectional silence.
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 pub(crate) struct PacketSourceGuard {
     inner: BoxedPacketSource,
     tracker: Arc<StallTracker>,
     window: Duration,
 }
 
-#[allow(dead_code)] // wired in Task 5 (SelectingTransport)
 impl PacketSourceGuard {
     pub(crate) fn new(
         inner: BoxedPacketSource,

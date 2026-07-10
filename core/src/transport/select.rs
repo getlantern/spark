@@ -12,11 +12,32 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::transport::probe::{CallbackUrl, ProbeOutcome};
+use crate::transport::stall::{
+    PacketSinkGuard, PacketSourceGuard, StallSink, StallTracker, StreamStallGuard,
+};
 use crate::transport::{
     Address, BoxedPacketSink, BoxedPacketSource, MemberStatus, PoolControl, ServerMeta, Transport,
     UdpTransport,
 };
 use crate::BoxedStream;
+
+/// Stall-detection tunables captured from `TransportConfig` at pool build.
+#[allow(dead_code)] // used in Tasks 6-9
+#[derive(Clone, Copy)]
+pub(crate) struct StallConfig {
+    pub(crate) window: std::time::Duration,
+    pub(crate) demote_count: u32,
+    pub(crate) demote_window: std::time::Duration,
+    pub(crate) quarantine: std::time::Duration,
+    pub(crate) quarantine_max: std::time::Duration,
+    pub(crate) trial_flows: u32,
+}
+
+impl StallConfig {
+    pub(crate) fn enabled(&self) -> bool {
+        !self.window.is_zero()
+    }
+}
 
 /// A built pool member: its transport pair, the callback URL used to probe it, and UI metadata.
 /// `Clone` is cheap — the transports are `Arc`s — and lets [`SelectingTransport::reload`] carry a
@@ -102,6 +123,11 @@ pub struct SelectingTransport {
     /// pool, so the direct dial still bypasses the tunnel route.
     direct_tcp: Arc<dyn Transport>,
     direct_udp: Arc<dyn UdpTransport>,
+    /// Stall-detection tunables (zero window = disabled).
+    stall: StallConfig,
+    /// Weak self-reference so the guard helpers can obtain an `Arc<Self>` for the `StallSink` impl
+    /// without a reference cycle. Set by `build_selecting` immediately after `Arc::new`.
+    pub(crate) me: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 impl SelectingTransport {
@@ -109,12 +135,14 @@ impl SelectingTransport {
     /// a tokio runtime (as `from_config`'s callers are). The prober runs an initial round immediately,
     /// then re-probes every `interval`; `window` bounds probe concurrency. `direct_tcp`/`direct_udp`
     /// are the fail-open fallback dialed when no member can serve a flow (see the struct doc).
+    /// `stall` controls per-flow stall detection (zero window = disabled).
     pub(crate) fn new(
         members: Vec<Member>,
         interval: std::time::Duration,
         window: usize,
         direct_tcp: Arc<dyn Transport>,
         direct_udp: Arc<dyn UdpTransport>,
+        stall: StallConfig,
     ) -> Self {
         let len = members.len();
         let members = Arc::new(Mutex::new(Arc::new(members)));
@@ -147,7 +175,47 @@ impl SelectingTransport {
             prober: Mutex::new(Some(task)),
             direct_tcp,
             direct_udp,
+            stall,
+            me: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Obtain an `Arc<Self>` from the weak self-reference set by `build_selecting`. Returns `None`
+    /// before `me` is initialised (only during `new`, before the `Arc` is constructed).
+    fn arc(&self) -> Option<Arc<Self>> {
+        self.me.get().and_then(|w| w.upgrade())
+    }
+
+    /// Wrap a member's TCP stream in a stall guard (no-op when disabled).
+    fn guard_stream(self: &Arc<Self>, member: usize, s: BoxedStream) -> BoxedStream {
+        if !self.stall.enabled() {
+            return s;
+        }
+        let sink: Arc<dyn StallSink> = self.clone();
+        let tracker = StallTracker::new(sink, member, self.stall.window);
+        Box::new(StreamStallGuard::new(s, tracker, self.stall.window))
+    }
+
+    /// Wrap a member's datagram halves in stall guards (no-op when disabled).
+    fn guard_udp(
+        self: &Arc<Self>,
+        member: usize,
+        sink_half: BoxedPacketSink,
+        source_half: BoxedPacketSource,
+    ) -> (BoxedPacketSink, BoxedPacketSource) {
+        if !self.stall.enabled() {
+            return (sink_half, source_half);
+        }
+        let sink: Arc<dyn StallSink> = self.clone();
+        let tracker = StallTracker::new(sink, member, self.stall.window);
+        (
+            Box::new(PacketSinkGuard::new(sink_half, tracker.clone())),
+            Box::new(PacketSourceGuard::new(
+                source_half,
+                tracker,
+                self.stall.window,
+            )),
+        )
     }
 
     /// A cheap snapshot of the current member list (short lock, never held across `.await`). Callers
@@ -350,6 +418,13 @@ impl SelectingTransport {
     }
 }
 
+impl StallSink for SelectingTransport {
+    fn record_stall(&self, member: usize) {
+        tracing::debug!(member, "flow stalled through pool member");
+    }
+    fn record_flow_ok(&self, _member: usize) {}
+}
+
 /// The dyn-dispatched control surface the fd-path tunnel registers for the platform FFI. Delegates
 /// to the inherent methods (disambiguated by the explicit `SelectingTransport::` path so the trait
 /// method doesn't recurse into itself).
@@ -397,7 +472,12 @@ impl Transport for SelectingTransport {
             // belt-and-suspenders guard.
             let Some(m) = members.get(i) else { continue };
             match m.transport.dial(target).await {
-                Ok(s) => return Ok(s),
+                Ok(s) => {
+                    return Ok(match self.arc() {
+                        Some(me) => me.guard_stream(i, s),
+                        None => s,
+                    });
+                }
                 Err(e) => {
                     self.demote(i);
                     tracing::debug!(member = i, error = %e, "pool member dial failed; failing over");
@@ -418,7 +498,12 @@ impl Transport for SelectingTransport {
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
             match m.transport.dial_addr(target.clone()).await {
-                Ok(s) => return Ok(s),
+                Ok(s) => {
+                    return Ok(match self.arc() {
+                        Some(me) => me.guard_stream(i, s),
+                        None => s,
+                    });
+                }
                 Err(e) => {
                     // Don't demote a member that merely can't carry a domain target (`Unsupported`) —
                     // it's healthy for the IP-based retry path. Demote only on a real dial failure.
@@ -460,7 +545,12 @@ impl UdpTransport for SelectingTransport {
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
             match m.udp.dial_udp(target).await {
-                Ok(p) => return Ok(p),
+                Ok(p) => {
+                    return Ok(match self.arc() {
+                        Some(me) => me.guard_udp(i, p.0, p.1),
+                        None => p,
+                    });
+                }
                 Err(e) => {
                     self.demote(i);
                     tracing::debug!(member = i, error = %e, "pool member udp dial failed; failing over");
@@ -487,7 +577,12 @@ impl UdpTransport for SelectingTransport {
         for &i in order.iter() {
             let Some(m) = members.get(i) else { continue };
             match m.udp.dial_udp_addr(target.clone()).await {
-                Ok(p) => return Ok(p),
+                Ok(p) => {
+                    return Ok(match self.arc() {
+                        Some(me) => me.guard_udp(i, p.0, p.1),
+                        None => p,
+                    });
+                }
                 Err(e) if e.kind() == io::ErrorKind::Unsupported => {
                     tracing::debug!(
                         member = i,
@@ -639,6 +734,17 @@ mod tests {
     use super::*;
     use crate::transport::{PacketSink, PacketSource};
 
+    fn test_stall_cfg() -> StallConfig {
+        StallConfig {
+            window: std::time::Duration::from_secs(15),
+            demote_count: 3,
+            demote_window: std::time::Duration::from_secs(30),
+            quarantine: std::time::Duration::from_secs(60),
+            quarantine_max: std::time::Duration::from_secs(600),
+            trial_flows: 2,
+        }
+    }
+
     struct Serve204;
     #[async_trait]
     impl Transport for Serve204 {
@@ -679,6 +785,7 @@ mod tests {
             8,
             Arc::new(FakeT { ok: true }),
             Arc::new(NoUdp),
+            test_stall_cfg(),
         );
         assert_eq!(&*st.order(), &[0usize, 1][..]); // seeded synchronously; prober hasn't run yet
     }
@@ -698,6 +805,7 @@ mod tests {
             8,
             Arc::new(FakeT { ok: true }),
             Arc::new(NoUdp),
+            test_stall_cfg(),
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while st.order().as_ref() != [0usize].as_slice() && std::time::Instant::now() < deadline {
@@ -819,6 +927,8 @@ mod tests {
             prober: Mutex::new(None),
             direct_tcp,
             direct_udp,
+            stall: test_stall_cfg(),
+            me: std::sync::OnceLock::new(),
         }
     }
 

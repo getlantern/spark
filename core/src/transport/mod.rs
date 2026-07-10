@@ -332,13 +332,23 @@ fn build_selecting(
     // directly instead of blackholing. Built with the same protector as the members, so the direct
     // dial bypasses the tunnel route just like a pool member would.
     let direct = Arc::new(DirectTransport::new(protector));
+    let stall = crate::transport::select::StallConfig {
+        window: std::time::Duration::from_secs(config.transport.stall_window_secs),
+        demote_count: config.transport.stall_demote_count,
+        demote_window: std::time::Duration::from_secs(config.transport.stall_demote_window_secs),
+        quarantine: std::time::Duration::from_secs(config.transport.stall_quarantine_secs),
+        quarantine_max: std::time::Duration::from_secs(config.transport.stall_quarantine_max_secs),
+        trial_flows: config.transport.stall_trial_flows,
+    };
     let st = Arc::new(SelectingTransport::new(
         members,
         std::time::Duration::from_secs(config.transport.probe_interval_secs),
         config.transport.probe_window,
         direct.clone() as Arc<dyn Transport>,
         direct as Arc<dyn UdpTransport>,
+        stall,
     ));
+    st.me.set(Arc::downgrade(&st)).ok();
     Ok((
         st.clone() as Arc<dyn Transport>,
         st.clone() as Arc<dyn UdpTransport>,
