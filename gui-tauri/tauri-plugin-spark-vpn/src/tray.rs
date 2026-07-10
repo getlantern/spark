@@ -68,6 +68,18 @@ pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let (menu, handles) = build_menu(app, &status, &servers, &routing, adblock, selected)?;
     app.manage(handles);
 
+    // Hide the window to the tray on close instead of quitting — the VPN keeps running. The tray's
+    // "Show Spark" reveals it again; "Quit Spark" is the only real exit.
+    if let Some(win) = app.get_webview_window("main") {
+        let win_for_event = win.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = win_for_event.hide();
+            }
+        });
+    }
+
     let icon = tauri::include_image!("icons/tray.png");
     TrayIconBuilder::with_id("spark-tray")
         .icon(icon)
