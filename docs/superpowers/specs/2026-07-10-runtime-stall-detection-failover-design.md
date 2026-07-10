@@ -1,5 +1,17 @@
 # Runtime Stall Detection + Live Failover — Design
 
+> **⚠️ Status (2026-07-10): shipped OFF by default (`stall_window_secs = 0`) pending a signal
+> redesign.** On-device testing (macOS, notarized build) showed the v1 per-flow L4 signal
+> ("was active, now no progress for the window") **false-positives on normal idle keep-alive /
+> HTTP-2 connections** — it can't distinguish those from a real throttle. On a small pool this
+> quarantined *every* member within seconds (163 false "flow stalled", all members struck), the pool
+> went empty, and the data path **failed open to a direct dial → the user's real IP leaked**. The
+> machinery + config land disabled; the detection signal must be redesigned before enabling:
+> **(a)** an aggregate/goodput signal (many concurrent flows on a member degrading), not per-flow L4
+> idle; **(b)** a **pool-floor guard** that never quarantines below N healthy members (so it can
+> never empty the pool / trigger fail-open); and separately **(c)** reconsider whether fail-open to
+> direct should leak the real IP at all (fail-closed option). See the closing "Redesign" section.
+
 ## Problem
 
 A proxy that passes its initial health probe is often **throttled or silently stalled by a censor

@@ -381,6 +381,12 @@ pub struct TransportConfig {
     pub probe_window: usize,
     /// Runtime stall detection: a flow that was flowing and then flatlines for this many seconds is
     /// aborted and counted against its pool member. `0` disables stall detection entirely.
+    ///
+    /// **Default 0 (OFF).** The v1 per-flow L4 signal ("was active, now no progress for N s") can't
+    /// distinguish a real throttle from a normal idle keep-alive/HTTP-2 connection, so it
+    /// false-positives, quarantines healthy members, and on a small pool empties it → the data path
+    /// fails open to a direct dial (real-IP leak). Shipped off until the signal is redesigned
+    /// (aggregate/goodput-based, with a pool-floor guard that never empties the pool).
     #[serde(default = "default_stall_window_secs")]
     pub stall_window_secs: u64,
     /// Stalls a member may accrue within `stall_demote_window_secs` before it is quarantined.
@@ -402,7 +408,7 @@ pub struct TransportConfig {
 }
 
 fn default_stall_window_secs() -> u64 {
-    15
+    0 // OFF by default — see the field doc (v1 signal false-positives; redesign pending)
 }
 fn default_stall_demote_count() -> u32 {
     3
@@ -1561,7 +1567,9 @@ city = \"San Francisco\"
     #[test]
     fn transport_config_has_stall_defaults() {
         let c = TransportConfig::default();
-        assert_eq!(c.stall_window_secs, 15);
+        // Stall detection ships OFF by default (window 0) — the v1 signal false-positives on idle
+        // keep-alives and can empty a small pool → fail-open leak. Re-enabled after the redesign.
+        assert_eq!(c.stall_window_secs, 0);
         assert_eq!(c.stall_demote_count, 3);
         assert_eq!(c.stall_trial_flows, 2);
     }
