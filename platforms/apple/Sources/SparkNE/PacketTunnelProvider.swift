@@ -119,12 +119,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let mode = (config?.isEmpty == false && config != "lantern-api") ? "explicit-config" : "self-fetch"
             self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), mode=\(mode, privacy: .public))")
 
-            // The app-group container path the app + extension share; the Rust core caches the
-            // generated `device_id` and the fetched `config_raw.json` here. Required by self-fetch
-            // mode (absent/empty config); for an explicit config it's passed through and ignored.
-            let dataDir = FileManager.default
-                .containerURL(forSecurityApplicationGroupIdentifier: "group.org.getlantern.spark")?
-                .appendingPathComponent("config", isDirectory: true).path
+            // The app-group container path where the Rust core caches the generated `device_id` and
+            // the fetched `config_raw.json`. Required by self-fetch mode (absent/empty config); for
+            // an explicit config it's passed through and ignored.
+            //
+            // Prefer the path the controlling app hands us in providerConfiguration["dataDir"]: its
+            // OWN app-group container (~/Library/Group Containers/.../config), which the app can read
+            // *before* connecting. We run as root, so self-resolving `containerURL(...)` lands in
+            // root's container (/var/root/Library/Group Containers/...) — a dir the user can't even
+            // traverse (mode 700), so the app could never read the cache before the first connect.
+            // Fall back to self-resolution only if the app didn't supply a path (older app builds).
+            // See docs/superpowers/specs/2026-07-10-locations-before-vpn-design.md.
+            let appDataDir = (provider?["dataDir"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let dataDir = (appDataDir?.isEmpty == false)
+                ? appDataDir
+                : FileManager.default
+                    .containerURL(forSecurityApplicationGroupIdentifier: "group.org.getlantern.spark")?
+                    .appendingPathComponent("config", isDirectory: true).path
 
             // Read the optional split-tunnel JSON from providerConfiguration["splitTunnel"].
             // Trimmed for the same reason as `config` above; nil/empty → NULL (no split-tunnel).

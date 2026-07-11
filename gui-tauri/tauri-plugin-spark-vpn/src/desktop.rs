@@ -329,6 +329,19 @@ mod ne_spike {
         // providerConfiguration values are strings, so pre-format the bool as "true"/"false"
         // (the NE parses "false" → off). Owned so the closure can stay `Fn`.
         let ad_block_str = if ad_block { "true" } else { "false" }.to_owned();
+        // Tell the NE to cache config_raw.json in *our* (the user's) app-group container rather than
+        // self-resolving it — as root the NE would land in /var/root/Library/Group Containers/...,
+        // a dir the user can't traverse, so the app could never read the location list before
+        // connecting (locations-before-VPN Phase 1). Pre-create it so it's user-owned (the NE writes
+        // root-owned files into it, but a user-owned, non-sticky dir still lets the app atomically
+        // replace them in Phase 2). Same helper the read side uses → the two can't disagree. Empty
+        // string (e.g. $HOME unset) → the NE falls back to its own containerURL resolution.
+        let data_dir = super::shared_config_cache_dir()
+            .map(|d| {
+                let _ = std::fs::create_dir_all(&d);
+                d.to_string_lossy().into_owned()
+            })
+            .unwrap_or_default();
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let outer = RcBlock::new(
             move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
@@ -370,6 +383,8 @@ mod ne_spike {
                         .into_super();
                     let adb_val: Retained<AnyObject> =
                         NSString::from_str(&ad_block_str).into_super().into_super();
+                    let dd_val: Retained<AnyObject> =
+                        NSString::from_str(&data_dir).into_super().into_super();
                     let dict = if let Some(ref c) = config {
                         let cfg_val: Retained<AnyObject> =
                             NSString::from_str(c).into_super().into_super();
@@ -380,8 +395,9 @@ mod ne_spike {
                                 ns_string!("routingMode"),
                                 ns_string!("appBypass"),
                                 ns_string!("adBlock"),
+                                ns_string!("dataDir"),
                             ],
-                            &[cfg_val, st_val, rm_val, ab_val, adb_val],
+                            &[cfg_val, st_val, rm_val, ab_val, adb_val, dd_val],
                         )
                     } else {
                         NSDictionary::from_retained_objects(
@@ -390,8 +406,9 @@ mod ne_spike {
                                 ns_string!("routingMode"),
                                 ns_string!("appBypass"),
                                 ns_string!("adBlock"),
+                                ns_string!("dataDir"),
                             ],
-                            &[st_val, rm_val, ab_val, adb_val],
+                            &[st_val, rm_val, ab_val, adb_val, dd_val],
                         )
                     };
                     proto.setProviderConfiguration(Some(&dict));

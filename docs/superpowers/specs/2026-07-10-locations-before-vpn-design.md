@@ -43,10 +43,23 @@ window + tray ◀── re-pull servers() / refresh() ◀──────┘
 - Wire this into `desktop.rs::servers()`: when the TOML static list (`servers_from_config()`) is empty, fall back to parsing the shared `config_raw.json` cache. Live overlay from the NE is unchanged (only when connected).
 - The cache already persists across sessions (the tunnel writes it); Phase 1 is purely the read side.
 
-**Shared cache dir (the crux):** the app must read the *same* `config_raw.json` the tunnel writes.
-- **macOS:** the NE caches into the **app-group container**; the app must resolve that same app-group path (it has the group entitlement) rather than its plain `app_config_dir`. Resolving the app-group path in the plugin is part of this work.
+**Shared cache dir (the crux):** the app must read the *same* `config_raw.json` the tunnel writes. There is **one canonical copy**, not per-process copies.
+- **macOS (confirmed on-device 2026-07-10):** the NE (`org.getlantern.spark.tunnel`) runs as **root**, and `PacketTunnelProvider.swift` self-resolves its cache dir via `containerURL(forSecurityApplicationGroupIdentifier:)` — which resolves **per-user**, so as root it lands in `/var/root/Library/Group Containers/group.org.getlantern.spark/config/config_raw.json` (`root:wheel`, `644`). That's a *different physical dir* than the user app's `~/Library/Group Containers/...`, and `/var/root` is mode `700` so the user cannot even traverse into it. The app's Phase 1 read therefore finds nothing today.
+  - **Fix — move the write to the user's container, don't copy.** The app passes its **own** app-group container path (`~/Library/Group Containers/group.org.getlantern.spark/config`) to the NE via `providerConfiguration["dataDir"]`; the NE prefers that over its self-resolution. The app pre-creates the dir so it is **user-owned** (`700`). Result: one canonical copy in the user's container that (a) the app can read before connecting, (b) is private via the `700` parent dir (no `chown`/`chmod` needed even though the NE writes root-owned files into it), and (c) is atomically replaceable by the user in Phase 2 (the dir is user-owned + **non-sticky**, so a cross-uid `rename` over a root-created file is permitted). Both the read side and the injected `dataDir` use the same `shared_config_cache_dir()` helper, so they can never disagree.
+  - **Scope note:** this makes Phase 1 touch the NE (`PacketTunnelProvider.swift`) + the plugin's `AppleControl::connect` (`desktop.rs`) in addition to the `servers()` read path — not the single-file change the original plan assumed. Without the NE change the read is inert (nothing to read).
 - **Windows/Linux:** the app and the privileged service must agree on the cache dir; the plan pins the exact shared path.
 - **Android:** core runs in-process; the cache is in the app files dir — already shared.
+
+## Concurrency / file locking (single canonical copy)
+
+The cache is written atomically per file — `core/src/config/fetch/cache.rs::write_atomic` does temp-write + `rename(2)` (same-filesystem, atomic). Consequences:
+
+- **Readers never lock.** `rename` guarantees a reader opens the whole old or whole new `config_raw.json`, never a torn write. Keeping the Phase 1 read lock-free means startup never blocks on a lock a root fetch might hold.
+- **Phase 1 needs no writer lock** — there is exactly one writer (the NE's tunnel-bringup fetch).
+- **Phase 2 introduces a second writer** (the app's own startup fetch) and with it two hazards:
+  1. *Benign:* `config_raw.json` and `config_meta.json` are not updated as one unit, so an interleave can pair one writer's body with the other's meta — cache.rs already documents this as harmless (worst case one redundant conditional fetch, self-healing).
+  2. *Real:* `write_atomic` uses a **fixed** temp name (`config_raw.tmp`), so two concurrent writers write the same temp path and can corrupt it. Latent today (one writer); activated by Phase 2.
+- **Phase 2 resolution:** give temp files **unique names** (`config_raw.<pid>.tmp` or random suffix) to kill the shared-temp corruption, and take a single **advisory exclusive lock** on a *stable* `config.lock` sidecar around the raw+meta write so the pair updates atomically w.r.t. the other writer. Lock the stable sidecar, never `config_raw.json` itself (the atomic rename swaps that file's inode). Advisory locks (`flock`/`O_EXLOCK`) are cooperative and **uid-agnostic**, so the root NE and the user app coordinate correctly. Because `load_or_fetch` is conditional (ETag/If-Modified-Since), the common case is a 304 with no write at all, so real contention is rare — the lock is cheap insurance for the changed-config window.
 
 ## Phase 2 — fetch-only `spark-core` + startup fetch
 
