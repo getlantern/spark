@@ -1,3 +1,4 @@
+mod cache_parse;
 mod commands;
 mod control;
 mod error;

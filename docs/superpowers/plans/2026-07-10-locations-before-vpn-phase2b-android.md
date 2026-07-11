@@ -10,7 +10,24 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-10-locations-before-vpn-design.md` (Phase 2 + "### Android").
 
-**Depends on:** Phase 2a (desktop) for the `spark://servers` frontend listener (Task 7 there) — reuse it, don't re-add. Phase 1 macOS (#82) for the `servers_from_cache_json` parser (widen its cfg to Android here).
+**Depends on:** Phase 2a (desktop) for the `spark://servers` frontend listener (Task 7 there) — reuse it, don't re-add.
+
+---
+
+## Plan revisions from the 2026-07-11 investigation (these supersede the tasks below where they conflict)
+
+Two findings from reading the actual code change the approach:
+
+1. **The fetch needs bundled CA roots — add a core entry, don't call `load_or_fetch` directly.** On Android (and iOS) boring TLS can't read the system trust store; `run_fd_dispatch` installs bundled roots via `crate::ca_roots::install_bundled_roots(dir)` (`core/src/fd_tunnel.rs:355`) before fetching (this was task #71). `ca_roots` is a **private** module — there's no public fetch-only entry. So Phase 2b must **add a public `spark_core::fd_tunnel::fetch_config_only(dir: &Path) -> bool`** (or similar) that: installs the bundled roots, builds a small tokio runtime, runs `config::fetch::load_or_fetch`, and returns whether `config_raw.json` changed — **no tun, no `establish()`**. `nativeFetchConfig` is a thin JNI wrapper over it. (Desktop's `config_fetch.rs` calls `load_or_fetch` directly because macOS/Windows/Linux boring uses the system trust store; the `fetch_config_only` entry is the mobile/no-system-trust path, reusable by iOS Phase 2c.)
+
+2. **Do BOTH the cache-read and the fetch in the `:vpn` process — the main process can't resolve the cache dir.** `SparkVpnService.kt:198` caches into `File(filesDir, "config")` = `<filesDir>/config`. The main-process Rust (`AndroidControl`) has **no verified mapping** to that Android `getFilesDir()` (Tauri's `app_data_dir()` may differ), and must not load the native lib. Guessing the path is the exact mistake that broke macOS Phase 1. So:
+   - **Read (Android Phase 1):** extend the **existing `servers` IPC handler in `SparkVpnService.kt`** — when there's no live pool (disconnected), call a new `nativeCachedServers("<filesDir>/config")` JNI (core reads `<dir>/config_raw.json` + parses it to the same servers JSON) and return that instead of `"[]"`. `AndroidControl::servers()` (main) is **unchanged** — it already calls the `servers` IPC. No main-process path resolution, no new IPC command for the read.
+   - **Fetch (Android Phase 2b):** a new `fetchConfig` IPC command → `:vpn` calls `nativeFetchConfig("<filesDir>/config")` (over `fetch_config_only`) → replies "changed" → main emits `spark://servers`.
+   - Net: **all `filesDir` access + native-lib calls stay in `:vpn`**, which knows the path and already loads the lib. The plugin's `cache_parse.rs` (extracted 2026-07-11) is therefore for the **app-side** readers only (macOS `AppleControl`, iOS Phase 2c) — **not** Android, which parses core-side.
+
+**Prep already landed (2026-07-11):** the `config_raw.json` parser is extracted to `gui-tauri/tauri-plugin-spark-vpn/src/cache_parse.rs` (shared by macOS/iOS app-side reads). Task 1 below is therefore partly done; its "widen the parser to Android" framing is superseded by revision #2 (Android parses core-side).
+
+**Verification reality:** every task below is compile-gateable (`cargo ndk clippy`, Kotlin build) but the end-to-end behavior (fetch-without-consent, cache-read-when-disconnected, `filesDir` path correctness) can only be confirmed on a device/emulator. Do the on-device pass before merging.
 
 ---
 

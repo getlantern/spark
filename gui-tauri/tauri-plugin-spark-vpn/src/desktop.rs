@@ -722,7 +722,7 @@ fn servers_from_cache() -> Vec<ServerInfo> {
         return Vec::new();
     };
     match std::fs::read_to_string(dir.join("config_raw.json")) {
-        Ok(raw) => servers_from_cache_json(&raw),
+        Ok(raw) => crate::cache_parse::servers_from_cache_json(&raw),
         // A missing cache is the normal pre-first-fetch state — silent. Any other error (e.g. an
         // entitlement/permission problem reaching the app-group container) is worth surfacing under
         // SPARK_NE_DEBUG so it's diagnosable in the field.
@@ -736,50 +736,8 @@ fn servers_from_cache() -> Vec<ServerInfo> {
     }
 }
 
-/// Parse a fetched `config_raw.json` body (Lantern shape) into the static location list. The
-/// top-level `servers` array carries geo entries (`country`/`country_code`/`city`); index by
-/// position, matching `servers_from_config`. No live fields are invented (healthy=false, etc.).
-/// Compiled on macOS (the only production caller) and under `cfg(test)` on every target, so the
-/// pure parser stays continuously tested across CI platforms while non-macOS production builds stay
-/// dead-code-clean.
-#[cfg(any(target_os = "macos", test))]
-fn servers_from_cache_json(raw: &str) -> Vec<ServerInfo> {
-    use serde::Deserialize;
-    #[derive(Deserialize)]
-    struct Root {
-        #[serde(default)]
-        servers: Vec<Entry>,
-    }
-    #[derive(Deserialize)]
-    struct Entry {
-        country: Option<String>,
-        // Accept both spellings: the config-new payload uses snake_case, but the camelCase
-        // `countryCode` is used on the control-channel ServerInfo, so alias it to avoid silently
-        // dropping the code if a backend emits camelCase here too.
-        #[serde(alias = "countryCode")]
-        country_code: Option<String>,
-        city: Option<String>,
-    }
-    let root: Root = match serde_json::from_str(raw) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    root.servers
-        .into_iter()
-        .enumerate()
-        .map(|(i, e)| ServerInfo {
-            index: i,
-            name: None,
-            country: e.country,
-            country_code: e.country_code,
-            city: e.city,
-            protocol: None,
-            latency_ms: None,
-            healthy: false,
-            is_current: false,
-        })
-        .collect()
-}
+// The `config_raw.json` → `ServerInfo` parser lives in `crate::cache_parse` (platform-neutral,
+// shared with `AndroidControl`); `servers_from_cache` above calls it.
 
 // ── macOS: AppleControl (cross-process NE). ───────────────────────────────────
 
@@ -1091,44 +1049,4 @@ impl TunnelControl for ServiceControl {
     }
 }
 
-#[cfg(test)]
-mod cache_tests {
-    use super::servers_from_cache_json;
-
-    #[test]
-    fn parses_top_level_servers_geo_into_serverinfo() {
-        let raw = r#"{
-            "servers": [
-                {"country": "U.S.A.", "country_code": "US", "city": "Ashburn", "latitude": 1.0, "longitude": 2.0},
-                {"country": "Germany", "country_code": "DE", "city": "Frankfurt"}
-            ],
-            "options": {}
-        }"#;
-        let list = servers_from_cache_json(raw);
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].index, 0);
-        assert_eq!(list[0].country.as_deref(), Some("U.S.A."));
-        assert_eq!(list[0].country_code.as_deref(), Some("US"));
-        assert_eq!(list[0].city.as_deref(), Some("Ashburn"));
-        assert_eq!(list[1].index, 1);
-        assert_eq!(list[1].city.as_deref(), Some("Frankfurt"));
-        assert!(!list[0].healthy);
-        assert!(list[0].latency_ms.is_none());
-        assert!(!list[0].is_current);
-    }
-
-    #[test]
-    fn empty_or_invalid_json_yields_empty_list() {
-        assert!(servers_from_cache_json("").is_empty());
-        assert!(servers_from_cache_json("not json").is_empty());
-        assert!(servers_from_cache_json(r#"{"options":{}}"#).is_empty());
-    }
-
-    #[test]
-    fn accepts_camelcase_country_code_alias() {
-        let raw = r#"{"servers": [{"country": "Japan", "countryCode": "JP", "city": "Tokyo"}]}"#;
-        let list = servers_from_cache_json(raw);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].country_code.as_deref(), Some("JP"));
-    }
-}
+// The cache-parser tests moved to `crate::cache_parse` alongside the parser.
