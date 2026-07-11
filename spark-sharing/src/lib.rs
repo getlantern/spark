@@ -1,5 +1,7 @@
 //! Unprivileged lifecycle adapter for Spark connection sharing.
 
+mod freddie;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+pub use freddie::{FreddieBuildError, FreddieSignaler};
 pub use lantern_unbounded::supervisor::{
     PoolEvent, SupervisorEvent, SupervisorPoolSummary, SupervisorSummary,
 };

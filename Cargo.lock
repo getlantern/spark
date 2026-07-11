@@ -2100,7 +2100,7 @@ dependencies = [
 [[package]]
 name = "lantern-unbounded"
 version = "0.1.0"
-source = "git+https://github.com/getlantern/unbounded-rs?rev=5a6808c13e81c5eb2f8599d9b96a6531bef4bc6d#5a6808c13e81c5eb2f8599d9b96a6531bef4bc6d"
+source = "git+https://github.com/getlantern/unbounded-rs?rev=f9b26ff4eeaf289ad23f85a8826a21341ffbaa35#f9b26ff4eeaf289ad23f85a8826a21341ffbaa35"
 dependencies = [
  "async-trait",
  "base64",
@@ -3603,8 +3603,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "lantern-unbounded",
+ "rcgen",
+ "rustls",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]

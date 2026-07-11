@@ -1550,14 +1550,31 @@ audit: `spark-sharing` production edges contain no `reqwest`, `hyper`, or `env_l
 Spark product crates contain no Unbounded/sharing edge. Gate: `cargo test -p spark-sharing --locked`,
 package clippy `-D warnings`, formatting, and full `cargo check --workspace --locked` all green.
 
+**2026-07-11 — Connection sharing, Spark-native Freddie signaling DONE.** Added
+`FreddieSignaler`, a concrete injected signaler using raw Tokio TCP + rustls 0.23/ring (Mozilla roots),
+with no reqwest/hyper. It sends Freddie's existing POST form and `X-BF-Version`, maps 404/418/other
+statuses into Unbounded's typed errors, decodes the Go signaling envelope, supports fixed-length,
+close-delimited, and chunked HTTP/1.1 responses, and enforces 32 KiB headers plus configurable body
+and chunk-wire limits. Tests cover exact form/header/envelope behavior, statuses, size rejection,
+chunking, dropped-future cancellation, endpoint parsing, and a hermetic certificate-verified rustls
+exchange. The Unbounded pin advanced to `f9b26ff4eeaf289ad23f85a8826a21341ffbaa35`, which makes its
+generic `Transport(String)` error available without reqwest; both default and no-default Unbounded
+test/clippy gates pass. Also corrected `scripts/size-budget.sh` to build only the two binaries it
+measures, matching `release.yml`; a whole-workspace release build had feature-unified the optional
+WebRTC graph into `spark-service`. Corrected local gate: spark 2,723,664 B (64%), spark-service
+3,385,920 B (80%). Sharing: 8 unit tests + doctest, clippy `-D warnings`, workspace check, release
+build, dependency isolation, and size gate all green. Verified API facts: rustls 0.23.41
+`builder_with_provider(ring).with_safe_default_protocol_versions()`; tokio-rustls 0.26.4
+`TlsConnector::connect(ServerName<'static>, IO)`; `RootCertStore` accepts cloned webpki trust anchors.
+
 ## Next chunk (exactly what the next session should do)
 
-**(C) Connection sharing — Spark-native Freddie signaling.** Implement the injected `Signaler` in
-`spark-sharing` over raw Tokio + rustls/ring HTTP/1.1 (no reqwest/hyper), with hermetic tests covering
-the Go form encoding, protocol-version header, success envelope, 404/418 mappings, cancellation,
-and bounded response parsing. Keep it unprivileged and do not add any dependency edge to core/service.
-After that compiles green, wire the sharing handle into one unprivileged frontend behind an explicit
-feature/config switch; do not combine those two chunks.
+**(C) Connection sharing — one unprivileged frontend integration.** Wire `FreddieSignaler` plus the
+sharing handle into a single unprivileged frontend behind an explicit compile-time feature and
+runtime opt-in config. The frontend must own start/stop, surface slot lifecycle status without logging
+consumer identifiers or ICE addresses, and stop the pool during application shutdown. Keep
+`spark-core` and `spark-service` untouched. Choose the currently shipping frontend only after
+confirming its runtime/process ownership from the code; do not wire every binding in one chunk.
 
 Two independent tracks — pick by whether a privileged box is available:
 

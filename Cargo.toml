@@ -34,6 +34,8 @@ bytes = "1"
 flate2 = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -112,7 +114,7 @@ webpki-root-certs = "1"
 flutter_rust_bridge = "=2.12.0"
 # Native connection sharing. Kept in the unprivileged `spark-sharing` adapter and
 # built without Unbounded's standalone reqwest/env_logger client.
-lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "5a6808c13e81c5eb2f8599d9b96a6531bef4bc6d", default-features = false }
+lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "f9b26ff4eeaf289ad23f85a8826a21341ffbaa35", default-features = false }
 
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed
