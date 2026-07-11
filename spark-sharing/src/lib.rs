@@ -181,7 +181,9 @@ mod tests {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let handle = start_sharing(config(), signaler.clone(), Some(events_tx));
 
-        let first = events_rx.recv().await;
+        let first = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .unwrap();
         assert!(matches!(
             first,
             Some(PoolEvent {
@@ -189,7 +191,9 @@ mod tests {
                 event: SupervisorEvent::AttemptStarted { attempt: 1 }
             })
         ));
-        let second = events_rx.recv().await;
+        let second = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .unwrap();
         assert!(matches!(
             second,
             Some(PoolEvent {
@@ -198,7 +202,10 @@ mod tests {
             })
         ));
 
-        let summary = handle.stop().await.unwrap();
+        let summary = tokio::time::timeout(Duration::from_secs(5), handle.stop())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(summary.attempts(), 1);
         assert_eq!(summary.failed_attempts(), 1);
         assert_eq!(signaler.exchanges.load(Ordering::Relaxed), 1);

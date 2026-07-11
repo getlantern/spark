@@ -1557,7 +1557,9 @@ statuses into Unbounded's typed errors, decodes the Go signaling envelope, suppo
 close-delimited, and chunked HTTP/1.1 responses, and enforces 32 KiB headers plus configurable body
 and chunk-wire limits. Tests cover exact form/header/envelope behavior, statuses, size rejection,
 chunking, dropped-future cancellation, endpoint parsing, and a hermetic certificate-verified rustls
-exchange. The Unbounded pin advanced to `f9b26ff4eeaf289ad23f85a8826a21341ffbaa35`, which makes its
+exchange. Async lifecycle tests use explicit five-second bounds on every network/supervisor wait;
+the cancellation test verifies future/task cancellation without depending on platform-specific
+remote TCP EOF timing. The Unbounded pin advanced to `f9b26ff4eeaf289ad23f85a8826a21341ffbaa35`, which makes its
 generic `Transport(String)` error available without reqwest; both default and no-default Unbounded
 test/clippy gates pass. Also corrected `scripts/size-budget.sh` to build only the two binaries it
 measures, matching `release.yml`; a whole-workspace release build had feature-unified the optional

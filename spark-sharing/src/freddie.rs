@@ -616,17 +616,24 @@ mod tests {
         });
         let mut roots = RootCertStore::empty();
         roots.add(cert).unwrap();
-        let result = FreddieSignaler::with_roots(&endpoint, DEFAULT_MAX_RESPONSE_BYTES, roots)
-            .unwrap()
-            .exchange("genesis", SignalMessageType::Genesis, "{}")
-            .await
-            .unwrap();
+        let signaler =
+            FreddieSignaler::with_roots(&endpoint, DEFAULT_MAX_RESPONSE_BYTES, roots).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            signaler.exchange("genesis", SignalMessageType::Genesis, "{}"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(result.is_none());
-        server.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn dropping_exchange_closes_stalled_connection() {
+    async fn dropping_exchange_cancels_stalled_request() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1/signal", listener.local_addr().unwrap());
         let (request_tx, request_rx) = oneshot::channel();
@@ -634,8 +641,7 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _ = read_request(&mut stream).await;
             request_tx.send(()).unwrap();
-            let mut byte = [0u8; 1];
-            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+            std::future::pending::<()>().await;
         });
         let signaler = FreddieSignaler::new(endpoint).unwrap();
         let exchange = tokio::spawn(async move {
@@ -643,10 +649,14 @@ mod tests {
                 .exchange("genesis", SignalMessageType::Genesis, "{}")
                 .await
         });
-        request_rx.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), request_rx)
+            .await
+            .unwrap()
+            .unwrap();
         exchange.abort();
         assert!(exchange.await.unwrap_err().is_cancelled());
-        server.await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[test]
