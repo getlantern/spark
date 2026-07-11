@@ -685,15 +685,26 @@ fn servers_from_cache() -> Vec<ServerInfo> {
     };
     match std::fs::read_to_string(dir.join("config_raw.json")) {
         Ok(raw) => servers_from_cache_json(&raw),
-        Err(_) => Vec::new(),
+        // A missing cache is the normal pre-first-fetch state — silent. Any other error (e.g. an
+        // entitlement/permission problem reaching the app-group container) is worth surfacing under
+        // SPARK_NE_DEBUG so it's diagnosable in the field.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            ne_spike::ne_debug(&format!(
+                "servers_from_cache: config_raw.json read failed: {e}"
+            ));
+            Vec::new()
+        }
     }
 }
 
 /// Parse a fetched `config_raw.json` body (Lantern shape) into the static location list. The
 /// top-level `servers` array carries geo entries (`country`/`country_code`/`city`); index by
 /// position, matching `servers_from_config`. No live fields are invented (healthy=false, etc.).
-/// macOS-only for now (reused by Windows/Linux in a Phase-1 follow-up, which will widen the gate).
-#[cfg(target_os = "macos")]
+/// Compiled on macOS (the only production caller) and under `cfg(test)` on every target, so the
+/// pure parser stays continuously tested across CI platforms while non-macOS production builds stay
+/// dead-code-clean.
+#[cfg(any(target_os = "macos", test))]
 fn servers_from_cache_json(raw: &str) -> Vec<ServerInfo> {
     use serde::Deserialize;
     #[derive(Deserialize)]
@@ -1038,7 +1049,7 @@ impl TunnelControl for ServiceControl {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod cache_tests {
     use super::servers_from_cache_json;
 
