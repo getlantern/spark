@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "spark-bridge", "spark-sharing", "dns-tunnel-core", "dns-tunnel-server"]
+members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "spark-bridge", "dns-tunnel-core", "dns-tunnel-server"]
 # Kept out of the workspace on purpose:
 #  - vendor/netstack-smoltcp: depended on by `path`, but its examples/tests/dev-deps
 #    (tun2, structopt, socket2-ext, …) should not be built as part of our workspace.
@@ -8,7 +8,9 @@ members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/appl
 #  - gui-tauri/src-tauri: the Tauri UI shell (ADR 0008). Kept out so Tauri's large
 #    dep tree never enters the core workspace graph or the size-tuned release profile;
 #    it builds standalone via its own `npm run tauri build` / `cargo build`.
-exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri"]
+#  - spark-sharing: the optional unprivileged WebRTC sharing subsystem. It has its own
+#    workspace and CI gate so its crypto features cannot inflate core/service binaries.
+exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing"]
 
 [workspace.package]
 version = "0.1.0"
@@ -34,8 +36,6 @@ bytes = "1"
 flate2 = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -112,10 +112,6 @@ webpki-root-certs = "1"
 # (`flutter_rust_bridge_codegen`) and the Dart `flutter_rust_bridge` package — all three must be the
 # same version or the generated glue mismatches the runtime at load time (not a compile error).
 flutter_rust_bridge = "=2.12.0"
-# Native connection sharing. Kept in the unprivileged `spark-sharing` adapter and
-# built without Unbounded's standalone reqwest/env_logger client.
-lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "f9b26ff4eeaf289ad23f85a8826a21341ffbaa35", default-features = false }
-
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed
 # "z" roughly HALVES data-path throughput — "z" disables the inlining/vectorization the smoltcp

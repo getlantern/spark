@@ -1539,7 +1539,7 @@ approve sysext, Connect → IP changes. (No standing infra remains on the Lanter
   `-p spark-ipc --features stream`).
 
 **2026-07-11 — Rust Unbounded/Spark connection-sharing integration, lifecycle slice DONE.**
-Added an unprivileged `spark-sharing` workspace crate, with no dependency edge into `spark-core`,
+Added an unprivileged `spark-sharing` crate, with no dependency edge into `spark-core`,
 `spark-service`, the CLI, backend, or platform bindings. It pins `getlantern/unbounded-rs` commit
 `5a6808c13e81c5eb2f8599d9b96a6531bef4bc6d` with `default-features = false`, so Unbounded's native
 `reqwest`/`env_logger` client is absent. `SharingConfig` maps Spark-owned settings into the real
@@ -1561,9 +1561,14 @@ exchange. The Unbounded pin advanced to `f9b26ff4eeaf289ad23f85a8826a21341ffbaa3
 generic `Transport(String)` error available without reqwest; both default and no-default Unbounded
 test/clippy gates pass. Also corrected `scripts/size-budget.sh` to build only the two binaries it
 measures, matching `release.yml`; a whole-workspace release build had feature-unified the optional
-WebRTC graph into `spark-service`. Corrected local gate: spark 2,723,664 B (64%), spark-service
-3,385,920 B (80%). Sharing: 8 unit tests + doctest, clippy `-D warnings`, workspace check, release
-build, dependency isolation, and size gate all green. Verified API facts: rustls 0.23.41
+WebRTC graph into `spark-service`. Sharing: 8 unit tests + doctest, clippy `-D warnings`, standalone
+check, release build, and dependency isolation all green. `spark-sharing` is now a standalone
+workspace excluded from the size-sensitive root workspace, with its own lockfile and three-OS CI job.
+This is required because Cargo unifies features across workspace members even when the size script
+selects only the two product binaries. With the standalone boundary, the root `Cargo.lock` is
+byte-identical to `origin/main` and
+the corrected size gate reports spark 2,343,824 B (55%) and spark-service 3,006,080 B (71%). Verified
+API facts: rustls 0.23.41
 `builder_with_provider(ring).with_safe_default_protocol_versions()`; tokio-rustls 0.26.4
 `TlsConnector::connect(ServerName<'static>, IO)`; `RootCertStore` accepts cloned webpki trust anchors.
 
