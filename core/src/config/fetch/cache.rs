@@ -49,10 +49,12 @@ pub fn store(dir: &Path, raw: &str, meta: &CacheMeta) -> io::Result<()> {
 /// Monotonic per-write counter for unique temp names (see `unique_tmp_path`).
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A per-write temp path in the same dir as `path`. Unique across concurrent writers (pid + a
-/// monotonic seq) so two writers sharing this cache — e.g. the tunnel process and the app's own
-/// startup fetch (locations-before-VPN Phase 2a) — never write the same temp file and clobber each
-/// other mid-write. A fixed `.tmp` name was safe only while a single process ever wrote the cache.
+/// A per-write temp path in the same dir as `path`. Two components give uniqueness at two scopes so
+/// writers sharing this cache — the tunnel process and the app's own startup fetch
+/// (locations-before-VPN Phase 2a) — never write the same temp file and clobber each other mid-write:
+/// the **pid** disambiguates across processes (tunnel sysext vs app), the **seq** disambiguates
+/// concurrent writes within one process. A fixed `.tmp` name was safe only while a single process
+/// ever wrote the cache.
 fn unique_tmp_path(path: &Path) -> PathBuf {
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
@@ -64,11 +66,16 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    // Temp stays in the same dir as `path`, so the rename is always same-filesystem (atomic).
-    // Its name is unique per writer/write so concurrent writers can't corrupt a shared temp.
+    // Temp stays in the same dir as `path`, so the rename is always same-filesystem (atomic). Its
+    // name is unique per writer/write so concurrent writers can't corrupt a shared temp.
     let tmp = unique_tmp_path(path);
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    // Remove the temp on any failure so a failed write/rename can't orphan `.<pid>.<seq>.tmp` files
+    // that would otherwise pile up in the (possibly root-owned) shared cache dir across launches.
+    let result = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]

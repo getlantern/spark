@@ -27,6 +27,12 @@ fn snapshot(dir: &Path) -> Option<Vec<u8>> {
 /// itself (cache-first + conditional); we ignore its returned `Config`/`CacheMeta` and let Phase 1's
 /// `servers_from_cache()` re-read the file on the next `servers()` pull. Never blocks the caller's
 /// critical path — run it on a detached background task.
+///
+/// The before/after snapshots aren't locked against the tunnel process writing the same cache
+/// concurrently. That's intentional and safe: the only observable effect of an interleave is a
+/// possible **false-positive** `true` (the `after` bytes reflect the tunnel's write, not ours),
+/// which just triggers one extra `servers()` re-pull — harmless. A false negative is covered by the
+/// UI's 2–3s poll. Serializing would need a cross-process lock for no correctness gain.
 pub(crate) async fn fetch_into_shared_cache(dir: &Path) -> std::io::Result<bool> {
     let before = snapshot(dir);
     let env = spark_core::config::fetch::FetchEnv::from_env();
