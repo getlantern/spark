@@ -715,6 +715,10 @@ fn servers_from_cache_json(raw: &str) -> Vec<ServerInfo> {
     #[derive(Deserialize)]
     struct Entry {
         country: Option<String>,
+        // Accept both spellings: the config-new payload uses snake_case, but the camelCase
+        // `countryCode` is used on the control-channel ServerInfo, so alias it to avoid silently
+        // dropping the code if a backend emits camelCase here too.
+        #[serde(alias = "countryCode")]
         country_code: Option<String>,
         city: Option<String>,
     }
@@ -1080,5 +1084,13 @@ mod cache_tests {
         assert!(servers_from_cache_json("").is_empty());
         assert!(servers_from_cache_json("not json").is_empty());
         assert!(servers_from_cache_json(r#"{"options":{}}"#).is_empty());
+    }
+
+    #[test]
+    fn accepts_camelcase_country_code_alias() {
+        let raw = r#"{"servers": [{"country": "Japan", "countryCode": "JP", "city": "Tokyo"}]}"#;
+        let list = servers_from_cache_json(raw);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].country_code.as_deref(), Some("JP"));
     }
 }
