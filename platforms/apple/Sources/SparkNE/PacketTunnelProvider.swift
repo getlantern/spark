@@ -137,6 +137,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 : FileManager.default
                     .containerURL(forSecurityApplicationGroupIdentifier: "group.org.getlantern.spark")?
                     .appendingPathComponent("config", isDirectory: true).path
+            self.log.notice("resolved dataDir=\(dataDir ?? "nil", privacy: .public)")
 
             // Read the optional split-tunnel JSON from providerConfiguration["splitTunnel"].
             // Trimmed for the same reason as `config` above; nil/empty → NULL (no split-tunnel).
