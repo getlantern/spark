@@ -10,7 +10,7 @@ BUDGET=$((4 * 1024 * 1024))   # 4 MiB
 BINS=(spark spark-service)
 
 echo "building release binaries..." >&2
-cargo build --release >&2
+cargo build --release --bin spark --bin spark-service >&2
 
 status=0
 for bin in "${BINS[@]}"; do
