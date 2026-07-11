@@ -111,6 +111,17 @@ Same shape as macOS: the Tauri iOS app links the fetch-only `spark-core` and run
 - **Phase 2b — Android** — IPC-triggered `fetchConfig` in the `:vpn` process (no tunnel establish) on startup, same stale-while-revalidate + `spark://servers` refresh. Land right after (or alongside) 2a.
 - **Phase 2c — iOS** — same fetch-only mechanism as desktop against the shared app-group container; gated on the iOS-support work landing, then done as soon as it does.
 
+## Phase 2a spike result (2026-07-11) — approach B (link `config-fetch` as-is)
+
+Measured, not assumed:
+- `config-fetch` builds standalone (`cargo build -p spark-core --no-default-features --features config-fetch`, ~32s) and its dep tree pulls **BoringSSL** (`boring2`/`boring-sys2`/`tokio-boring2`) + `flint-fronted`/`flint-kindling` **and** the data plane (`netstack-smoltcp`, `tun-rs`) — the data plane is non-optional today.
+- **Cost is dominated by BoringSSL:** the `libboring_sys2` rlib alone is **8.3 MB** (the whole `config-fetch` `libspark_core.rlib` is 12.7 MB unstripped). `netstack-smoltcp` (~1K SLoC) + `tun-rs` (thin) are negligible by comparison.
+- `config::fetch` hard-depends on `crate::transport::{probe::tls_wrap, DirectTransport, Transport}` + `transport::probe::parse_status_code`, so a "lean" feature can't drop the transport layer regardless.
+
+**Decision: approach B — link `config-fetch` as-is; do NOT build a data-plane-gated `fetch` feature.** Gating the small data plane to save a few hundred KB while carrying an unavoidable 8 MB BoringSSL (required by `anytls`, required by `config-fetch`, which is the whole point of reusing the censorship-resistant fetch) is not worth the refactor risk. The Tauri app is already excluded from the core's size-tuned profile (root `Cargo.toml`), so the `<3 MB` core target does not apply to it. Plan Tasks 1 (core gating) is dropped; Task 2 uses `features = ["config-fetch"]`.
+
+**Noted future optimization (not now):** on Windows/Linux the privileged `spark-service` is a persistent daemon that could perform the startup fetch over IPC (no BoringSSL in the app there), unlike macOS where the NE only runs while connected so the app must fetch itself. v1 keeps the uniform "app links the fetch" approach the spec chose; revisit if desktop app size becomes a concern.
+
 ## Verification
 
 - **Unit:** `config_raw.json` `servers[]` → `ServerInfo` parsing (fixtures); the fetch-only feature builds standalone and `load_or_fetch` works against a fixture/staging endpoint; stale-while-revalidate ordering (cache rendered before the fetch resolves).

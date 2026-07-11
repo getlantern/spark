@@ -682,15 +682,36 @@ fn servers_from_config() -> Vec<ServerInfo> {
         .collect()
 }
 
-/// The shared app-group container dir where the NE caches `config_raw.json`. The app + extension
-/// share `group.org.getlantern.spark`; for the non-sandboxed app (same user) this is
-/// `~/Library/Group Containers/group.org.getlantern.spark/config`. Returns `None` if `$HOME` is
-/// unset. macOS-only for now, matching `servers_from_config`; Windows/Linux get their own shared-dir
-/// resolution in a Phase-1 follow-up.
-#[cfg(target_os = "macos")]
-fn shared_config_cache_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Group Containers/group.org.getlantern.spark/config"))
+/// The shared cache dir the app + privileged tunnel both use for `config_raw.json`.
+/// - **macOS:** the app-group container the NE writes (Phase 1) — `~/Library/Group Containers/
+///   group.org.getlantern.spark/config`. The app also hands this to the NE as `dataDir`.
+/// - **Windows:** `%ProgramData%\Lantern\Spark\config` — the persistent service must write here too
+///   (service-side alignment is a follow-up; macOS is the primary Phase 2a target).
+/// - **Linux (and other unix):** `/var/lib/spark/config` (ditto).
+///
+/// `pub(crate)` so the Phase 2a startup fetch (`config_fetch`) and `setup` can resolve the same dir
+/// the Phase 1 read path uses — they can never disagree. Returns `None` if the base can't be resolved.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn shared_config_cache_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(PathBuf::from(home).join("Library/Group Containers/group.org.getlantern.spark/config"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("ProgramData")?;
+        Some(
+            PathBuf::from(base)
+                .join("Lantern")
+                .join("Spark")
+                .join("config"),
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Some(PathBuf::from("/var/lib/spark/config"))
+    }
 }
 
 /// Location list read from the NE's shared `config_raw.json` cache, or empty if there's no cache

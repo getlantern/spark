@@ -4,6 +4,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,9 +46,27 @@ pub fn store(dir: &Path, raw: &str, meta: &CacheMeta) -> io::Result<()> {
     write_atomic(&meta_path(dir), &meta_json)
 }
 
+/// Monotonic per-write counter for unique temp names (see `unique_tmp_path`).
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A per-write temp path in the same dir as `path`. Unique across concurrent writers (pid + a
+/// monotonic seq) so two writers sharing this cache — e.g. the tunnel process and the app's own
+/// startup fetch (locations-before-VPN Phase 2a) — never write the same temp file and clobber each
+/// other mid-write. A fixed `.tmp` name was safe only while a single process ever wrote the cache.
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config");
+    path.with_file_name(format!("{name}.{pid}.{seq}.tmp"))
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Temp stays in the same dir as `path`, so the rename is always same-filesystem (atomic).
-    let tmp = path.with_extension("tmp");
+    // Its name is unique per writer/write so concurrent writers can't corrupt a shared temp.
+    let tmp = unique_tmp_path(path);
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }
@@ -55,6 +74,21 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temp_path_is_unique_per_write() {
+        let p = Path::new("/tmp/spark-x/config_raw.json");
+        let a = unique_tmp_path(p);
+        let b = unique_tmp_path(p);
+        assert_ne!(a, b, "two writers must not share a temp path");
+        // Same dir as the target (so the rename stays same-filesystem/atomic) and derived from the
+        // target's file name.
+        assert_eq!(a.parent(), p.parent());
+        assert!(a
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with("config_raw.json.") && s.ends_with(".tmp")));
+    }
 
     #[test]
     fn round_trips_raw_and_meta() {

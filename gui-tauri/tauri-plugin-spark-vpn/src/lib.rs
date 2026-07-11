@@ -12,6 +12,11 @@ pub(crate) mod persist;
 #[cfg(not(target_os = "android"))]
 mod desktop;
 
+// Phase 2a: app-side startup config fetch (links spark-core's kindling fetch). Desktop only —
+// Android fetches in the :vpn process over IPC (Phase 2b).
+#[cfg(not(target_os = "android"))]
+mod config_fetch;
+
 // macOS installed-apps catalog for desktop app-based split tunneling (AppleControl uses it).
 #[cfg(target_os = "macos")]
 mod apps_darwin;
@@ -37,6 +42,10 @@ use tauri::{
     plugin::{Builder, TauriPlugin},
     Manager, Runtime,
 };
+// `Emitter` provides `.emit()` (Phase 2a startup fetch emits `spark://servers`); unused on Android,
+// which doesn't run the desktop startup fetch.
+#[cfg(not(target_os = "android"))]
+use tauri::Emitter;
 
 // Desktop control construction. On Android the control is built in `init`'s setup from the
 // registered plugin handle (which is not available here), so this module is desktop-only.
@@ -127,6 +136,27 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             {
                 let ctl = platform::control(app)?;
                 app.manage(ctl);
+
+                // Phase 2a: on every launch, fetch the config into the shared cache — independent of
+                // VPN state — so the location list refreshes even before/without connecting
+                // (stale-while-revalidate on top of Phase 1's instant cache read). Fully detached: a
+                // failure never blocks startup, the window, or connect. On a *changed* config, emit
+                // `spark://servers` so the window re-pulls `servers()`; the tray's `refresh()` re-reads
+                // it too. On 304/unchanged or failure, the cached list is left intact.
+                let handle = app.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let Some(dir) = crate::desktop::shared_config_cache_dir() else {
+                        return;
+                    };
+                    let _ = std::fs::create_dir_all(&dir);
+                    match crate::config_fetch::fetch_into_shared_cache(&dir).await {
+                        Ok(true) => {
+                            let _ = handle.emit("spark://servers", ());
+                        }
+                        Ok(false) => {} // 304 / unchanged — nothing to do
+                        Err(e) => eprintln!("[spark-vpn] startup config fetch failed: {e}"),
+                    }
+                });
             }
             #[cfg(desktop)]
             tray::init(app)?;
