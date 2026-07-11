@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "spark-bridge", "dns-tunnel-core", "dns-tunnel-server"]
+members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "spark-bridge", "spark-sharing", "dns-tunnel-core", "dns-tunnel-server"]
 # Kept out of the workspace on purpose:
 #  - vendor/netstack-smoltcp: depended on by `path`, but its examples/tests/dev-deps
 #    (tun2, structopt, socket2-ext, …) should not be built as part of our workspace.
@@ -110,6 +110,9 @@ webpki-root-certs = "1"
 # (`flutter_rust_bridge_codegen`) and the Dart `flutter_rust_bridge` package — all three must be the
 # same version or the generated glue mismatches the runtime at load time (not a compile error).
 flutter_rust_bridge = "=2.12.0"
+# Native connection sharing. Kept in the unprivileged `spark-sharing` adapter and
+# built without Unbounded's standalone reqwest/env_logger client.
+lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "5a6808c13e81c5eb2f8599d9b96a6531bef4bc6d", default-features = false }
 
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed

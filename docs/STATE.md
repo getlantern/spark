@@ -1538,7 +1538,27 @@ approve sysext, Connect → IP changes. (No standing infra remains on the Lanter
   `tokio::process`.) NB: the ipc `stream` tests need the feature → use `--all-features` (or
   `-p spark-ipc --features stream`).
 
+**2026-07-11 — Rust Unbounded/Spark connection-sharing integration, lifecycle slice DONE.**
+Added an unprivileged `spark-sharing` workspace crate, with no dependency edge into `spark-core`,
+`spark-service`, the CLI, backend, or platform bindings. It pins `getlantern/unbounded-rs` commit
+`5a6808c13e81c5eb2f8599d9b96a6531bef4bc6d` with `default-features = false`, so Unbounded's native
+`reqwest`/`env_logger` client is absent. `SharingConfig` maps Spark-owned settings into the real
+five-slot-capable peer-proxy supervisor; `start_sharing` returns an explicit cancel/wait/stop handle
+and accepts lifecycle events plus an injected `Signaler`. The test runs the real supervisor through
+an injected signaling attempt and proves orderly cancellation and aggregate counters. Dependency
+audit: `spark-sharing` production edges contain no `reqwest`, `hyper`, or `env_logger`; existing
+Spark product crates contain no Unbounded/sharing edge. Gate: `cargo test -p spark-sharing --locked`,
+package clippy `-D warnings`, formatting, and full `cargo check --workspace --locked` all green.
+
 ## Next chunk (exactly what the next session should do)
+
+**(C) Connection sharing — Spark-native Freddie signaling.** Implement the injected `Signaler` in
+`spark-sharing` over raw Tokio + rustls/ring HTTP/1.1 (no reqwest/hyper), with hermetic tests covering
+the Go form encoding, protocol-version header, success envelope, 404/418 mappings, cancellation,
+and bounded response parsing. Keep it unprivileged and do not add any dependency edge to core/service.
+After that compiles green, wire the sharing handle into one unprivileged frontend behind an explicit
+feature/config switch; do not combine those two chunks.
+
 Two independent tracks — pick by whether a privileged box is available:
 
 **(A) Privileged live gates (root) — the box is privileged now.** Build (`cargo build --release`),
