@@ -348,9 +348,21 @@ async fn read_to_close_bounded(
         if target.len() > limit {
             return Err(invalid_data("Freddie response body exceeds limit"));
         }
-        if read_more(stream, target).await? == 0 {
+        if target.len() == limit {
+            let mut extra = [0_u8; 1];
+            return match stream.read(&mut extra).await? {
+                0 => Ok(()),
+                _ => Err(invalid_data("Freddie response body exceeds limit")),
+            };
+        }
+        let mut chunk = [0_u8; 4096];
+        let remaining = limit - target.len();
+        let read_capacity = remaining.min(chunk.len());
+        let read = stream.read(&mut chunk[..read_capacity]).await?;
+        if read == 0 {
             return Ok(());
         }
+        target.extend_from_slice(&chunk[..read]);
     }
 }
 
@@ -580,6 +592,21 @@ mod tests {
             .exchange("genesis", SignalMessageType::Genesis, "{}")
             .await
             .unwrap_err();
+        assert!(error.to_string().contains("exceeds limit"));
+    }
+
+    #[tokio::test]
+    async fn bounded_close_reader_never_buffers_past_limit() {
+        let (mut reader, mut writer) = tokio::io::duplex(16);
+        tokio::spawn(async move {
+            writer.write_all(b"12345").await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+        let mut body = Vec::new();
+        let error = read_to_close_bounded(&mut reader, &mut body, 4)
+            .await
+            .unwrap_err();
+        assert_eq!(body, b"1234");
         assert!(error.to_string().contains("exceeds limit"));
     }
 
