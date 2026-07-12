@@ -61,8 +61,9 @@ impl Endpoint {
         if authority.is_empty()
             || authority.contains('@')
             || authority.chars().any(char::is_whitespace)
-            || target.contains('\r')
-            || target.contains('\n')
+            || target
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
             || target.contains('#')
         {
             return Err(invalid_endpoint("invalid authority or request target"));
@@ -223,7 +224,7 @@ impl FreddieSignaler {
             .write_all(request.as_bytes())
             .await
             .map_err(transport_error)?;
-        stream.shutdown().await.map_err(transport_error)?;
+        stream.flush().await.map_err(transport_error)?;
         let response = read_response(&mut stream, self.max_response_bytes)
             .await
             .map_err(transport_error)?;
@@ -691,5 +692,15 @@ mod tests {
         assert_eq!((ipv6.host.as_str(), ipv6.port), ("::1", 8443));
         assert!(Endpoint::parse("ftp://example.com/signal").is_err());
         assert!(Endpoint::parse("http://user@example.com/signal").is_err());
+        assert!(Endpoint::parse("http://example.com/raw path").is_err());
+        assert!(Endpoint::parse("http://example.com/tab\there").is_err());
+    }
+
+    #[test]
+    fn accepts_a_response_without_headers() {
+        assert_eq!(
+            parse_headers(b"HTTP/1.1 200 OK\r\n\r\n").unwrap(),
+            (200, BodyFraming::CloseDelimited)
+        );
     }
 }
