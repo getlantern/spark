@@ -338,12 +338,17 @@ async fn read_response(
         if received.len() >= MAX_HEADER_BYTES {
             return Err(invalid_data("Freddie response headers exceed limit"));
         }
-        if read_more(stream, &mut received).await? == 0 {
+        let mut chunk = [0_u8; 4096];
+        let remaining = MAX_HEADER_BYTES - received.len();
+        let read_capacity = remaining.min(chunk.len());
+        let read = stream.read(&mut chunk[..read_capacity]).await?;
+        if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Freddie closed an incomplete response",
             ));
         }
+        received.extend_from_slice(&chunk[..read]);
     };
 
     if header_end > MAX_HEADER_BYTES {
@@ -442,7 +447,7 @@ fn parse_headers(headers: &[u8]) -> io::Result<(u16, BodyFraming)> {
     }
 
     let mut content_length = None;
-    let mut chunked = false;
+    let mut transfer_encoding = None;
     for line in lines {
         let (name, value) = line
             .split_once(':')
@@ -459,13 +464,22 @@ fn parse_headers(headers: &[u8]) -> io::Result<(u16, BodyFraming)> {
                 return Err(invalid_data("conflicting Freddie Content-Length values"));
             }
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            if value.eq_ignore_ascii_case("chunked") {
-                chunked = true;
-            } else if !value.eq_ignore_ascii_case("identity") {
+            let parsed = if value.eq_ignore_ascii_case("chunked") {
+                true
+            } else if value.eq_ignore_ascii_case("identity") {
+                false
+            } else {
                 return Err(invalid_data("unsupported Freddie Transfer-Encoding"));
+            };
+            if transfer_encoding
+                .replace(parsed)
+                .is_some_and(|old| old != parsed)
+            {
+                return Err(invalid_data("conflicting Freddie Transfer-Encoding values"));
             }
         }
     }
+    let chunked = transfer_encoding == Some(true);
     let framing = match (content_length, chunked) {
         (Some(_), true) => {
             return Err(invalid_data(
@@ -639,6 +653,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_headers_over_limit() {
+        let mut encoded = b"HTTP/1.1 200 OK\r\nX-Fill: ".to_vec();
+        encoded.resize(MAX_HEADER_BYTES + 1, b'a');
+        let (endpoint, _) = stub(encoded).await;
+        let error = FreddieSignaler::new_insecure_http(endpoint)
+            .unwrap()
+            .exchange("genesis", SignalMessageType::Genesis, "{}")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("headers exceed limit"));
+    }
+
+    #[tokio::test]
     async fn bounded_close_reader_never_buffers_past_limit() {
         let (mut reader, mut writer) = tokio::io::duplex(16);
         tokio::spawn(async move {
@@ -787,5 +814,15 @@ mod tests {
             parse_headers(b"HTTP/1.1 200 OK\r\n\r\n").unwrap(),
             (200, BodyFraming::CloseDelimited)
         );
+    }
+
+    #[test]
+    fn rejects_conflicting_transfer_encodings() {
+        let headers =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert!(parse_headers(headers)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting"));
     }
 }

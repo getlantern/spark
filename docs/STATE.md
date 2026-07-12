@@ -1566,7 +1566,7 @@ remote TCP EOF timing. The Unbounded pin advanced to the merged peer-proxy commi
 available without reqwest; both default and no-default Unbounded
 test/clippy gates pass. Also corrected `scripts/size-budget.sh` to build only the two binaries it
 measures, matching `release.yml`; a whole-workspace release build had feature-unified the optional
-WebRTC graph into `spark-service`. Sharing: 14 unit tests + doctest, clippy `-D warnings`, standalone
+WebRTC graph into `spark-service`. Sharing: 16 unit tests + doctest, clippy `-D warnings`, standalone
 check, release build, and dependency isolation all green. `spark-sharing` is now a standalone
 workspace excluded from the size-sensitive root workspace, with its own lockfile and three-OS CI job.
 This is required because Cargo unifies features across workspace members even when the size script

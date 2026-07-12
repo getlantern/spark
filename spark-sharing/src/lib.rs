@@ -25,6 +25,7 @@ pub struct SharingConfig {
     /// STUN servers used to gather peer-facing ICE candidates.
     pub stun_urls: Vec<String>,
     /// Number of independent censored-user sessions to advertise concurrently.
+    /// Zero is clamped to one so starting sharing always creates a usable pool.
     pub concurrent_sessions: usize,
     /// Maximum time to wait for a consumer's WebRTC DataChannel to open.
     pub nat_timeout: Duration,
