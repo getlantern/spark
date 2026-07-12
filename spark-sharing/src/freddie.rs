@@ -145,7 +145,7 @@ fn invalid_endpoint(reason: impl Into<String>) -> FreddieBuildError {
 pub struct FreddieSignaler {
     endpoint: Endpoint,
     tls: TlsConnector,
-    max_response_bytes: usize,
+    max_message_bytes: usize,
 }
 
 impl fmt::Debug for FreddieSignaler {
@@ -153,18 +153,24 @@ impl fmt::Debug for FreddieSignaler {
         formatter
             .debug_struct("FreddieSignaler")
             .field("endpoint", &"<redacted>")
-            .field("max_response_bytes", &self.max_response_bytes)
+            .field("max_message_bytes", &self.max_message_bytes)
             .finish()
     }
 }
 
 impl FreddieSignaler {
-    /// Creates an HTTPS signaling client with a 1 MiB response-body limit.
+    /// Creates an HTTPS signaling client with a 1 MiB limit per signaling message.
+    ///
+    /// The limit applies to a complete POST response body and to each decoded
+    /// advertisement in the long-lived GET stream, not to the stream as a whole.
     pub fn new(endpoint: impl AsRef<str>) -> Result<Self, FreddieBuildError> {
         Self::with_response_limit(endpoint, DEFAULT_MAX_RESPONSE_BYTES)
     }
 
-    /// Creates an HTTPS signaling client with an explicit non-zero response-body limit.
+    /// Creates an HTTPS client with an explicit non-zero per-message limit.
+    ///
+    /// The limit applies to a complete POST response body and to each decoded
+    /// advertisement in the long-lived GET stream, not to the stream as a whole.
     pub fn with_response_limit(
         endpoint: impl AsRef<str>,
         max_response_bytes: usize,
@@ -178,12 +184,15 @@ impl FreddieSignaler {
         Ok(client)
     }
 
-    /// Creates a plaintext HTTP client for controlled local tests only.
+    /// Creates a plaintext HTTP client with a 1 MiB per-message limit for controlled tests.
     pub fn new_insecure_http(endpoint: impl AsRef<str>) -> Result<Self, FreddieBuildError> {
         Self::with_insecure_http_response_limit(endpoint, DEFAULT_MAX_RESPONSE_BYTES)
     }
 
-    /// Creates a plaintext HTTP test client with an explicit non-zero response-body limit.
+    /// Creates a plaintext HTTP test client with an explicit non-zero per-message limit.
+    ///
+    /// The limit applies to a complete POST response body and to each decoded
+    /// advertisement in the long-lived GET stream, not to the stream as a whole.
     pub fn with_insecure_http_response_limit(
         endpoint: impl AsRef<str>,
         max_response_bytes: usize,
@@ -221,7 +230,7 @@ impl FreddieSignaler {
         Ok(Self {
             endpoint: Endpoint::parse(endpoint)?,
             tls: TlsConnector::from(Arc::new(tls)),
-            max_response_bytes,
+            max_message_bytes: max_response_bytes,
         })
     }
 
@@ -270,7 +279,7 @@ impl FreddieSignaler {
             .await
             .map_err(transport_error)?;
         stream.flush().await.map_err(transport_error)?;
-        let response = read_response(&mut stream, self.max_response_bytes)
+        let response = read_response(&mut stream, self.max_message_bytes)
             .await
             .map_err(transport_error)?;
 
@@ -303,7 +312,7 @@ impl FreddieSignaler {
                 framing: AdvertisementFraming::new(head.framing, head.body)
                     .map_err(transport_error)?,
                 decoded: Vec::new(),
-                max_message_bytes: self.max_response_bytes,
+                max_message_bytes: self.max_message_bytes,
             }),
             418 => Err(SignalingError::ProtocolVersion(PROTOCOL_VERSION.into())),
             status => Err(SignalingError::Http(status)),
