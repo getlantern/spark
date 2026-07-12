@@ -225,6 +225,22 @@ impl Drop for ConsumerHandle {
     }
 }
 
+async fn join_all<T>(tasks: Vec<JoinHandle<T>>) -> Result<Vec<T>, JoinError> {
+    let mut values = Vec::with_capacity(tasks.len());
+    let mut first_join_error = None;
+    for task in tasks {
+        match task.await {
+            Ok(value) => values.push(value),
+            Err(error) if first_join_error.is_none() => first_join_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    match first_join_error {
+        Some(error) => Err(error),
+        None => Ok(values),
+    }
+}
+
 pub fn start_consumer(
     config: ConsumerRuntimeConfig,
     signaler: Arc<dyn ConsumerSignaler>,
@@ -287,11 +303,7 @@ pub fn start_consumer(
                 }
             }));
         }
-        let mut summaries = Vec::with_capacity(slots);
-        for task in tasks {
-            summaries.push(task.await?);
-        }
-        Ok(summaries)
+        join_all(tasks).await
     });
 
     Ok(ConsumerHandle {
@@ -305,12 +317,29 @@ pub fn start_consumer(
 #[cfg(test)]
 mod tests {
     use std::fmt;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use async_trait::async_trait;
     use lantern_unbounded::signaling::{AdvertisementSource, Signaler, SignalingError};
     use lantern_unbounded::{SignalMessage, SignalMessageType};
 
     use super::*;
+
+    #[tokio::test]
+    async fn joins_every_slot_after_an_earlier_join_error() {
+        let later_task_completed = Arc::new(AtomicBool::new(false));
+        let later_task_flag = later_task_completed.clone();
+        let tasks = vec![
+            tokio::spawn(async { panic!("simulated consumer slot panic") }),
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                later_task_flag.store(true, Ordering::SeqCst);
+            }),
+        ];
+
+        assert!(join_all(tasks).await.is_err());
+        assert!(later_task_completed.load(Ordering::SeqCst));
+    }
 
     struct PendingAdvertisements;
 
