@@ -60,7 +60,9 @@ impl Endpoint {
         };
         if authority.is_empty()
             || authority.contains('@')
-            || authority.chars().any(char::is_whitespace)
+            || authority
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
             || target
                 .chars()
                 .any(|character| character.is_whitespace() || character.is_control())
@@ -146,21 +148,53 @@ impl fmt::Debug for FreddieSignaler {
 }
 
 impl FreddieSignaler {
-    /// Creates a signaling client with a 1 MiB response-body limit.
+    /// Creates an HTTPS signaling client with a 1 MiB response-body limit.
     pub fn new(endpoint: impl AsRef<str>) -> Result<Self, FreddieBuildError> {
         Self::with_response_limit(endpoint, DEFAULT_MAX_RESPONSE_BYTES)
     }
 
-    /// Creates a signaling client with an explicit non-zero response-body limit.
+    /// Creates an HTTPS signaling client with an explicit non-zero response-body limit.
     pub fn with_response_limit(
         endpoint: impl AsRef<str>,
+        max_response_bytes: usize,
+    ) -> Result<Self, FreddieBuildError> {
+        let client = Self::with_any_scheme(endpoint.as_ref(), max_response_bytes)?;
+        if client.endpoint.scheme != Scheme::Https {
+            return Err(invalid_endpoint(
+                "HTTPS is required; use new_insecure_http only for controlled local testing",
+            ));
+        }
+        Ok(client)
+    }
+
+    /// Creates a plaintext HTTP client for controlled local tests only.
+    pub fn new_insecure_http(endpoint: impl AsRef<str>) -> Result<Self, FreddieBuildError> {
+        Self::with_insecure_http_response_limit(endpoint, DEFAULT_MAX_RESPONSE_BYTES)
+    }
+
+    /// Creates a plaintext HTTP test client with an explicit non-zero response-body limit.
+    pub fn with_insecure_http_response_limit(
+        endpoint: impl AsRef<str>,
+        max_response_bytes: usize,
+    ) -> Result<Self, FreddieBuildError> {
+        let client = Self::with_any_scheme(endpoint.as_ref(), max_response_bytes)?;
+        if client.endpoint.scheme != Scheme::Http {
+            return Err(invalid_endpoint(
+                "new_insecure_http requires an http:// endpoint",
+            ));
+        }
+        Ok(client)
+    }
+
+    fn with_any_scheme(
+        endpoint: &str,
         max_response_bytes: usize,
     ) -> Result<Self, FreddieBuildError> {
         if max_response_bytes == 0 {
             return Err(invalid_endpoint("response limit must be non-zero"));
         }
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        Self::with_roots(endpoint.as_ref(), max_response_bytes, roots)
+        Self::with_roots(endpoint, max_response_bytes, roots)
     }
 
     fn with_roots(
@@ -556,7 +590,7 @@ mod tests {
     async fn sends_go_form_and_decodes_envelope() {
         let body = r#"{"ReplyTo":"offer-request","Type":1,"Payload":"{}"}"#;
         let (endpoint, request_rx) = stub(response(200, body)).await;
-        let signaler = FreddieSignaler::new(endpoint).unwrap();
+        let signaler = FreddieSignaler::new_insecure_http(endpoint).unwrap();
         let message = signaler
             .exchange("genesis/one", SignalMessageType::Genesis, "two words&?")
             .await
@@ -575,7 +609,7 @@ mod tests {
     async fn maps_protocol_statuses() {
         for (status, expected) in [(404, "recipient"), (418, "version"), (503, "HTTP 503")] {
             let (endpoint, _) = stub(response(status, "error")).await;
-            let error = FreddieSignaler::new(endpoint)
+            let error = FreddieSignaler::new_insecure_http(endpoint)
                 .unwrap()
                 .exchange("genesis", SignalMessageType::Genesis, "{}")
                 .await
@@ -587,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_response_over_limit() {
         let (endpoint, _) = stub(response(200, "12345")).await;
-        let error = FreddieSignaler::with_response_limit(endpoint, 4)
+        let error = FreddieSignaler::with_insecure_http_response_limit(endpoint, 4)
             .unwrap()
             .exchange("genesis", SignalMessageType::Genesis, "{}")
             .await
@@ -617,11 +651,9 @@ mod tests {
         let (endpoint, _) = stub(encoded).await;
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            FreddieSignaler::new(endpoint).unwrap().exchange(
-                "genesis",
-                SignalMessageType::Genesis,
-                "{}",
-            ),
+            FreddieSignaler::new_insecure_http(endpoint)
+                .unwrap()
+                .exchange("genesis", SignalMessageType::Genesis, "{}"),
         )
         .await
         .unwrap()
@@ -633,7 +665,7 @@ mod tests {
     async fn decodes_chunked_success_response() {
         let encoded = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nC\r\n{\"ReplyTo\":\"\r\n1F\r\noffer\",\"Type\":1,\"Payload\":\"{}\"}\r\n0\r\n\r\n".to_vec();
         let (endpoint, _) = stub(encoded).await;
-        let message = FreddieSignaler::new(endpoint)
+        let message = FreddieSignaler::new_insecure_http(endpoint)
             .unwrap()
             .exchange("genesis", SignalMessageType::Genesis, "{}")
             .await
@@ -695,7 +727,7 @@ mod tests {
             request_tx.send(()).unwrap();
             std::future::pending::<()>().await;
         });
-        let signaler = FreddieSignaler::new(endpoint).unwrap();
+        let signaler = FreddieSignaler::new_insecure_http(endpoint).unwrap();
         let exchange = tokio::spawn(async move {
             signaler
                 .exchange("genesis", SignalMessageType::Genesis, "{}")
@@ -721,6 +753,14 @@ mod tests {
         assert!(Endpoint::parse("http://user@example.com/signal").is_err());
         assert!(Endpoint::parse("http://example.com/raw path").is_err());
         assert!(Endpoint::parse("http://example.com/tab\there").is_err());
+        assert!(Endpoint::parse("http://example.com/\u{7f}").is_err());
+    }
+
+    #[test]
+    fn requires_explicit_opt_in_for_plaintext_http() {
+        assert!(FreddieSignaler::new("http://127.0.0.1/signal").is_err());
+        assert!(FreddieSignaler::new_insecure_http("http://127.0.0.1/signal").is_ok());
+        assert!(FreddieSignaler::new_insecure_http("https://example.com/signal").is_err());
     }
 
     #[test]

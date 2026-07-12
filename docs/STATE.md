@@ -1553,7 +1553,8 @@ package clippy `-D warnings`, formatting, and full `cargo check --workspace --lo
 
 **2026-07-11 — Connection sharing, Spark-native Freddie signaling DONE.** Added
 `FreddieSignaler`, a concrete injected signaler using raw Tokio TCP + rustls 0.23/ring (Mozilla roots),
-with no reqwest/hyper. It sends Freddie's existing POST form and `X-BF-Version`, maps 404/418/other
+with no reqwest/hyper. Default constructors require HTTPS; plaintext HTTP requires the explicitly
+named `new_insecure_http` local-testing constructor. It sends Freddie's existing POST form and `X-BF-Version`, maps 404/418/other
 statuses into Unbounded's typed errors, decodes the Go signaling envelope, supports fixed-length,
 close-delimited, and chunked HTTP/1.1 responses, and enforces 32 KiB headers plus configurable body
 and chunk-wire limits. Tests cover exact form/header/envelope behavior, statuses, size rejection,
@@ -1565,7 +1566,7 @@ remote TCP EOF timing. The Unbounded pin advanced to the merged peer-proxy commi
 available without reqwest; both default and no-default Unbounded
 test/clippy gates pass. Also corrected `scripts/size-budget.sh` to build only the two binaries it
 measures, matching `release.yml`; a whole-workspace release build had feature-unified the optional
-WebRTC graph into `spark-service`. Sharing: 12 unit tests + doctest, clippy `-D warnings`, standalone
+WebRTC graph into `spark-service`. Sharing: 13 unit tests + doctest, clippy `-D warnings`, standalone
 check, release build, and dependency isolation all green. `spark-sharing` is now a standalone
 workspace excluded from the size-sensitive root workspace, with its own lockfile and three-OS CI job.
 This is required because Cargo unifies features across workspace members even when the size script
