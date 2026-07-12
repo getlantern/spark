@@ -158,8 +158,9 @@ impl ConsumerHandle {
         &self,
         target: impl Into<Socks5Target>,
     ) -> Result<ConsumerQuicStream, ConsumerSocks5Error> {
+        let target = target.into();
         self.dialer
-            .connect_socks5(&target.into(), &self.cancellation)
+            .connect_socks5(&target, &self.cancellation)
             .await
     }
 

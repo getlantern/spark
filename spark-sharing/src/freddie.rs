@@ -361,18 +361,19 @@ impl AdvertisementSource for FreddieAdvertisements {
     async fn next(&mut self) -> Result<Option<SignalMessage>, SignalingError> {
         loop {
             if let Some(newline) = self.decoded.iter().position(|byte| *byte == b'\n') {
-                let mut line = self.decoded.drain(..=newline).collect::<Vec<_>>();
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                if line.len() > self.max_message_bytes {
+                let line_end = newline.saturating_sub(usize::from(
+                    newline > 0 && self.decoded[newline - 1] == b'\r',
+                ));
+                if line_end > self.max_message_bytes {
                     return Err(advertisement_too_large());
                 }
-                if line.iter().all(u8::is_ascii_whitespace) {
+                if self.decoded[..line_end].iter().all(u8::is_ascii_whitespace) {
+                    self.decoded.drain(..=newline);
                     continue;
                 }
-                return Ok(Some(serde_json::from_slice(&line)?));
+                let message = serde_json::from_slice(&self.decoded[..line_end])?;
+                self.decoded.drain(..=newline);
+                return Ok(Some(message));
             }
             let buffered_payload = self
                 .decoded
