@@ -161,11 +161,14 @@ impl ConsumerHandle {
             .session_task
             .take()
             .expect("consumer session task is present")
-            .await??;
-        self.broker_task
+            .await;
+        let broker = self
+            .broker_task
             .take()
             .expect("consumer broker task is present")
-            .await??;
+            .await;
+        let sessions = sessions??;
+        broker??;
         Ok(ConsumerRuntimeSummary { sessions })
     }
 }
