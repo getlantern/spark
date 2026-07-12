@@ -14,7 +14,7 @@ spark-transport = ["dep:spark-core"]
 
 [dependencies]
 async-trait = "0.1"
-lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "e6296614ed7d42a1d9fbeccf88a7ed8ee148cbfa", default-features = false }
+lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "8478c17afe4309cb42ba586897139f931e633f4a", default-features = false }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
