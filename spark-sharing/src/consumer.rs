@@ -47,17 +47,29 @@ pub fn ephemeral_quic_server_config() -> Result<quinn::ServerConfig, ConsumerTls
     Ok(quinn::ServerConfig::with_crypto(Arc::new(crypto)))
 }
 
+/// Configuration for the censored-user Unbounded runtime.
 pub struct ConsumerRuntimeConfig {
+    /// QUIC server identity and transport settings presented to the Go egress.
     pub quic_server_config: quinn::ServerConfig,
+    /// Synthetic address exposed by the stable virtual UDP socket.
     pub local_address: SocketAddr,
+    /// Stable identifier used by replacement peers to rejoin this consumer.
     pub consumer_session_id: String,
+    /// ICE STUN URLs used to discover peer-reachable candidates.
     pub stun_urls: Vec<String>,
+    /// Optional application tag included in Freddie advertisements.
     pub tag: String,
+    /// Number of independent peer paths advertised concurrently.
     pub concurrent_sessions: usize,
+    /// Time allowed for additional ICE candidates after the first candidate.
     pub candidate_patience: Duration,
+    /// Maximum time to wait for a peer DataChannel to open.
     pub nat_timeout: Duration,
+    /// Delay before a failed or completed path is advertised again.
     pub retry_delay: Duration,
+    /// Datagram capacity reserved for each virtual peer path.
     pub path_queue_capacity: usize,
+    /// Whether local IPv6 ICE candidates may be advertised.
     pub enable_ipv6: bool,
 }
 
