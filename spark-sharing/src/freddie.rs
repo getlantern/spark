@@ -551,7 +551,7 @@ impl AdvertisementFraming {
 }
 
 fn advertisement_too_large() -> SignalingError {
-    transport_message("Freddie advertisement exceeds response limit".into())
+    transport_message("Freddie advertisement exceeds per-message limit".into())
 }
 
 fn encode_form(fields: &[(&str, &str)]) -> String {
@@ -984,7 +984,7 @@ mod tests {
         };
 
         let error = advertisements.next().await.unwrap_err();
-        assert!(error.to_string().contains("exceeds response limit"));
+        assert!(error.to_string().contains("exceeds per-message limit"));
     }
 
     #[tokio::test]
