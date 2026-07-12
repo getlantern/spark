@@ -54,9 +54,18 @@ impl Endpoint {
             return Err(invalid_endpoint("expected http:// or https://"));
         };
 
-        let (authority, target) = match remainder.split_once('/') {
-            Some((authority, path)) => (authority, format!("/{path}")),
-            None => (remainder, "/".to_owned()),
+        let boundary = remainder
+            .char_indices()
+            .find_map(|(index, character)| matches!(character, '/' | '?' | '#').then_some(index));
+        let (authority, suffix) = match boundary {
+            Some(index) => remainder.split_at(index),
+            None => (remainder, ""),
+        };
+        let target = match suffix.chars().next() {
+            Some('?') => format!("/{suffix}"),
+            Some('/') | Some('#') => suffix.to_owned(),
+            None => "/".to_owned(),
+            Some(_) => unreachable!("request-target boundary is a known delimiter"),
         };
         if authority.is_empty()
             || authority.contains('@')
@@ -754,6 +763,15 @@ mod tests {
         assert!(Endpoint::parse("http://example.com/raw path").is_err());
         assert!(Endpoint::parse("http://example.com/tab\there").is_err());
         assert!(Endpoint::parse("http://example.com/\u{7f}").is_err());
+    }
+
+    #[test]
+    fn parses_query_without_path_and_rejects_fragments() {
+        let query = Endpoint::parse("https://example.com?x=1").unwrap();
+        assert_eq!(query.authority, "example.com");
+        assert_eq!(query.target, "/?x=1");
+        assert!(Endpoint::parse("https://example.com#fragment").is_err());
+        assert!(Endpoint::parse("https://example.com/path#fragment").is_err());
     }
 
     #[test]
