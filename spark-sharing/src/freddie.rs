@@ -518,6 +518,9 @@ impl AdvertisementFraming {
                     }
                     let line_end = loop {
                         if let Some(position) = find_bytes(wire, b"\r\n") {
+                            if position > 128 {
+                                return Err(invalid_data("Freddie chunk size line exceeds limit"));
+                            }
                             break position;
                         }
                         if wire.len() > 128 {
@@ -982,6 +985,22 @@ mod tests {
 
         let error = advertisements.next().await.unwrap_err();
         assert!(error.to_string().contains("exceeds response limit"));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_chunk_size_line_over_128_bytes_when_already_buffered() {
+        let mut wire = vec![b'1'; 129];
+        wire.extend_from_slice(b"\r\n");
+        let (stream, _peer) = tokio::io::duplex(64);
+        let mut stream: Box<dyn AsyncStream> = Box::new(stream);
+        let mut framing = AdvertisementFraming::Chunked {
+            wire,
+            chunk_remaining: None,
+            finished: false,
+        };
+
+        let error = framing.next_bytes(&mut stream, 64).await.unwrap_err();
+        assert!(error.to_string().contains("chunk size line exceeds limit"));
     }
 
     #[tokio::test]
