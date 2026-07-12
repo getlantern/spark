@@ -23,6 +23,7 @@ pub use freddie::{FreddieBuildError, FreddieSignaler};
 pub use lantern_unbounded::supervisor::{
     PoolEvent, SupervisorEvent, SupervisorPoolSummary, SupervisorSummary,
 };
+pub use lantern_unbounded::Socks5Target;
 
 /// Runtime settings for the peer-proxy sharing pool.
 #[derive(Debug, Clone)]
