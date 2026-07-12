@@ -313,7 +313,12 @@ async fn read_response(
                 return Err(invalid_data("Freddie response body exceeds limit"));
             }
             while body.len() < length {
-                read_more(stream, &mut body).await?;
+                if read_more(stream, &mut body).await? == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Freddie closed before sending the declared Content-Length",
+                    ));
+                }
             }
             if body.len() != length {
                 return Err(invalid_data("Freddie response exceeds Content-Length"));
@@ -575,6 +580,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exceeds limit"));
+    }
+
+    #[tokio::test]
+    async fn rejects_eof_before_declared_content_length() {
+        let encoded =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort".to_vec();
+        let (endpoint, _) = stub(encoded).await;
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            FreddieSignaler::new(endpoint).unwrap().exchange(
+                "genesis",
+                SignalMessageType::Genesis,
+                "{}",
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("Content-Length"));
     }
 
     #[tokio::test]

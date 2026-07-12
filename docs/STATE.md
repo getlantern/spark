@@ -1541,13 +1541,14 @@ approve sysext, Connect → IP changes. (No standing infra remains on the Lanter
 **2026-07-11 — Rust Unbounded/Spark connection-sharing integration, lifecycle slice DONE.**
 Added an unprivileged `spark-sharing` crate, with no dependency edge into `spark-core`,
 `spark-service`, the CLI, backend, or platform bindings. It pins `getlantern/unbounded-rs` commit
-`5a6808c13e81c5eb2f8599d9b96a6531bef4bc6d` with `default-features = false`, so Unbounded's native
+`5cbfd9c13b56720329de53a14def8e610bd89360` with `default-features = false`, so Unbounded's native
 `reqwest`/`env_logger` client is absent. `SharingConfig` maps Spark-owned settings into the real
 five-slot-capable peer-proxy supervisor; `start_sharing` returns an explicit cancel/wait/stop handle
 and accepts lifecycle events plus an injected `Signaler`. The test runs the real supervisor through
 an injected signaling attempt and proves orderly cancellation and aggregate counters. Dependency
 audit: `spark-sharing` production edges contain no `reqwest`, `hyper`, or `env_logger`; existing
-Spark product crates contain no Unbounded/sharing edge. Gate: `cargo test -p spark-sharing --locked`,
+Spark product crates contain no Unbounded/sharing edge. Gate:
+`cargo test --manifest-path spark-sharing/Cargo.toml --locked`,
 package clippy `-D warnings`, formatting, and full `cargo check --workspace --locked` all green.
 
 **2026-07-11 — Connection sharing, Spark-native Freddie signaling DONE.** Added
@@ -1559,11 +1560,12 @@ and chunk-wire limits. Tests cover exact form/header/envelope behavior, statuses
 chunking, dropped-future cancellation, endpoint parsing, and a hermetic certificate-verified rustls
 exchange. Async lifecycle tests use explicit five-second bounds on every network/supervisor wait;
 the cancellation test verifies future/task cancellation without depending on platform-specific
-remote TCP EOF timing. The Unbounded pin advanced to `f9b26ff4eeaf289ad23f85a8826a21341ffbaa35`, which makes its
-generic `Transport(String)` error available without reqwest; both default and no-default Unbounded
+remote TCP EOF timing. The Unbounded pin advanced to the merged peer-proxy commit
+`5cbfd9c13b56720329de53a14def8e610bd89360`, which makes its generic `Transport(String)` error
+available without reqwest; both default and no-default Unbounded
 test/clippy gates pass. Also corrected `scripts/size-budget.sh` to build only the two binaries it
 measures, matching `release.yml`; a whole-workspace release build had feature-unified the optional
-WebRTC graph into `spark-service`. Sharing: 8 unit tests + doctest, clippy `-D warnings`, standalone
+WebRTC graph into `spark-service`. Sharing: 10 unit tests + doctest, clippy `-D warnings`, standalone
 check, release build, and dependency isolation all green. `spark-sharing` is now a standalone
 workspace excluded from the size-sensitive root workspace, with its own lockfile and three-OS CI job.
 This is required because Cargo unifies features across workspace members even when the size script

@@ -68,7 +68,7 @@ impl SharingConfig {
 #[derive(Debug)]
 pub struct SharingHandle {
     cancellation: CancellationToken,
-    task: JoinHandle<SupervisorPoolSummary>,
+    task: Option<JoinHandle<SupervisorPoolSummary>>,
 }
 
 impl SharingHandle {
@@ -78,14 +78,20 @@ impl SharingHandle {
     }
 
     /// Waits for the sharing pool to finish without initiating cancellation.
-    pub async fn wait(self) -> Result<SupervisorPoolSummary, JoinError> {
-        self.task.await
+    pub async fn wait(mut self) -> Result<SupervisorPoolSummary, JoinError> {
+        self.task.take().expect("sharing task is present").await
     }
 
     /// Cancels every sharing slot, waits for cleanup, and returns aggregate counters.
-    pub async fn stop(self) -> Result<SupervisorPoolSummary, JoinError> {
+    pub async fn stop(mut self) -> Result<SupervisorPoolSummary, JoinError> {
         self.cancellation.cancel();
-        self.task.await
+        self.task.take().expect("sharing task is present").await
+    }
+}
+
+impl Drop for SharingHandle {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }
 
@@ -131,7 +137,10 @@ pub fn start_sharing(
     let task = tokio::spawn(async move {
         supervise_peer_proxy_pool(supervisor, slots, task_cancellation, events).await
     });
-    SharingHandle { cancellation, task }
+    SharingHandle {
+        cancellation,
+        task: Some(task),
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +218,36 @@ mod tests {
         assert_eq!(summary.attempts(), 1);
         assert_eq!(summary.failed_attempts(), 1);
         assert_eq!(signaler.exchanges.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_handle_cancels_the_pool() {
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let handle = start_sharing(config(), Arc::new(TestSignaler::default()), Some(events_tx));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+                .await
+                .unwrap(),
+            Some(PoolEvent {
+                event: SupervisorEvent::AttemptStarted { .. },
+                ..
+            })
+        ));
+
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events_rx.recv().await {
+                    Some(PoolEvent {
+                        event: SupervisorEvent::Stopped { .. },
+                        ..
+                    }) => break,
+                    Some(_) => {}
+                    None => panic!("sharing event stream closed before the pool stopped"),
+                }
+            }
+        })
+        .await
+        .expect("dropped sharing handle did not stop the pool");
     }
 }
