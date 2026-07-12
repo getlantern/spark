@@ -126,7 +126,7 @@ pub struct ConsumerHandle {
     cancellation: CancellationToken,
     dialer: ConsumerQuicDialer,
     broker_task: Option<JoinHandle<Result<(), ConsumerQuicError>>>,
-    session_task: Option<JoinHandle<Vec<ConsumerSummary>>>,
+    session_task: Option<JoinHandle<Result<Vec<ConsumerSummary>, JoinError>>>,
 }
 
 impl ConsumerHandle {
@@ -161,7 +161,7 @@ impl ConsumerHandle {
             .session_task
             .take()
             .expect("consumer session task is present")
-            .await?;
+            .await??;
         self.broker_task
             .take()
             .expect("consumer broker task is present")
@@ -274,9 +274,9 @@ pub fn start_consumer(
         }
         let mut summaries = Vec::with_capacity(slots);
         for task in tasks {
-            summaries.push(task.await.expect("consumer slot task failed"));
+            summaries.push(task.await?);
         }
-        summaries
+        Ok(summaries)
     });
 
     Ok(ConsumerHandle {
