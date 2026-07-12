@@ -164,18 +164,18 @@ impl FreddieSignaler {
     /// The limit applies to a complete POST response body and to each decoded
     /// advertisement in the long-lived GET stream, not to the stream as a whole.
     pub fn new(endpoint: impl AsRef<str>) -> Result<Self, FreddieBuildError> {
-        Self::with_response_limit(endpoint, DEFAULT_MAX_RESPONSE_BYTES)
+        Self::with_message_limit(endpoint, DEFAULT_MAX_RESPONSE_BYTES)
     }
 
     /// Creates an HTTPS client with an explicit non-zero per-message limit.
     ///
     /// The limit applies to a complete POST response body and to each decoded
     /// advertisement in the long-lived GET stream, not to the stream as a whole.
-    pub fn with_response_limit(
+    pub fn with_message_limit(
         endpoint: impl AsRef<str>,
-        max_response_bytes: usize,
+        max_message_bytes: usize,
     ) -> Result<Self, FreddieBuildError> {
-        let client = Self::with_any_scheme(endpoint.as_ref(), max_response_bytes)?;
+        let client = Self::with_any_scheme(endpoint.as_ref(), max_message_bytes)?;
         if client.endpoint.scheme != Scheme::Https {
             return Err(invalid_endpoint(
                 "HTTPS is required; use new_insecure_http only for controlled local testing",
@@ -186,18 +186,18 @@ impl FreddieSignaler {
 
     /// Creates a plaintext HTTP client with a 1 MiB per-message limit for controlled tests.
     pub fn new_insecure_http(endpoint: impl AsRef<str>) -> Result<Self, FreddieBuildError> {
-        Self::with_insecure_http_response_limit(endpoint, DEFAULT_MAX_RESPONSE_BYTES)
+        Self::with_insecure_http_message_limit(endpoint, DEFAULT_MAX_RESPONSE_BYTES)
     }
 
     /// Creates a plaintext HTTP test client with an explicit non-zero per-message limit.
     ///
     /// The limit applies to a complete POST response body and to each decoded
     /// advertisement in the long-lived GET stream, not to the stream as a whole.
-    pub fn with_insecure_http_response_limit(
+    pub fn with_insecure_http_message_limit(
         endpoint: impl AsRef<str>,
-        max_response_bytes: usize,
+        max_message_bytes: usize,
     ) -> Result<Self, FreddieBuildError> {
-        let client = Self::with_any_scheme(endpoint.as_ref(), max_response_bytes)?;
+        let client = Self::with_any_scheme(endpoint.as_ref(), max_message_bytes)?;
         if client.endpoint.scheme != Scheme::Http {
             return Err(invalid_endpoint(
                 "new_insecure_http requires an http:// endpoint",
@@ -208,18 +208,18 @@ impl FreddieSignaler {
 
     fn with_any_scheme(
         endpoint: &str,
-        max_response_bytes: usize,
+        max_message_bytes: usize,
     ) -> Result<Self, FreddieBuildError> {
-        if max_response_bytes == 0 {
-            return Err(invalid_endpoint("response limit must be non-zero"));
+        if max_message_bytes == 0 {
+            return Err(invalid_endpoint("message limit must be non-zero"));
         }
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        Self::with_roots(endpoint, max_response_bytes, roots)
+        Self::with_roots(endpoint, max_message_bytes, roots)
     }
 
     fn with_roots(
         endpoint: &str,
-        max_response_bytes: usize,
+        max_message_bytes: usize,
         roots: RootCertStore,
     ) -> Result<Self, FreddieBuildError> {
         let tls =
@@ -230,7 +230,7 @@ impl FreddieSignaler {
         Ok(Self {
             endpoint: Endpoint::parse(endpoint)?,
             tls: TlsConnector::from(Arc::new(tls)),
-            max_message_bytes: max_response_bytes,
+            max_message_bytes,
         })
     }
 
@@ -1028,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_response_over_limit() {
         let (endpoint, _) = stub(response(200, "12345")).await;
-        let error = FreddieSignaler::with_insecure_http_response_limit(endpoint, 4)
+        let error = FreddieSignaler::with_insecure_http_message_limit(endpoint, 4)
             .unwrap()
             .exchange("genesis", SignalMessageType::Genesis, "{}")
             .await
