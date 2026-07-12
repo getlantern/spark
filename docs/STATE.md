@@ -1588,7 +1588,9 @@ for both IP and domain targets without adding a WebRTC dependency edge into `spa
 server uses an ephemeral certificate and the Go-compatible `broflake` ALPN. The pinned unbounded-rs
 layer keeps the infrastructure as the migrating QUIC client and adds cancellation-safe eventual
 stream dialing plus the SOCKS5 target handshake. Standalone tests and strict clippy pass with and
-without `spark-transport`.
+without `spark-transport`. Review hardening accepts CRLF advertisement lines, enforces the decoded
+per-message limit incrementally across transport and HTTP-chunk boundaries, and covers exact-limit
+EOF messages plus oversize rejection.
 
 ## Next chunk (exactly what the next session should do)
 

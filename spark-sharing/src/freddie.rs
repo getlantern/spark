@@ -351,29 +351,48 @@ impl fmt::Debug for FreddieAdvertisements {
 impl AdvertisementSource for FreddieAdvertisements {
     async fn next(&mut self) -> Result<Option<SignalMessage>, SignalingError> {
         loop {
-            if self.decoded.len() > self.max_message_bytes {
-                return Err(transport_message(
-                    "Freddie advertisement exceeds response limit".into(),
-                ));
-            }
             if let Some(newline) = self.decoded.iter().position(|byte| *byte == b'\n') {
                 let mut line = self.decoded.drain(..=newline).collect::<Vec<_>>();
                 line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                if line.len() > self.max_message_bytes {
+                    return Err(advertisement_too_large());
+                }
                 if line.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
                 return Ok(Some(serde_json::from_slice(&line)?));
             }
+            let buffered_payload = self
+                .decoded
+                .len()
+                .saturating_sub(usize::from(self.decoded.last() == Some(&b'\r')));
+            if buffered_payload > self.max_message_bytes {
+                return Err(advertisement_too_large());
+            }
+            let allowance = self
+                .max_message_bytes
+                .saturating_add(2)
+                .saturating_sub(self.decoded.len())
+                .max(1);
             match self
                 .framing
-                .next_bytes(&mut self.stream, self.max_message_bytes)
+                .next_bytes(&mut self.stream, allowance)
                 .await
                 .map_err(transport_error)?
             {
                 Some(bytes) => self.decoded.extend_from_slice(&bytes),
                 None if self.decoded.iter().all(u8::is_ascii_whitespace) => return Ok(None),
                 None => {
-                    let line = std::mem::take(&mut self.decoded);
+                    let mut line = std::mem::take(&mut self.decoded);
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    if line.len() > self.max_message_bytes {
+                        return Err(advertisement_too_large());
+                    }
                     return Ok(Some(serde_json::from_slice(&line)?));
                 }
             }
@@ -388,6 +407,7 @@ enum AdvertisementFraming {
     },
     Chunked {
         wire: Vec<u8>,
+        chunk_remaining: Option<usize>,
         finished: bool,
     },
 }
@@ -408,6 +428,7 @@ impl AdvertisementFraming {
             }),
             BodyFraming::Chunked => Ok(Self::Chunked {
                 wire: body,
+                chunk_remaining: None,
                 finished: false,
             }),
         }
@@ -424,7 +445,8 @@ impl AdvertisementFraming {
                 remaining,
             } => {
                 if !buffered.is_empty() {
-                    let bytes = std::mem::take(buffered);
+                    let take = buffered.len().min(limit.max(1));
+                    let bytes = buffered.drain(..take).collect::<Vec<_>>();
                     if let Some(remaining) = remaining {
                         *remaining = remaining.checked_sub(bytes.len()).ok_or_else(|| {
                             invalid_data("Freddie response exceeds Content-Length")
@@ -438,7 +460,8 @@ impl AdvertisementFraming {
                 let mut bytes = vec![0_u8; 4096];
                 let capacity = remaining
                     .map(|remaining| remaining.min(bytes.len()))
-                    .unwrap_or(bytes.len());
+                    .unwrap_or(bytes.len())
+                    .min(limit.max(1));
                 let read = stream.read(&mut bytes[..capacity]).await?;
                 if read == 0 {
                     return if remaining.is_some() {
@@ -456,54 +479,76 @@ impl AdvertisementFraming {
                 }
                 Ok(Some(bytes))
             }
-            Self::Chunked { wire, finished } => {
+            Self::Chunked {
+                wire,
+                chunk_remaining,
+                finished,
+            } => {
                 if *finished {
                     return Ok(None);
                 }
-                let line_end = loop {
-                    if let Some(position) = find_bytes(wire, b"\r\n") {
-                        break position;
+                loop {
+                    if let Some(remaining) = chunk_remaining {
+                        if *remaining == 0 {
+                            while wire.len() < 2 {
+                                if read_more(stream.as_mut(), wire).await? == 0 {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::UnexpectedEof,
+                                        "Freddie closed after chunk data",
+                                    ));
+                                }
+                            }
+                            if wire.get(..2) != Some(b"\r\n") {
+                                return Err(invalid_data("invalid Freddie chunk terminator"));
+                            }
+                            wire.drain(..2);
+                            *chunk_remaining = None;
+                            continue;
+                        }
+                        if wire.is_empty() && read_more(stream.as_mut(), wire).await? == 0 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "Freddie closed during a chunk",
+                            ));
+                        }
+                        let take = (*remaining).min(wire.len()).min(limit.max(1));
+                        let bytes = wire.drain(..take).collect::<Vec<_>>();
+                        *remaining -= take;
+                        return Ok(Some(bytes));
                     }
-                    if wire.len() > 128 {
-                        return Err(invalid_data("Freddie chunk size line exceeds limit"));
-                    }
-                    if read_more(stream.as_mut(), wire).await? == 0 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "Freddie closed during a chunk size",
-                        ));
-                    }
-                };
-                let size_text = std::str::from_utf8(&wire[..line_end])
-                    .map_err(|_| invalid_data("invalid Freddie chunk size"))?;
-                let size =
-                    usize::from_str_radix(size_text.split(';').next().unwrap_or_default(), 16)
+                    let line_end = loop {
+                        if let Some(position) = find_bytes(wire, b"\r\n") {
+                            break position;
+                        }
+                        if wire.len() > 128 {
+                            return Err(invalid_data("Freddie chunk size line exceeds limit"));
+                        }
+                        if read_more(stream.as_mut(), wire).await? == 0 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "Freddie closed during a chunk size",
+                            ));
+                        }
+                    };
+                    let size_text = std::str::from_utf8(&wire[..line_end])
                         .map_err(|_| invalid_data("invalid Freddie chunk size"))?;
-                wire.drain(..line_end + 2);
-                if size == 0 {
-                    *finished = true;
-                    return Ok(None);
-                }
-                if size > limit {
-                    return Err(invalid_data("Freddie advertisement chunk exceeds limit"));
-                }
-                while wire.len() < size + 2 {
-                    if read_more(stream.as_mut(), wire).await? == 0 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "Freddie closed during a chunk",
-                        ));
+                    let size =
+                        usize::from_str_radix(size_text.split(';').next().unwrap_or_default(), 16)
+                            .map_err(|_| invalid_data("invalid Freddie chunk size"))?;
+                    wire.drain(..line_end + 2);
+                    if size == 0 {
+                        *finished = true;
+                        return Ok(None);
                     }
+                    *chunk_remaining = Some(size);
                 }
-                if wire.get(size..size + 2) != Some(b"\r\n") {
-                    return Err(invalid_data("invalid Freddie chunk terminator"));
-                }
-                let bytes = wire.drain(..size).collect::<Vec<_>>();
-                wire.drain(..2);
-                Ok(Some(bytes))
             }
         }
     }
+}
+
+fn advertisement_too_large() -> SignalingError {
+    transport_message("Freddie advertisement exceeds response limit".into())
 }
 
 fn encode_form(fields: &[(&str, &str)]) -> String {
@@ -872,7 +917,7 @@ mod tests {
                 request.extend_from_slice(&chunk[..read]);
             }
             let _ = request_tx.send(request);
-            let message = b"{\"ReplyTo\":\"peer\",\"Type\":0,\"Payload\":\"{}\"}\n";
+            let message = b"{\"ReplyTo\":\"peer\",\"Type\":0,\"Payload\":\"{}\"}\r\n";
             stream
                 .write_all(
                     format!(
@@ -898,6 +943,45 @@ mod tests {
         assert!(request.starts_with("GET /v1/signal HTTP/1.1\r\n"));
         assert!(request.contains(&format!("\r\n{VERSION_HEADER}: {PROTOCOL_VERSION}\r\n")));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepts_an_exact_limit_eof_message_with_trailing_carriage_return() {
+        let encoded = br#"{"ReplyTo":"peer","Type":0,"Payload":"{}"}"#;
+        let mut body = encoded.to_vec();
+        body.push(b'\r');
+        let body_len = body.len();
+        let (stream, _peer) = tokio::io::duplex(64);
+        let mut advertisements = FreddieAdvertisements {
+            stream: Box::new(stream),
+            framing: AdvertisementFraming::Raw {
+                buffered: body,
+                remaining: Some(body_len),
+            },
+            decoded: Vec::new(),
+            max_message_bytes: encoded.len(),
+        };
+
+        let message = advertisements.next().await.unwrap().unwrap();
+        assert_eq!(message.reply_to, "peer");
+        assert!(advertisements.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_an_eof_advertisement_over_the_exact_limit() {
+        let (stream, _peer) = tokio::io::duplex(64);
+        let mut advertisements = FreddieAdvertisements {
+            stream: Box::new(stream),
+            framing: AdvertisementFraming::Raw {
+                buffered: b"12345".to_vec(),
+                remaining: Some(5),
+            },
+            decoded: Vec::new(),
+            max_message_bytes: 4,
+        };
+
+        let error = advertisements.next().await.unwrap_err();
+        assert!(error.to_string().contains("exceeds response limit"));
     }
 
     #[tokio::test]
