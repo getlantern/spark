@@ -8,19 +8,23 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+spark-transport = ["dep:spark-core"]
+
 [dependencies]
 async-trait = "0.1"
-lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "5cbfd9c13b56720329de53a14def8e610bd89360", default-features = false }
+lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "9ffc2a5b6fc0b1f0874f58e5938b6d66b8a81126", default-features = false }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = "1"
+spark-core = { path = "../core", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = "0.7"
 webpki-roots = "1"
-
-[dev-dependencies]
-rcgen = "0.13"
 
 [profile.release]
 opt-level = 3

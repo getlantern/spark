@@ -1577,6 +1577,19 @@ API facts: rustls 0.23.41
 `builder_with_provider(ring).with_safe_default_protocol_versions()`; tokio-rustls 0.26.4
 `TlsConnector::connect(ServerName<'static>, IO)`; `RootCertStore` accepts cloned webpki trust anchors.
 
+**2026-07-12 — Rust Unbounded/Spark censored-consumer transport foundation.** Extended the isolated
+`spark-sharing` subsystem with the inverse role: a configurable censored-user session pool shares one
+stable CSID and virtual QUIC socket, discovers volunteer peers through Freddie's long-lived GET
+stream, and exposes target dials through the infrastructure Go egress. `FreddieSignaler` now implements
+`ConsumerSignaler` with bounded incremental handling for chunked, fixed-length, and close-delimited
+advertisement bodies. `ConsumerHandle` owns the WebRTC session pool and QUIC broker lifecycle;
+`ConsumerTransport`, behind the opt-in `spark-transport` feature, implements Spark's TCP `Transport`
+for both IP and domain targets without adding a WebRTC dependency edge into `spark-core`. The QUIC
+server uses an ephemeral certificate and the Go-compatible `broflake` ALPN. The pinned unbounded-rs
+layer keeps the infrastructure as the migrating QUIC client and adds cancellation-safe eventual
+stream dialing plus the SOCKS5 target handshake. Standalone tests and strict clippy pass with and
+without `spark-transport`.
+
 ## Next chunk (exactly what the next session should do)
 
 **(C) Connection sharing — one unprivileged frontend integration.** Wire `FreddieSignaler` plus the

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lantern_unbounded::protocol::{PROTOCOL_VERSION, VERSION_HEADER};
-use lantern_unbounded::signaling::{Signaler, SignalingError};
+use lantern_unbounded::signaling::{
+    AdvertisementSource, ConsumerSignaler, Signaler, SignalingError,
+};
 use lantern_unbounded::{SignalMessage, SignalMessageType};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
@@ -280,6 +282,33 @@ impl FreddieSignaler {
             status => Err(SignalingError::Http(status)),
         }
     }
+
+    async fn advertisements_inner(&self) -> Result<FreddieAdvertisements, SignalingError> {
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\n{}: {}\r\nConnection: close\r\n\r\n",
+            self.endpoint.target, self.endpoint.authority, VERSION_HEADER, PROTOCOL_VERSION,
+        );
+        let mut stream = self.connect().await?;
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(transport_error)?;
+        stream.flush().await.map_err(transport_error)?;
+        let head = read_response_head(&mut stream)
+            .await
+            .map_err(transport_error)?;
+        match head.status {
+            200 => Ok(FreddieAdvertisements {
+                stream,
+                framing: AdvertisementFraming::new(head.framing, head.body)
+                    .map_err(transport_error)?,
+                decoded: Vec::new(),
+                max_message_bytes: self.max_response_bytes,
+            }),
+            418 => Err(SignalingError::ProtocolVersion(PROTOCOL_VERSION.into())),
+            status => Err(SignalingError::Http(status)),
+        }
+    }
 }
 
 #[async_trait]
@@ -291,6 +320,189 @@ impl Signaler for FreddieSignaler {
         payload: &str,
     ) -> Result<Option<SignalMessage>, SignalingError> {
         self.exchange_inner(send_to, kind, payload).await
+    }
+}
+
+#[async_trait]
+impl ConsumerSignaler for FreddieSignaler {
+    async fn advertisements(&self) -> Result<Box<dyn AdvertisementSource>, SignalingError> {
+        Ok(Box::new(self.advertisements_inner().await?))
+    }
+}
+
+struct FreddieAdvertisements {
+    stream: Box<dyn AsyncStream>,
+    framing: AdvertisementFraming,
+    decoded: Vec<u8>,
+    max_message_bytes: usize,
+}
+
+impl fmt::Debug for FreddieAdvertisements {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FreddieAdvertisements")
+            .field("decoded_bytes", &self.decoded.len())
+            .field("max_message_bytes", &self.max_message_bytes)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl AdvertisementSource for FreddieAdvertisements {
+    async fn next(&mut self) -> Result<Option<SignalMessage>, SignalingError> {
+        loop {
+            if self.decoded.len() > self.max_message_bytes {
+                return Err(transport_message(
+                    "Freddie advertisement exceeds response limit".into(),
+                ));
+            }
+            if let Some(newline) = self.decoded.iter().position(|byte| *byte == b'\n') {
+                let mut line = self.decoded.drain(..=newline).collect::<Vec<_>>();
+                line.pop();
+                if line.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                return Ok(Some(serde_json::from_slice(&line)?));
+            }
+            match self
+                .framing
+                .next_bytes(&mut self.stream, self.max_message_bytes)
+                .await
+                .map_err(transport_error)?
+            {
+                Some(bytes) => self.decoded.extend_from_slice(&bytes),
+                None if self.decoded.iter().all(u8::is_ascii_whitespace) => return Ok(None),
+                None => {
+                    let line = std::mem::take(&mut self.decoded);
+                    return Ok(Some(serde_json::from_slice(&line)?));
+                }
+            }
+        }
+    }
+}
+
+enum AdvertisementFraming {
+    Raw {
+        buffered: Vec<u8>,
+        remaining: Option<usize>,
+    },
+    Chunked {
+        wire: Vec<u8>,
+        finished: bool,
+    },
+}
+
+impl AdvertisementFraming {
+    fn new(framing: BodyFraming, body: Vec<u8>) -> io::Result<Self> {
+        match framing {
+            BodyFraming::ContentLength(length) if body.len() <= length => Ok(Self::Raw {
+                buffered: body,
+                remaining: Some(length),
+            }),
+            BodyFraming::ContentLength(_) => {
+                Err(invalid_data("Freddie response exceeds Content-Length"))
+            }
+            BodyFraming::CloseDelimited => Ok(Self::Raw {
+                buffered: body,
+                remaining: None,
+            }),
+            BodyFraming::Chunked => Ok(Self::Chunked {
+                wire: body,
+                finished: false,
+            }),
+        }
+    }
+
+    async fn next_bytes(
+        &mut self,
+        stream: &mut Box<dyn AsyncStream>,
+        limit: usize,
+    ) -> io::Result<Option<Vec<u8>>> {
+        match self {
+            Self::Raw {
+                buffered,
+                remaining,
+            } => {
+                if !buffered.is_empty() {
+                    let bytes = std::mem::take(buffered);
+                    if let Some(remaining) = remaining {
+                        *remaining = remaining.checked_sub(bytes.len()).ok_or_else(|| {
+                            invalid_data("Freddie response exceeds Content-Length")
+                        })?;
+                    }
+                    return Ok(Some(bytes));
+                }
+                if *remaining == Some(0) {
+                    return Ok(None);
+                }
+                let mut bytes = vec![0_u8; 4096];
+                let capacity = remaining
+                    .map(|remaining| remaining.min(bytes.len()))
+                    .unwrap_or(bytes.len());
+                let read = stream.read(&mut bytes[..capacity]).await?;
+                if read == 0 {
+                    return if remaining.is_some() {
+                        Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "Freddie closed before sending the declared Content-Length",
+                        ))
+                    } else {
+                        Ok(None)
+                    };
+                }
+                bytes.truncate(read);
+                if let Some(remaining) = remaining {
+                    *remaining -= read;
+                }
+                Ok(Some(bytes))
+            }
+            Self::Chunked { wire, finished } => {
+                if *finished {
+                    return Ok(None);
+                }
+                let line_end = loop {
+                    if let Some(position) = find_bytes(wire, b"\r\n") {
+                        break position;
+                    }
+                    if wire.len() > 128 {
+                        return Err(invalid_data("Freddie chunk size line exceeds limit"));
+                    }
+                    if read_more(stream.as_mut(), wire).await? == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "Freddie closed during a chunk size",
+                        ));
+                    }
+                };
+                let size_text = std::str::from_utf8(&wire[..line_end])
+                    .map_err(|_| invalid_data("invalid Freddie chunk size"))?;
+                let size =
+                    usize::from_str_radix(size_text.split(';').next().unwrap_or_default(), 16)
+                        .map_err(|_| invalid_data("invalid Freddie chunk size"))?;
+                wire.drain(..line_end + 2);
+                if size == 0 {
+                    *finished = true;
+                    return Ok(None);
+                }
+                if size > limit {
+                    return Err(invalid_data("Freddie advertisement chunk exceeds limit"));
+                }
+                while wire.len() < size + 2 {
+                    if read_more(stream.as_mut(), wire).await? == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "Freddie closed during a chunk",
+                        ));
+                    }
+                }
+                if wire.get(size..size + 2) != Some(b"\r\n") {
+                    return Err(invalid_data("invalid Freddie chunk terminator"));
+                }
+                let bytes = wire.drain(..size).collect::<Vec<_>>();
+                wire.drain(..2);
+                Ok(Some(bytes))
+            }
+        }
     }
 }
 
@@ -326,10 +538,13 @@ struct Response {
     body: Vec<u8>,
 }
 
-async fn read_response(
-    stream: &mut dyn AsyncStream,
-    max_body_bytes: usize,
-) -> io::Result<Response> {
+struct ResponseHead {
+    status: u16,
+    framing: BodyFraming,
+    body: Vec<u8>,
+}
+
+async fn read_response_head(stream: &mut dyn AsyncStream) -> io::Result<ResponseHead> {
     let mut received = Vec::with_capacity(4096);
     let header_end = loop {
         if let Some(position) = find_bytes(&received, b"\r\n\r\n") {
@@ -350,13 +565,24 @@ async fn read_response(
         }
         received.extend_from_slice(&chunk[..read]);
     };
-
     if header_end > MAX_HEADER_BYTES {
         return Err(invalid_data("Freddie response headers exceed limit"));
     }
     let (status, framing) = parse_headers(&received[..header_end])?;
-    let mut body = received.split_off(header_end);
-    match framing {
+    Ok(ResponseHead {
+        status,
+        framing,
+        body: received.split_off(header_end),
+    })
+}
+
+async fn read_response(
+    stream: &mut dyn AsyncStream,
+    max_body_bytes: usize,
+) -> io::Result<Response> {
+    let head = read_response_head(stream).await?;
+    let mut body = head.body;
+    match head.framing {
         BodyFraming::ContentLength(length) => {
             if length > max_body_bytes {
                 return Err(invalid_data("Freddie response body exceeds limit"));
@@ -384,7 +610,10 @@ async fn read_response(
             read_to_close_bounded(stream, &mut body, max_body_bytes).await?;
         }
     }
-    Ok(Response { status, body })
+    Ok(Response {
+        status: head.status,
+        body,
+    })
 }
 
 async fn read_to_close_bounded(
@@ -626,6 +855,49 @@ mod tests {
         assert!(request.starts_with("POST /v1/signal HTTP/1.1\r\n"));
         assert!(request.contains(&format!("\r\n{VERSION_HEADER}: {PROTOCOL_VERSION}\r\n")));
         assert!(request.ends_with("data=two+words%26%3F&send-to=genesis%2Fone&type=0"));
+    }
+
+    #[tokio::test]
+    async fn streams_chunked_consumer_advertisements() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/signal", listener.local_addr().unwrap());
+        let (request_tx, request_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while find_bytes(&request, b"\r\n\r\n").is_none() {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let _ = request_tx.send(request);
+            let message = b"{\"ReplyTo\":\"peer\",\"Type\":0,\"Payload\":\"{}\"}\n";
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n",
+                        message.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            stream.write_all(message).await.unwrap();
+            stream.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+        });
+
+        let signaler = FreddieSignaler::new_insecure_http(endpoint).unwrap();
+        let mut advertisements = signaler.advertisements().await.unwrap();
+        let message = advertisements.next().await.unwrap().unwrap();
+        assert_eq!(message.reply_to, "peer");
+        assert_eq!(message.kind, SignalMessageType::Genesis);
+        assert!(advertisements.next().await.unwrap().is_none());
+
+        let request = String::from_utf8(request_rx.await.unwrap()).unwrap();
+        assert!(request.starts_with("GET /v1/signal HTTP/1.1\r\n"));
+        assert!(request.contains(&format!("\r\n{VERSION_HEADER}: {PROTOCOL_VERSION}\r\n")));
+        server.await.unwrap();
     }
 
     #[tokio::test]
