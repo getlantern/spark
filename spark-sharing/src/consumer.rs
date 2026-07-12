@@ -48,6 +48,7 @@ pub fn ephemeral_quic_server_config() -> Result<quinn::ServerConfig, ConsumerTls
 }
 
 /// Configuration for the censored-user Unbounded runtime.
+#[derive(Debug, Clone)]
 pub struct ConsumerRuntimeConfig {
     /// QUIC server identity and transport settings presented to the Go egress.
     pub quic_server_config: quinn::ServerConfig,
