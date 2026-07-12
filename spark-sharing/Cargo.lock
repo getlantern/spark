@@ -943,7 +943,7 @@ dependencies = [
 [[package]]
 name = "lantern-unbounded"
 version = "0.1.0"
-source = "git+https://github.com/getlantern/unbounded-rs?rev=f9b26ff4eeaf289ad23f85a8826a21341ffbaa35#f9b26ff4eeaf289ad23f85a8826a21341ffbaa35"
+source = "git+https://github.com/getlantern/unbounded-rs?rev=5cbfd9c13b56720329de53a14def8e610bd89360#5cbfd9c13b56720329de53a14def8e610bd89360"
 dependencies = [
  "async-trait",
  "base64",
