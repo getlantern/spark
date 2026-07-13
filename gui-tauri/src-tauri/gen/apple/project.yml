@@ -125,9 +125,10 @@ targets:
           # Xcode's GUI (Product ▸ Archive) runs build-script phases with a minimal PATH that
           # omits node version managers (nvm) and Homebrew, so `npm` fails with "command not
           # found" — even though it resolves fine from a login shell (`tauri ios build`).
-          # Prepend the usual install locations, but only ones that exist, so the phase works
-          # from both the CLI and the Xcode GUI without hard-coding a single node install.
-          for d in "$HOME"/.nvm/versions/node/*/bin /opt/homebrew/bin /usr/local/bin; do
+          # Prepend the usual install locations that exist. Iterate least-preferred first so
+          # that after the prepends, the most specific manager (nvm, then Homebrew) ends up
+          # highest-priority on PATH ahead of a system /usr/local/bin node.
+          for d in /usr/local/bin /opt/homebrew/bin "$HOME"/.nvm/versions/node/*/bin; do
             [ -d "$d" ] && PATH="$d:$PATH"
           done
           export PATH
