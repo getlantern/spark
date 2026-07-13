@@ -543,6 +543,18 @@ mod tests {
             argv(&dns_clear_op("12")),
             "interface ipv4 set dnsservers 12 dhcp"
         );
+        // The required/ignorable split is safety-critical — `run` stops only on required-op
+        // failures. A failed DNS *set* must abort install before any route change (required); a
+        // failed DNS *clear* must not abort restore()'s cover removal (ignorable). Assert both so a
+        // refactor can't silently flip either.
+        assert!(
+            !dns_set_op("12", "10.6.7.1").ignore_failure,
+            "dns_set must be required"
+        );
+        assert!(
+            dns_clear_op("12").ignore_failure,
+            "dns_clear must be ignorable"
+        );
     }
 
     #[cfg(target_os = "windows")]
