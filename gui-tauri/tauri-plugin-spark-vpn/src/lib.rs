@@ -1,4 +1,3 @@
-mod cache_parse;
 mod commands;
 mod control;
 mod error;
@@ -138,17 +137,22 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 let ctl = platform::control(app)?;
                 app.manage(ctl);
 
-                // Phase 2a: on every launch, fetch the config into the shared cache — independent of
-                // VPN state — so the location list refreshes even before/without connecting
-                // (stale-while-revalidate on top of Phase 1's instant cache read). Fully detached: a
-                // failure never blocks startup, the window, or connect. On a *changed* config, emit
-                // `spark://servers` so the window re-pulls `servers()`; the tray's `refresh()` re-reads
-                // it too. On 304/unchanged or failure, the cached list is left intact.
+                // Phase 2a: on every launch, fetch the config into the app's OWN cache dir —
+                // independent of VPN state — so the location list refreshes even before/without
+                // connecting (stale-while-revalidate on top of the instant cache read). Fully
+                // detached: a failure never blocks startup, the window, or connect. On a *changed*
+                // config, emit `spark://servers` so the window re-pulls `servers()`; the tray's
+                // `refresh()` re-reads it too. On 304/unchanged or failure, the cached list is intact.
+                //
+                // The cache lives under the app's `app_config_dir` (Application Support) — NOT the
+                // app-group container — to avoid the macOS "access data from other apps" TCC prompt
+                // and the NE-sandbox EPERM (see desktop::app_config_cache_dir).
                 let handle = app.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let Some(dir) = crate::desktop::shared_config_cache_dir() else {
+                    let Ok(base) = handle.path().app_config_dir() else {
                         return;
                     };
+                    let dir = crate::desktop::app_config_cache_dir(&base);
                     let _ = std::fs::create_dir_all(&dir);
                     match crate::config_fetch::fetch_into_shared_cache(&dir).await {
                         Ok(true) => {

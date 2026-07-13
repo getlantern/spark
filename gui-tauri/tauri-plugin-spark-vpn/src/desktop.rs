@@ -671,62 +671,68 @@ fn servers_from_config() -> Vec<ServerInfo> {
         .collect()
 }
 
-/// The shared cache dir the app + privileged tunnel both use for `config_raw.json`.
-/// - **macOS:** the app-group container the NE writes (Phase 1) — `~/Library/Group Containers/
-///   group.org.getlantern.spark/config`. The app also hands this to the NE as `dataDir`.
-/// - **Windows:** `%ProgramData%\Lantern\Spark\config` — the persistent service must write here too
-///   (service-side alignment is a follow-up; macOS is the primary Phase 2a target).
-/// - **Linux (and other unix):** `/var/lib/spark/config` (ditto).
+/// The app's OWN on-disk config-cache dir: `<app_config_dir>/config` (macOS:
+/// `~/Library/Application Support/org.getlantern.spark/config`) — where the app fetches + reads its
+/// `config_raw.json` for the location list. `base` is the plugin's `app_config_dir()`.
 ///
-/// `pub(crate)` so the Phase 2a startup fetch (`config_fetch`) and `setup` can resolve the same dir
-/// the Phase 1 read path uses — they can never disagree. Returns `None` if the base can't be resolved.
+/// Deliberately NOT the app-group container: the macOS system-extension sandbox denies the root NE
+/// access to the *user's* group container (EPERM — hangs connect), so the NE cache can't be shared
+/// with the app anyway; and a non-sandboxed app poking into `~/Library/Group Containers/` trips a
+/// macOS "access data from other apps" TCC prompt. The app's own Application Support dir (where the
+/// plugin already stores its settings) avoids both.
 #[cfg(not(target_os = "android"))]
-pub(crate) fn shared_config_cache_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME")?;
-        Some(PathBuf::from(home).join("Library/Group Containers/group.org.getlantern.spark/config"))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var_os("ProgramData")?;
-        Some(
-            PathBuf::from(base)
-                .join("Lantern")
-                .join("Spark")
-                .join("config"),
-        )
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Some(PathBuf::from("/var/lib/spark/config"))
-    }
+pub(crate) fn app_config_cache_dir(base: &std::path::Path) -> PathBuf {
+    base.join("config")
 }
 
-/// Location list read from the NE's shared `config_raw.json` cache, or empty if there's no cache
-/// yet (never fetched) or it can't be read/parsed.
+/// Location list read from the app's own `config_raw.json` cache, or empty if there's no cache yet
+/// (never fetched) or it can't be read/parsed. Built via the core's exact `config_raw.json` → pool
+/// mapping ([`spark_core::config::lantern::from_config_raw_json`]) so the pre-connect list IS the
+/// pool — same members, same order, each with its protocol — and the connected NE overlay (merged by
+/// index) lines up. (Building from the top-level geo `servers[]` array instead put protocol/latency
+/// on the wrong rows: that array is ordered differently from `options.outbounds`.)
 #[cfg(target_os = "macos")]
-fn servers_from_cache() -> Vec<ServerInfo> {
-    let Some(dir) = shared_config_cache_dir() else {
-        return Vec::new();
-    };
-    match std::fs::read_to_string(dir.join("config_raw.json")) {
-        Ok(raw) => crate::cache_parse::servers_from_cache_json(&raw),
-        // A missing cache is the normal pre-first-fetch state — silent. Any other error (e.g. an
-        // entitlement/permission problem reaching the app-group container) is worth surfacing under
-        // SPARK_NE_DEBUG so it's diagnosable in the field.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+fn servers_from_cache(base: &std::path::Path) -> Vec<ServerInfo> {
+    let raw = match std::fs::read_to_string(app_config_cache_dir(base).join("config_raw.json")) {
+        Ok(raw) => raw,
+        // A missing cache is the normal pre-first-fetch state — silent.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            ne_spike::ne_debug(&format!(
-                "servers_from_cache: config_raw.json read failed: {e}"
-            ));
+            ne_spike::ne_debug(&format!("servers_from_cache: read failed: {e}"));
+            return Vec::new();
+        }
+    };
+    match spark_core::config::lantern::from_config_raw_json(&raw) {
+        Ok(cfg) => servers_from_pool(&cfg),
+        Err(e) => {
+            ne_spike::ne_debug(&format!("servers_from_cache: parse failed: {e}"));
             Vec::new()
         }
     }
 }
 
-// The `config_raw.json` → `ServerInfo` parser lives in `crate::cache_parse` (platform-neutral,
-// shared with `AndroidControl`); `servers_from_cache` above calls it.
+/// Map a parsed config's server pool to the UI location list — the same members/order the live NE
+/// snapshot uses (indexed by position), each with its protocol label but no live metrics yet
+/// (latency/health/current fill in from the NE snapshot once connected).
+#[cfg(target_os = "macos")]
+fn servers_from_pool(cfg: &spark_core::config::Config) -> Vec<ServerInfo> {
+    cfg.transport
+        .servers
+        .iter()
+        .enumerate()
+        .map(|(i, e)| ServerInfo {
+            index: i,
+            name: e.name.clone(),
+            country: e.country.clone(),
+            country_code: e.country_code.clone(),
+            city: e.city.clone(),
+            protocol: Some(spark_core::transport::spec_kind(&e.spec).to_string()),
+            latency_ms: None,
+            healthy: false,
+            is_current: false,
+        })
+        .collect()
+}
 
 // ── macOS: AppleControl (cross-process NE). ───────────────────────────────────
 
@@ -789,7 +795,7 @@ impl TunnelControl for AppleControl {
         // No TOML dev-override → fall back to the NE's shared config_raw.json cache so the location
         // list shows before connecting (and persists between sessions).
         if list.is_empty() {
-            list = servers_from_cache();
+            list = servers_from_cache(&self.base);
         }
         // Overlay live latency / health / current — but only when actually connected, else
         // sendProviderMessage to a down session just burns the 5s timeout on every poll.
@@ -1037,5 +1043,3 @@ impl TunnelControl for ServiceControl {
         ))
     }
 }
-
-// The cache-parser tests moved to `crate::cache_parse` alongside the parser.
