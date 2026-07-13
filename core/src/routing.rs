@@ -170,10 +170,11 @@ impl RouteManager {
     pub async fn restore(&mut self) -> io::Result<()> {
         let w = self.windows_params()?;
         debug!(tun = %self.tun, ifindex = %w.ifindex, "restoring direct routing (removing full-tunnel routes)");
-        // Revert DNS FIRST, then remove the covers: `run` stops at the first required-op failure, so
-        // ordering DNS first means a failed `netsh … dhcp` aborts before we fail-open the routes —
-        // avoiding the worst partial state (direct routing while DNS still points at the gone
-        // tunnel resolver). On success the order is immaterial.
+        // Revert DNS FIRST, then remove the covers. `dns_clear_op` is ignorable (see its doc), so
+        // unlike install()'s required `dns_set_op` a failed `netsh … dhcp` does NOT abort — the
+        // covers are still removed and fail-open completes. Ordering DNS first only matters if the
+        // adapter is still up, so DNS reverts before routing goes direct. On success order is
+        // immaterial.
         let mut ops = vec![dns_clear_op(&w.ifindex)];
         ops.extend(restore_ops());
         run(ops).await
@@ -202,10 +203,24 @@ async fn run_one(op: &RouteOp) -> io::Result<()> {
         .stdin(std::process::Stdio::null())
         .output()
         .await?;
-    if output.status.success() || op.ignore_failure {
+    if output.status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if op.ignore_failure {
+        // A tolerated failure is still worth a trace: the pre-clear deletes legitimately fail when
+        // the cover is absent, but an *unexpected* one here — e.g. `netsh … dhcp` failing on an
+        // interface that still exists — would otherwise vanish silently. Debug, not warn, because
+        // the routine pre-clear misses would make warn cry wolf on every install/restore.
+        debug!(
+            program = op.program,
+            args = %op.args.join(" "),
+            status = %output.status,
+            stderr = %stderr.trim(),
+            "ignorable route op failed; continuing",
+        );
+        return Ok(());
+    }
     Err(io::Error::other(format!(
         "`{} {}` failed ({}): {}",
         op.program,
@@ -429,7 +444,9 @@ mod tests {
 
     #[test]
     fn install_clears_then_covers_both_halves_via_the_tun() {
-        let ops = install_ops("utun7", "");
+        // A realistic gateway — ignored on unix and unasserted here, but `""` would inject a blank
+        // argv element into the Windows `route add … <gateway> …` form.
+        let ops = install_ops("utun7", "10.0.0.1");
         assert_eq!(ops.len(), 4, "two clears + two adds");
         // The clears come first and tolerate failure; the adds are required.
         assert!(ops[0].ignore_failure && ops[1].ignore_failure);
