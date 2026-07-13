@@ -16,6 +16,11 @@ use tokio_rustls::TlsConnector;
 
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
+/// Upper bound on the caller-supplied response limit. The chunked path computes
+/// `max_wire_bytes = limit * 2 + MAX_HEADER_BYTES`; capping the limit here keeps that
+/// well under `usize::MAX` so a pathological caller value can't saturate the multiply
+/// into an effectively-unbounded read (OOM).
+const MAX_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
 
 trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -212,6 +217,11 @@ impl FreddieSignaler {
     ) -> Result<Self, FreddieBuildError> {
         if max_message_bytes == 0 {
             return Err(invalid_endpoint("message limit must be non-zero"));
+        }
+        if max_response_bytes > MAX_RESPONSE_LIMIT {
+            return Err(invalid_endpoint(
+                "response limit exceeds the 64 MiB maximum",
+            ));
         }
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self::with_roots(endpoint, max_message_bytes, roots)
