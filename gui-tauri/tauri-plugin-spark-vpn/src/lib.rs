@@ -69,12 +69,12 @@ mod platform {
             .app_config_dir()
             .map_err(|e| crate::Error::Platform(format!("no app config dir: {e}")))?;
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             Ok(Box::new(crate::desktop::AppleControl { base }))
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(not(target_os = "macos"), not(target_os = "ios")))]
         {
             Ok(Box::new(crate::desktop::ServiceControl::new(base)))
         }
