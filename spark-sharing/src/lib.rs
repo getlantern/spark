@@ -92,6 +92,10 @@ impl SharingHandle {
 
 impl Drop for SharingHandle {
     fn drop(&mut self) {
+        // Cooperative cancellation only — the supervisor observes the token at its await points and
+        // winds down gracefully (closing WebRTC sessions + emitting `Stopped`); the runtime keeps
+        // polling it after this returns. Do NOT `abort()` here: that truncates the graceful shutdown
+        // (verified by `dropping_the_handle_cancels_the_pool`, which requires the `Stopped` event).
         self.cancellation.cancel();
     }
 }
