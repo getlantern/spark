@@ -235,8 +235,12 @@ fn build_member(
 
 /// The bare protocol kind for a spec, e.g. `"hysteria2"` — surfaced to the UI as a per-member
 /// subtitle. (`spec_label` is the same kind plus the server address, for diagnostic logs.)
+///
+/// `pub` so an app that parses a `config_raw.json` into a [`crate::config::Config`] (e.g. to render
+/// the location list *before* connecting) can label each pool member with the exact same protocol
+/// string the live pool uses — keeping the pre-connect list and the connected pool consistent.
 #[cfg(feature = "multi-server")]
-fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
+pub fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
     use crate::config::ServerSpec;
     match spec {
         ServerSpec::Anytls(_) => "anytls",

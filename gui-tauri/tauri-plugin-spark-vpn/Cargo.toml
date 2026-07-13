@@ -26,6 +26,12 @@ toml = "0.8"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 spark-ipc = { path = "../../ipc", features = ["stream"] }
 tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
+# Fetch-only use of spark-core: run the same kindling config fetch the tunnel uses, in the app
+# process, so the location list refreshes on every launch independent of the VPN (Phase 2a).
+# `config-fetch` pulls BoringSSL (~8 MB) + flint fronting — the cost of reusing the censorship-
+# resistant fetch (Phase 2a spike, docs/superpowers/specs/2026-07-10-locations-before-vpn-design.md).
+# Desktop only; Android fetches in the :vpn process over IPC (Phase 2b).
+spark-core = { path = "../../core", features = ["config-fetch"] }
 
 # macOS: the plugin's AppleControl talks to the NE via objc2 (ne_spike moves here in a later task).
 [target.'cfg(target_os = "macos")'.dependencies]
