@@ -26,6 +26,10 @@ for t in "${TARGETS[@]}"; do
             export MACOSX_DEPLOYMENT_TARGET=12.0
             unset IPHONEOS_DEPLOYMENT_TARGET
             ;;
+        *)
+            # A target matching neither arm: clear both so a prior slice's min-OS can't leak in.
+            unset IPHONEOS_DEPLOYMENT_TARGET MACOSX_DEPLOYMENT_TARGET
+            ;;
     esac
     # BoringSSL cross-compiles for every Apple target — iOS device, iOS simulator, and macOS (verified
     # 2026-06-23) — so all slices get the SAME feature set rather than the former macOS-only set:
