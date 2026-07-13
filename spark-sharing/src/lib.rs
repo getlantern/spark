@@ -1,5 +1,6 @@
 //! Unprivileged lifecycle adapter for Spark connection sharing.
 
+mod consumer;
 mod freddie;
 
 use std::sync::Arc;
@@ -12,10 +13,17 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "spark-transport")]
+pub use consumer::ConsumerTransport;
+pub use consumer::{
+    ephemeral_quic_server_config, start_consumer, ConsumerHandle, ConsumerPoolEvent,
+    ConsumerRuntimeConfig, ConsumerRuntimeError, ConsumerRuntimeSummary, ConsumerTlsError,
+};
 pub use freddie::{FreddieBuildError, FreddieSignaler};
 pub use lantern_unbounded::supervisor::{
     PoolEvent, SupervisorEvent, SupervisorPoolSummary, SupervisorSummary,
 };
+pub use lantern_unbounded::Socks5Target;
 
 /// Runtime settings for the peer-proxy sharing pool.
 #[derive(Debug, Clone)]
