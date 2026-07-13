@@ -790,38 +790,31 @@ impl TunnelControl for AppleControl {
     }
 
     fn servers(&self) -> crate::Result<Vec<ServerInfo>> {
-        // Static list from config first, so the screen shows the pool even before connecting.
-        let mut list = servers_from_config();
-        // No TOML dev-override → fall back to the NE's shared config_raw.json cache so the location
-        // list shows before connecting (and persists between sessions).
-        if list.is_empty() {
-            list = servers_from_cache(&self.base);
-        }
-        // Overlay live latency / health / current — but only when actually connected, else
-        // sendProviderMessage to a down session just burns the 5s timeout on every poll.
+        // When connected, the NE's live snapshot is the source of truth: a COMPLETE list (geo,
+        // protocol, latency, health, current) for the pool actually in use. Use it directly.
+        //
+        // Do NOT overlay it onto the app's own cached list by index. The app cache and the NE cache
+        // are independent config-new fetches (macOS can't share them — the NE sandbox blocks the
+        // user container), so their pool order can differ; overlaying by index then stamped
+        // `is_current`/latency onto the wrong city (e.g. showing Tokyo as current while actually
+        // connected to Toronto). Only poll the NE when connected — `sendProviderMessage` to a down
+        // session burns the 5s timeout on every poll.
         let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
         if ne_spike::ui_state(raw) == "connected" {
             if let Ok(json) = ne_spike::send_provider_message("{\"cmd\":\"servers\"}".to_owned()) {
                 if let Ok(live) = serde_json::from_str::<Vec<ServerInfo>>(&json) {
-                    if list.is_empty() {
-                        list = live; // no static config (e.g. base64) → use the live pool outright
-                    } else {
-                        for l in &live {
-                            if let Some(s) = list.get_mut(l.index) {
-                                // Protocol is identity metadata, not a live measurement: only fill it
-                                // when the snapshot knows it, so a partial snapshot can't blank an
-                                // already-known subtitle.
-                                if let Some(p) = &l.protocol {
-                                    s.protocol = Some(p.clone());
-                                }
-                                s.latency_ms = l.latency_ms;
-                                s.healthy = l.healthy;
-                                s.is_current = l.is_current;
-                            }
-                        }
+                    if !live.is_empty() {
+                        return Ok(live);
                     }
                 }
             }
+        }
+        // Not connected (or no live pool, e.g. a single-transport config): show the pre-connect list
+        // from a SPARK_CONFIG dev-override, else the app's own cached `config_raw.json` (built from
+        // the pool, with protocol) so the screen shows the pool before connecting.
+        let mut list = servers_from_config();
+        if list.is_empty() {
+            list = servers_from_cache(&self.base);
         }
         Ok(list)
     }
