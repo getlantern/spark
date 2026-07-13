@@ -11,7 +11,9 @@
 #   SKIP_NOTARIZE=1 build signed-but-not-notarized (fast local iteration)
 #   REUSE_SYSEXT    path to a prebuilt .systemextension to embed instead of building one (keeps the
 #                   sysext version stable → reinstall needs no reboot; for app-only Rust/JS changes)
-#   OUTPUT_DIR      where Spark.app/Spark.dmg land (default: dist/)
+#   MAC_ARCH        macOS arch: arm64 (default) or x86_64. x86_64 → a separate Spark-x86_64.dmg.
+#   OUTPUT_DIR      where Spark.app + the DMG land (default: dist/); the DMG is Spark.dmg for
+#                   arm64 and Spark-x86_64.dmg for MAC_ARCH=x86_64
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 REPO_ROOT="$PWD"
@@ -24,8 +26,21 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 ARCHIVE="$WORK/SparkApp.xcarchive"
 OUT="${OUTPUT_DIR:-$REPO_ROOT/dist}"; mkdir -p "$OUT"
+
+# macOS target arch — arm64 (default) or x86_64. Selects the Rust target for the Tauri app and the
+# sysext ARCHS, and (exported) the xcframework macOS slice. An Intel build lands as a separate
+# Spark-x86_64.dmg beside the arm64 Spark.dmg; the .app inside is always named Spark.app so it
+# installs under the same name regardless of arch.
+MAC_ARCH="${MAC_ARCH:-arm64}"
+case "$MAC_ARCH" in
+  arm64)  RUST_TARGET=aarch64-apple-darwin; ARCH_SUFFIX="" ;;
+  x86_64) RUST_TARGET=x86_64-apple-darwin;  ARCH_SUFFIX="-x86_64" ;;
+  *) echo "MAC_ARCH must be arm64 or x86_64 (got: $MAC_ARCH)" >&2; exit 1 ;;
+esac
+export MAC_ARCH   # consumed by build-xcframework.sh to pick the macOS slice arch
+
 APP="$OUT/Spark.app"
-DMG="$OUT/Spark.dmg"
+DMG="$OUT/Spark${ARCH_SUFFIX}.dmg"
 ENT="$GUI/src-tauri/Release.entitlements"
 SKIP_NOTARIZE="${SKIP_NOTARIZE:-0}"
 
@@ -72,22 +87,33 @@ if [[ -n "${REUSE_SYSEXT:-}" ]]; then
   log "reusing prebuilt system extension (no version bump): $REUSE_SYSEXT"
   SYSEXT_SRC="$REUSE_SYSEXT"
   [[ -d "$SYSEXT_SRC" ]] || { echo "REUSE_SYSEXT not found: $SYSEXT_SRC" >&2; exit 1; }
+  # A prebuilt sysext is arch-specific; embedding an arm64 sysext in an x86_64 app (or vice-versa)
+  # yields an extension that won't load on the target Mac. Fail loudly on a mismatch.
+  if command -v lipo >/dev/null 2>&1; then
+    # `|| true` so an empty glob (no executable found) doesn't trip errexit under `set -o pipefail`
+    # (ls exits non-zero on no match); the `-n "$ext_bin"` guard below then skips the check.
+    ext_bin="$(ls "$SYSEXT_SRC"/Contents/MacOS/* 2>/dev/null | head -1 || true)"
+    if [[ -n "$ext_bin" ]] && ! lipo -archs "$ext_bin" 2>/dev/null | tr ' ' '\n' | grep -qx "$MAC_ARCH"; then
+      echo "REUSE_SYSEXT arch mismatch: $ext_bin is [$(lipo -archs "$ext_bin" 2>/dev/null)], need $MAC_ARCH" >&2
+      exit 1
+    fi
+  fi
 else
-  log "building the system extension (platforms/apple archive)"
+  log "building the system extension (platforms/apple archive, arch=$MAC_ARCH)"
   "$APPLE_DIR/build-xcframework.sh"
   ( cd "$APPLE_DIR" && xcodegen generate )
   xcodebuild -project "$APPLE_DIR/Spark.xcodeproj" -scheme SparkApp -configuration Release \
     -destination 'generic/platform=macOS' -archivePath "$ARCHIVE" \
-    ARCHS=arm64 CURRENT_PROJECT_VERSION="$(date +%s)" archive
+    ARCHS="$MAC_ARCH" CURRENT_PROJECT_VERSION="$(date +%s)" archive
   SYSEXT_SRC="$ARCHIVE/Products/Applications/SparkApp.app/Contents/Library/SystemExtensions/$SYSEXT_ID.systemextension"
   [[ -d "$SYSEXT_SRC" ]] || { echo "system extension not found in archive: $SYSEXT_SRC" >&2; exit 1; }
 fi
 
 # 2. The Tauri controlling app (config resolves at runtime via config.rs: config.toml → SPARK_CONFIG
 #    → SPARK_PROXY → direct, so there's nothing to bake here).
-log "building the Tauri app"
-( cd "$GUI" && APPLE_SIGNING_IDENTITY="$SIGN_IDENTITY" npm run tauri build )
-TAURI_APP="$GUI/src-tauri/target/release/bundle/macos/Spark.app"
+log "building the Tauri app (target=$RUST_TARGET)"
+( cd "$GUI" && APPLE_SIGNING_IDENTITY="$SIGN_IDENTITY" npm run tauri build -- --target "$RUST_TARGET" )
+TAURI_APP="$GUI/src-tauri/target/$RUST_TARGET/release/bundle/macos/Spark.app"
 [[ -d "$TAURI_APP" ]] || { echo "tauri build did not produce $TAURI_APP" >&2; exit 1; }
 rm -rf "$APP"; cp -R "$TAURI_APP" "$APP"
 

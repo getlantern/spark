@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use crate::control::TunnelControl;
 use crate::models::{ServerInfo, Status};
 
-// ── macOS NE control (relocated verbatim from gui-tauri/src-tauri/src/lib.rs) ─
+// ── Apple (macOS + iOS) NE control (relocated verbatim from gui-tauri/src-tauri/src/lib.rs;
+//    the NETunnelProviderManager path is shared, macOS additionally does system-extension activation) ─
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod ne_spike {
     use objc2_network_extension::NETunnelProviderManager;
 
@@ -162,6 +163,7 @@ mod ne_spike {
         ns_string, NSArray, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString,
     };
     use objc2_network_extension::NETunnelProviderProtocol;
+    #[cfg(target_os = "macos")]
     use objc2_system_extensions::{
         OSSystemExtensionManager, OSSystemExtensionProperties, OSSystemExtensionReplacementAction,
         OSSystemExtensionRequest, OSSystemExtensionRequestDelegate, OSSystemExtensionRequestResult,
@@ -177,10 +179,12 @@ mod ne_spike {
 
     /// Ivars for the activation delegate: a channel to report the terminal outcome
     /// (Ok once activated, Err on failure) back to the waiting worker thread.
+    #[cfg(target_os = "macos")]
     struct ActIvars {
         tx: Sender<Result<(), String>>,
     }
 
+    #[cfg(target_os = "macos")]
     define_class!(
         // SAFETY: plain NSObject subclass — no subclassing requirements, no Drop.
         #[unsafe(super(NSObject))]
@@ -247,6 +251,7 @@ mod ne_spike {
         }
     );
 
+    #[cfg(target_os = "macos")]
     impl ActDelegate {
         fn new(tx: Sender<Result<(), String>>) -> Retained<Self> {
             let this = Self::alloc().set_ivars(ActIvars { tx });
@@ -262,6 +267,7 @@ mod ne_spike {
     /// Returns Ok once the extension is active; once approved this completes
     /// immediately on subsequent calls. Needs the `system-extension.install` +
     /// packet-tunnel entitlements (present in the signed product build).
+    #[cfg(target_os = "macos")]
     pub fn activate_extension() -> Result<(), String> {
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let delegate = ActDelegate::new(tx);
@@ -297,9 +303,11 @@ mod ne_spike {
     /// final verdict. `config` is the resolved data-path config (TOML/host:port),
     /// handed to the extension via providerConfiguration["config"].
     ///
-    /// First activates the org.getlantern.spark.tunnel system extension (U1b-2b-ii,
-    /// prompting approval on first run) so there's a provider to start, then runs the
-    /// save/start chain. Needs the NE entitlement (present in the signed product build).
+    /// On macOS, first activates the org.getlantern.spark.tunnel *system extension* (U1b-2b-ii,
+    /// prompting approval on first run) so there's a provider to start. On iOS the NE is a bundled
+    /// app-extension — no activation step; consent is the "Allow VPN configuration" prompt raised
+    /// by saveToPreferences. Then runs the save/start chain. Needs the NE entitlement (present in
+    /// the signed product build).
     ///
     /// The one adaptation from the app's version: instead of reading split-tunnel /
     /// routing-mode from the app's config module internally, they are passed in as
@@ -311,7 +319,10 @@ mod ne_spike {
         app_bypass: Option<String>,
         ad_block: bool,
     ) -> Result<(), String> {
-        // No provider can start until the extension is activated + user-approved.
+        // macOS system extension must be activated + user-approved before a provider can start. iOS
+        // ships the NE as a bundled app-extension — no activation; the "Allow VPN configuration"
+        // consent comes from saveToPreferences during connect below.
+        #[cfg(target_os = "macos")]
         activate_extension()?;
         // Resolve the optional strings to owned values before entering the block so
         // the closure can be `Fn` (RcBlock requires Fn, not FnOnce). The original
@@ -329,6 +340,12 @@ mod ne_spike {
         // providerConfiguration values are strings, so pre-format the bool as "true"/"false"
         // (the NE parses "false" → off). Owned so the closure can stay `Fn`.
         let ad_block_str = if ad_block { "true" } else { "false" }.to_owned();
+        // NOTE: we deliberately do NOT pass a dataDir to the NE. The NE self-resolves its OWN
+        // app-group container; the system-extension sandbox forbids the root NE from accessing the
+        // *user's* group container (EPERM → self-fetch hangs → connect times out, confirmed
+        // on-device 2026-07-13). The app keeps its own separate config cache for the UI location list
+        // (`app_config_cache_dir()`, fetched by the Phase 2a startup task); it is not shared with the
+        // NE on macOS.
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let outer = RcBlock::new(
             move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
@@ -599,7 +616,7 @@ mod ne_spike {
 
 /// Resolve a deliberate dev override config string, or `None` for the normal daemon-fetch path.
 /// Reads `SPARK_CONFIG` (base64 TOML) → `SPARK_PROXY` (host:port) → `None`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn resolve() -> Option<String> {
     resolve_with(
         std::env::var("SPARK_CONFIG").ok(),
@@ -607,7 +624,7 @@ pub(crate) fn resolve() -> Option<String> {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn resolve_with(baked: Option<String>, proxy: Option<String>) -> Option<String> {
     [baked, proxy]
         .into_iter()
@@ -619,7 +636,7 @@ fn resolve_with(baked: Option<String>, proxy: Option<String>) -> Option<String> 
 /// Parse the static pool list from an explicit TOML dev override (`resolve()`).
 /// Empty in the normal (daemon-fetch) path — the pool is only known after the extension
 /// fetches it, so the live snapshot fills the UI on connect.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn servers_from_config() -> Vec<ServerInfo> {
     use serde::Deserialize;
 
@@ -665,14 +682,78 @@ fn servers_from_config() -> Vec<ServerInfo> {
         .collect()
 }
 
-// ── macOS: AppleControl (cross-process NE). ───────────────────────────────────
+/// The app's OWN on-disk config-cache dir: `<app_config_dir>/config` (macOS:
+/// `~/Library/Application Support/org.getlantern.spark/config`) — where the app fetches + reads its
+/// `config_raw.json` for the location list. `base` is the plugin's `app_config_dir()`.
+///
+/// Deliberately NOT the app-group container: the macOS system-extension sandbox denies the root NE
+/// access to the *user's* group container (EPERM — hangs connect), so the NE cache can't be shared
+/// with the app anyway; and a non-sandboxed app poking into `~/Library/Group Containers/` trips a
+/// macOS "access data from other apps" TCC prompt. The app's own Application Support dir (where the
+/// plugin already stores its settings) avoids both.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn app_config_cache_dir(base: &std::path::Path) -> PathBuf {
+    base.join("config")
+}
 
-#[cfg(target_os = "macos")]
+/// Location list read from the app's own `config_raw.json` cache, or empty if there's no cache yet
+/// (never fetched) or it can't be read/parsed. Built via the core's exact `config_raw.json` → pool
+/// mapping ([`spark_core::config::lantern::from_config_raw_json`]) so the pre-connect list IS the
+/// pool — same members, same order, each with its protocol. (Building from the top-level geo
+/// `servers[]` array instead put protocol/latency on the wrong rows: that array is ordered
+/// differently from `options.outbounds`.) This is the pre-connect path only; once connected,
+/// `servers()` returns the NE's live snapshot directly (no overlay).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn servers_from_cache(base: &std::path::Path) -> Vec<ServerInfo> {
+    let raw = match std::fs::read_to_string(app_config_cache_dir(base).join("config_raw.json")) {
+        Ok(raw) => raw,
+        // A missing cache is the normal pre-first-fetch state — silent.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            ne_spike::ne_debug(&format!("servers_from_cache: read failed: {e}"));
+            return Vec::new();
+        }
+    };
+    match spark_core::config::lantern::from_config_raw_json(&raw) {
+        Ok(cfg) => servers_from_pool(&cfg),
+        Err(e) => {
+            ne_spike::ne_debug(&format!("servers_from_cache: parse failed: {e}"));
+            Vec::new()
+        }
+    }
+}
+
+/// Map a parsed config's server pool to the UI location list — the same members/order the live NE
+/// snapshot uses (indexed by position), each with its protocol label but no live metrics yet
+/// (latency/health/current fill in from the NE snapshot once connected).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn servers_from_pool(cfg: &spark_core::config::Config) -> Vec<ServerInfo> {
+    cfg.transport
+        .servers
+        .iter()
+        .enumerate()
+        .map(|(i, e)| ServerInfo {
+            index: i,
+            name: e.name.clone(),
+            country: e.country.clone(),
+            country_code: e.country_code.clone(),
+            city: e.city.clone(),
+            protocol: Some(spark_core::transport::spec_kind(&e.spec).to_string()),
+            latency_ms: None,
+            healthy: false,
+            is_current: false,
+        })
+        .collect()
+}
+
+// ── Apple (macOS + iOS): AppleControl (cross-process NE). ────────────────────
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) struct AppleControl {
     pub(crate) base: PathBuf,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 impl TunnelControl for AppleControl {
     fn connect(&self) -> crate::Result<()> {
         let config = resolve(); // dev-override or None (daemon self-fetches)
@@ -721,33 +802,31 @@ impl TunnelControl for AppleControl {
     }
 
     fn servers(&self) -> crate::Result<Vec<ServerInfo>> {
-        // Static list from config first, so the screen shows the pool even before connecting.
-        let mut list = servers_from_config();
-        // Overlay live latency / health / current — but only when actually connected, else
-        // sendProviderMessage to a down session just burns the 5s timeout on every poll.
+        // When connected, the NE's live snapshot is the source of truth: a COMPLETE list (geo,
+        // protocol, latency, health, current) for the pool actually in use. Use it directly.
+        //
+        // Do NOT overlay it onto the app's own cached list by index. The app cache and the NE cache
+        // are independent config-new fetches (macOS can't share them — the NE sandbox blocks the
+        // user container), so their pool order can differ; overlaying by index then stamped
+        // `is_current`/latency onto the wrong city (e.g. showing Tokyo as current while actually
+        // connected to Toronto). Only poll the NE when connected — `sendProviderMessage` to a down
+        // session burns the 5s timeout on every poll.
         let (_, raw) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
         if ne_spike::ui_state(raw) == "connected" {
             if let Ok(json) = ne_spike::send_provider_message("{\"cmd\":\"servers\"}".to_owned()) {
                 if let Ok(live) = serde_json::from_str::<Vec<ServerInfo>>(&json) {
-                    if list.is_empty() {
-                        list = live; // no static config (e.g. base64) → use the live pool outright
-                    } else {
-                        for l in &live {
-                            if let Some(s) = list.get_mut(l.index) {
-                                // Protocol is identity metadata, not a live measurement: only fill it
-                                // when the snapshot knows it, so a partial snapshot can't blank an
-                                // already-known subtitle.
-                                if let Some(p) = &l.protocol {
-                                    s.protocol = Some(p.clone());
-                                }
-                                s.latency_ms = l.latency_ms;
-                                s.healthy = l.healthy;
-                                s.is_current = l.is_current;
-                            }
-                        }
+                    if !live.is_empty() {
+                        return Ok(live);
                     }
                 }
             }
+        }
+        // Not connected (or no live pool, e.g. a single-transport config): show the pre-connect list
+        // from a SPARK_CONFIG dev-override, else the app's own cached `config_raw.json` (built from
+        // the pool, with protocol) so the screen shows the pool before connecting.
+        let mut list = servers_from_config();
+        if list.is_empty() {
+            list = servers_from_cache(&self.base);
         }
         Ok(list)
     }
@@ -826,7 +905,12 @@ impl TunnelControl for AppleControl {
     // App split tunneling: the macOS installed-apps catalog + excluded-apps persistence, with a
     // best-effort live push to the running NE (mirroring set_split_tunnel).
     fn list_installed_apps(&self) -> crate::Result<String> {
-        Ok(crate::apps_darwin::list_installed_apps(&self.base))
+        // apps_darwin uses AppKit (NSWorkspace) which is macOS-only. On iOS the picker
+        // is not yet implemented; return an empty catalog so the command doesn't error.
+        #[cfg(target_os = "macos")]
+        return Ok(crate::apps_darwin::list_installed_apps(&self.base));
+        #[cfg(not(target_os = "macos"))]
+        Ok("[]".to_string())
     }
 
     fn get_excluded_apps(&self) -> crate::Result<String> {
@@ -854,13 +938,21 @@ impl TunnelControl for AppleControl {
 
 // ── Windows/Linux: ServiceControl over spark-ipc. ────────────────────────────
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 pub(crate) struct ServiceControl {
     pub(crate) base: PathBuf,
     ipc: crate::service_ipc::IpcClient,
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 impl ServiceControl {
     pub(crate) fn new(base: PathBuf) -> Self {
         let ipc = crate::service_ipc::IpcClient::new(crate::service_ipc::default_control_addr());
@@ -896,7 +988,11 @@ impl ServiceControl {
     }
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 impl TunnelControl for ServiceControl {
     fn connect(&self) -> crate::Result<()> {
         self.ack("connect", spark_ipc::message::RequestPayload::Connect)

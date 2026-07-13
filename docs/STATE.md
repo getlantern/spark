@@ -1577,21 +1577,6 @@ API facts: rustls 0.23.41
 `builder_with_provider(ring).with_safe_default_protocol_versions()`; tokio-rustls 0.26.4
 `TlsConnector::connect(ServerName<'static>, IO)`; `RootCertStore` accepts cloned webpki trust anchors.
 
-**2026-07-12 — Rust Unbounded/Spark censored-consumer transport foundation.** Extended the isolated
-`spark-sharing` subsystem with the inverse role: a configurable censored-user session pool shares one
-stable CSID and virtual QUIC socket, discovers volunteer peers through Freddie's long-lived GET
-stream, and exposes target dials through the infrastructure Go egress. `FreddieSignaler` now implements
-`ConsumerSignaler` with bounded incremental handling for chunked, fixed-length, and close-delimited
-advertisement bodies. `ConsumerHandle` owns the WebRTC session pool and QUIC broker lifecycle;
-`ConsumerTransport`, behind the opt-in `spark-transport` feature, implements Spark's TCP `Transport`
-for both IP and domain targets without adding a WebRTC dependency edge into `spark-core`. The QUIC
-server uses an ephemeral certificate and the Go-compatible `broflake` ALPN. The pinned unbounded-rs
-layer keeps the infrastructure as the migrating QUIC client and adds cancellation-safe eventual
-stream dialing plus the SOCKS5 target handshake. Standalone tests and strict clippy pass with and
-without `spark-transport`. Review hardening accepts CRLF advertisement lines, enforces the decoded
-per-message limit incrementally across transport and HTTP-chunk boundaries, and covers exact-limit
-EOF messages plus oversize rejection.
-
 ## Next chunk (exactly what the next session should do)
 
 **(C) Connection sharing — one unprivileged frontend integration.** Wire `FreddieSignaler` plus the
@@ -2843,16 +2828,3 @@ should be spread across the resolver pool so no single recursive resolver sees a
 bytes/answer, capped by what resolvers carry) and broad pool breadth. Commit `e557477`. **Live
 recursive throughput still pending the infra gate** (deployed NS-delegated server + real public
 resolver); loopback+RTT-sim is the self-contained proxy for it.
-
-**2026-07-12 — Unbounded censored consumer live interop + migration validated.** Ran the exact
-`spark-sharing` consumer against a local current Go Freddie, the Rust `unbounded-rs` peer proxy, and
-the deployed Go egress (`wss://unbounded.iantem.io/ws`). A basic request reached `example.com` and
-returned HTTP 200. That run exposed a real cross-implementation MTU mismatch: quic-go starts at 1280
-bytes while the Rust virtual UDP ingress had inherited Quinn's 1200-byte outbound limit. Raised only
-the virtual ingress ceiling to quic-go's 1452-byte maximum; Quinn outbound remains pinned to 1200.
-The defining churn test then downloaded a 20 MB response from `speed.cloudflare.com`; peer A was
-stopped after 2.9 MB and peer B attached through a newly advertised path under the same consumer
-session. The original QUIC stream resumed and finished with HTTP 200 and 20,001,492 wire bytes:
-two consumer attempts, one completed path, zero failed attempts. Also re-exported `Socks5Target`
-from `spark-sharing`, making the public `ConsumerHandle::dial` domain-target API constructible by
-callers without reproducing Spark's exact transitive dependency.

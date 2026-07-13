@@ -6,6 +6,7 @@
   import { selectedIndex } from "$lib/selection";
   import { flagEmoji, serverLabel, latencyClass, protocolLabel } from "$lib/format";
   import { _ } from "$lib/i18n";
+  import { listen } from "@tauri-apps/api/event";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -15,6 +16,7 @@
   let busy = $state(false);
   let expanded = $state<Set<string>>(new Set());
   let poll: ReturnType<typeof setInterval>;
+  let unlistenServers: Promise<() => void> | undefined; // spark://servers subscription (Tauri only)
   let refreshing = false;
 
   // The member new flows currently dial (auto-best or pinned) — drives the Smart Location card.
@@ -85,8 +87,14 @@
   onMount(() => {
     refresh();
     poll = setInterval(refresh, 3000); // keep latency pills fresh
+    // Phase 2a: re-pull immediately when the startup config fetch reports a changed list, instead of
+    // waiting for the next 3s poll. Tauri-only (`listen` rejects in a plain browser).
+    if (isTauri()) unlistenServers = listen("spark://servers", () => void refresh());
   });
-  onDestroy(() => clearInterval(poll));
+  onDestroy(() => {
+    clearInterval(poll);
+    unlistenServers?.then((f) => f()).catch(() => {});
+  });
 </script>
 
 <main class="app">
