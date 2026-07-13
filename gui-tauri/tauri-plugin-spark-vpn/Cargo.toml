@@ -11,7 +11,7 @@ links = "tauri-plugin-spark-vpn"
 tauri-plugin = { version = "2", features = ["build"] }
 
 [dependencies]
-tauri = { version = "2" }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -27,6 +27,12 @@ toml = "0.8"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 spark-ipc = { path = "../../ipc", features = ["stream"] }
 tokio = { version = "1", features = ["rt", "net", "io-util", "time"] }
+# Fetch-only use of spark-core: run the same kindling config fetch the tunnel uses, in the app
+# process, so the location list refreshes on every launch independent of the VPN (Phase 2a).
+# `config-fetch` pulls BoringSSL (~8 MB) + flint fronting — the cost of reusing the censorship-
+# resistant fetch (Phase 2a spike, docs/superpowers/specs/2026-07-10-locations-before-vpn-design.md).
+# Desktop only; Android fetches in the :vpn process over IPC (Phase 2b).
+spark-core = { path = "../../core", features = ["config-fetch"] }
 
 # Apple (macOS + iOS): AppleControl drives the NE via objc2 (NETunnelProviderManager). Shared by
 # both Apple targets — iOS reuses the same control path, minus the system-extension activation.

@@ -100,6 +100,10 @@ pub mod select;
 /// `blake3` nor `aes`.
 #[cfg(feature = "shadowsocks")]
 pub mod shadowsocks;
+/// Runtime stall detection for the multi-server pool: lock-free per-flow outcome tracking.
+/// Gated behind `multi-server` alongside the pool it serves.
+#[cfg(feature = "multi-server")]
+pub(crate) mod stall;
 pub mod tcp_tunnel;
 
 /// A dial target that may be an unresolved domain: the fake-IP proxy path recovers a domain from a
@@ -231,8 +235,12 @@ fn build_member(
 
 /// The bare protocol kind for a spec, e.g. `"hysteria2"` — surfaced to the UI as a per-member
 /// subtitle. (`spec_label` is the same kind plus the server address, for diagnostic logs.)
+///
+/// `pub` so an app that parses a `config_raw.json` into a [`crate::config::Config`] (e.g. to render
+/// the location list *before* connecting) can label each pool member with the exact same protocol
+/// string the live pool uses — keeping the pre-connect list and the connected pool consistent.
 #[cfg(feature = "multi-server")]
-fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
+pub fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
     use crate::config::ServerSpec;
     match spec {
         ServerSpec::Anytls(_) => "anytls",
@@ -274,10 +282,37 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
     }
 }
 
-/// Build a `SelectingTransport` over `config.transport.servers`. Each entry's callback URL is its
-/// per-entry override or the global `transport.callback_url`. Members that can't be built (notably a
-/// transport whose feature isn't compiled in) are **skipped** — a partial pool still connects, and a
-/// future protocol in a fetched config can't brick the tunnel; the pool must end up non-empty.
+/// Build pool [`select::Member`]s from `config.transport.servers`, returning the buildable members
+/// and the skip reasons. Each entry's callback URL is its per-entry override or the global
+/// `transport.callback_url`. Members that can't be built (notably a transport whose feature isn't
+/// compiled in) are **skipped** (reason collected) — a partial pool still connects, and a future
+/// protocol in a fetched config can't brick the tunnel. Shared by initial construction
+/// ([`build_selecting`]) and live reload ([`select::SelectingTransport::reload`] via
+/// [`PoolControl::reload_from_config`]).
+#[cfg(feature = "multi-server")]
+fn build_members(
+    config: &Config,
+    protector: Option<&SocketProtector>,
+) -> (Vec<crate::transport::select::Member>, Vec<String>) {
+    let wire = wire_plan_from_config(&config.transport.shaping);
+    let mut members = Vec::with_capacity(config.transport.servers.len());
+    let mut skipped: Vec<String> = Vec::new();
+    for entry in &config.transport.servers {
+        // Skip (don't propagate) a member we can't build, mirroring the config_raw adapter skipping
+        // outbounds it can't represent. The reason is logged and aggregated into the empty-pool error.
+        match build_member(entry, config, protector, &wire) {
+            Ok(m) => members.push(m),
+            Err(e) => {
+                let who = entry.name.as_deref().unwrap_or("<unnamed>");
+                tracing::warn!(server = who, error = %e, "transport.servers: skipping un-buildable pool member");
+                skipped.push(format!("{who}: {e}"));
+            }
+        }
+    }
+    (members, skipped)
+}
+
+/// Build a `SelectingTransport` over `config.transport.servers`. The pool must end up non-empty.
 #[cfg(feature = "multi-server")]
 #[allow(clippy::type_complexity)]
 fn build_selecting(
@@ -289,21 +324,7 @@ fn build_selecting(
     Option<Arc<dyn PoolControl>>,
 )> {
     use crate::transport::select::SelectingTransport;
-    let wire = wire_plan_from_config(&config.transport.shaping);
-    let mut members = Vec::with_capacity(config.transport.servers.len());
-    let mut skipped: Vec<String> = Vec::new();
-    for entry in &config.transport.servers {
-        // Skip (don't propagate) a member we can't build, mirroring the config_raw adapter skipping
-        // outbounds it can't represent. The reason is logged and aggregated into the empty-pool error.
-        match build_member(entry, config, protector.as_ref(), &wire) {
-            Ok(m) => members.push(m),
-            Err(e) => {
-                let who = entry.name.as_deref().unwrap_or("<unnamed>");
-                tracing::warn!(server = who, error = %e, "transport.servers: skipping un-buildable pool member");
-                skipped.push(format!("{who}: {e}"));
-            }
-        }
-    }
+    let (members, skipped) = build_members(config, protector.as_ref());
     if members.is_empty() {
         return Err(io::Error::other(format!(
             "transport.servers: no buildable pool members ({} skipped — {})",
@@ -315,13 +336,23 @@ fn build_selecting(
     // directly instead of blackholing. Built with the same protector as the members, so the direct
     // dial bypasses the tunnel route just like a pool member would.
     let direct = Arc::new(DirectTransport::new(protector));
+    let stall = crate::transport::select::StallConfig {
+        window: std::time::Duration::from_secs(config.transport.stall_window_secs),
+        demote_count: config.transport.stall_demote_count,
+        demote_window: std::time::Duration::from_secs(config.transport.stall_demote_window_secs),
+        quarantine: std::time::Duration::from_secs(config.transport.stall_quarantine_secs),
+        quarantine_max: std::time::Duration::from_secs(config.transport.stall_quarantine_max_secs),
+        trial_flows: config.transport.stall_trial_flows,
+    };
     let st = Arc::new(SelectingTransport::new(
         members,
         std::time::Duration::from_secs(config.transport.probe_interval_secs),
         config.transport.probe_window,
         direct.clone() as Arc<dyn Transport>,
         direct as Arc<dyn UdpTransport>,
+        stall,
     ));
+    st.me.set(Arc::downgrade(&st)).ok();
     Ok((
         st.clone() as Arc<dyn Transport>,
         st.clone() as Arc<dyn UdpTransport>,
@@ -965,6 +996,15 @@ pub trait PoolControl: Send + Sync {
     /// returns to auto. New flows only; in-flight unaffected. Returns `true` if applied, `false` if
     /// an out-of-range index was ignored (so callers can report a real failure instead of a no-op).
     fn set_pin(&self, index: Option<usize>) -> bool;
+
+    /// Live-rebuild the pool from a refreshed config: new servers are probed + surfaced without a
+    /// reconnect, and the best prior working proxy is retained (see
+    /// [`select::SelectingTransport::reload`]). Default is a no-op; only the multi-server pool
+    /// implements it. Returns `io::Result` so the caller can log and keep the current pool when the
+    /// refreshed server set builds nothing.
+    fn reload_from_config(&self, _config: &Config) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// JSON-escape a string for [`snapshot_to_json`] (only the characters JSON requires: quote,

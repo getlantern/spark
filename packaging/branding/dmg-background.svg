@@ -1,0 +1,42 @@
+<svg width="1440" height="960" viewBox="0 0 1440 960" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e9f1f4"/>
+    </linearGradient>
+    <linearGradient id="boltwm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00bdd6" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#00bdd6" stop-opacity="0.03"/>
+    </linearGradient>
+    <linearGradient id="boltmark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd54a"/>
+      <stop offset="1" stop-color="#f2a900"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#00bdd6" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#00bdd6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1440" height="960" fill="url(#bg)"/>
+
+  <!-- oversized faint bolt watermark, bottom-right, for depth/texture -->
+  <path d="M1120 300 L840 760 L1010 760 L930 1060 L1300 620 L1120 620 L1120 300 Z" fill="url(#boltwm)"/>
+
+  <!-- wordmark: small bolt + SPARK -->
+  <g transform="translate(556,96)">
+    <path d="M64 0 L4 92 L40 92 L22 150 L92 66 L54 66 L64 0 Z" fill="url(#boltmark)"/>
+    <text x="120" y="110" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="96" font-weight="700" letter-spacing="2" fill="#1b1c1d">Spark</text>
+  </g>
+
+  <!-- drag arrow from app slot toward Applications slot (icons sit at y=470). One cohesive shape:
+       a 20px rounded shaft whose right end overlaps a proportional 40px arrowhead (2× the shaft),
+       so head and shaft read as a single arrow with no gap. -->
+  <g transform="translate(0,470)">
+    <rect x="576" y="-10" width="272" height="20" rx="10" fill="url(#arrow)"/>
+    <path d="M844 -20 L884 0 L844 20 Z" fill="#00bdd6"/>
+  </g>
+
+  <!-- instruction -->
+  <text x="720" y="812" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="40" font-weight="500" fill="#616569">Drag Spark into your Applications folder</text>
+</svg>

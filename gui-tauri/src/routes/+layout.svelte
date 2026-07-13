@@ -9,6 +9,10 @@
 
   import { setupI18n, isRtl, locale, isLoading } from "$lib/i18n";
   import { theme, resolveTheme } from "$lib/theme";
+  import { listen } from "@tauri-apps/api/event";
+  import { goto } from "$app/navigation";
+  import { initSelectedIndex } from "$lib/selection";
+  import { isTauri } from "$lib/tauri_backend";
 
   let { children } = $props();
 
@@ -32,6 +36,20 @@
   });
   $effect(() => {
     document.documentElement.dataset.theme = resolveTheme($theme, prefersDark);
+  });
+
+  // Tray ↔ window sync: pull the pin on load + whenever the tray changes state; handle tray-driven
+  // navigation. Tauri-only — in a plain browser there's no tray and `listen` would reject on mount,
+  // producing a noisy unhandled rejection, so skip it entirely off-Tauri.
+  $effect(() => {
+    if (!isTauri()) return;
+    void initSelectedIndex();
+    const state = listen("spark://state", () => void initSelectedIndex());
+    const nav = listen<string>("spark://navigate", (e) => goto(e.payload));
+    return () => {
+      state.then((f) => f()).catch((e) => console.error("[layout] unlisten spark://state:", e));
+      nav.then((f) => f()).catch((e) => console.error("[layout] unlisten spark://navigate:", e));
+    };
   });
 </script>
 

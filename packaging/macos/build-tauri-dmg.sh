@@ -113,11 +113,62 @@ if [[ "$SKIP_NOTARIZE" != "1" ]]; then
 fi
 
 # 6. Build the DMG (drag-to-/Applications), sign it.
-log "building the DMG"
-STAGE="$WORK/stage"; mkdir -p "$STAGE"
+log "building the DMG (branded drag-to-Applications layout)"
+STAGE="$WORK/stage"; mkdir -p "$STAGE/.background"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+# Branded background (⚡ Spark wordmark + drag arrow) and a custom volume icon (the app icon).
+cp "$REPO_ROOT/packaging/branding/dmg-background.png" "$STAGE/.background/background.png"
+cp "$GUI/src-tauri/icons/icon.icns" "$STAGE/.VolumeIcon.icns"
+
+# Lay the window out on a read-write image, then compress to the final UDZO DMG. If Finder
+# automation is unavailable (headless CI without an Aqua session / Automation TCC grant), fall
+# back to the default layout so the build still produces a working DMG.
+RW="$WORK/rw.dmg"
+# Detach any stale volume of this name first. A lingering /Volumes/$VOLNAME (e.g. a previously-mounted
+# DMG) makes the new RW image mount as "$VOLNAME 1", and the Finder layout below — which targets the
+# volume by name — would then style the WRONG volume, yielding a DMG with no .DS_Store (no styling).
+for v in /Volumes/"$VOLNAME" /Volumes/"$VOLNAME "[0-9]*; do
+  [[ -e "$v" ]] && hdiutil detach "$v" -force >/dev/null 2>&1 || true
+done
+hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDRW "$RW" >/dev/null
+if MNT="$(hdiutil attach -readwrite -noverify -noautoopen "$RW" 2>/dev/null | grep -Eo '/Volumes/[^"]+$' | head -1)" && [[ -n "$MNT" ]]; then
+  # Target the ACTUAL mounted volume by name (not the fixed $VOLNAME) so a name collision can't
+  # misdirect the layout osascript to a different volume.
+  VOL="$(basename "$MNT")"
+  # Set the Finder "custom icon" bit so .VolumeIcon.icns is honored. Non-fatal, but warn
+  # loudly if SetFile is missing/fails so we don't silently ship an unbranded volume icon.
+  if command -v SetFile >/dev/null 2>&1; then
+    SetFile -a C "$MNT" || log "WARN: SetFile failed — volume icon may not show (DMG still valid)"
+  else
+    log "WARN: SetFile not found (install Xcode command-line tools) — volume icon skipped"
+  fi
+  if osascript >/dev/null 2>&1 <<EOF
+tell application "Finder"
+  tell disk "$VOL"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 160, 920, 640}
+    set vo to the icon view options of container window
+    set arrangement of vo to not arranged
+    set icon size of vo to 128
+    set text size of vo to 13
+    set background picture of vo to file ".background:background.png"
+    set position of item "$VOLNAME.app" of container window to {200, 235}
+    set position of item "Applications" of container window to {520, 235}
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+EOF
+  then log "DMG window laid out"; else log "WARN: Finder layout skipped (automation unavailable) — DMG uses default layout"; fi
+  sync
+  hdiutil detach "$MNT" >/dev/null 2>&1 || hdiutil detach "$MNT" -force >/dev/null 2>&1 || true
+fi
+hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG" -ov >/dev/null
 codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG"
 
 # 7. Notarize + staple the DMG.

@@ -119,12 +119,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let mode = (config?.isEmpty == false && config != "lantern-api") ? "explicit-config" : "self-fetch"
             self.log.notice("resolved fd=\(fd); starting spark_tunnel_run (mtu=\(self.mtu), mode=\(mode, privacy: .public))")
 
-            // The app-group container path the app + extension share; the Rust core caches the
-            // generated `device_id` and the fetched `config_raw.json` here. Required by self-fetch
-            // mode (absent/empty config); for an explicit config it's passed through and ignored.
+            // The app-group container where the Rust core caches the generated `device_id` and the
+            // fetched `config_raw.json`. Self-resolved to the NE's OWN container.
+            //
+            // Do NOT accept an app-supplied dataDir pointing at the *user's* group container: the
+            // system-extension sandbox denies this (root) process access to the user container —
+            // `load_or_fetch` fails with EPERM ("Operation not permitted"), the self-fetch never
+            // completes, and the tunnel hangs in "connecting" until it times out (confirmed
+            // on-device 2026-07-13). The NE can only use its own container; the app keeps a separate
+            // cache for the UI location list (it fetches into its own container). The two caches are
+            // NOT shared on macOS. See docs/superpowers/specs/2026-07-10-locations-before-vpn-design.md.
             let dataDir = FileManager.default
                 .containerURL(forSecurityApplicationGroupIdentifier: "group.org.getlantern.spark")?
                 .appendingPathComponent("config", isDirectory: true).path
+            self.log.notice("resolved dataDir=\(dataDir ?? "nil", privacy: .private)")
 
             // Read the optional split-tunnel JSON from providerConfiguration["splitTunnel"].
             // Trimmed for the same reason as `config` above; nil/empty → NULL (no split-tunnel).

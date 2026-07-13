@@ -6,6 +6,7 @@
   import { selectedIndex } from "$lib/selection";
   import { flagEmoji, serverLabel } from "$lib/format";
   import { _ } from "$lib/i18n";
+  import { listen } from "@tauri-apps/api/event";
   // Fonts + global design tokens live in +layout.svelte (shared across home ↔ server selection).
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
@@ -19,6 +20,7 @@
   let errorMsg = $state<string | null>(null);
   let servers = $state<ServerInfo[]>([]);
   let poll: ReturnType<typeof setInterval>;
+  let unlistenServers: Promise<() => void> | undefined; // spark://servers subscription (Tauri only)
   let refreshing = false; // re-entrancy guard: status() can block ~3s, longer than the 2s poll
 
   const connected = $derived(status.state === "connected");
@@ -114,8 +116,15 @@
       loadSplit();
       loadRouting();
     }, 2000);
+    // Phase 2a: the app-side startup config fetch emits spark://servers when the cached list
+    // changes — re-pull immediately instead of waiting for the next 2s poll. Tauri-only (`listen`
+    // rejects in a plain browser), matching the layout's spark://state guard.
+    if (isTauri()) unlistenServers = listen("spark://servers", () => void refresh());
   });
-  onDestroy(() => clearInterval(poll));
+  onDestroy(() => {
+    clearInterval(poll);
+    unlistenServers?.then((f) => f()).catch(() => {});
+  });
 </script>
 
 <main class="app">
