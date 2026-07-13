@@ -13,6 +13,19 @@ settings:
     # (unlike macOS Developer-ID). Applies to both the app and the NE app-extension target.
     DEVELOPMENT_TEAM: ACZRKC3LQ9
     CODE_SIGN_STYLE: Automatic
+  configs:
+    # Release (TestFlight / App Store) signs MANUALLY so a headless
+    # `tauri ios build --export-method app-store-connect` can sign without an Xcode account
+    # session — automatic signing fails headless with "No Accounts". Requires the Apple
+    # Distribution identity in the keychain + the two App Store provisioning profiles named
+    # on the targets below (create via the ASC API or Xcode). Debug stays automatic, so
+    # on-device `tauri ios dev` is unaffected.
+    release:
+      CODE_SIGN_STYLE: Manual
+      CODE_SIGN_IDENTITY: "Apple Distribution"
+      # xcodegen otherwise defaults the app target's iphoneos identity to a development cert,
+      # which the App Store profile rejects — pin the SDK-specific key too.
+      "CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Distribution"
 settingGroups:
   app:
     base:
@@ -87,6 +100,12 @@ targets:
         LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
         EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+      configs:
+        release:
+          PROVISIONING_PROFILE_SPECIFIER: "Spark iOS App Store"
+          # Override xcodegen's per-target dev-cert default (it beats the project-level identity).
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+          "CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Distribution"
       groups: [app]
     dependencies:
       - framework: libapp.a
@@ -102,7 +121,18 @@ targets:
       - target: SparkTunnel
         embed: true
     preBuildScripts:
-      - script: npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
+      - script: |
+          # Xcode's GUI (Product ▸ Archive) runs build-script phases with a minimal PATH that
+          # omits node version managers (nvm) and Homebrew, so `npm` fails with "command not
+          # found" — even though it resolves fine from a login shell (`tauri ios build`).
+          # Prepend the usual install locations that exist. Iterate least-preferred first so
+          # that after the prepends, the most specific manager (nvm, then Homebrew) ends up
+          # highest-priority on PATH ahead of a system /usr/local/bin node.
+          for d in /usr/local/bin /opt/homebrew/bin "$HOME"/.nvm/versions/node/*/bin; do
+            [ -d "$d" ] && PATH="$d:$PATH"
+          done
+          export PATH
+          npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
         basedOnDependencyAnalysis: false
         outputFiles:
@@ -144,6 +174,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.getlantern.spark.tunnel
         ENABLE_BITCODE: false
         ARCHS: [arm64]
+      configs:
+        release:
+          PROVISIONING_PROFILE_SPECIFIER: "Spark Tunnel iOS App Store"
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+          "CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Distribution"
     dependencies:
       # Link (don't embed) the Rust core static-lib xcframework — provides the `SparkCore` module.
       - framework: ../../../../platforms/apple/SparkCore.xcframework

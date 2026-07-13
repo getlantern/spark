@@ -221,7 +221,7 @@
 			);
 			sourceTree = "<group>";
 		};
-		"TEMP_B7C22FE7-0985-4FCD-AA16-E2CE7144F511" /* x86_64 */ = {
+		"TEMP_33B42993-15D7-4B7D-BC61-627688E3668A" /* x86_64 */ = {
 			isa = PBXGroup;
 			children = (
 			);
@@ -282,11 +282,9 @@
 				TargetAttributes = {
 					4FE910604B87E1BF149B2DBA = {
 						DevelopmentTeam = ACZRKC3LQ9;
-						ProvisioningStyle = Automatic;
 					};
 					9FCA804A4C0D92147B4B4EBD = {
 						DevelopmentTeam = ACZRKC3LQ9;
-						ProvisioningStyle = Automatic;
 					};
 				};
 			};
@@ -343,7 +341,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}";
+			shellScript = "# Xcode's GUI (Product ▸ Archive) runs build-script phases with a minimal PATH that\n# omits node version managers (nvm) and Homebrew, so `npm` fails with \"command not\n# found\" — even though it resolves fine from a login shell (`tauri ios build`).\n# Prepend the usual install locations that exist. Iterate least-preferred first so\n# that after the prepends, the most specific manager (nvm, then Homebrew) ends up\n# highest-priority on PATH ahead of a system /usr/local/bin node.\nfor d in /usr/local/bin /opt/homebrew/bin \"$HOME\"/.nvm/versions/node/*/bin; do\n  [ -d \"$d\" ] && PATH=\"$d:$PATH\"\ndone\nexport PATH\nnpm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -409,7 +407,9 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
+				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = ACZRKC3LQ9;
@@ -443,7 +443,8 @@
 				);
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "gui-tauri_iOS/gui-tauri_iOS.entitlements";
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -459,6 +460,7 @@
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = org.getlantern.spark;
 				PRODUCT_NAME = Spark;
+				PROVISIONING_PROFILE_SPECIFIER = "Spark iOS App Store";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
@@ -497,6 +499,8 @@
 					arm64,
 				);
 				CODE_SIGN_ENTITLEMENTS = SparkTunnel/SparkTunnel.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
 				ENABLE_BITCODE = NO;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -510,6 +514,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.getlantern.spark.tunnel;
 				PRODUCT_NAME = SparkTunnel;
+				PROVISIONING_PROFILE_SPECIFIER = "Spark Tunnel iOS App Store";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
