@@ -13,6 +13,24 @@ OUT="platforms/apple/SparkCore.xcframework"
 echo "building staticlib for: ${TARGETS[*]}" >&2
 for t in "${TARGETS[@]}"; do
     rustup target add "$t" >/dev/null 2>&1 || true
+    # Pin each slice's minimum-OS so its objects (incl. BoringSSL's) target the SAME deployment
+    # target the consuming apps link against — otherwise the linker warns "object file built for
+    # newer iOS/macOS version than being linked". iOS 14 matches the Tauri iOS project.yml + the
+    # SPM Package.swift floor; macOS 12 matches platforms/apple/project.yml. cc/clang honor these.
+    case "$t" in
+        aarch64-apple-ios | aarch64-apple-ios-sim)
+            export IPHONEOS_DEPLOYMENT_TARGET=14.0
+            unset MACOSX_DEPLOYMENT_TARGET
+            ;;
+        aarch64-apple-darwin)
+            export MACOSX_DEPLOYMENT_TARGET=12.0
+            unset IPHONEOS_DEPLOYMENT_TARGET
+            ;;
+        *)
+            # A target matching neither arm: clear both so a prior slice's min-OS can't leak in.
+            unset IPHONEOS_DEPLOYMENT_TARGET MACOSX_DEPLOYMENT_TARGET
+            ;;
+    esac
     # BoringSSL cross-compiles for every Apple target — iOS device, iOS simulator, and macOS (verified
     # 2026-06-23) — so all slices get the SAME feature set rather than the former macOS-only set:
     # `anytls`/`samizdat`/`shadowsocks`/`hysteria2` transports, the `multi-server` latency pool,
