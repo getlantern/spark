@@ -221,7 +221,7 @@
 			);
 			sourceTree = "<group>";
 		};
-		"TEMP_A25B3397-DFAF-4434-B8D9-7520B3540741" /* x86_64 */ = {
+		"TEMP_F60488B1-9D90-4954-BCBC-4B9F3BDFCE1E" /* x86_64 */ = {
 			isa = PBXGroup;
 			children = (
 			);
@@ -282,11 +282,9 @@
 				TargetAttributes = {
 					4FE910604B87E1BF149B2DBA = {
 						DevelopmentTeam = ACZRKC3LQ9;
-						ProvisioningStyle = Automatic;
 					};
 					9FCA804A4C0D92147B4B4EBD = {
 						DevelopmentTeam = ACZRKC3LQ9;
-						ProvisioningStyle = Automatic;
 					};
 				};
 			};
@@ -409,7 +407,9 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
+				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = ACZRKC3LQ9;
@@ -443,7 +443,8 @@
 				);
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "gui-tauri_iOS/gui-tauri_iOS.entitlements";
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -459,6 +460,7 @@
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = org.getlantern.spark;
 				PRODUCT_NAME = Spark;
+				PROVISIONING_PROFILE_SPECIFIER = "Spark iOS App Store";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
@@ -497,6 +499,8 @@
 					arm64,
 				);
 				CODE_SIGN_ENTITLEMENTS = SparkTunnel/SparkTunnel.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
 				ENABLE_BITCODE = NO;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -510,6 +514,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.getlantern.spark.tunnel;
 				PRODUCT_NAME = SparkTunnel;
+				PROVISIONING_PROFILE_SPECIFIER = "Spark Tunnel iOS App Store";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
