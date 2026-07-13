@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "spark-sharing"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "5cbfd9c13b56720329de53a14def8e610bd89360", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-util = "0.7"
+webpki-roots = "1"
+
+[dev-dependencies]
+rcgen = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+overflow-checks = false

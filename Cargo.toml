@@ -8,7 +8,9 @@ members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/appl
 #  - gui-tauri/src-tauri: the Tauri UI shell (ADR 0008). Kept out so Tauri's large
 #    dep tree never enters the core workspace graph or the size-tuned release profile;
 #    it builds standalone via its own `npm run tauri build` / `cargo build`.
-exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri"]
+#  - spark-sharing: the optional unprivileged WebRTC sharing subsystem. It has its own
+#    workspace and CI gate so its crypto features cannot inflate core/service binaries.
+exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing"]
 
 [workspace.package]
 version = "0.1.0"
@@ -110,7 +112,6 @@ webpki-root-certs = "1"
 # (`flutter_rust_bridge_codegen`) and the Dart `flutter_rust_bridge` package — all three must be the
 # same version or the generated glue mismatches the runtime at load time (not a compile error).
 flutter_rust_bridge = "=2.12.0"
-
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed
 # "z" roughly HALVES data-path throughput — "z" disables the inlining/vectorization the smoltcp

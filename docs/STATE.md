@@ -1538,7 +1538,54 @@ approve sysext, Connect → IP changes. (No standing infra remains on the Lanter
   `tokio::process`.) NB: the ipc `stream` tests need the feature → use `--all-features` (or
   `-p spark-ipc --features stream`).
 
+**2026-07-11 — Rust Unbounded/Spark connection-sharing integration, lifecycle slice DONE.**
+Added an unprivileged `spark-sharing` crate, with no dependency edge into `spark-core`,
+`spark-service`, the CLI, backend, or platform bindings. It pins `getlantern/unbounded-rs` commit
+`5cbfd9c13b56720329de53a14def8e610bd89360` with `default-features = false`, so Unbounded's native
+`reqwest`/`env_logger` client is absent. `SharingConfig` maps Spark-owned settings into the real
+five-slot-capable peer-proxy supervisor; `start_sharing` returns an explicit cancel/wait/stop handle
+and accepts lifecycle events plus an injected `Signaler`. The test runs the real supervisor through
+an injected signaling attempt and proves orderly cancellation and aggregate counters. Dependency
+audit: `spark-sharing` production edges contain no `reqwest`, `hyper`, or `env_logger`; existing
+Spark product crates contain no Unbounded/sharing edge. Gate:
+`cargo test --manifest-path spark-sharing/Cargo.toml --locked`,
+package clippy `-D warnings`, formatting, and full `cargo check --workspace --locked` all green.
+
+**2026-07-11 — Connection sharing, Spark-native Freddie signaling DONE.** Added
+`FreddieSignaler`, a concrete injected signaler using raw Tokio TCP + rustls 0.23/ring (Mozilla roots),
+with no reqwest/hyper. Default constructors require HTTPS; plaintext HTTP requires the explicitly
+named `new_insecure_http` local-testing constructor. It sends Freddie's existing POST form and `X-BF-Version`, maps 404/418/other
+statuses into Unbounded's typed errors, decodes the Go signaling envelope, supports fixed-length,
+close-delimited, and chunked HTTP/1.1 responses, and enforces 32 KiB headers plus configurable body
+and chunk-wire limits. Tests cover exact form/header/envelope behavior, statuses, size rejection,
+chunking, dropped-future cancellation, endpoint parsing, and a hermetic certificate-verified rustls
+exchange. Async lifecycle tests use explicit five-second bounds on every network/supervisor wait;
+the cancellation test verifies future/task cancellation without depending on platform-specific
+remote TCP EOF timing. The Unbounded pin advanced to the merged peer-proxy commit
+`5cbfd9c13b56720329de53a14def8e610bd89360`, which makes its generic `Transport(String)` error
+available without reqwest; both default and no-default Unbounded
+test/clippy gates pass. Also corrected `scripts/size-budget.sh` to build only the two binaries it
+measures, matching `release.yml`; a whole-workspace release build had feature-unified the optional
+WebRTC graph into `spark-service`. Sharing: 16 unit tests + doctest, clippy `-D warnings`, standalone
+check, release build, and dependency isolation all green. `spark-sharing` is now a standalone
+workspace excluded from the size-sensitive root workspace, with its own lockfile and three-OS CI job.
+This is required because Cargo unifies features across workspace members even when the size script
+selects only the two product binaries. With the standalone boundary, the root `Cargo.lock` is
+byte-identical to `origin/main` and
+the corrected size gate reports spark 2,343,824 B (55%) and spark-service 3,006,080 B (71%). Verified
+API facts: rustls 0.23.41
+`builder_with_provider(ring).with_safe_default_protocol_versions()`; tokio-rustls 0.26.4
+`TlsConnector::connect(ServerName<'static>, IO)`; `RootCertStore` accepts cloned webpki trust anchors.
+
 ## Next chunk (exactly what the next session should do)
+
+**(C) Connection sharing — one unprivileged frontend integration.** Wire `FreddieSignaler` plus the
+sharing handle into a single unprivileged frontend behind an explicit compile-time feature and
+runtime opt-in config. The frontend must own start/stop, surface slot lifecycle status without logging
+consumer identifiers or ICE addresses, and stop the pool during application shutdown. Keep
+`spark-core` and `spark-service` untouched. Choose the currently shipping frontend only after
+confirming its runtime/process ownership from the code; do not wire every binding in one chunk.
+
 Two independent tracks — pick by whether a privileged box is available:
 
 **(A) Privileged live gates (root) — the box is privileged now.** Build (`cargo build --release`),

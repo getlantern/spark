@@ -1,5 +1,6 @@
 # Rust build output
 /target
+/spark-sharing/target
 **/*.rs.bk
 
 # Release packaging output (DMGs, tarballs, etc. — built by packaging/ scripts + CI)
