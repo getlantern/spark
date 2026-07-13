@@ -333,8 +333,8 @@ mod ne_spike {
         // app-group container; the system-extension sandbox forbids the root NE from accessing the
         // *user's* group container (EPERM → self-fetch hangs → connect times out, confirmed
         // on-device 2026-07-13). The app keeps its own separate config cache for the UI location list
-        // (`shared_config_cache_dir()`, fetched by the Phase 2a startup task); it is not shared with
-        // the NE on macOS.
+        // (`app_config_cache_dir()`, fetched by the Phase 2a startup task); it is not shared with the
+        // NE on macOS.
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let outer = RcBlock::new(
             move |arr: *mut NSArray<NETunnelProviderManager>, e: *mut NSError| {
@@ -688,9 +688,10 @@ pub(crate) fn app_config_cache_dir(base: &std::path::Path) -> PathBuf {
 /// Location list read from the app's own `config_raw.json` cache, or empty if there's no cache yet
 /// (never fetched) or it can't be read/parsed. Built via the core's exact `config_raw.json` → pool
 /// mapping ([`spark_core::config::lantern::from_config_raw_json`]) so the pre-connect list IS the
-/// pool — same members, same order, each with its protocol — and the connected NE overlay (merged by
-/// index) lines up. (Building from the top-level geo `servers[]` array instead put protocol/latency
-/// on the wrong rows: that array is ordered differently from `options.outbounds`.)
+/// pool — same members, same order, each with its protocol. (Building from the top-level geo
+/// `servers[]` array instead put protocol/latency on the wrong rows: that array is ordered
+/// differently from `options.outbounds`.) This is the pre-connect path only; once connected,
+/// `servers()` returns the NE's live snapshot directly (no overlay).
 #[cfg(target_os = "macos")]
 fn servers_from_cache(base: &std::path::Path) -> Vec<ServerInfo> {
     let raw = match std::fs::read_to_string(app_config_cache_dir(base).join("config_raw.json")) {

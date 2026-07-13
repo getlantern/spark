@@ -154,7 +154,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     };
                     let dir = crate::desktop::app_config_cache_dir(&base);
                     let _ = std::fs::create_dir_all(&dir);
-                    match crate::config_fetch::fetch_into_shared_cache(&dir).await {
+                    match crate::config_fetch::fetch_into_cache(&dir).await {
                         Ok(true) => {
                             let _ = handle.emit("spark://servers", ());
                         }

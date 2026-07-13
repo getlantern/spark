@@ -1,5 +1,6 @@
 //! App-side startup config fetch (desktop, Phase 2a). Runs spark-core's kindling `load_or_fetch`
-//! against the SAME shared cache dir the tunnel uses ([`crate::desktop::shared_config_cache_dir`]),
+//! into the app's OWN config cache dir ([`crate::desktop::app_config_cache_dir`]) — on macOS the NE
+//! keeps a separate cache (the sysext sandbox blocks the user container, so they can't be shared) —
 //! so the location list refreshes on every launch regardless of VPN state. Change is detected by
 //! comparing the raw cache bytes before/after the fetch — cheap, exact, and independent of
 //! `load_or_fetch`'s internal 304 signalling. On a change the caller emits `spark://servers`; on
@@ -21,19 +22,20 @@ fn snapshot(dir: &Path) -> Option<Vec<u8>> {
     std::fs::read(dir.join("config_raw.json")).ok()
 }
 
-/// Run one kindling config fetch into the shared cache `dir`. Returns `Ok(true)` if the cached
+/// Run one kindling config fetch into the app's cache `dir`. Returns `Ok(true)` if the cached
 /// config changed (caller emits `spark://servers`), `Ok(false)` on 304/unchanged, and `Err` if the
 /// fetch failed (caller keeps the cached list — never clobbers). `load_or_fetch` writes the cache
-/// itself (cache-first + conditional); we ignore its returned `Config`/`CacheMeta` and let Phase 1's
+/// itself (cache-first + conditional); we ignore its returned `Config`/`CacheMeta` and let
 /// `servers_from_cache()` re-read the file on the next `servers()` pull. Never blocks the caller's
 /// critical path — run it on a detached background task.
 ///
-/// The before/after snapshots aren't locked against the tunnel process writing the same cache
-/// concurrently. That's intentional and safe: the only observable effect of an interleave is a
-/// possible **false-positive** `true` (the `after` bytes reflect the tunnel's write, not ours),
-/// which just triggers one extra `servers()` re-pull — harmless. A false negative is covered by the
-/// UI's 2–3s poll. Serializing would need a cross-process lock for no correctness gain.
-pub(crate) async fn fetch_into_shared_cache(dir: &Path) -> std::io::Result<bool> {
+/// The before/after snapshots aren't locked against a concurrent writer of the same file (another
+/// app instance, or — on platforms where the dir is shared — the tunnel). That's intentional and
+/// safe: the only observable effect of an interleave is a possible **false-positive** `true` (the
+/// `after` bytes reflect the other writer's config, not ours), which just triggers one extra
+/// `servers()` re-pull — harmless. A false negative is covered by the UI's 2–3s poll. Serializing
+/// would need a cross-process lock for no correctness gain.
+pub(crate) async fn fetch_into_cache(dir: &Path) -> std::io::Result<bool> {
     let before = snapshot(dir);
     let env = spark_core::config::fetch::FetchEnv::from_env();
     let _ = spark_core::config::fetch::load_or_fetch(dir, &env).await?;
