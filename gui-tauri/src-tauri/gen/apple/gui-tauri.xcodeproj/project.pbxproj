@@ -61,6 +61,7 @@
 		36B1D547379ECD57C41D3D86 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		3D86BDA2CB6EDE7585F81BBD /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		44C5064960F0AD7EE6FA091B /* FdResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FdResolver.swift; sourceTree = "<group>"; };
+		4BBA67D9B4324203E95EB463 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		4D3065B6CB282B499D9A3598 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
 		5CA662B2B94E1A9AFC0C2102 /* gui-tauri_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "gui-tauri_iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		6B99315FA7ACB7F6AD719C36 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
@@ -70,7 +71,6 @@
 		A62C6D70D1E0136342D8CBD5 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		A7F155BCA9B1B9D3D7367F76 /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
 		C4FF3C3B77BAD21D2C63B3B9 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
-		D7C9F31F2BE1151E06466D6B /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		F544A2431FAD7FC53F100456 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F7013D54026B3B0C5BC62722 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
@@ -119,14 +119,6 @@
 				F544A2431FAD7FC53F100456 /* Info.plist */,
 			);
 			path = "gui-tauri_iOS";
-			sourceTree = "<group>";
-		};
-		1D59F8E5D88E06CEA45262A8 /* debug */ = {
-			isa = PBXGroup;
-			children = (
-				D7C9F31F2BE1151E06466D6B /* libapp.a */,
-			);
-			path = debug;
 			sourceTree = "<group>";
 		};
 		2D9B4276E48B914CCA210408 /* Products */ = {
@@ -188,6 +180,14 @@
 			path = Externals;
 			sourceTree = "<group>";
 		};
+		C8AB0A416E7D73ADC5277E1B /* release */ = {
+			isa = PBXGroup;
+			children = (
+				4BBA67D9B4324203E95EB463 /* libapp.a */,
+			);
+			path = release;
+			sourceTree = "<group>";
+		};
 		C997D8801972189D32432ABA /* gui-tauri */ = {
 			isa = PBXGroup;
 			children = (
@@ -200,7 +200,7 @@
 		CF78015EBBEA78C5A09E4A01 /* arm64 */ = {
 			isa = PBXGroup;
 			children = (
-				1D59F8E5D88E06CEA45262A8 /* debug */,
+				C8AB0A416E7D73ADC5277E1B /* release */,
 			);
 			path = arm64;
 			sourceTree = "<group>";
@@ -221,7 +221,7 @@
 			);
 			sourceTree = "<group>";
 		};
-		"TEMP_B7C22FE7-0985-4FCD-AA16-E2CE7144F511" /* x86_64 */ = {
+		"TEMP_A25B3397-DFAF-4434-B8D9-7520B3540741" /* x86_64 */ = {
 			isa = PBXGroup;
 			children = (
 			);
@@ -343,7 +343,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}";
+			shellScript = "# Xcode's GUI (Product ▸ Archive) runs build-script phases with a minimal PATH that\n# omits node version managers (nvm) and Homebrew, so `npm` fails with \"command not\n# found\" — even though it resolves fine from a login shell (`tauri ios build`).\n# Prepend the usual install locations, but only ones that exist, so the phase works\n# from both the CLI and the Xcode GUI without hard-coding a single node install.\nfor d in \"$HOME\"/.nvm/versions/node/*/bin /opt/homebrew/bin /usr/local/bin; do\n  [ -d \"$d\" ] && PATH=\"$d:$PATH\"\ndone\nexport PATH\nnpm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
