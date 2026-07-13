@@ -36,7 +36,13 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
+      # Referenced only so the folder shows in the project tree + the preBuildScript can emit
+      # libapp.a here. `buildPhase: none` keeps xcodegen from bucketing the static libapp.a into
+      # the Resources copy phase (it's already LINKED via the `framework: libapp.a` dependency
+      # below; a .a is a build-time link input, never a runtime bundle resource). Without this,
+      # the app ships a redundant copy of libapp.a in Resources/ (bundle bloat / App Store nit).
       - path: Externals
+        buildPhase: none
       - path: gui-tauri_iOS
       - path: assets
         buildPhase: resources

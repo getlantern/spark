@@ -10,7 +10,6 @@
 		13EE2A82127CC63920FC24E5 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 35227EF9FE48284E67590F7D /* Security.framework */; };
 		28A2D2205AB3530113451546 /* SparkTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 03C3228FA9B5448F41CA976F /* SparkTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3DB4C8590D7DFCC222BF4CAC /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 36B1D547379ECD57C41D3D86 /* Metal.framework */; };
-		51119129F5C0021C6046F49C /* libapp.a in Resources */ = {isa = PBXBuildFile; fileRef = D7C9F31F2BE1151E06466D6B /* libapp.a */; };
 		5ACA6482F363F4900CF537C9 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D86BDA2CB6EDE7585F81BBD /* QuartzCore.framework */; };
 		6CC913FD6E9ECE3194EE8049 /* SparkCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 123B085A28DF2E490C22A73E /* SparkCore.xcframework */; };
 		7933768E57F9E4285635D2DF /* FdResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44C5064960F0AD7EE6FA091B /* FdResolver.swift */; };
@@ -319,7 +318,6 @@
 				B640D806249B11991835DDAC /* Assets.xcassets in Resources */,
 				BAB0E7A826EAE4E392F61F79 /* LaunchScreen.storyboard in Resources */,
 				82B8997FB4887E7E22B3FE7D /* assets in Resources */,
-				51119129F5C0021C6046F49C /* libapp.a in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
