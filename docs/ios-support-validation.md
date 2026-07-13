@@ -70,3 +70,22 @@ platform); domain/IP ("Websites") split tunneling remains available.
   validated on-device (not host-unit-testable, no Robolectric-equivalent) — same posture as the
   Windows SCM/pipe and Android Messenger layers. The pure-Rust `cfg`-gating is covered by the
   workspace build/clippy/test gate.
+
+## Bundle hygiene — `libapp.a` removed from Resources (2026-07-13, re-verified on device)
+
+Copilot's #75 review flagged that the app bundle shipped `libapp.a` (the `gui_tauri_lib`
+staticlib = the app's own Rust code) in **Resources/** on top of the Frameworks link. It was
+redundant: a `.a` is a build-time link input compiled into the app binary, not a runtime bundle
+resource, and the NE (`SparkTunnel`) links its own `SparkCore.xcframework` and never references
+`libapp.a`. Root cause: `- path: Externals` was a `sources:` group, so xcodegen bucketed the `.a`
+it finds there into the Resources copy phase.
+
+Fixed via `buildPhase: none` on the Externals group in `project.yml` (source of truth) **and** by
+removing the two `libapp.a in Resources` entries from the committed `pbxproj` — necessary because
+`tauri ios build` runs `xcodebuild` on the committed `pbxproj` directly and does **not** regenerate
+it from `project.yml`.
+
+Re-verified on the iPhone 16: `npm run tauri ios build --debug` builds clean, the built `Spark.app`
+bundle contains **no `.a`**, and the app installs, launches, **connects, and routes traffic** on
+device — confirming the Resources copy was dead weight (the tunnel data path is unaffected; the NE
+never used `libapp.a`).
