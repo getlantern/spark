@@ -22,7 +22,7 @@ Let an **uncensored volunteer** turn their device into a "digital bridge": Spark
 
 - Mobile (Android/iOS) volunteer sharing.
 - The "Share My Connection" residential-IP proxy mode (Lantern's higher-risk SmC path with its own legal disclosure). We ship only the p2p Unbounded/broflake path, which needs no residential-IP disclosure.
-- Precise geolocation guarantees — arcs are approximate (the visible peer address is frequently a TURN-relay IP, not the censored user's true location). UI copy must not overclaim.
+- Precise geolocation guarantees — arcs are approximate. IP geolocation is region-level at best and reflects the peer's network egress, not a precise location. UI copy must not overclaim.
 
 ## 4. Architecture — one vertical slice, five layers
 
@@ -101,7 +101,7 @@ Sharing lives in the existing plugin (it already owns the app-process control se
 
 ## 8. Key risks
 
-- **Upstream `unbounded-rs` change** (per-peer events): tractable (we own the crate), but the remote address may be a TURN-relay IP → arcs/geo are approximate. Mitigate with honest UI copy; count stats even when `remote` is `None`.
+- **Upstream `unbounded-rs` change** (per-peer events): tractable (we own the crate). Arcs/geo are approximate regardless — IP geolocation is region-level and reflects the peer's network egress, not a precise location (we do not use TURN relays). Mitigate with honest UI copy; count stats even when `remote` is `None`.
 - **Globe performance:** the biggest Lantern pitfall — mitigated by the static/animate-on-arrival/pause-off-tab pattern and an arc cap.
 - **Config key drift:** the sharing config + `Features.unbounded` field names must match what the Lantern config server actually delivers — confirmed against the live config in Phase 7 before shipping.
 
