@@ -12,7 +12,8 @@
 #   REUSE_SYSEXT    path to a prebuilt .systemextension to embed instead of building one (keeps the
 #                   sysext version stable → reinstall needs no reboot; for app-only Rust/JS changes)
 #   MAC_ARCH        macOS arch: arm64 (default) or x86_64. x86_64 → a separate Spark-x86_64.dmg.
-#   OUTPUT_DIR      where Spark.app/Spark.dmg land (default: dist/)
+#   OUTPUT_DIR      where Spark.app + the DMG land (default: dist/); the DMG is Spark.dmg for
+#                   arm64 and Spark-x86_64.dmg for MAC_ARCH=x86_64
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 REPO_ROOT="$PWD"
