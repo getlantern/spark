@@ -90,7 +90,9 @@ if [[ -n "${REUSE_SYSEXT:-}" ]]; then
   # A prebuilt sysext is arch-specific; embedding an arm64 sysext in an x86_64 app (or vice-versa)
   # yields an extension that won't load on the target Mac. Fail loudly on a mismatch.
   if command -v lipo >/dev/null 2>&1; then
-    ext_bin="$(ls "$SYSEXT_SRC"/Contents/MacOS/* 2>/dev/null | head -1)"
+    # `|| true` so an empty glob (no executable found) doesn't trip errexit under `set -o pipefail`
+    # (ls exits non-zero on no match); the `-n "$ext_bin"` guard below then skips the check.
+    ext_bin="$(ls "$SYSEXT_SRC"/Contents/MacOS/* 2>/dev/null | head -1 || true)"
     if [[ -n "$ext_bin" ]] && ! lipo -archs "$ext_bin" 2>/dev/null | tr ' ' '\n' | grep -qx "$MAC_ARCH"; then
       echo "REUSE_SYSEXT arch mismatch: $ext_bin is [$(lipo -archs "$ext_bin" 2>/dev/null)], need $MAC_ARCH" >&2
       exit 1
