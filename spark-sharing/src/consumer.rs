@@ -288,6 +288,9 @@ pub fn start_consumer(
                         summary = &mut session => {
                             while let Ok(event) = event_rx.try_recv() {
                                 if let Some(events) = &events {
+                                    // Best-effort telemetry: a dropped receiver must NOT stop the
+                                    // pool serving traffic, so a closed channel is intentionally
+                                    // ignored rather than propagated.
                                     let _ = events.send(ConsumerPoolEvent { slot, event });
                                 }
                             }
@@ -296,6 +299,9 @@ pub fn start_consumer(
                         event = event_rx.recv() => match event {
                             Some(event) => {
                                 if let Some(events) = &events {
+                                    // Best-effort telemetry: a dropped receiver must NOT stop the
+                                    // pool serving traffic, so a closed channel is intentionally
+                                    // ignored rather than propagated.
                                     let _ = events.send(ConsumerPoolEvent { slot, event });
                                 }
                             }

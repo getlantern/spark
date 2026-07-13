@@ -218,10 +218,8 @@ impl FreddieSignaler {
         if max_message_bytes == 0 {
             return Err(invalid_endpoint("message limit must be non-zero"));
         }
-        if max_response_bytes > MAX_RESPONSE_LIMIT {
-            return Err(invalid_endpoint(
-                "response limit exceeds the 64 MiB maximum",
-            ));
+        if max_message_bytes > MAX_RESPONSE_LIMIT {
+            return Err(invalid_endpoint("message limit exceeds the 64 MiB maximum"));
         }
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self::with_roots(endpoint, max_message_bytes, roots)
