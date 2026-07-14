@@ -6,6 +6,7 @@
   import { selectedIndex } from "$lib/selection";
   import { flagEmoji, serverLabel } from "$lib/format";
   import { unboundedVisible } from "$lib/unbounded";
+  import BottomTabs from "$lib/BottomTabs.svelte";
   import { _ } from "$lib/i18n";
   import { listen } from "@tauri-apps/api/event";
   // Fonts + global design tokens live in +layout.svelte (shared across home ↔ server selection).
@@ -163,17 +164,6 @@
   </header>
 
   <div class="body">
-    {#if showUnboundedTab}
-      <!-- VPN | Unbounded switcher: gated on the server flag + the user's hidden pref. VPN side is
-           the active/home view; Unbounded side carries a live status dot and opens /unbounded. -->
-      <nav class="switcher" aria-label={$_("tab_vpn")}>
-        <span class="seg active" aria-current="page">{$_("tab_vpn")}</span>
-        <button class="seg" onclick={() => goto("/unbounded")}>
-          <span class="udot" class:on={unboundedEnabled}></span>
-          {$_("tab_unbounded")}
-        </button>
-      </nav>
-    {/if}
     <section class="hero">
       <!-- VPNSwitch: rounded track (brand when connected, grey otherwise), white knob that slides
            right on connect, spinner while transitioning. -->
@@ -254,6 +244,10 @@
       </button>
     </div>
   </div>
+
+  {#if showUnboundedTab}
+    <BottomTabs current="vpn" vpnOn={connected} unboundedOn={unboundedEnabled} />
+  {/if}
 </main>
 
 {#snippet menu()}
@@ -301,40 +295,6 @@
   .wordmark { font-size: 20px; font-weight: 700; letter-spacing: 1.5px; color: var(--text-primary); }
 
   .body { flex: 1; display: flex; flex-direction: column; padding: 0 16px; min-height: 0; }
-
-  /* VPN | Unbounded switcher — a pill of two segments, the active one raised on the surface. */
-  .switcher {
-    align-self: center;
-    display: inline-flex;
-    gap: 2px;
-    margin-block: 12px 0;
-    padding: 3px;
-    border-radius: 999px;
-    background: var(--pill-bg);
-  }
-  .seg {
-    display: inline-flex; align-items: center; gap: 6px;
-    border: none; cursor: pointer;
-    padding: 6px 16px;
-    border-radius: 999px;
-    background: none;
-    font-family: var(--font);
-    font-size: 13px; font-weight: 600;
-    color: var(--text-tertiary);
-  }
-  button.seg:hover { background: var(--hover); }
-  .seg.active {
-    background: var(--surface);
-    color: var(--text-primary);
-    box-shadow: 0 1px 4px var(--shadow);
-    cursor: default;
-  }
-  .udot {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--indicator-off);
-    transition: background 0.2s ease;
-  }
-  .udot.on { background: var(--success); }
 
   /* Hero with the toggle vertically centered above the card */
   .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }

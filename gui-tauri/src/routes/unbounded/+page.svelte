@@ -11,6 +11,7 @@
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { listen } from "@tauri-apps/api/event";
   import Globe from "$lib/Globe.svelte";
+  import BottomTabs from "$lib/BottomTabs.svelte";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -131,6 +132,8 @@
       </div>
     </div>
   </div>
+
+  <BottomTabs current="unbounded" unboundedOn={status.enabled} />
 </main>
 
 {#if showWelcome}
