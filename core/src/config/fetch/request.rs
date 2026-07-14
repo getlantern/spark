@@ -78,6 +78,12 @@ impl ConfigRequest {
                 "hysteria2".to_string(),
                 "shadowsocks".to_string(),
                 "meek".to_string(),
+                // Advertises Unbounded-volunteer capability. The config server emits the top-level
+                // `unbounded` block (egress_addr/discovery_srv — what the sharing pool dials) ONLY
+                // when the client both has the `unbounded` feature on AND lists "unbounded" here
+                // (lantern-cloud config.go `shouldEmitUnboundedWidget`). Any `unbounded`-type
+                // *outbound* the server also assigns is harmlessly skipped by lantern.rs.
+                "unbounded".to_string(),
             ],
             time_zone: local_timezone(),
         }
