@@ -3,6 +3,7 @@
 mod aggregate;
 mod consumer;
 mod freddie;
+mod geo;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +23,7 @@ pub use consumer::{
     ConsumerRuntimeConfig, ConsumerRuntimeError, ConsumerRuntimeSummary, ConsumerTlsError,
 };
 pub use freddie::{FreddieBuildError, FreddieSignaler};
+pub use geo::{Geo, GeoResolver};
 pub use lantern_unbounded::supervisor::{
     PoolEvent, SupervisorEvent, SupervisorPoolSummary, SupervisorSummary,
 };

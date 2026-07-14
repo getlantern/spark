@@ -2,12 +2,7 @@ use std::collections::HashMap;
 
 use lantern_unbounded::supervisor::{PoolEvent, SupervisorEvent};
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Geo {
-    pub country_code: String,
-    pub lat: f64,
-    pub lon: f64,
-}
+use crate::geo::Geo;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerView {
