@@ -5,6 +5,7 @@
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { selectedIndex } from "$lib/selection";
   import { flagEmoji, serverLabel } from "$lib/format";
+  import { unboundedVisible } from "$lib/unbounded";
   import { _ } from "$lib/i18n";
   import { listen } from "@tauri-apps/api/event";
   // Fonts + global design tokens live in +layout.svelte (shared across home ↔ server selection).
@@ -107,23 +108,48 @@
   }
   const routingModeLabel = $derived(routingMode === "full" ? $_("full_tunnel") : $_("smart_routing"));
 
+  // Unbounded volunteer-proxy tab: strictly opt-in + server-gated. There's no server feature-flag
+  // signal exposed to the UI yet, so serverEnabled defaults false (tab hidden). The tab still
+  // renders the moment the flag flips true — Task 7.1 wires it to the real Features source.
+  // TODO(Task 7.1): drive unboundedServerEnabled from Features.unbounded.
+  let unboundedServerEnabled = $state(false);
+  let unboundedHidden = $state(false);
+  let unboundedEnabled = $state(false); // live status dot; kept fresh by the spark://unbounded event
+  let unlistenUnbounded: Promise<() => void> | undefined;
+  const showUnboundedTab = $derived(unboundedVisible(unboundedServerEnabled, unboundedHidden));
+  async function loadUnbounded() {
+    try { unboundedHidden = (await backend.unboundedGetSettings()).hidden; } catch { /* keep last */ }
+    try { unboundedEnabled = (await backend.unboundedStatus()).enabled; } catch { /* keep last */ }
+  }
+
   onMount(() => {
     refresh();
     loadSplit();
     loadRouting();
+    loadUnbounded();
     poll = setInterval(() => {
       refresh();
       loadSplit();
       loadRouting();
+      loadUnbounded();
     }, 2000);
     // Phase 2a: the app-side startup config fetch emits spark://servers when the cached list
     // changes — re-pull immediately instead of waiting for the next 2s poll. Tauri-only (`listen`
     // rejects in a plain browser), matching the layout's spark://state guard.
-    if (isTauri()) unlistenServers = listen("spark://servers", () => void refresh());
+    if (isTauri()) {
+      unlistenServers = listen("spark://servers", () => void refresh());
+      // Keep the Unbounded status dot live between polls: the plugin emits spark://unbounded
+      // ({ enabled, helpingNow, totalHelped, peers }) on every peer/enable change.
+      unlistenUnbounded = listen<{ enabled: boolean }>(
+        "spark://unbounded",
+        (e) => (unboundedEnabled = e.payload.enabled),
+      );
+    }
   });
   onDestroy(() => {
     clearInterval(poll);
     unlistenServers?.then((f) => f()).catch(() => {});
+    unlistenUnbounded?.then((f) => f()).catch(() => {});
   });
 </script>
 
@@ -136,6 +162,17 @@
   </header>
 
   <div class="body">
+    {#if showUnboundedTab}
+      <!-- VPN | Unbounded switcher: gated on the server flag + the user's hidden pref. VPN side is
+           the active/home view; Unbounded side carries a live status dot and opens /unbounded. -->
+      <nav class="switcher" aria-label={$_("tab_vpn")}>
+        <span class="seg active" aria-current="page">{$_("tab_vpn")}</span>
+        <button class="seg" onclick={() => goto("/unbounded")}>
+          <span class="udot" class:on={unboundedEnabled}></span>
+          {$_("tab_unbounded")}
+        </button>
+      </nav>
+    {/if}
     <section class="hero">
       <!-- VPNSwitch: rounded track (brand when connected, grey otherwise), white knob that slides
            right on connect, spinner while transitioning. -->
@@ -263,6 +300,40 @@
   .wordmark { font-size: 20px; font-weight: 700; letter-spacing: 1.5px; color: var(--text-primary); }
 
   .body { flex: 1; display: flex; flex-direction: column; padding: 0 16px; min-height: 0; }
+
+  /* VPN | Unbounded switcher — a pill of two segments, the active one raised on the surface. */
+  .switcher {
+    align-self: center;
+    display: inline-flex;
+    gap: 2px;
+    margin-block: 12px 0;
+    padding: 3px;
+    border-radius: 999px;
+    background: var(--pill-bg);
+  }
+  .seg {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: none; cursor: pointer;
+    padding: 6px 16px;
+    border-radius: 999px;
+    background: none;
+    font-family: var(--font);
+    font-size: 13px; font-weight: 600;
+    color: var(--text-tertiary);
+  }
+  button.seg:hover { background: var(--hover); }
+  .seg.active {
+    background: var(--surface);
+    color: var(--text-primary);
+    box-shadow: 0 1px 4px var(--shadow);
+    cursor: default;
+  }
+  .udot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--indicator-off);
+    transition: background 0.2s ease;
+  }
+  .udot.on { background: var(--success); }
 
   /* Hero with the toggle vertically centered above the card */
   .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }

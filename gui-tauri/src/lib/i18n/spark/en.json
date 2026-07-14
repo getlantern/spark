@@ -6,6 +6,8 @@
   "status_failed": "Failed",
   "auto": "Auto",
   "vpn_status": "VPN status",
+  "tab_vpn": "VPN",
+  "tab_unbounded": "Unbounded",
   "routing_mode": "Routing Mode",
   "routing_smart_desc": "Routes only blocked traffic through the VPN",
   "routing_full_desc": "Routes all traffic through VPN",
