@@ -125,7 +125,9 @@
           <div class="name">{$_("unbounded_auto_enable")}</div>
           <div class="sub">{$_("unbounded_auto_enable_sub")}</div>
         </div>
-        <button class="switch" class:on={autoEnable} role="switch" aria-checked={autoEnable} aria-label={$_("unbounded_auto_enable")} onclick={toggleAutoEnable}><span class="knob"></span></button>
+        <button class="checkbox" class:on={autoEnable} role="checkbox" aria-checked={autoEnable} aria-label={$_("unbounded_auto_enable")} onclick={toggleAutoEnable}>
+          {#if autoEnable}<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>{/if}
+        </button>
       </div>
     </div>
   </div>
@@ -197,12 +199,23 @@
     width: 46px; height: 28px; border-radius: 999px; border: none; background: var(--switch-off);
     position: relative; cursor: pointer; transition: background 0.15s ease; flex-shrink: 0;
   }
-  .switch.on { background: var(--brand, #1f9d55); }
+  /* Enabled state is green per the design (not the app brand cyan). */
+  .switch.on { background: #34b759; }
   .knob {
     position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
     border-radius: 50%; background: #fff; transition: transform 0.15s ease;
   }
   .switch.on .knob { transform: translateX(18px); }
+
+  /* Auto-enable is a checkbox in the design, not a switch: an outlined square that fills
+     dark-teal with a white check when on. */
+  .checkbox {
+    width: 26px; height: 26px; flex-shrink: 0; border-radius: 7px; cursor: pointer;
+    display: grid; place-items: center; color: #fff;
+    background: transparent; border: 1.5px solid var(--border);
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .checkbox.on { background: #0e5563; border-color: #0e5563; }
 
   /* One-time onboarding dialog, styled off the app's surface/card tokens. */
   .overlay {
