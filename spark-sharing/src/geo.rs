@@ -74,7 +74,14 @@ impl GeoResolver {
     /// The cache lock is released before the network fetch and re-acquired only to insert,
     /// so no guard is ever held across an `.await`.
     pub async fn resolve(&self, ip: IpAddr) -> Option<Geo> {
-        if let Ok(cache) = self.cache.lock() {
+        // Recover from a poisoned cache lock (via `into_inner`) instead of skipping the cache — a
+        // poison must not silently turn every lookup into a fresh network request. The guard is
+        // scoped so it is released before the `.await` below (never held across it).
+        {
+            let cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             if let Some(geo) = cache.get(&ip) {
                 return Some(geo.clone());
             }
@@ -83,9 +90,10 @@ impl GeoResolver {
         let body = (self.fetch)(ip).await.ok()?;
         let geo = parse_geo(&body).ok()?;
 
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(ip, geo.clone());
-        }
+        self.cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(ip, geo.clone());
         Some(geo)
     }
 }

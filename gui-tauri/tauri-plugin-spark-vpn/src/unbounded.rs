@@ -183,7 +183,7 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         Ok(gate) => gate,
         Err(_) => return Ok(()),
     };
-    if state.handle.lock().is_ok_and(|g| g.is_some()) {
+    if lock_recover(&state.handle).is_some() {
         return Ok(());
     }
 
@@ -196,9 +196,7 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     let handle = start_sharing(cfg, Arc::new(signaler), Some(tx));
 
     // Store the handle in a tight, non-await scope.
-    if let Ok(mut guard) = state.handle.lock() {
-        *guard = Some(handle);
-    }
+    *lock_recover(&state.handle) = Some(handle);
 
     let loop_app = app.clone();
     let loop_base = base.clone();
@@ -219,9 +217,8 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
                     }
                 }
                 let status = agg.status();
-                if let Ok(mut latest) = loop_app.state::<UnboundedState>().latest_status.lock() {
-                    *latest = Some(status.clone());
-                }
+                *lock_recover(&loop_app.state::<UnboundedState>().latest_status) =
+                    Some(status.clone());
                 emit_snapshot(&loop_app, true, &status, total);
             }
         }
@@ -232,21 +229,25 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         // don't stay stuck on "enabled" with a dead pool. (Clear the handle first so a racing start
         // sees no pool and starts cleanly.)
         let ustate = loop_app.state::<UnboundedState>();
-        if let Ok(mut h) = ustate.handle.lock() {
-            *h = None;
-        }
-        if let Ok(mut latest) = ustate.latest_status.lock() {
-            *latest = None;
-        }
+        *lock_recover(&ustate.handle) = None;
+        *lock_recover(&ustate.latest_status) = None;
         let _ = crate::persist::save_unbounded_enabled(&loop_base, false);
         emit_snapshot(&loop_app, false, &empty_status(), total);
     });
 
-    if let Ok(mut guard) = state.loop_handle.lock() {
-        *guard = Some(loop_handle);
-    }
+    *lock_recover(&state.loop_handle) = Some(loop_handle);
 
-    crate::persist::save_unbounded_enabled(&base, true)?;
+    // If persisting the enabled flag fails, the pool + aggregation task are already running; tear
+    // them down before returning so we never leave Unbounded silently running behind a returned
+    // error (with a persisted "disabled" state the UI would show).
+    if let Err(e) = crate::persist::save_unbounded_enabled(&base, true) {
+        drop(lock_recover(&state.handle).take());
+        if let Some(loop_handle) = lock_recover(&state.loop_handle).take() {
+            loop_handle.abort();
+        }
+        *lock_recover(&state.latest_status) = None;
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -256,17 +257,17 @@ pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Resu
     let state = app.state::<UnboundedState>();
 
     // Take the sharing handle out and drop it — its `Drop` does a cooperative cancel. Do NOT abort.
-    let handle = state.handle.lock().ok().and_then(|mut g| g.take());
+    // Recover from a poisoned lock (via `lock_recover`) rather than treating it as "no handle" —
+    // otherwise a poison would leave the pool running while stop silently succeeds.
+    let handle = lock_recover(&state.handle).take();
     drop(handle);
 
     // Abort + clear the aggregation loop task (the mpsc receiver ends when the sender is dropped
     // by the supervisor, but abort is deterministic and stops emits immediately).
-    if let Some(loop_handle) = state.loop_handle.lock().ok().and_then(|mut g| g.take()) {
+    if let Some(loop_handle) = lock_recover(&state.loop_handle).take() {
         loop_handle.abort();
     }
-    if let Ok(mut latest) = state.latest_status.lock() {
-        *latest = None;
-    }
+    *lock_recover(&state.latest_status) = None;
 
     crate::persist::save_unbounded_enabled(&base, false)?;
 
@@ -287,13 +288,10 @@ pub(crate) async fn unbounded_status<R: Runtime>(
 
     // Live values only while a pool is running (its loop keeps `latest_status` fresh); otherwise
     // report nobody helping / no peers.
-    let running = state.handle.lock().is_ok_and(|g| g.is_some());
+    let running = lock_recover(&state.handle).is_some();
     let status = if running {
-        state
-            .latest_status
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
+        lock_recover(&state.latest_status)
+            .clone()
             .unwrap_or_else(empty_status)
     } else {
         empty_status()
@@ -362,6 +360,13 @@ fn empty_status() -> SharingStatus {
         helping_now: 0,
         peers: Vec::new(),
     }
+}
+
+/// Lock a std mutex, recovering the guard if a prior holder panicked (poisoned it). The data these
+/// mutexes guard is always left in a valid state, so a poison must never silently turn start/stop/
+/// status into a no-op — recover and continue. Does not panic (not an `unwrap`/`expect`).
+fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 #[cfg(test)]
