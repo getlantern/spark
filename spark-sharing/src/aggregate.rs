@@ -60,6 +60,38 @@ impl Aggregator {
         }
     }
 
+    /// Like [`Aggregator::apply`], but resolves peer geolocation before emitting a
+    /// `Joined` delta. Used by the plugin's aggregation loop; the sync [`Aggregator::apply`]
+    /// stays for pure unit tests.
+    pub async fn apply_with_geo(
+        &mut self,
+        ev: PoolEvent,
+        resolver: &crate::geo::GeoResolver,
+    ) -> Option<SharingDelta> {
+        match ev.event {
+            SupervisorEvent::PeerConnected { session_id, remote } => {
+                if self.live.contains_key(&session_id) {
+                    return None;
+                }
+                let geo = match remote {
+                    Some(addr) => resolver.resolve(addr.ip()).await,
+                    None => None,
+                };
+                self.live.insert(session_id.clone(), geo.clone());
+                self.sessions_this_run += 1;
+                Some(SharingDelta::Joined(PeerView { session_id, geo }))
+            }
+            SupervisorEvent::PeerDisconnected { session_id } => {
+                if self.live.remove(&session_id).is_some() {
+                    Some(SharingDelta::Left(session_id))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub fn status(&self) -> SharingStatus {
         let peers = self
             .live
@@ -135,5 +167,37 @@ mod tests {
         );
         assert_eq!(agg.apply(left("nope")), None); // leave for a session we never saw
         assert_eq!(agg.status().helping_now, 0);
+    }
+
+    #[tokio::test]
+    async fn joined_carries_resolved_geo() {
+        let resolver = crate::geo::GeoResolver::with_fetcher(|_| {
+            Box::pin(async {
+                Ok::<_, crate::geo::GeoError>(
+                    r#"{"country":{"iso_code":"IR"},"location":{"latitude":1.0,"longitude":2.0}}"#
+                        .to_string(),
+                )
+            })
+        });
+        let mut agg = Aggregator::new();
+        let ev = PoolEvent {
+            slot: 0,
+            event: SupervisorEvent::PeerConnected {
+                session_id: "a".into(),
+                remote: "203.0.113.5:443".parse().ok(),
+            },
+        };
+        let delta = agg.apply_with_geo(ev, &resolver).await;
+        assert_eq!(
+            delta,
+            Some(SharingDelta::Joined(PeerView {
+                session_id: "a".into(),
+                geo: Some(crate::geo::Geo {
+                    country_code: "IR".into(),
+                    lat: 1.0,
+                    lon: 2.0
+                })
+            }))
+        );
     }
 }
