@@ -74,9 +74,9 @@ export class TauriBackend implements SparkBackend {
     return await invoke<UnboundedSettings>("plugin:spark-vpn|unbounded_get_settings");
   }
   async unboundedSetSettings(settings: Partial<UnboundedSettings>): Promise<void> {
-    // camelCase keys — Tauri maps them to the Rust command's snake_case params
-    // (auto_enable / hidden / welcome_seen); omitted keys stay unchanged.
-    await invoke("plugin:spark-vpn|unbounded_set_settings", settings);
+    // The Rust command takes a single `settings` struct that deserializes the camelCase keys
+    // (autoEnable / hidden / welcomeSeen) via serde rename_all; omitted keys stay unchanged.
+    await invoke("plugin:spark-vpn|unbounded_set_settings", { settings });
   }
   async unboundedAvailable(): Promise<boolean> {
     return await invoke<boolean>("plugin:spark-vpn|unbounded_available");

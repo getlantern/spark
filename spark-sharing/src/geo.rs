@@ -176,12 +176,36 @@ async fn get_geo_json(ip: IpAddr) -> Result<String, GeoError> {
         received.extend_from_slice(&chunk[..read]);
     }
 
-    let separator = received
+    http_2xx_body(&received)
+}
+
+/// Extract the body of a raw HTTP/1.1 response, requiring a 2xx status.
+///
+/// Best-effort by design: a non-2xx status is rejected here, and any other framing quirk (e.g. a
+/// `Transfer-Encoding: chunked` body, which this deliberately does not decode) either fails here or
+/// later at JSON parse — both surface as `None` at [`GeoResolver::resolve`]. The geo service returns
+/// a small `Content-Length`-framed JSON, read to EOF via `Connection: close`.
+fn http_2xx_body(received: &[u8]) -> Result<String, GeoError> {
+    let status_line_end = received
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .ok_or_else(|| GeoError::Fetch("geo response missing status line".into()))?;
+    let status_line = String::from_utf8_lossy(&received[..status_line_end]);
+    let is_2xx = status_line
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|code| code.starts_with('2'));
+    if !is_2xx {
+        return Err(GeoError::Fetch(format!(
+            "geo response status: {status_line}"
+        )));
+    }
+    let header_end = received
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| GeoError::Fetch("geo response missing header terminator".into()))?;
-    let body = &received[separator + 4..];
-    String::from_utf8(body.to_vec()).map_err(|error| GeoError::Fetch(error.to_string()))
+    String::from_utf8(received[header_end + 4..].to_vec())
+        .map_err(|error| GeoError::Fetch(error.to_string()))
 }
 
 #[cfg(test)]
@@ -223,5 +247,23 @@ mod tests {
             resolver.resolve(IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
             None
         );
+    }
+
+    #[test]
+    fn http_2xx_body_extracts_on_200() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}";
+        assert_eq!(http_2xx_body(resp).unwrap(), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn http_2xx_body_rejects_non_2xx() {
+        let resp = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        assert!(http_2xx_body(resp).is_err());
+    }
+
+    #[test]
+    fn http_2xx_body_rejects_missing_terminator() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json";
+        assert!(http_2xx_body(resp).is_err());
     }
 }

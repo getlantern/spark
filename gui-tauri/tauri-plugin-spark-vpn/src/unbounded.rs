@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use spark_core::config::lantern::UnboundedConfig;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -166,6 +166,15 @@ fn emit_snapshot<R: Runtime>(
 #[tauri::command]
 pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
     let base = base_dir(&app)?;
+    let state = app.state::<UnboundedState>();
+
+    // Idempotent: if a pool is already running, do nothing. Without this, a double-click, repeated
+    // tray toggle, or racing UI call would start a second pool and overwrite the stored handles,
+    // orphaning the first pool + its aggregation task (still consuming resources / emitting).
+    if state.handle.lock().is_ok_and(|g| g.is_some()) {
+        return Ok(());
+    }
+
     // Refuses with a typed "unbounded not available" error when the feature is gated off or the
     // resolved config lacks the endpoints to dial (see build_sharing_config).
     let (cfg, signaler) = build_sharing_config(&app)?;
@@ -174,10 +183,8 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // `Arc<FreddieSignaler>` coerces to the `Arc<dyn Signaler>` that `start_sharing` expects.
     let handle = start_sharing(cfg, Arc::new(signaler), Some(tx));
 
-    let state = app.state::<UnboundedState>();
     // Store the handle in a tight, non-await scope.
-    {
-        let mut guard = state.handle.lock().expect("handle lock");
+    if let Ok(mut guard) = state.handle.lock() {
         *guard = Some(handle);
     }
 
@@ -186,28 +193,29 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     let loop_handle = tauri::async_runtime::spawn(async move {
         let mut agg = Aggregator::new();
         let resolver = GeoResolver::new();
+        // Seed the cumulative counter once from disk, then keep it in memory — persisting only on a
+        // join. Avoids a disk read on every delta, and a poisoned lock can no longer panic the loop
+        // (which would leave the pool running but the UI/tray frozen).
+        let mut total = crate::persist::load_unbounded_total_helped(&loop_base);
         while let Some(ev) = rx.recv().await {
             if let Some(delta) = agg.apply_with_geo(ev, &resolver).await {
-                let mut total = crate::persist::load_unbounded_total_helped(&loop_base);
+                let joined = matches!(delta, SharingDelta::Joined(_));
                 on_delta(&mut total, &delta);
-                if matches!(delta, SharingDelta::Joined(_)) {
+                if joined {
                     if let Err(e) = crate::persist::save_unbounded_total_helped(&loop_base, total) {
                         eprintln!("[spark-unbounded] failed to persist total_helped: {e}");
                     }
                 }
                 let status = agg.status();
-                *loop_app
-                    .state::<UnboundedState>()
-                    .latest_status
-                    .lock()
-                    .expect("status lock") = Some(status.clone());
+                if let Ok(mut latest) = loop_app.state::<UnboundedState>().latest_status.lock() {
+                    *latest = Some(status.clone());
+                }
                 emit_snapshot(&loop_app, true, &status, total);
             }
         }
     });
 
-    {
-        let mut guard = state.loop_handle.lock().expect("loop lock");
+    if let Ok(mut guard) = state.loop_handle.lock() {
         *guard = Some(loop_handle);
     }
 
@@ -221,15 +229,17 @@ pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Resu
     let state = app.state::<UnboundedState>();
 
     // Take the sharing handle out and drop it — its `Drop` does a cooperative cancel. Do NOT abort.
-    let handle = state.handle.lock().expect("handle lock").take();
+    let handle = state.handle.lock().ok().and_then(|mut g| g.take());
     drop(handle);
 
     // Abort + clear the aggregation loop task (the mpsc receiver ends when the sender is dropped
     // by the supervisor, but abort is deterministic and stops emits immediately).
-    if let Some(loop_handle) = state.loop_handle.lock().expect("loop lock").take() {
+    if let Some(loop_handle) = state.loop_handle.lock().ok().and_then(|mut g| g.take()) {
         loop_handle.abort();
     }
-    *state.latest_status.lock().expect("status lock") = None;
+    if let Ok(mut latest) = state.latest_status.lock() {
+        *latest = None;
+    }
 
     crate::persist::save_unbounded_enabled(&base, false)?;
 
@@ -250,12 +260,13 @@ pub(crate) async fn unbounded_status<R: Runtime>(
 
     // Live values only while a pool is running (its loop keeps `latest_status` fresh); otherwise
     // report nobody helping / no peers.
-    let status = if state.handle.lock().expect("handle lock").is_some() {
+    let running = state.handle.lock().is_ok_and(|g| g.is_some());
+    let status = if running {
         state
             .latest_status
             .lock()
-            .expect("status lock")
-            .clone()
+            .ok()
+            .and_then(|g| g.clone())
             .unwrap_or_else(empty_status)
     } else {
         empty_status()
@@ -287,21 +298,32 @@ pub(crate) async fn unbounded_get_settings<R: Runtime>(
     }))
 }
 
-#[tauri::command]
-pub(crate) async fn unbounded_set_settings<R: Runtime>(
-    app: AppHandle<R>,
+/// A partial update to the durable Unbounded settings. Only the provided fields are written.
+///
+/// A single struct arg with `#[serde(rename_all = "camelCase")]` maps the UI's camelCase keys onto
+/// the persisted snake_case names explicitly — self-documenting and independent of Tauri's per-param
+/// case conversion (the UI invokes with `{ settings: { autoEnable, hidden, welcomeSeen } }`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct UnboundedSettingsPatch {
     auto_enable: Option<bool>,
     hidden: Option<bool>,
     welcome_seen: Option<bool>,
+}
+
+#[tauri::command]
+pub(crate) async fn unbounded_set_settings<R: Runtime>(
+    app: AppHandle<R>,
+    settings: UnboundedSettingsPatch,
 ) -> crate::Result<()> {
     let base = base_dir(&app)?;
-    if let Some(v) = auto_enable {
+    if let Some(v) = settings.auto_enable {
         crate::persist::save_unbounded_auto_enable(&base, v)?;
     }
-    if let Some(v) = hidden {
+    if let Some(v) = settings.hidden {
         crate::persist::save_unbounded_hidden(&base, v)?;
     }
-    if let Some(v) = welcome_seen {
+    if let Some(v) = settings.welcome_seen {
         crate::persist::save_unbounded_welcome_seen(&base, v)?;
     }
     Ok(())
