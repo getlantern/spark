@@ -16,6 +16,7 @@ const COMMANDS: &[&str] = &[
     "unbounded_start",
     "unbounded_stop",
     "unbounded_status",
+    "unbounded_available",
     "unbounded_get_settings",
     "unbounded_set_settings",
 ];

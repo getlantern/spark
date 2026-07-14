@@ -8,8 +8,10 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Serialize;
+use spark_core::config::lantern::UnboundedConfig;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -39,21 +41,55 @@ fn base_dir<R: Runtime>(app: &AppHandle<R>) -> crate::Result<PathBuf> {
         .map_err(|e| crate::Error::Platform(format!("no app config dir: {e}")))
 }
 
-/// Build the sharing config + signaler for the pool.
+/// Read + parse the Unbounded block from the app's own cached `config_raw.json` (the same cache the
+/// location list reads). Returns the default (disabled) config when the cache is absent/unreadable or
+/// carries no `unbounded`/`features.unbounded` section — so a first-launch client with no config yet
+/// simply reports the feature as unavailable rather than erroring.
+fn read_unbounded_config<R: Runtime>(app: &AppHandle<R>) -> crate::Result<UnboundedConfig> {
+    let base = base_dir(app)?;
+    let path = crate::desktop::app_config_cache_dir(&base).join("config_raw.json");
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => spark_core::config::lantern::unbounded_from_config_raw_json(&raw)
+            .map_err(|e| crate::Error::Platform(format!("unbounded config parse failed: {e}"))),
+        // No cache yet (never fetched) is the normal pre-first-fetch state → feature unavailable.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UnboundedConfig::default()),
+        Err(e) => Err(crate::Error::Io(e)),
+    }
+}
+
+/// Build the sharing config + signaler for the pool from the resolved Lantern config's Unbounded
+/// block (`features.unbounded` gate + the top-level `unbounded` block; see
+/// [`spark_core::config::lantern::UnboundedConfig`]).
 ///
-/// The Lantern config does not yet carry an `unbounded`/sharing block (egress WS URL, Freddie
-/// signaling endpoint, STUN URLs); outbounds of type `unbounded` are dropped by the config mapper
-/// today. Until Phase 7 wires the real block, this gates `unbounded_start` with a typed error.
+/// Returns the typed "unbounded not available" error — keeping `unbounded_start` refusing — when the
+/// feature is gated off, the block is missing, or it lacks the endpoints needed to dial. Otherwise it
+/// maps the wire fields onto a [`SharingConfig`] (egress URL + session count; STUN is left empty — the
+/// config carries none today) and builds a [`FreddieSignaler`] from the signaling endpoint.
 fn build_sharing_config<R: Runtime>(
     app: &AppHandle<R>,
 ) -> crate::Result<(SharingConfig, FreddieSignaler)> {
-    // TODO(Task 7.1): read the real unbounded config block (egress URL, Freddie endpoint, STUN
-    // URLs, concurrent_sessions, timeouts) from the resolved Lantern config and build the signaler
-    // from it. Until then the block is absent, so refuse to start rather than dial a placeholder.
-    let _ = app;
-    Err(crate::Error::Platform(
-        "unbounded config unavailable".into(),
-    ))
+    let uc = read_unbounded_config(app)?;
+    if !uc.is_available() {
+        return Err(crate::Error::Platform("unbounded not available".into()));
+    }
+    let cfg = SharingConfig {
+        egress_url: uc.egress_url,
+        // The config doesn't carry STUN servers today; an empty list lets the consumer gather
+        // host/srflx candidates without an explicit STUN server.
+        stun_urls: Vec::new(),
+        // `ctable_size` from the wire, clamped to a sane floor (SharingConfig::supervisor_config
+        // also clamps 0 → 1, but be explicit so a missing/zero value still yields a usable pool).
+        concurrent_sessions: uc.concurrent_sessions.max(1),
+        nat_timeout: Duration::from_secs(10),
+        initial_backoff: Duration::from_secs(1),
+        max_backoff: Duration::from_secs(30),
+        stable_session: Duration::from_secs(30),
+        enable_ipv6: false,
+        randomize_dtls: true,
+    };
+    let signaler = FreddieSignaler::new(&uc.signaling_url)
+        .map_err(|e| crate::Error::Platform(format!("unbounded signaler build failed: {e}")))?;
+    Ok((cfg, signaler))
 }
 
 /// Bump the running total by one for each new peer join. Pure glue, unit-tested below.
@@ -130,7 +166,8 @@ fn emit_snapshot<R: Runtime>(
 #[tauri::command]
 pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
     let base = base_dir(&app)?;
-    // Gates cleanly on the missing config block until Phase 7 (returns the typed error today).
+    // Refuses with a typed "unbounded not available" error when the feature is gated off or the
+    // resolved config lacks the endpoints to dial (see build_sharing_config).
     let (cfg, signaler) = build_sharing_config(&app)?;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PoolEvent>();
@@ -227,6 +264,15 @@ pub(crate) async fn unbounded_status<R: Runtime>(
     Ok(serde_json::to_value(snapshot_payload(
         enabled, &status, total,
     ))?)
+}
+
+/// Whether the Unbounded feature is available for this client: the server's `features.unbounded`
+/// gate is on AND the resolved config carries the endpoints needed to start sharing. The UI uses
+/// this to decide whether to surface the Unbounded tab/row at all. A missing/unreadable config
+/// (e.g. before the first fetch) reports `false`.
+#[tauri::command]
+pub(crate) async fn unbounded_available<R: Runtime>(app: AppHandle<R>) -> crate::Result<bool> {
+    Ok(read_unbounded_config(&app)?.is_available())
 }
 
 #[tauri::command]

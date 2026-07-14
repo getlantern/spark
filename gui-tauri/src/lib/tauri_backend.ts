@@ -78,6 +78,9 @@ export class TauriBackend implements SparkBackend {
     // (auto_enable / hidden / welcome_seen); omitted keys stay unchanged.
     await invoke("plugin:spark-vpn|unbounded_set_settings", settings);
   }
+  async unboundedAvailable(): Promise<boolean> {
+    return await invoke<boolean>("plugin:spark-vpn|unbounded_available");
+  }
 }
 
 // True when running inside the Tauri webview (vs a plain browser at `npm run dev`).

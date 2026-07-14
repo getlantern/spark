@@ -21,6 +21,7 @@ Allows all spark-vpn tunnel-control commands.
 - `allow-unbounded-start`
 - `allow-unbounded-stop`
 - `allow-unbounded-status`
+- `allow-unbounded-available`
 - `allow-unbounded-get-settings`
 - `allow-unbounded-set-settings`
 
@@ -393,6 +394,32 @@ Enables the status command without any pre-configured scope.
 <td>
 
 Denies the status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-available`
+
+</td>
+<td>
+
+Enables the unbounded_available command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-available`
+
+</td>
+<td>
+
+Denies the unbounded_available command without any pre-configured scope.
 
 </td>
 </tr>

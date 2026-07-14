@@ -108,16 +108,17 @@
   }
   const routingModeLabel = $derived(routingMode === "full" ? $_("full_tunnel") : $_("smart_routing"));
 
-  // Unbounded volunteer-proxy tab: strictly opt-in + server-gated. There's no server feature-flag
-  // signal exposed to the UI yet, so serverEnabled defaults false (tab hidden). The tab still
-  // renders the moment the flag flips true — Task 7.1 wires it to the real Features source.
-  // TODO(Task 7.1): drive unboundedServerEnabled from Features.unbounded.
+  // Unbounded volunteer-proxy tab: strictly opt-in + server-gated. Availability comes from the
+  // backend (server `features.unbounded` gate + a config block with the endpoints to dial — Task
+  // 7.1); it defaults false (tab hidden) until the async check resolves, and the tab renders the
+  // moment it flips true.
   let unboundedServerEnabled = $state(false);
   let unboundedHidden = $state(false);
   let unboundedEnabled = $state(false); // live status dot; kept fresh by the spark://unbounded event
   let unlistenUnbounded: Promise<() => void> | undefined;
   const showUnboundedTab = $derived(unboundedVisible(unboundedServerEnabled, unboundedHidden));
   async function loadUnbounded() {
+    try { unboundedServerEnabled = await backend.unboundedAvailable(); } catch { /* keep last */ }
     try { unboundedHidden = (await backend.unboundedGetSettings()).hidden; } catch { /* keep last */ }
     try { unboundedEnabled = (await backend.unboundedStatus()).enabled; } catch { /* keep last */ }
   }

@@ -38,6 +38,49 @@ pub enum ConfigRawError {
     },
 }
 
+/// The Unbounded (volunteer-proxy) settings spark surfaces to the plugin, distilled from the Lantern
+/// config's `features.unbounded` gate and its top-level `unbounded` block. `core` doesn't depend on
+/// `spark-sharing`, so this carries only the raw fields; the plugin (which does depend on it) builds
+/// the `SharingConfig` + Freddie signaler from these.
+///
+/// Field mapping to the wire (lantern-cloud must keep these names in sync):
+/// - `enabled`         ← `features.unbounded` (the master gate; absent ⇒ `false`)
+/// - `egress_url`      ← `unbounded.egress_addr`     (the sharing egress WebSocket URL, `wss://…`)
+/// - `signaling_url`   ← `unbounded.discovery_srv`   (the Freddie signaling endpoint, `https://…`)
+/// - `concurrent_sessions` ← `unbounded.ctable_size` (how many peer sessions to advertise at once)
+///
+/// `enabled` alone doesn't imply the block is usable: the plugin also requires a non-empty
+/// `egress_url` + `signaling_url` before it will start (see [`UnboundedConfig::is_available`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnboundedConfig {
+    /// The `features.unbounded` master gate. Absent/false ⇒ the feature is off for this client.
+    pub enabled: bool,
+    /// Sharing egress WebSocket URL (`unbounded.egress_addr`, e.g. `wss://…`). Empty when absent.
+    pub egress_url: String,
+    /// Freddie signaling endpoint (`unbounded.discovery_srv`, an `https://…` URL). Empty when absent.
+    pub signaling_url: String,
+    /// Number of concurrent censored-user sessions to advertise (`unbounded.ctable_size`). `0` when
+    /// absent — the plugin clamps to a sensible floor.
+    pub concurrent_sessions: usize,
+}
+
+impl UnboundedConfig {
+    /// True when the feature is gated on AND the block carries the two endpoints the plugin needs to
+    /// actually start sharing. `enabled` without endpoints is treated as unavailable, since starting
+    /// would only fail at dial time.
+    pub fn is_available(&self) -> bool {
+        self.enabled && !self.egress_url.is_empty() && !self.signaling_url.is_empty()
+    }
+}
+
+/// Parse a Lantern `config_raw.json` string into its [`UnboundedConfig`] (the `features.unbounded`
+/// gate joined with the top-level `unbounded` block). Absent sections default to `enabled = false`.
+/// Same lenient parse as [`from_config_raw_json`]: unknown fields are ignored.
+pub fn unbounded_from_config_raw_json(s: &str) -> Result<UnboundedConfig, ConfigRawError> {
+    let raw: RawRoot = serde_json::from_str(s)?;
+    Ok(raw.unbounded_config())
+}
+
 /// True if `s` parses as a JSON object with an `options.outbounds` array — the `config_raw.json`
 /// shape — vs spark's native TOML, so the loader can route the string to [`from_config_raw_json`].
 /// A structural check (not a substring scan): unrelated JSON — including one that merely mentions
@@ -346,6 +389,49 @@ struct RawRoot {
     stall_quarantine_max_seconds: Option<u64>,
     #[serde(default)]
     stall_trial_flows: Option<u32>,
+    /// The `features` map (feature flags). Only `unbounded` is consumed here; other keys — including
+    /// dotted ones like `otel.metrics` — pass through untouched.
+    #[serde(default)]
+    features: RawFeatures,
+    /// The top-level `unbounded` (volunteer-proxy) block. Absent ⇒ default (empty endpoints).
+    #[serde(default)]
+    unbounded: RawUnbounded,
+}
+
+impl RawRoot {
+    /// Distil the `features.unbounded` gate + the `unbounded` block into a [`UnboundedConfig`].
+    fn unbounded_config(&self) -> UnboundedConfig {
+        UnboundedConfig {
+            enabled: self.features.unbounded,
+            egress_url: self.unbounded.egress_addr.clone(),
+            signaling_url: self.unbounded.discovery_srv.clone(),
+            concurrent_sessions: self.unbounded.ctable_size,
+        }
+    }
+}
+
+/// The `features` flag map. Only `unbounded` is consumed; dotted keys (`otel.metrics`, `private.gcp`,
+/// …) and anything else are ignored by serde's unknown-field leniency.
+#[derive(Deserialize, Default)]
+struct RawFeatures {
+    #[serde(default)]
+    unbounded: bool,
+}
+
+/// The top-level `unbounded` block. spark consumes the egress WS URL, the Freddie signaling endpoint,
+/// and the session-count hint; the other fields (`discovery_endpoint`, `egress_endpoint`,
+/// `ptable_size`) are lantern-box wiring spark doesn't act on and are ignored.
+#[derive(Deserialize, Default)]
+struct RawUnbounded {
+    /// Sharing egress WebSocket URL (`wss://…`) → [`UnboundedConfig::egress_url`].
+    #[serde(default)]
+    egress_addr: String,
+    /// Freddie signaling endpoint (`https://…`) → [`UnboundedConfig::signaling_url`].
+    #[serde(default)]
+    discovery_srv: String,
+    /// Concurrent-session hint → [`UnboundedConfig::concurrent_sessions`].
+    #[serde(default)]
+    ctable_size: usize,
 }
 
 #[derive(Deserialize, Default)]
@@ -837,6 +923,64 @@ mod tests {
         assert_eq!(c.transport.stall_quarantine_secs, 60);
         assert_eq!(c.transport.stall_quarantine_max_secs, 600);
         assert_eq!(c.transport.stall_trial_flows, 2);
+    }
+
+    #[test]
+    fn parses_unbounded_block_with_features_gate() {
+        // A hand-written fixture (never the real config_raw.json): features.unbounded=true plus an
+        // unbounded block with egress (wss), signaling (https), and a session-count hint.
+        let raw = r#"{
+          "features": { "unbounded": true, "otel.metrics": true },
+          "unbounded": {
+            "discovery_srv": "https://freddie.example/signal",
+            "discovery_endpoint": "peers",
+            "egress_addr": "wss://egress.example/ws",
+            "egress_endpoint": "eg",
+            "ctable_size": 5,
+            "ptable_size": 5
+          },
+          "options": { "outbounds": [] }
+        }"#;
+        let u = unbounded_from_config_raw_json(raw).expect("unbounded parses");
+        assert!(u.enabled);
+        assert_eq!(u.egress_url, "wss://egress.example/ws");
+        assert_eq!(u.signaling_url, "https://freddie.example/signal");
+        assert_eq!(u.concurrent_sessions, 5);
+        assert!(u.is_available());
+    }
+
+    #[test]
+    fn unbounded_defaults_disabled_when_block_absent() {
+        // No features/unbounded sections at all → default (disabled, empty endpoints, not available).
+        let raw = r#"{ "options": { "outbounds": [] } }"#;
+        let u = unbounded_from_config_raw_json(raw).expect("unbounded parses");
+        assert!(!u.enabled);
+        assert!(u.egress_url.is_empty());
+        assert!(u.signaling_url.is_empty());
+        assert_eq!(u.concurrent_sessions, 0);
+        assert!(!u.is_available());
+    }
+
+    #[test]
+    fn unbounded_enabled_but_no_endpoints_is_not_available() {
+        // The gate is on but the block carries no endpoints — treat as unavailable (starting would
+        // only fail at dial time).
+        let raw = r#"{ "features": { "unbounded": true }, "options": { "outbounds": [] } }"#;
+        let u = unbounded_from_config_raw_json(raw).expect("unbounded parses");
+        assert!(u.enabled);
+        assert!(!u.is_available());
+    }
+
+    #[test]
+    fn unbounded_endpoints_present_but_gate_off_is_not_available() {
+        // Endpoints present but features.unbounded is false/absent → gated off, not available.
+        let raw = r#"{
+          "unbounded": { "discovery_srv": "https://x/s", "egress_addr": "wss://x/ws" },
+          "options": { "outbounds": [] }
+        }"#;
+        let u = unbounded_from_config_raw_json(raw).expect("unbounded parses");
+        assert!(!u.enabled);
+        assert!(!u.is_available());
     }
 
     #[test]

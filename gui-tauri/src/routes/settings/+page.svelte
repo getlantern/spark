@@ -17,13 +17,15 @@
   // Unbounded settings row: gated on server availability only (NOT on `hidden`). The home
   // switcher tab uses unboundedVisible(serverEnabled, hidden), but this row must stay
   // reachable when hidden=true so the user can un-hide — otherwise "Hide Unbounded" is
-  // irreversible from the UI. serverEnabled defaults false (row hidden) until the flag flips.
-  // TODO(Task 7.1): drive unboundedServerEnabled from Features.unbounded.
+  // irreversible from the UI. Availability comes from the backend (server `features.unbounded`
+  // gate + a config block with the endpoints — Task 7.1); defaults false (row hidden) until the
+  // async check resolves.
   let unboundedServerEnabled = $state(false);
   const showUnbounded = $derived(unboundedServerEnabled);
 
   onMount(async () => {
     try { adBlock = await backend.getAdBlockEnabled(); } catch {}
+    try { unboundedServerEnabled = await backend.unboundedAvailable(); } catch {}
   });
 
   function showSnack(msg: string) {

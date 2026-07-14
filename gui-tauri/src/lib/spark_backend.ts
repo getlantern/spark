@@ -86,6 +86,9 @@ export interface SparkBackend {
   unboundedGetSettings(): Promise<UnboundedSettings>;
   /** Persist any subset of the Unbounded settings (auto-enable / hidden / welcome-seen). */
   unboundedSetSettings(settings: Partial<UnboundedSettings>): Promise<void>;
+  /** Whether Unbounded is available for this client (server `features.unbounded` gate + a config
+   * block with the endpoints to dial). Gates whether the UI surfaces the feature at all. */
+  unboundedAvailable(): Promise<boolean>;
 }
 
 // MockBackend simulates the service for U0: connect → connecting → (≈900ms) →
@@ -232,4 +235,6 @@ export class MockBackend implements SparkBackend {
     if (settings.hidden !== undefined) mockState.hidden = settings.hidden;
     if (settings.welcomeSeen !== undefined) mockState.welcomeSeen = settings.welcomeSeen;
   }
+  // Dev-visible: the mock always reports Unbounded available so the tab/row shows at `npm run dev`.
+  async unboundedAvailable(): Promise<boolean> { return true; }
 }

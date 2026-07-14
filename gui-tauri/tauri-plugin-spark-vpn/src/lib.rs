@@ -132,6 +132,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             #[cfg(not(target_os = "android"))]
             unbounded::unbounded_status,
             #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_available,
+            #[cfg(not(target_os = "android"))]
             unbounded::unbounded_get_settings,
             #[cfg(not(target_os = "android"))]
             unbounded::unbounded_set_settings,
@@ -186,21 +188,30 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 
                 // Gated startup auto-enable for Unbounded (volunteer proxy). Two gates, both must
                 // pass: (1) the user opted in (`auto_enable`, default false — see persist.rs), and
-                // (2) the server allows it. The server `Features.unbounded` flag lands in Phase 7;
-                // until then "config unavailable" counts as NOT allowed, so this stays off. And
-                // `unbounded_start` itself returns the typed "unbounded config unavailable" error
-                // today (Phase 7 wires the real block), so even if opted in this is a no-op now —
-                // it only logs, never panics. Detached so it can't block startup or the window.
-                if let Ok(base) = app.path().app_config_dir() {
-                    if crate::persist::load_unbounded_auto_enable(&base) {
-                        let handle = app.app_handle().clone();
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(e) = unbounded::unbounded_start(handle).await {
-                                eprintln!("[spark-vpn] unbounded auto-enable skipped: {e}");
-                            }
-                        });
+                // (2) the server allows it AND the config carries the endpoints to dial
+                // (`unbounded_available`, backed by `features.unbounded` + the `unbounded` block —
+                // Task 7.1). `unbounded_start` self-gates on the same availability check, but check
+                // it explicitly here so we don't even spawn the task when the feature is off, and so
+                // the "skipped" log distinguishes not-available from a real start failure. Detached
+                // so it can't block startup or the window.
+                let handle = app.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let Ok(base) = handle.path().app_config_dir() else {
+                        return;
+                    };
+                    if !crate::persist::load_unbounded_auto_enable(&base) {
+                        return;
                     }
-                }
+                    match unbounded::unbounded_available(handle.clone()).await {
+                        Ok(true) => {
+                            if let Err(e) = unbounded::unbounded_start(handle).await {
+                                eprintln!("[spark-vpn] unbounded auto-enable failed: {e}");
+                            }
+                        }
+                        Ok(false) => {} // feature not available for this client — nothing to do
+                        Err(e) => eprintln!("[spark-vpn] unbounded availability check failed: {e}"),
+                    }
+                });
             }
             #[cfg(desktop)]
             tray::init(app)?;

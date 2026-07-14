@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-unbounded-available"
+description = "Enables the unbounded_available command without any pre-configured scope."
+commands.allow = ["unbounded_available"]
+
+[[permission]]
+identifier = "deny-unbounded-available"
+description = "Denies the unbounded_available command without any pre-configured scope."
+commands.deny = ["unbounded_available"]

@@ -40,4 +40,8 @@ describe("MockBackend unbounded", () => {
     await mock.unboundedSetSettings({ welcomeSeen: true });
     expect((await mock.unboundedGetSettings()).welcomeSeen).toBe(true);
   });
+
+  it("reports the feature as available (dev-visible)", async () => {
+    expect(await mock.unboundedAvailable()).toBe(true);
+  });
 });
