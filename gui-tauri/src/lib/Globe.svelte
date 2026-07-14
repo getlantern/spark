@@ -15,6 +15,8 @@
   // and the Americas in frame, and reads as "from the free internet" rather than any one country.
   const HOME = { lat: 20, lng: 0 };
   const MAX_ARCS = 50;
+  // Arc colors alternate teal / gold to match the design's multi-color arcs.
+  const ARC_COLORS = ["#22c3d6", "#f0b429"];
 
   interface Arc {
     id: string;
@@ -22,6 +24,7 @@
     startLng: number;
     endLat: number;
     endLng: number;
+    color: string;
   }
 
   let el = $state<HTMLDivElement>();
@@ -33,12 +36,6 @@
   let tabVisible = true;
   let io: IntersectionObserver | undefined;
   let ro: ResizeObserver | undefined;
-
-  function accent(): string {
-    if (typeof window === "undefined" || !el) return "#00bdd6";
-    const v = getComputedStyle(el).getPropertyValue("--brand").trim();
-    return v || "#00bdd6";
-  }
 
   // The render loop should run only while both visible on-screen and on an active tab. globe.gl
   // exposes pause/resume for exactly this; gating on both signals keeps the GPU idle in the common
@@ -73,6 +70,7 @@
         startLng: HOME.lng,
         endLat: p.geo.lat,
         endLng: p.geo.lon,
+        color: ARC_COLORS[next.length % ARC_COLORS.length],
       });
       if (!prevIds.has(p.sessionId)) fresh.push(p.sessionId);
     }
@@ -88,35 +86,39 @@
       const GlobeGl = (await import("globe.gl")).default;
       if (disposed || !el) return;
 
-      const color = accent();
       const asArc = (o: object) => o as Arc;
       globe = new GlobeGl(el)
         .width(el.clientWidth)
         .height(el.clientHeight)
         .backgroundColor("rgba(0,0,0,0)")
         .showGlobe(true)
-        .showGraticules(true)
         .showAtmosphere(true)
-        .atmosphereColor(color)
-        .atmosphereAltitude(0.18)
+        // Soft, near-white halo to match the light globe in the design.
+        .atmosphereColor("#cfe4ef")
+        .atmosphereAltitude(0.14)
         .arcStartLat((o: object) => asArc(o).startLat)
         .arcStartLng((o: object) => asArc(o).startLng)
         .arcEndLat((o: object) => asArc(o).endLat)
         .arcEndLng((o: object) => asArc(o).endLng)
-        .arcColor(() => [`${color}00`, color])
-        .arcStroke(0.5)
-        .arcAltitudeAutoScale(0.4)
+        // Per-arc color (teal/gold), fading from transparent at HOME to solid at the peer.
+        .arcColor((o: object) => {
+          const c = asArc(o).color;
+          return [`${c}00`, c];
+        })
+        .arcStroke(0.6)
+        .arcAltitudeAutoScale(0.45)
         .arcDashLength(0.5)
         .arcDashGap(1)
         .arcDashAnimateTime(1600);
-      // A plain colored sphere (no image texture) keeps the lazy chunk lean — but without a texture
-      // globe.gl's default globe material is BLACK, so give it an on-brand deep-teal ocean with a
-      // faint emissive (so the unlit hemisphere isn't pure black) to match the cyan atmosphere/arcs.
+      // A plain colored sphere (no image texture) keeps the lazy chunk lean. Without a texture the
+      // default globe material is black, so paint a light near-white ocean with a strong emissive so
+      // the sphere reads as an evenly-lit, soft light globe (matching the design), not a shaded dark
+      // ball. Continents are drawn as slightly-darker polygons below.
       globe.globeImageUrl(null as unknown as string);
       const mat = globe.globeMaterial();
-      mat?.color?.set?.("#0e3f4f");
-      mat?.emissive?.set?.("#07232c");
-      if (mat && "shininess" in mat) mat.shininess = 6;
+      mat?.color?.set?.("#eaeff3");
+      mat?.emissive?.set?.("#c4ced6");
+      if (mat && "shininess" in mat) mat.shininess = 3;
 
       // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
       globe.controls().autoRotate = false;
@@ -141,9 +143,10 @@
           const countries = (feature as any)(topo, topo.objects.countries).features;
           globe
             .polygonsData(countries)
-            .polygonCapColor(() => "#237e97")
+            // Continents: a slightly-darker cool grey than the near-white ocean, with soft borders.
+            .polygonCapColor(() => "#c8d3da")
             .polygonSideColor(() => "rgba(0,0,0,0)")
-            .polygonStrokeColor(() => "rgba(255,255,255,0.14)")
+            .polygonStrokeColor(() => "rgba(150,166,176,0.45)")
             .polygonAltitude(0.006);
         }
       } catch (e) {
