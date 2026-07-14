@@ -13,6 +13,11 @@ const COMMANDS: &[&str] = &[
     "list_installed_apps",
     "get_excluded_apps",
     "set_excluded_apps",
+    "unbounded_start",
+    "unbounded_stop",
+    "unbounded_status",
+    "unbounded_get_settings",
+    "unbounded_set_settings",
 ];
 
 fn main() {

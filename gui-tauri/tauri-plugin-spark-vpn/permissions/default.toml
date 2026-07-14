@@ -17,4 +17,9 @@ permissions = [
   "allow-list-installed-apps",
   "allow-get-excluded-apps",
   "allow-set-excluded-apps",
+  "allow-unbounded-start",
+  "allow-unbounded-stop",
+  "allow-unbounded-status",
+  "allow-unbounded-get-settings",
+  "allow-unbounded-set-settings",
 ]

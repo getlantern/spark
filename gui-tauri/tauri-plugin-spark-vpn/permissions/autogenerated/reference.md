@@ -18,6 +18,11 @@ Allows all spark-vpn tunnel-control commands.
 - `allow-list-installed-apps`
 - `allow-get-excluded-apps`
 - `allow-set-excluded-apps`
+- `allow-unbounded-start`
+- `allow-unbounded-stop`
+- `allow-unbounded-status`
+- `allow-unbounded-get-settings`
+- `allow-unbounded-set-settings`
 
 ## Permission Table
 
@@ -388,6 +393,136 @@ Enables the status command without any pre-configured scope.
 <td>
 
 Denies the status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-get-settings`
+
+</td>
+<td>
+
+Enables the unbounded_get_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-get-settings`
+
+</td>
+<td>
+
+Denies the unbounded_get_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-set-settings`
+
+</td>
+<td>
+
+Enables the unbounded_set_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-set-settings`
+
+</td>
+<td>
+
+Denies the unbounded_set_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-start`
+
+</td>
+<td>
+
+Enables the unbounded_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-start`
+
+</td>
+<td>
+
+Denies the unbounded_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-status`
+
+</td>
+<td>
+
+Enables the unbounded_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-status`
+
+</td>
+<td>
+
+Denies the unbounded_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-stop`
+
+</td>
+<td>
+
+Enables the unbounded_stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-stop`
+
+</td>
+<td>
+
+Denies the unbounded_stop command without any pre-configured scope.
 
 </td>
 </tr>
