@@ -30,6 +30,10 @@ pub(crate) struct UnboundedState {
     handle: Mutex<Option<SharingHandle>>,
     loop_handle: Mutex<Option<JoinHandle<()>>>,
     latest_status: Mutex<Option<SharingStatus>>,
+    /// Serializes `unbounded_start`: held (async-safe) across the whole start so two concurrent
+    /// callers can't both pass the "already running?" check and each spin up a pool. A `tokio`
+    /// mutex (not `std`) because it is intentionally held across `.await` points.
+    start_gate: tokio::sync::Mutex<()>,
 }
 
 /// Resolve the persistence base dir (the platform-provided app config dir) the same way
@@ -171,6 +175,14 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // Idempotent: if a pool is already running, do nothing. Without this, a double-click, repeated
     // tray toggle, or racing UI call would start a second pool and overwrite the stored handles,
     // orphaning the first pool + its aggregation task (still consuming resources / emitting).
+    //
+    // Hold the start gate across the whole start (build + spawn + store). `try_lock` makes a second
+    // concurrent caller bail immediately instead of blocking, and — because the gate serializes
+    // starts — the `handle.is_some()` check below is race-free (only one start runs at a time).
+    let _gate = match state.start_gate.try_lock() {
+        Ok(gate) => gate,
+        Err(_) => return Ok(()),
+    };
     if state.handle.lock().is_ok_and(|g| g.is_some()) {
         return Ok(());
     }

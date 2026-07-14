@@ -111,7 +111,7 @@
       // A plain colored sphere (no image texture) keeps the lazy chunk lean.
       globe.globeImageUrl(null as unknown as string);
 
-      // Static at rest: no auto-rotation. Users may still drag/zoom the orbit controls.
+      // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
       globe.controls().autoRotate = false;
       globe.controls().enableZoom = false;
       globe.pointOfView({ lat: HOME.lat, lng: HOME.lng, altitude: 2.4 });

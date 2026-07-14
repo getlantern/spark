@@ -162,9 +162,6 @@ async fn get_geo_json(ip: IpAddr) -> Result<String, GeoError> {
 
     let mut received = Vec::with_capacity(4096);
     loop {
-        if received.len() > MAX_GEO_RESPONSE_BYTES {
-            return Err(GeoError::Fetch("geo response exceeds limit".into()));
-        }
         let mut chunk = [0_u8; 4096];
         let read = stream
             .read(&mut chunk)
@@ -174,6 +171,11 @@ async fn get_geo_json(ip: IpAddr) -> Result<String, GeoError> {
             break;
         }
         received.extend_from_slice(&chunk[..read]);
+        // Check the cap right after appending, so a single read can't push `received` an
+        // unbounded amount past the limit before the next iteration.
+        if received.len() > MAX_GEO_RESPONSE_BYTES {
+            return Err(GeoError::Fetch("geo response exceeds limit".into()));
+        }
     }
 
     http_2xx_body(&received)
@@ -204,7 +206,8 @@ fn http_2xx_body(received: &[u8]) -> Result<String, GeoError> {
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| GeoError::Fetch("geo response missing header terminator".into()))?;
-    String::from_utf8(received[header_end + 4..].to_vec())
+    std::str::from_utf8(&received[header_end + 4..])
+        .map(str::to_owned)
         .map_err(|error| GeoError::Fetch(error.to_string()))
 }
 
