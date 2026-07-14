@@ -225,6 +225,21 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
                 emit_snapshot(&loop_app, true, &status, total);
             }
         }
+
+        // The event stream closed without an explicit stop — i.e. the supervisor pool ended on its
+        // own (a panic/crash; it otherwise retries forever). `unbounded_stop` aborts this task
+        // before this runs, so reaching here means nobody called stop: reflect "off" so the UI/tray
+        // don't stay stuck on "enabled" with a dead pool. (Clear the handle first so a racing start
+        // sees no pool and starts cleanly.)
+        let ustate = loop_app.state::<UnboundedState>();
+        if let Ok(mut h) = ustate.handle.lock() {
+            *h = None;
+        }
+        if let Ok(mut latest) = ustate.latest_status.lock() {
+            *latest = None;
+        }
+        let _ = crate::persist::save_unbounded_enabled(&loop_base, false);
+        emit_snapshot(&loop_app, false, &empty_status(), total);
     });
 
     if let Ok(mut guard) = state.loop_handle.lock() {

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
@@ -123,12 +123,16 @@ fn parse_geo(body: &str) -> Result<Geo, GeoError> {
     })
 }
 
-/// Fetches the raw geo-service JSON body for `ip` over HTTPS.
+/// A process-wide TLS connector for geo lookups, built once from the webpki roots and reused.
 ///
-/// This mirrors the raw rustls + tokio HTTP/1.1 path in [`crate::freddie`] rather than
-/// pulling in a heavyweight HTTP client. It is deliberately best-effort: any failure
-/// surfaces as [`GeoError::Fetch`], which [`GeoResolver::resolve`] maps to `None`.
-async fn get_geo_json(ip: IpAddr) -> Result<String, GeoError> {
+/// Building the `RootCertStore` + `ClientConfig` is comparatively expensive; without caching it
+/// would be repeated on every cache-miss lookup (once per unique peer IP on the join path).
+/// `TlsConnector` is `Arc`-backed, so cloning the cached one is cheap.
+fn geo_connector() -> Result<TlsConnector, GeoError> {
+    static CONNECTOR: OnceLock<TlsConnector> = OnceLock::new();
+    if let Some(connector) = CONNECTOR.get() {
+        return Ok(connector.clone());
+    }
     let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config =
         ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -137,6 +141,19 @@ async fn get_geo_json(ip: IpAddr) -> Result<String, GeoError> {
             .with_root_certificates(roots)
             .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
+    // A concurrent builder may win the race; either way we return a usable connector, and the
+    // first to `set` wins the cache slot for all subsequent lookups.
+    let _ = CONNECTOR.set(connector.clone());
+    Ok(connector)
+}
+
+/// Fetches the raw geo-service JSON body for `ip` over HTTPS.
+///
+/// This mirrors the raw rustls + tokio HTTP/1.1 path in [`crate::freddie`] rather than
+/// pulling in a heavyweight HTTP client. It is deliberately best-effort: any failure
+/// surfaces as [`GeoError::Fetch`], which [`GeoResolver::resolve`] maps to `None`.
+async fn get_geo_json(ip: IpAddr) -> Result<String, GeoError> {
+    let connector = geo_connector()?;
     let server_name =
         ServerName::try_from(GEO_HOST).map_err(|error| GeoError::Fetch(error.to_string()))?;
 
