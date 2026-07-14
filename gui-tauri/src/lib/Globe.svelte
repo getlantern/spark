@@ -129,6 +129,27 @@
       globe.arcsData(arcs);
       syncAnimation();
 
+      // Vector continents from a bundled TopoJSON (in this lazy chunk — no CDN, no raster earth
+      // texture), rendered after the sphere/arcs so they progressively fill in. Lighter-teal land
+      // over the dark-teal ocean makes peer arcs geographically legible. Cosmetic: a load failure
+      // just leaves the plain sphere.
+      try {
+        const { feature } = await import("topojson-client");
+        const topoMod = await import("world-atlas/countries-110m.json");
+        if (!disposed && globe) {
+          const topo: any = topoMod.default ?? topoMod;
+          const countries = (feature as any)(topo, topo.objects.countries).features;
+          globe
+            .polygonsData(countries)
+            .polygonCapColor(() => "#237e97")
+            .polygonSideColor(() => "rgba(0,0,0,0)")
+            .polygonStrokeColor(() => "rgba(255,255,255,0.14)")
+            .polygonAltitude(0.006);
+        }
+      } catch (e) {
+        console.warn("globe: continents failed to load", e);
+      }
+
       io = new IntersectionObserver(
         (entries) => {
           onScreen = entries.some((e) => e.isIntersecting);
