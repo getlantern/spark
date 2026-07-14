@@ -153,7 +153,7 @@
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M2.5 19a6.5 6.5 0 0 1 13 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8"/><path d="M18 19a6 6 0 0 0-3.2-5.3"/></svg>
 {/snippet}
 {#snippet autoIcon()}
-  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><polyline points="21 3 21 8 16 8"/><path d="M12 8.5v3.5l2.4 1.4"/></svg>
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.4A8 8 0 1 0 18 17.5"/><polyline points="20 4 20 9.5 14.5 9.5"/><path fill="currentColor" stroke="none" d="M11 7.4 11.85 9.65 14.1 10.5 11.85 11.35 11 13.6 10.15 11.35 7.9 10.5 10.15 9.65Z"/></svg>
 {/snippet}
 
 {#if showWelcome}
@@ -194,7 +194,7 @@
      tall and centered, matching the design. */
   .globe-mount {
     margin-top: 4px;
-    height: 300px;
+    height: 330px;
     overflow: hidden;
   }
 

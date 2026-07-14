@@ -134,7 +134,7 @@
       globe.controls().autoRotate = false;
       globe.controls().enableZoom = false;
       // Lower altitude → the globe fills the frame like the design (it's the hero of the screen).
-      globe.pointOfView({ lat: HOME.lat, lng: HOME.lng, altitude: 1.9 });
+      globe.pointOfView({ lat: HOME.lat, lng: HOME.lng, altitude: 2.15 });
 
       rendered = true;
       // Draw whatever peers already exist at mount time.
@@ -154,12 +154,12 @@
           const countries = (feature as any)(topo, topo.objects.countries).features;
           globe
             .polygonsData(countries)
-            // Continents: a soft, very-light cool grey over the near-white ocean with faint borders,
-            // matching the design's pale earth.
-            .polygonCapColor(() => "#dbe3e8")
+            // Continents: a soft, very-light cool grey barely above the near-white ocean, with
+            // almost-invisible borders — the design reads as one pale landmass, not busy countries.
+            .polygonCapColor(() => "#e4e9ed")
             .polygonSideColor(() => "rgba(0,0,0,0)")
-            .polygonStrokeColor(() => "rgba(160,176,186,0.35)")
-            .polygonAltitude(0.006);
+            .polygonStrokeColor(() => "rgba(170,184,193,0.15)")
+            .polygonAltitude(0.004);
         }
       } catch (e) {
         console.warn("globe: continents failed to load", e);
@@ -199,7 +199,7 @@
     if (current.length === 0) return; // cleared; leave the globe parked
     const newest = fresh.length ? arcs.find((a) => a.id === fresh[fresh.length - 1]) : undefined;
     if (newest) {
-      globe.pointOfView({ lat: newest.endLat, lng: newest.endLng, altitude: 1.9 }, 900);
+      globe.pointOfView({ lat: newest.endLat, lng: newest.endLng, altitude: 2.15 }, 900);
     }
   });
 
