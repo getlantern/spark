@@ -183,6 +183,24 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                         Err(e) => eprintln!("[spark-vpn] startup config fetch failed: {e}"),
                     }
                 });
+
+                // Gated startup auto-enable for Unbounded (volunteer proxy). Two gates, both must
+                // pass: (1) the user opted in (`auto_enable`, default false — see persist.rs), and
+                // (2) the server allows it. The server `Features.unbounded` flag lands in Phase 7;
+                // until then "config unavailable" counts as NOT allowed, so this stays off. And
+                // `unbounded_start` itself returns the typed "unbounded config unavailable" error
+                // today (Phase 7 wires the real block), so even if opted in this is a no-op now —
+                // it only logs, never panics. Detached so it can't block startup or the window.
+                if let Ok(base) = app.path().app_config_dir() {
+                    if crate::persist::load_unbounded_auto_enable(&base) {
+                        let handle = app.app_handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = unbounded::unbounded_start(handle).await {
+                                eprintln!("[spark-vpn] unbounded auto-enable skipped: {e}");
+                            }
+                        });
+                    }
+                }
             }
             #[cfg(desktop)]
             tray::init(app)?;

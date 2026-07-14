@@ -123,7 +123,8 @@ fn emit_snapshot<R: Runtime>(
         "spark://unbounded",
         snapshot_payload(enabled, status, total),
     );
-    // TODO(Task 4.3): refresh tray label here
+    #[cfg(desktop)]
+    crate::tray::refresh_unbounded_label(app, enabled, status.helping_now);
 }
 
 #[tauri::command]

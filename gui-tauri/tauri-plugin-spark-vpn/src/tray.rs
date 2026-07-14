@@ -56,6 +56,16 @@ pub(crate) fn connect_item(state: &str) -> (&'static str, &'static str, bool) {
     }
 }
 
+/// The disabled status line for Unbounded (volunteer proxy): "Unbounded: off" when disabled,
+/// "Unbounded: helping N" when enabled (N = peers currently helped, may be 0).
+pub(crate) fn unbounded_tray_label(enabled: bool, helping_now: usize) -> String {
+    if !enabled {
+        "Unbounded: off".to_string()
+    } else {
+        format!("Unbounded: helping {helping_now}")
+    }
+}
+
 /// The disabled top-of-menu header: connection status plus the selected location. A manual pin
 /// (`Some(index)`) shows that server's label; `None` is "Smart Location" — Spark auto-choosing —
 /// which is never shown for a manually picked location.
@@ -83,6 +93,19 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, Runtime,
 };
+
+/// Menu id for the Unbounded enable/disable toggle. The status line above it is a disabled
+/// (non-clickable) text item, so it needs no id.
+const MENU_UNBOUNDED_TOGGLE: &str = "unbounded_toggle";
+
+/// Toggle label for the Unbounded enable/disable item, given the current enabled state.
+pub(crate) fn unbounded_toggle_label(enabled: bool) -> &'static str {
+    if enabled {
+        "Disable Unbounded"
+    } else {
+        "Enable Unbounded"
+    }
+}
 
 /// Build the system tray from current state and register it + its handles. Called once from setup.
 pub(crate) fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -200,6 +223,10 @@ pub(crate) struct TrayHandles<R: Runtime> {
     pub routing_smart: CheckMenuItem<R>,
     pub routing_full: CheckMenuItem<R>,
     pub adblock: CheckMenuItem<R>,
+    /// Disabled status line showing `unbounded_tray_label(...)`.
+    pub unbounded_status: MenuItem<R>,
+    /// Enable/disable toggle, label from `unbounded_toggle_label(...)`.
+    pub unbounded_toggle: MenuItem<R>,
     /// (pin, item) for each location entry incl. Smart (pin = None).
     pub locations: std::sync::Mutex<Vec<(Option<usize>, CheckMenuItem<R>)>>,
     /// Server pool signature (index+cc+city) used to detect when the submenu must be rebuilt.
@@ -300,6 +327,20 @@ fn build_menu<R: Runtime>(
         .checked(adblock)
         .build(app)?;
     let split = MenuItemBuilder::with_id("split", "Split Tunneling…").build(app)?;
+
+    // Unbounded (volunteer proxy): a disabled status line + an enable/disable toggle. The toggle's
+    // action is decided from the live persisted state in the handler, not this id.
+    let (ub_enabled, ub_helping) = read_unbounded_state(app);
+    let unbounded_status = MenuItemBuilder::with_id(
+        "unbounded_status",
+        unbounded_tray_label(ub_enabled, ub_helping),
+    )
+    .enabled(false)
+    .build(app)?;
+    let unbounded_toggle =
+        MenuItemBuilder::with_id(MENU_UNBOUNDED_TOGGLE, unbounded_toggle_label(ub_enabled))
+            .build(app)?;
+
     let show = MenuItemBuilder::with_id("show", "Show Spark").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Spark").build(app)?;
 
@@ -312,6 +353,9 @@ fn build_menu<R: Runtime>(
         .item(&adblock_item)
         .item(&split)
         .separator()
+        .item(&unbounded_status)
+        .item(&unbounded_toggle)
+        .separator()
         .item(&show)
         .item(&quit)
         .build()?;
@@ -322,6 +366,8 @@ fn build_menu<R: Runtime>(
         routing_smart,
         routing_full,
         adblock: adblock_item,
+        unbounded_status,
+        unbounded_toggle,
         locations: std::sync::Mutex::new(locations),
         pool_sig: std::sync::Mutex::new(pool_sig),
         location_submenu,
@@ -354,6 +400,38 @@ fn read_state<R: Runtime>(
         .lock()
         .expect("pin lock");
     (status, servers, routing, adblock, selected)
+}
+
+/// Read the current Unbounded state for building the tray: `(enabled, helping_now)`. `enabled` comes
+/// from the persisted opt-in flag; `helping_now` is 0 at build time (no pool has started yet — the
+/// live count arrives later via `refresh_unbounded_label` from `emit_snapshot`). Best-effort: a
+/// missing config dir yields `(false, 0)`.
+fn read_unbounded_state<R: Runtime>(app: &AppHandle<R>) -> (bool, usize) {
+    let enabled = match app.path().app_config_dir() {
+        Ok(base) => crate::persist::load_unbounded_enabled(&base),
+        Err(_) => false,
+    };
+    (enabled, 0)
+}
+
+/// Patch the Unbounded status line + toggle label in place from `(enabled, helping_now)`. Called
+/// from `unbounded::emit_snapshot` after each pool change, and from the tray's own event handler.
+/// Mirrors `refresh`: cheap, safe to call often, and a no-op if the tray isn't built yet.
+pub(crate) fn refresh_unbounded_label<R: Runtime>(
+    app: &AppHandle<R>,
+    enabled: bool,
+    helping_now: usize,
+) {
+    let handles = match app.try_state::<TrayHandles<R>>() {
+        Some(h) => h,
+        None => return, // tray not built yet
+    };
+    let _ = handles
+        .unbounded_status
+        .set_text(unbounded_tray_label(enabled, helping_now));
+    let _ = handles
+        .unbounded_toggle
+        .set_text(unbounded_toggle_label(enabled));
 }
 
 /// Tray menu-event handler: run the corresponding control action, then refresh + notify the window.
@@ -431,6 +509,27 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) 
                 }
                 Err(e) => report_tray_action(&app, "read ad-block", Err(e)),
             },
+            MENU_UNBOUNDED_TOGGLE => {
+                // Unbounded start/stop are async commands; dispatch them on the async runtime
+                // rather than blocking this worker thread. Decide the action from the persisted
+                // enabled flag. `emit_snapshot` refreshes the tray label once the command settles.
+                let toggle_app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let enabled = match toggle_app.path().app_config_dir() {
+                        Ok(base) => crate::persist::load_unbounded_enabled(&base),
+                        Err(e) => {
+                            eprintln!("[spark-tray] unbounded toggle: no config dir: {e}");
+                            return;
+                        }
+                    };
+                    let result = if enabled {
+                        crate::unbounded::unbounded_stop(toggle_app.clone()).await
+                    } else {
+                        crate::unbounded::unbounded_start(toggle_app.clone()).await
+                    };
+                    report_tray_action(&toggle_app, "toggle unbounded", result);
+                });
+            }
             other => {
                 if let Some(pin) = parse_loc_menu_id(other) {
                     let result = ctl.select_server(crate::tray_pin_to_i32(pin));
@@ -489,6 +588,13 @@ mod tests {
         assert_eq!(parse_loc_menu_id("loc:3"), Some(Some(3)));
         assert_eq!(parse_loc_menu_id("routing:full"), None);
         assert_eq!(parse_loc_menu_id("loc:x"), None);
+    }
+
+    #[test]
+    fn unbounded_tray_label_reflects_state() {
+        assert_eq!(unbounded_tray_label(false, 0), "Unbounded: off");
+        assert_eq!(unbounded_tray_label(true, 9), "Unbounded: helping 9");
+        assert_eq!(unbounded_tray_label(true, 0), "Unbounded: helping 0");
     }
 
     #[test]
