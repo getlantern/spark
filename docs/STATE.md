@@ -1744,6 +1744,40 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   (M0 was ~280 KB — empty CLI.)
 
 ## Decisions log (append-only)
+- 2026-07-13 (Unbounded volunteer desktop v1 — BUILT on branch `fisk/unbounded-volunteer`, gates green,
+  PR open): **an opt-in "Unbounded" tab that runs the `spark-sharing` peer-proxy so uncensored
+  volunteers become bridges for censored users, with a live globe + stats, kept alive via the tray.**
+  Spec `docs/superpowers/specs/2026-07-13-unbounded-volunteer-desktop-design.md`, plan
+  `docs/superpowers/plans/2026-07-13-unbounded-volunteer-desktop.md`. Runs **unprivileged in the Tauri
+  app process** (outbound-only; no TUN/NE needed). Phases:
+  (1) **upstream `unbounded-rs`** gained additive `SupervisorEvent::PeerConnected{session_id,remote}` /
+  `PeerDisconnected{session_id}` (PR #3), and a follow-up **shutdown-hang + per-connection-leak fix** in
+  the peer-state callback (PR #4 — the callback captured a clone of the `SupervisorEvent` sender + a
+  strong `Arc<RTCPeerConnection>` forming a cycle; fixed via a `select!`-terminated pool forwarder +
+  `Weak` connection ref). Consumer PR #2 also merged. `spark-sharing` pinned at unbounded-rs `521a356`.
+  (2) **`spark-sharing` aggregation** — `aggregate.rs` `Aggregator` folds the per-slot pool events into a
+  live per-session view (`helping_now` refcounts by `session_id`, dedups, `sessions_this_run`);
+  `apply_with_geo` resolves geo on join. (3) **`geo.rs`** — `GeoResolver` GETs
+  `geo.getiantem.org/lookup/<ip>` over the freddie-style raw rustls path, per-process cache
+  (lock released across the await), best-effort → `None`. (4) **plugin** (`tauri-plugin-spark-vpn`):
+  `persist.rs` five opt-in keys (all default false/0), `unbounded.rs` (start/stop/status/get_settings/
+  set_settings + `unbounded_available`) owning the `SharingHandle` + an aggregation loop that persists
+  `total_helped` on join and emits the `spark://unbounded` snapshot; tray status line + toggle + gated,
+  default-off startup auto-enable; commands registered in `build.rs`/`default.toml` ACL. (5) **UI**:
+  backend seam (`unbounded*` + Mock with a simulated peer stream), gated `VPN | Unbounded` shell tab
+  (`unboundedVisible(serverEnabled,hidden)`), `/unbounded` screen (stats + toggle + one-time onboarding
+  + auto-enable), `/settings/unbounded` (auto-enable + hide; hub row gated on availability ONLY so hide
+  stays reversible). (6) **globe** — `Globe.svelte` via **dynamically-imported `globe.gl`** (separate
+  lazy chunk ~525 KB gz, not in the main bundle), static at rest, animate-on-arrival, pause off-tab
+  (IntersectionObserver + visibilitychange), cap 50 arcs, clear-on-empty. (7) **config gate** —
+  `core/src/config/lantern.rs` parses the **real** live config: top-level `features.unbounded` (bool) +
+  an `unbounded` block (`discovery_srv`→signaling, `egress_addr`→egress, `ctable_size`→concurrent);
+  the plugin reads the app's cached `config_raw.json`, builds `SharingConfig`+`FreddieSignaler`, refuses
+  `unbounded_start` + reports `unbounded_available=false` when the gate is off/missing; the UI tab +
+  settings row load `unboundedAvailable()` on mount. All four workspaces (root, spark-sharing, plugin,
+  gui-tauri) fmt/clippy/test/check green. **Remaining: interactive desktop e2e** (opt-in → onboarding →
+  toggle → live globe/stats against a real peer → close-window/tray-keeps-running → total-helped
+  persists across restart → hide removes tab) + the PR review loop, both pending a running desktop build.
 - 2026-06-25 (config-fetch fronting — kindling-fronted auto-fetch DONE + live-verified): **the
   censored cold-start config fetch now races a direct plain-TLS request against a domain-fronted
   one-shot h2 request** (spark #30; flint #7/#8/#9; `config-new-fetch-design.md §9` marked DONE).
