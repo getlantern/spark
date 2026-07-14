@@ -43,6 +43,9 @@
   "unbounded_total_helped": "Total people helped to date",
   "unbounded_auto_enable": "Auto-enable Unbounded",
   "unbounded_auto_enable_sub": "Start helping automatically whenever Spark is running.",
+  "unbounded_settings_title": "Unbounded Settings",
+  "unbounded_hide": "Hide Unbounded",
+  "unbounded_hide_sub": "Removes the Unbounded tab. You can turn it back on here any time.",
   "unbounded_welcome_title": "Welcome to Unbounded",
   "unbounded_welcome_body": "Unbounded lets your device act as a digital bridge for people living under censorship. When you turn it on, their traffic flows through your connection to the open internet. It's entirely optional, and you can turn it off any time.",
   "unbounded_welcome_dismiss": "Get started"

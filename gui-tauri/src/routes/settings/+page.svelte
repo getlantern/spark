@@ -14,7 +14,17 @@
   let snack = $state<string | null>(null);
   let snackTimer: ReturnType<typeof setTimeout> | undefined;
 
-  onMount(async () => { try { adBlock = await backend.getAdBlockEnabled(); } catch {} });
+  // Unbounded settings row: gated on server availability only (NOT on `hidden`). The home
+  // switcher tab uses unboundedVisible(serverEnabled, hidden), but this row must stay
+  // reachable when hidden=true so the user can un-hide — otherwise "Hide Unbounded" is
+  // irreversible from the UI. serverEnabled defaults false (row hidden) until the flag flips.
+  // TODO(Task 7.1): drive unboundedServerEnabled from Features.unbounded.
+  let unboundedServerEnabled = $state(false);
+  const showUnbounded = $derived(unboundedServerEnabled);
+
+  onMount(async () => {
+    try { adBlock = await backend.getAdBlockEnabled(); } catch {}
+  });
 
   function showSnack(msg: string) {
     snack = msg;
@@ -66,6 +76,14 @@
         <span class="value">{languageLabel}</span>
         <span class="chev">{@render chevron()}</span>
       </button>
+      {#if showUnbounded}
+        <div class="divider"></div>
+        <button class="row nav" onclick={() => goto("/settings/unbounded")}>
+          <span class="ic">{@render bridge()}</span>
+          <div class="meta"><div class="name">{$_("unbounded_title")}</div></div>
+          <span class="chev">{@render chevron()}</span>
+        </button>
+      {/if}
     </div>
 
     <div class="card" style="margin-top:12px">
@@ -91,6 +109,9 @@
 {/snippet}
 {#snippet shield()}
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg>
+{/snippet}
+{#snippet bridge()}
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9v9"/><path d="M22 9v9"/><path d="M2 12a6 6 0 0 1 6-6h8a6 6 0 0 1 6 6"/><path d="M7 12v6"/><path d="M12 10v8"/><path d="M17 12v6"/></svg>
 {/snippet}
 
 <style>
