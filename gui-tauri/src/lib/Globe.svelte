@@ -120,14 +120,13 @@
         .pointColor(() => "#33a852")
         .pointAltitude(0.012)
         .pointRadius(0.34);
-      // A plain colored sphere (no image texture) keeps the lazy chunk lean. Without a texture the
-      // default globe material is black, so paint a light near-white ocean with a strong emissive so
-      // the sphere reads as an evenly-lit, soft light globe (matching the design), not a shaded dark
-      // ball. Continents are drawn as slightly-darker polygons below.
+      // Design palette: a GREY ocean sphere with WHITE continents drawn on top (no texture — keeps
+      // the lazy chunk lean). The emissive lifts the unlit hemisphere so the sphere reads as a soft
+      // mid-grey with gentle 3D shading rather than a hard-lit dark ball.
       globe.globeImageUrl(null as unknown as string);
       const mat = globe.globeMaterial();
-      mat?.color?.set?.("#f2f6f8");
-      mat?.emissive?.set?.("#dbe3e9");
+      mat?.color?.set?.("#c6ced5");
+      mat?.emissive?.set?.("#aeb8c1");
       if (mat && "shininess" in mat) mat.shininess = 2;
 
       // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
@@ -154,11 +153,11 @@
           const countries = (feature as any)(topo, topo.objects.countries).features;
           globe
             .polygonsData(countries)
-            // Continents: a soft, very-light cool grey barely above the near-white ocean, with
-            // almost-invisible borders — the design reads as one pale landmass, not busy countries.
-            .polygonCapColor(() => "#e4e9ed")
+            // Continents: solid WHITE landmasses over the grey ocean, with NO country outlines
+            // (transparent stroke) so they read as clean continent shapes, per the design.
+            .polygonCapColor(() => "#fbfdff")
             .polygonSideColor(() => "rgba(0,0,0,0)")
-            .polygonStrokeColor(() => "rgba(170,184,193,0.15)")
+            .polygonStrokeColor(() => "rgba(0,0,0,0)")
             .polygonAltitude(0.004);
         }
       } catch (e) {

@@ -77,7 +77,7 @@
     background: var(--hover);
   }
   .seg.active {
-    background: var(--pill-bg);
+    background: rgba(0, 189, 214, 0.12);
     color: var(--text-primary);
     cursor: default;
   }
