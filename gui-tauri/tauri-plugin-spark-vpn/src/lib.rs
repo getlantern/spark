@@ -12,6 +12,12 @@ pub(crate) mod persist;
 #[cfg(not(target_os = "android"))]
 mod desktop;
 
+// Unbounded (volunteer-proxy) control + aggregation loop + `spark://unbounded` event. Depends on
+// `persist` (durable settings) and `spark-sharing` (the peer-proxy pool). Gated the same as
+// `persist` — desktop only; the Android sharing path lands in a later Unbounded phase.
+#[cfg(not(target_os = "android"))]
+mod unbounded;
+
 // Phase 2a: app-side startup config fetch (links spark-core's kindling fetch). Desktop only —
 // Android fetches in the :vpn process over IPC (Phase 2b).
 #[cfg(not(target_os = "android"))]
@@ -118,6 +124,17 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::list_installed_apps,
             commands::get_excluded_apps,
             commands::set_excluded_apps,
+            // Unbounded (volunteer-proxy) commands. Desktop only — gated the same as the module.
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_start,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_stop,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_status,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_get_settings,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_set_settings,
         ])
         .setup(|app, _api| {
             app.manage(commands::SelectedServer::default());
@@ -136,6 +153,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             {
                 let ctl = platform::control(app)?;
                 app.manage(ctl);
+
+                // Unbounded (volunteer-proxy) live handles: the running sharing pool + its
+                // aggregation-loop task + latest status. Default = nothing running.
+                app.manage(unbounded::UnboundedState::default());
 
                 // Phase 2a: on every launch, fetch the config into the app's OWN cache dir —
                 // independent of VPN state — so the location list refreshes even before/without
