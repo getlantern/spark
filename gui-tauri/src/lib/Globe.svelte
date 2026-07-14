@@ -95,6 +95,7 @@
         .height(el.clientHeight)
         .backgroundColor("rgba(0,0,0,0)")
         .showGlobe(true)
+        .showGraticules(true)
         .showAtmosphere(true)
         .atmosphereColor(color)
         .atmosphereAltitude(0.18)
@@ -108,8 +109,14 @@
         .arcDashLength(0.5)
         .arcDashGap(1)
         .arcDashAnimateTime(1600);
-      // A plain colored sphere (no image texture) keeps the lazy chunk lean.
+      // A plain colored sphere (no image texture) keeps the lazy chunk lean — but without a texture
+      // globe.gl's default globe material is BLACK, so give it an on-brand deep-teal ocean with a
+      // faint emissive (so the unlit hemisphere isn't pure black) to match the cyan atmosphere/arcs.
       globe.globeImageUrl(null as unknown as string);
+      const mat = globe.globeMaterial();
+      mat?.color?.set?.("#0e3f4f");
+      mat?.emissive?.set?.("#07232c");
+      if (mat && "shininess" in mat) mat.shininess = 6;
 
       // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
       globe.controls().autoRotate = false;
