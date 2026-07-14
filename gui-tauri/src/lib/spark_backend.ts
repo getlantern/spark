@@ -47,6 +47,11 @@ export interface InstalledApp {
   icon?: string | null;
 }
 
+export interface UnboundedGeo { countryCode: string; lat: number; lon: number; }
+export interface UnboundedPeer { sessionId: string; geo: UnboundedGeo | null; }
+export interface UnboundedStatus { enabled: boolean; helpingNow: number; totalHelped: number; peers: UnboundedPeer[]; }
+export interface UnboundedSettings { autoEnable: boolean; hidden: boolean; welcomeSeen: boolean; }
+
 export interface SparkBackend {
   status(): Promise<SparkStatus>;
   connect(): Promise<void>;
@@ -71,6 +76,16 @@ export interface SparkBackend {
   getExcludedApps(): Promise<string[]>;
   /** Persist the excluded set; applied live (Android rebuilds the tunnel, no reconnect). */
   setExcludedApps(ids: string[]): Promise<void>;
+  /** Start the Unbounded volunteer proxy (this device helps censored users). */
+  unboundedStart(): Promise<void>;
+  /** Stop the Unbounded volunteer proxy. */
+  unboundedStop(): Promise<void>;
+  /** Current Unbounded view: enabled flag, live/total peers helped, and the active peer list. */
+  unboundedStatus(): Promise<UnboundedStatus>;
+  /** Durable Unbounded settings (auto-enable / hidden / welcome-seen). */
+  unboundedGetSettings(): Promise<UnboundedSettings>;
+  /** Persist any subset of the Unbounded settings (auto-enable / hidden / welcome-seen). */
+  unboundedSetSettings(settings: Partial<UnboundedSettings>): Promise<void>;
 }
 
 // MockBackend simulates the service for U0: connect → connecting → (≈900ms) →
@@ -88,7 +103,12 @@ const mockState: {
   routingMode: "smart" | "full";
   adBlockEnabled: boolean;
   excludedApps: string[];
-} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [] };
+  unbounded: UnboundedStatus;
+  unboundedTimer: ReturnType<typeof setInterval> | null;
+  autoEnable: boolean;
+  hidden: boolean;
+  welcomeSeen: boolean;
+} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [] }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false };
 
 export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
@@ -162,4 +182,54 @@ export class MockBackend implements SparkBackend {
   }
   async getExcludedApps(): Promise<string[]> { return [...mockState.excludedApps]; }
   async setExcludedApps(ids: string[]): Promise<void> { mockState.excludedApps = [...ids]; }
+
+  // A rotating cast of countries so the globe has something to plot at `npm run dev`; the real
+  // TauriBackend gets its peers from the `spark://unbounded` event over the plugin.
+  private static readonly geos: UnboundedGeo[] = [
+    { countryCode: "IR", lat: 35.7, lon: 51.4 },
+    { countryCode: "CN", lat: 39.9, lon: 116.4 },
+    { countryCode: "RU", lat: 55.8, lon: 37.6 },
+    { countryCode: "TR", lat: 41.0, lon: 28.98 },
+    { countryCode: "EG", lat: 30.0, lon: 31.2 },
+    { countryCode: "MM", lat: 16.8, lon: 96.2 },
+  ];
+
+  async unboundedStart(): Promise<void> {
+    mockState.unbounded.enabled = true;
+    // Only drive the simulated peer stream in a browser context; unit tests run under node
+    // (no `window`) and just assert the enabled flag flips synchronously above.
+    if (typeof window === "undefined" || mockState.unboundedTimer) return;
+    mockState.unboundedTimer = setInterval(() => {
+      const u = mockState.unbounded;
+      // Occasionally drop a peer, otherwise add one — a gentle churn around a handful of helpers.
+      if (u.peers.length > 2 && Math.random() < 0.3) {
+        u.peers.shift();
+      } else {
+        const geo = MockBackend.geos[Math.floor(Math.random() * MockBackend.geos.length)];
+        u.peers.push({ sessionId: crypto.randomUUID(), geo });
+        u.totalHelped += 1;
+      }
+      u.helpingNow = u.peers.length;
+    }, 2000);
+  }
+
+  async unboundedStop(): Promise<void> {
+    if (mockState.unboundedTimer) clearInterval(mockState.unboundedTimer);
+    mockState.unboundedTimer = null;
+    mockState.unbounded.enabled = false;
+    mockState.unbounded.helpingNow = 0;
+    mockState.unbounded.peers = [];
+    // totalHelped is cumulative — it survives stop.
+  }
+
+  async unboundedStatus(): Promise<UnboundedStatus> { return structuredClone(mockState.unbounded); }
+
+  async unboundedGetSettings(): Promise<UnboundedSettings> {
+    return { autoEnable: mockState.autoEnable, hidden: mockState.hidden, welcomeSeen: mockState.welcomeSeen };
+  }
+  async unboundedSetSettings(settings: Partial<UnboundedSettings>): Promise<void> {
+    if (settings.autoEnable !== undefined) mockState.autoEnable = settings.autoEnable;
+    if (settings.hidden !== undefined) mockState.hidden = settings.hidden;
+    if (settings.welcomeSeen !== undefined) mockState.welcomeSeen = settings.welcomeSeen;
+  }
 }

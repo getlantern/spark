@@ -7,7 +7,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { InstalledApp, ServerInfo, SparkBackend, SparkStatus, SplitTunnel } from "./spark_backend";
+import type { InstalledApp, ServerInfo, SparkBackend, SparkStatus, SplitTunnel, UnboundedSettings, UnboundedStatus } from "./spark_backend";
 
 export class TauriBackend implements SparkBackend {
   async status(): Promise<SparkStatus> {
@@ -60,6 +60,23 @@ export class TauriBackend implements SparkBackend {
   }
   async setExcludedApps(ids: string[]): Promise<void> {
     await invoke("plugin:spark-vpn|set_excluded_apps", { json: JSON.stringify(ids) });
+  }
+  async unboundedStart(): Promise<void> {
+    await invoke("plugin:spark-vpn|unbounded_start");
+  }
+  async unboundedStop(): Promise<void> {
+    await invoke("plugin:spark-vpn|unbounded_stop");
+  }
+  async unboundedStatus(): Promise<UnboundedStatus> {
+    return await invoke<UnboundedStatus>("plugin:spark-vpn|unbounded_status");
+  }
+  async unboundedGetSettings(): Promise<UnboundedSettings> {
+    return await invoke<UnboundedSettings>("plugin:spark-vpn|unbounded_get_settings");
+  }
+  async unboundedSetSettings(settings: Partial<UnboundedSettings>): Promise<void> {
+    // camelCase keys — Tauri maps them to the Rust command's snake_case params
+    // (auto_enable / hidden / welcome_seen); omitted keys stay unchanged.
+    await invoke("plugin:spark-vpn|unbounded_set_settings", settings);
   }
 }
 
