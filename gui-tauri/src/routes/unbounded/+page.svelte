@@ -10,6 +10,7 @@
   } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { listen } from "@tauri-apps/api/event";
+  import Globe from "$lib/Globe.svelte";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -97,10 +98,8 @@
       <p>{$_("unbounded_help_banner")}</p>
     </div>
 
-    <!-- TODO(Task 6.1): mount <Globe {peers} /> here -->
-    <div class="globe-placeholder">
-      <span class="sphere" aria-hidden="true"></span>
-      <span class="ph-label">{$_("unbounded_globe_placeholder")}</span>
+    <div class="globe-mount">
+      <Globe {peers} />
     </div>
 
     <div class="card">
@@ -162,21 +161,15 @@
   .banner .ic { color: var(--text-tertiary); }
   .banner p { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text-secondary); }
 
-  /* Placeholder for the WebGL globe (Task 6.1). A neutral, sized area so layout is stable. */
-  .globe-placeholder {
+  /* Sized mount for the WebGL globe. Same footprint as the former placeholder so layout is stable. */
+  .globe-mount {
     margin-top: 12px;
     height: 220px;
     border-radius: 16px;
     background: var(--surface);
     box-shadow: 0 4px 32px var(--shadow);
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    overflow: hidden;
   }
-  .globe-placeholder .sphere {
-    width: 120px; height: 120px; border-radius: 50%;
-    border: 2px solid var(--border);
-    background: radial-gradient(circle at 35% 30%, var(--hover), transparent 65%);
-  }
-  .globe-placeholder .ph-label { font-size: 13px; font-weight: 500; color: var(--text-tertiary); }
 
   .card {
     background: var(--surface); border-radius: 16px; box-shadow: 0 4px 32px var(--shadow);
