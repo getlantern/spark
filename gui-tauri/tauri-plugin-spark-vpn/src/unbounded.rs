@@ -46,9 +46,10 @@ fn base_dir<R: Runtime>(app: &AppHandle<R>) -> crate::Result<PathBuf> {
 }
 
 /// Read + parse the Unbounded block from the app's own cached `config_raw.json` (the same cache the
-/// location list reads). Returns the default (disabled) config when the cache is absent/unreadable or
-/// carries no `unbounded`/`features.unbounded` section — so a first-launch client with no config yet
-/// simply reports the feature as unavailable rather than erroring.
+/// location list reads). Returns the default (disabled) config when the cache file does not exist yet
+/// (the normal pre-first-fetch state) or when it parses but carries no `unbounded`/`features.unbounded`
+/// section — so a first-launch client simply reports the feature as unavailable. Other I/O errors and
+/// JSON parse failures propagate as an error rather than being masked as "unavailable".
 fn read_unbounded_config<R: Runtime>(app: &AppHandle<R>) -> crate::Result<UnboundedConfig> {
     let base = base_dir(app)?;
     let path = crate::desktop::app_config_cache_dir(&base).join("config_raw.json");
@@ -269,11 +270,12 @@ pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Resu
     }
     *lock_recover(&state.latest_status) = None;
 
-    crate::persist::save_unbounded_enabled(&base, false)?;
-
-    // Emit a stopped snapshot: no peers, nobody helped right now, but keep the cumulative total.
+    // Emit the stopped snapshot BEFORE persisting the flag: the pool is already torn down, so the
+    // UI/tray must reflect "off" even if the disk write fails (the error still propagates after).
+    // No peers, nobody helping now, but keep the cumulative total.
     let total = crate::persist::load_unbounded_total_helped(&base);
     emit_snapshot(&app, false, &empty_status(), total);
+    crate::persist::save_unbounded_enabled(&base, false)?;
     Ok(())
 }
 
@@ -282,12 +284,13 @@ pub(crate) async fn unbounded_status<R: Runtime>(
     app: AppHandle<R>,
 ) -> crate::Result<serde_json::Value> {
     let base = base_dir(&app)?;
-    let enabled = crate::persist::load_unbounded_enabled(&base);
     let total = crate::persist::load_unbounded_total_helped(&base);
     let state = app.state::<UnboundedState>();
 
-    // Live values only while a pool is running (its loop keeps `latest_status` fresh); otherwise
-    // report nobody helping / no peers.
+    // `enabled` reflects whether a pool is actually running (live handle), NOT the persisted flag —
+    // otherwise a restart with the persisted flag left `true` (but no pool started, e.g. auto-enable
+    // off) would report `enabled: true` with an empty status. Live values only while running (the
+    // loop keeps `latest_status` fresh); otherwise nobody helping / no peers.
     let running = lock_recover(&state.handle).is_some();
     let status = if running {
         lock_recover(&state.latest_status)
@@ -298,7 +301,7 @@ pub(crate) async fn unbounded_status<R: Runtime>(
     };
 
     Ok(serde_json::to_value(snapshot_payload(
-        enabled, &status, total,
+        running, &status, total,
     ))?)
 }
 
