@@ -87,10 +87,11 @@
 
 <main class="app">
   <header class="appbar">
-    <button class="iconbtn" aria-label={$_("back")} onclick={() => goto("/")}>
-      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+    <button class="iconbtn" aria-label={$_("menu")} onclick={() => goto("/settings")}>
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <span class="title">{$_("unbounded_title")}</span>
+    <span class="iconbtn spacer" aria-hidden="true"></span>
   </header>
 
   <div class="scroll">
@@ -105,23 +106,29 @@
 
     <div class="card">
       <div class="row toggle-row">
-        <div class="meta"><div class="name">{$_("unbounded_status")}</div></div>
+        <span class="ic">{@render globeIcon()}</span>
+        <div class="meta">
+          <div class="name">{$_("unbounded_status")}: <span class="state" class:on={status.enabled}>{status.enabled ? $_("unbounded_state_enabled") : $_("unbounded_state_disabled")}</span></div>
+        </div>
         <button class="switch" class:on={status.enabled} role="switch" aria-checked={status.enabled} aria-busy={busy} aria-label={$_("unbounded_status")} onclick={toggle}><span class="knob"></span></button>
       </div>
       <div class="divider"></div>
       <div class="row stat-row">
+        <span class="ic">{@render personIcon()}</span>
         <div class="meta"><div class="name">{$_("unbounded_helping_now")}</div></div>
-        <span class="pill">{status.helpingNow}</span>
+        <span class="stat">{status.helpingNow}</span>
       </div>
       <div class="divider"></div>
       <div class="row stat-row">
+        <span class="ic">{@render peopleIcon()}</span>
         <div class="meta"><div class="name">{$_("unbounded_total_helped")}</div></div>
-        <span class="pill">{status.totalHelped}</span>
+        <span class="stat">{status.totalHelped}</span>
       </div>
     </div>
 
     <div class="card" style="margin-top:12px">
       <div class="row toggle-row">
+        <span class="ic">{@render autoIcon()}</span>
         <div class="meta">
           <div class="name">{$_("unbounded_auto_enable")}</div>
           <div class="sub">{$_("unbounded_auto_enable_sub")}</div>
@@ -135,6 +142,19 @@
 
   <BottomTabs current="unbounded" unboundedOn={status.enabled} />
 </main>
+
+{#snippet globeIcon()}
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg>
+{/snippet}
+{#snippet personIcon()}
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg>
+{/snippet}
+{#snippet peopleIcon()}
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M2.5 19a6.5 6.5 0 0 1 13 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8"/><path d="M18 19a6 6 0 0 0-3.2-5.3"/></svg>
+{/snippet}
+{#snippet autoIcon()}
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><polyline points="21 3 21 8 16 8"/><path d="M12 8.5v3.5l2.4 1.4"/></svg>
+{/snippet}
 
 {#if showWelcome}
   <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="unbounded-welcome-title">
@@ -150,15 +170,19 @@
   .app { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
   .appbar {
     height: 56px; flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px;
-    background: var(--bg); border-bottom: 1px solid var(--border);
-    box-shadow: 0 4px 12px rgba(0, 97, 98, 0.06);
+    background: var(--bg);
   }
   .iconbtn {
     width: 40px; height: 40px; border: none; background: none; cursor: pointer;
     display: grid; place-items: center; color: var(--text-tertiary); border-radius: 8px;
   }
+  .spacer { visibility: hidden; }
   :global([dir="rtl"]) .iconbtn svg { transform: scaleX(-1); }
-  .title { font-size: 19px; font-weight: 700; letter-spacing: -0.2px; color: var(--text-primary); }
+  /* Centered, bold, uppercase title flanked by the menu button + an equal-width spacer. */
+  .title {
+    flex: 1; text-align: center; font-size: 20px; font-weight: 800; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--text-primary);
+  }
 
   .scroll { flex: 1; overflow-y: auto; padding: 12px 16px 20px; }
 
@@ -166,13 +190,11 @@
   .banner .ic { color: var(--text-tertiary); }
   .banner p { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text-secondary); }
 
-  /* Sized mount for the WebGL globe. Same footprint as the former placeholder so layout is stable. */
+  /* The globe is the hero of the screen — it floats directly on the page background (no card),
+     tall and centered, matching the design. */
   .globe-mount {
-    margin-top: 12px;
-    height: 220px;
-    border-radius: 16px;
-    background: var(--surface);
-    box-shadow: 0 4px 32px var(--shadow);
+    margin-top: 4px;
+    height: 300px;
     overflow: hidden;
   }
 
@@ -185,18 +207,20 @@
     background: none; border: none; font-family: var(--font); text-align: start;
   }
   .toggle-row, .stat-row { justify-content: space-between; }
+  .row .ic { width: 24px; display: inline-flex; justify-content: center; color: var(--text-secondary); flex-shrink: 0; }
   .meta { flex: 1; min-width: 0; }
   .name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+  /* "Status: Enabled" — the state word turns green when sharing is on. */
+  .state { font-weight: 700; color: var(--text-tertiary); }
+  .state.on { color: #2fa84f; }
   .sub {
     margin-top: 2px; font-size: 12px; font-weight: 500; color: var(--text-tertiary);
     letter-spacing: 0.01em;
   }
   .divider { height: 1px; background: var(--border); margin: 0 16px; }
 
-  .pill {
-    font-size: 14px; font-weight: 700; padding: 3px 10px; border-radius: 999px; white-space: nowrap;
-    color: var(--text-secondary); background: var(--pill-bg);
-  }
+  /* Stat values: prominent teal numbers, right-aligned (no pill). */
+  .stat { font-size: 16px; font-weight: 800; color: #1a8a9c; white-space: nowrap; }
 
   .switch {
     width: 46px; height: 28px; border-radius: 999px; border: none; background: var(--switch-off);

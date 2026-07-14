@@ -78,6 +78,11 @@
     return fresh;
   }
 
+  // The green endpoint dots — one per current arc's peer location.
+  function arcPoints(): { lat: number; lng: number }[] {
+    return arcs.map((a) => ({ lat: a.endLat, lng: a.endLng }));
+  }
+
   onMount(() => {
     if (typeof window === "undefined" || !el) return;
 
@@ -100,35 +105,41 @@
         .arcStartLng((o: object) => asArc(o).startLng)
         .arcEndLat((o: object) => asArc(o).endLat)
         .arcEndLng((o: object) => asArc(o).endLng)
-        // Per-arc color (teal/gold), fading from transparent at HOME to solid at the peer.
+        // Per-arc color (teal/gold), a solid gradient that stays visible along its whole length
+        // and reads prominently over the light globe (matching the design's bold arcs).
         .arcColor((o: object) => {
           const c = asArc(o).color;
-          return [`${c}00`, c];
+          return [`${c}66`, c];
         })
-        .arcStroke(0.6)
-        .arcAltitudeAutoScale(0.45)
-        .arcDashLength(0.5)
-        .arcDashGap(1)
-        .arcDashAnimateTime(1600);
+        .arcStroke(1.6)
+        .arcAltitudeAutoScale(0.62)
+        .arcDashLength(1)
+        .arcDashGap(0)
+        .arcDashAnimateTime(0)
+        // A green dot at each peer endpoint, as in the design.
+        .pointColor(() => "#33a852")
+        .pointAltitude(0.012)
+        .pointRadius(0.34);
       // A plain colored sphere (no image texture) keeps the lazy chunk lean. Without a texture the
       // default globe material is black, so paint a light near-white ocean with a strong emissive so
       // the sphere reads as an evenly-lit, soft light globe (matching the design), not a shaded dark
       // ball. Continents are drawn as slightly-darker polygons below.
       globe.globeImageUrl(null as unknown as string);
       const mat = globe.globeMaterial();
-      mat?.color?.set?.("#eaeff3");
-      mat?.emissive?.set?.("#c4ced6");
-      if (mat && "shininess" in mat) mat.shininess = 3;
+      mat?.color?.set?.("#f2f6f8");
+      mat?.emissive?.set?.("#dbe3e9");
+      if (mat && "shininess" in mat) mat.shininess = 2;
 
       // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
       globe.controls().autoRotate = false;
       globe.controls().enableZoom = false;
-      globe.pointOfView({ lat: HOME.lat, lng: HOME.lng, altitude: 2.4 });
+      // Lower altitude → the globe fills the frame like the design (it's the hero of the screen).
+      globe.pointOfView({ lat: HOME.lat, lng: HOME.lng, altitude: 1.9 });
 
       rendered = true;
       // Draw whatever peers already exist at mount time.
       rebuildArcs(new Set());
-      globe.arcsData(arcs);
+      globe.arcsData(arcs).pointsData(arcPoints());
       syncAnimation();
 
       // Vector continents from a bundled TopoJSON (in this lazy chunk — no CDN, no raster earth
@@ -143,10 +154,11 @@
           const countries = (feature as any)(topo, topo.objects.countries).features;
           globe
             .polygonsData(countries)
-            // Continents: a slightly-darker cool grey than the near-white ocean, with soft borders.
-            .polygonCapColor(() => "#c8d3da")
+            // Continents: a soft, very-light cool grey over the near-white ocean with faint borders,
+            // matching the design's pale earth.
+            .polygonCapColor(() => "#dbe3e8")
             .polygonSideColor(() => "rgba(0,0,0,0)")
-            .polygonStrokeColor(() => "rgba(150,166,176,0.45)")
+            .polygonStrokeColor(() => "rgba(160,176,186,0.35)")
             .polygonAltitude(0.006);
         }
       } catch (e) {
@@ -182,12 +194,12 @@
 
     const prevIds = new Set(arcs.map((a) => a.id));
     const fresh = rebuildArcs(prevIds);
-    globe.arcsData(arcs);
+    globe.arcsData(arcs).pointsData(arcPoints());
 
     if (current.length === 0) return; // cleared; leave the globe parked
     const newest = fresh.length ? arcs.find((a) => a.id === fresh[fresh.length - 1]) : undefined;
     if (newest) {
-      globe.pointOfView({ lat: newest.endLat, lng: newest.endLng, altitude: 2.4 }, 900);
+      globe.pointOfView({ lat: newest.endLat, lng: newest.endLng, altitude: 1.9 }, 900);
     }
   });
 

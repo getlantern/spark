@@ -39,6 +39,8 @@
   "unbounded_help_banner": "Help others bypass censorship by securely sharing your connection.",
   "unbounded_globe_placeholder": "Connections appear here",
   "unbounded_status": "Status",
+  "unbounded_state_enabled": "Enabled",
+  "unbounded_state_disabled": "Disabled",
   "unbounded_helping_now": "People you are helping right now",
   "unbounded_total_helped": "Total people helped to date",
   "unbounded_auto_enable": "Auto-enable Unbounded",
