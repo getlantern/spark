@@ -463,10 +463,70 @@
           "markdownDescription": "Denies the status command without any pre-configured scope."
         },
         {
-          "description": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-get-ad-block-enabled`\n- `allow-set-ad-block-enabled`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`",
+          "description": "Enables the unbounded_get_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-unbounded-get-settings",
+          "markdownDescription": "Enables the unbounded_get_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the unbounded_get_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-unbounded-get-settings",
+          "markdownDescription": "Denies the unbounded_get_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the unbounded_set_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-unbounded-set-settings",
+          "markdownDescription": "Enables the unbounded_set_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the unbounded_set_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-unbounded-set-settings",
+          "markdownDescription": "Denies the unbounded_set_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the unbounded_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-unbounded-start",
+          "markdownDescription": "Enables the unbounded_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the unbounded_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-unbounded-start",
+          "markdownDescription": "Denies the unbounded_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the unbounded_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-unbounded-status",
+          "markdownDescription": "Enables the unbounded_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the unbounded_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-unbounded-status",
+          "markdownDescription": "Denies the unbounded_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the unbounded_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-unbounded-stop",
+          "markdownDescription": "Enables the unbounded_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the unbounded_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-unbounded-stop",
+          "markdownDescription": "Denies the unbounded_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-get-ad-block-enabled`\n- `allow-set-ad-block-enabled`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`\n- `allow-unbounded-start`\n- `allow-unbounded-stop`\n- `allow-unbounded-status`\n- `allow-unbounded-get-settings`\n- `allow-unbounded-set-settings`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-get-ad-block-enabled`\n- `allow-set-ad-block-enabled`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`"
+          "markdownDescription": "Allows all spark-vpn tunnel-control commands.\n#### This default permission set includes:\n\n- `allow-connect`\n- `allow-disconnect`\n- `allow-status`\n- `allow-servers`\n- `allow-select-server`\n- `allow-get-split-tunnel`\n- `allow-set-split-tunnel`\n- `allow-get-routing-mode`\n- `allow-set-routing-mode`\n- `allow-get-ad-block-enabled`\n- `allow-set-ad-block-enabled`\n- `allow-list-installed-apps`\n- `allow-get-excluded-apps`\n- `allow-set-excluded-apps`\n- `allow-unbounded-start`\n- `allow-unbounded-stop`\n- `allow-unbounded-status`\n- `allow-unbounded-get-settings`\n- `allow-unbounded-set-settings`"
         }
       ]
     }
