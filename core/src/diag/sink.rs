@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use tokio::sync::{mpsc, oneshot, Notify};
 
-use super::{DiagEvent, DiagLevel};
+use super::{events, DiagEvent};
 
 /// Ring depth — sized for the DEBUG+ capture posture (§C2 wants a rich recent window;
 /// logbus's 256 is for a live UI stream).
@@ -400,11 +400,8 @@ async fn writer_loop(
                 let mut files = lock_files(&files);
                 files.append_both(&line);
                 if overflowed > 0 {
-                    let mut drop_ev =
-                        DiagEvent::new(DiagLevel::Warn, component, "diag.buffer_dropped");
-                    drop_ev
-                        .fields
-                        .insert("count".to_string(), overflowed.into());
+                    let mut drop_ev = events::diag_buffer_dropped(overflowed);
+                    drop_ev.component = component;
                     files.append_both(&drop_ev.to_jsonl());
                 }
             }
@@ -444,6 +441,7 @@ pub fn emit_error(ev: DiagEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diag::DiagLevel;
 
     /// Unique per-test scratch dir (pid + call line), cleared before use.
     fn test_dir(line: u32) -> PathBuf {
