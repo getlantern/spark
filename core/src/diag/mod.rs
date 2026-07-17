@@ -13,6 +13,7 @@ pub mod events;
 pub mod layer;
 pub mod otlp;
 pub mod sink;
+pub mod span;
 
 pub use sink::{emit, emit_error, install, DiagSink};
 

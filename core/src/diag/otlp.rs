@@ -13,6 +13,7 @@
 
 use serde_json::{json, Value};
 
+use super::span::DiagSpan;
 use super::{DiagEvent, DiagLevel};
 
 /// Resource-level identity attached to every batch (getlantern/semconv names; the
@@ -207,13 +208,86 @@ fn build_log_record(ev: &DiagEvent, trace_ctx: Option<(&[u8; 16], &[u8; 8])>) ->
     record
 }
 
+/// Encode finished spans as one OTLP/HTTP JSON traces payload.
+///
+/// Produces the OTLP/Traces JSON envelope accepted by SigNoz's `/v1/traces` endpoint:
+/// `{"resourceSpans":[{"resource":{"attributes":[...]},"scopeSpans":[{"scope":{"name":"spark-diag"},"spans":[...]}]}]}`
+///
+/// Spans without an error carry no `status` field (OTLP interprets absence as OK).
+/// Spans with `error: Some(msg)` carry `{"status":{"code":2,"message":msg}}` (code 2 =
+/// STATUS_CODE_ERROR per the OTLP spec).
+pub fn encode_spans(res: &ResourceAttrs, spans: &[DiagSpan]) -> Vec<u8> {
+    let resource_attrs = build_resource_attrs(res);
+    let span_objects: Vec<Value> = spans.iter().map(build_span_object).collect();
+
+    let payload = json!({
+        "resourceSpans": [{
+            "resource": {
+                "attributes": resource_attrs
+            },
+            "scopeSpans": [{
+                "scope": { "name": "spark-diag" },
+                "spans": span_objects
+            }]
+        }]
+    });
+
+    serde_json::to_vec(&payload).unwrap_or_else(|e| {
+        tracing::debug!(err = %e, "diag: OTLP spans encoding failed");
+        b"{}".to_vec()
+    })
+}
+
+fn hex16(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex8(bytes: &[u8; 8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn build_span_object(span: &DiagSpan) -> Value {
+    let mut obj = json!({
+        "traceId": hex16(&span.trace_id),
+        "spanId": hex8(&span.span_id),
+        "name": span.name,
+        // SPAN_KIND_INTERNAL = 1 (deliberate hand-coded spans only)
+        "kind": 1,
+        "startTimeUnixNano": span.start_unix_nano.to_string(),
+        "endTimeUnixNano": span.end_unix_nano.to_string(),
+        "attributes": build_span_attrs(&span.attrs)
+    });
+
+    if let Some(pid) = &span.parent_span_id {
+        obj["parentSpanId"] = Value::String(hex8(pid));
+    }
+
+    // status: omit entirely for OK spans; set code=2 for errors.
+    if let Some(msg) = &span.error {
+        obj["status"] = json!({ "code": 2, "message": msg });
+    }
+
+    obj
+}
+
+fn build_span_attrs(attrs: &std::collections::BTreeMap<String, serde_json::Value>) -> Vec<Value> {
+    attrs
+        .iter()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, v)| json!({ "key": k, "value": to_otlp_value(v) }))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests (TDD: written before implementation was complete)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::diag::span::DiagSpan;
     use crate::diag::{events, DiagLevel};
 
     fn test_res() -> ResourceAttrs {
@@ -363,6 +437,86 @@ mod tests {
             .expect("arrayValue.values must be an array");
         assert_eq!(arr_vals[0]["stringValue"], "alpha");
         assert_eq!(arr_vals[1]["stringValue"], "beta");
+    }
+
+    #[test]
+    fn encodes_otlp_traces_envelope() {
+        let res = test_res();
+
+        // Span 1: no error, no parent.
+        let mut attrs1 = BTreeMap::new();
+        attrs1.insert("phase".to_string(), serde_json::json!("init"));
+        let span1 = DiagSpan {
+            trace_id: *b"0123456789abcdef",
+            span_id: *b"01234567",
+            parent_span_id: None,
+            name: "unbounded.session",
+            start_unix_nano: 1_700_000_000_000_000_000,
+            end_unix_nano: 1_700_000_000_500_000_000,
+            error: None,
+            attrs: attrs1,
+        };
+
+        // Span 2: with error, with parent.
+        let span2 = DiagSpan {
+            trace_id: *b"0123456789abcdef",
+            span_id: *b"89abcdef",
+            parent_span_id: Some(*b"01234567"),
+            name: "signaling",
+            start_unix_nano: 1_700_000_000_100_000_000,
+            end_unix_nano: 1_700_000_000_200_000_000,
+            error: Some("boom".to_string()),
+            attrs: BTreeMap::new(),
+        };
+
+        let body = encode_spans(&res, &[span1, span2]);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Resource attributes
+        let attrs = &v["resourceSpans"][0]["resource"]["attributes"];
+        let find = |k: &str| {
+            attrs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["key"] == k)
+                .map(|a| a["value"]["stringValue"].clone())
+        };
+        assert_eq!(find("service.name").unwrap(), "spark");
+
+        let spans = v["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        assert_eq!(spans.len(), 2);
+
+        // Span 1 assertions
+        let s1 = &spans[0];
+        assert_eq!(s1["traceId"], "30313233343536373839616263646566");
+        assert_eq!(s1["spanId"], "3031323334353637");
+        assert!(
+            s1.get("parentSpanId").is_none() || s1["parentSpanId"].is_null(),
+            "root span must have no parentSpanId"
+        );
+        assert_eq!(s1["kind"], 1);
+        assert_eq!(s1["startTimeUnixNano"], "1700000000000000000");
+        assert_eq!(s1["endTimeUnixNano"], "1700000000500000000");
+        // Attributes present
+        let sa1 = s1["attributes"].as_array().unwrap();
+        assert!(
+            sa1.iter().any(|a| a["key"] == "phase"),
+            "phase attr must be present"
+        );
+        // status ABSENT for no-error span
+        assert!(
+            s1.get("status").is_none() || s1["status"].is_null(),
+            "status must be absent for an OK span"
+        );
+
+        // Span 2 assertions — parentSpanId is the hex of b"01234567" (span1's spanId)
+        let s2 = &spans[1];
+        assert_eq!(s2["parentSpanId"], "3031323334353637");
+        assert_eq!(s2["status"]["code"], 2);
+        assert_eq!(s2["status"]["message"], "boom");
     }
 
     #[test]
