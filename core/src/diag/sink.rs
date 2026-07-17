@@ -114,11 +114,16 @@ impl CappedFile {
     /// (see [`DiagSink::take_spool_batch`]); the old fd would keep appending to the
     /// unlinked file otherwise.
     fn reopen(&mut self) -> std::io::Result<()> {
-        self.file = OpenOptions::new()
+        // Both fields update together or not at all: a metadata() failure must not
+        // leave a fresh fd paired with the previous file's length (which would
+        // trigger a spurious rotation on the next append).
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        self.len = self.file.metadata()?.len();
+        let len = file.metadata()?.len();
+        self.file = file;
+        self.len = len;
         Ok(())
     }
 }
@@ -598,6 +603,37 @@ mod tests {
         assert_eq!(taken, vec![line_a.to_string(), line_b.to_string()]);
         // Recovery is spool-only: these lines hit diag.log when first written.
         assert_eq!(fs::read_to_string(dir.join(LOG_NAME)).unwrap(), "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn take_recovers_leftover_take_file() {
+        let dir = test_dir(line!());
+        let sink = DiagSink::new(&dir, "app").unwrap();
+        // Push 2 events through the normal writer path.
+        sink.push(ev(0));
+        sink.push(ev(1));
+        sink.flush_writer().await;
+
+        // Simulate an interrupted prior take: write two extra JSONL lines directly
+        // into the take file (as if a previous take renamed the spool out but crashed
+        // before deleting the take-file).
+        let extra_a = DiagEvent::new(DiagLevel::Info, "app", "test.leftover").to_jsonl();
+        let extra_b = DiagEvent::new(DiagLevel::Warn, "app", "test.leftover2").to_jsonl();
+        fs::write(dir.join(TAKE_NAME), format!("{extra_a}\n{extra_b}\n")).unwrap();
+
+        // take_spool_batch must fold the leftover take-file back and return all 4 lines.
+        let taken = sink.take_spool_batch(usize::MAX).unwrap();
+        assert_eq!(
+            taken.len(),
+            4,
+            "expected 2 pushed events + 2 recovered leftover lines, got: {taken:?}"
+        );
+        // The take-file must be gone after a successful take.
+        assert!(
+            !dir.join(TAKE_NAME).exists(),
+            "leftover take-file must be consumed"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
