@@ -9,6 +9,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+pub mod sink;
+
+pub use sink::{emit, emit_error, install, DiagSink};
+
 /// Severity level for a [`DiagEvent`], serialized in lowercase for JSONL / OTLP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
