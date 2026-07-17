@@ -29,7 +29,7 @@ pub fn unbounded_ice_gathering(candidate_types: &[&str], count: u64) -> DiagEven
     let mut ev = DiagEvent::new(DiagLevel::Info, "app", "unbounded.ice_gathering");
     let arr: Value = candidate_types
         .iter()
-        .map(|s| Value::String(s.to_string()))
+        .map(|s| Value::String(crate::redact::redact_addrs(s).into_owned()))
         .collect();
     ev.fields.insert("candidate_types".into(), arr);
     ev.fields.insert("count".into(), count.into());
@@ -212,6 +212,7 @@ mod tests {
             unbounded_peer_disconnected("s", 1, 2, "reset by 8.8.8.8"),
             unbounded_signaling("connect", Some(5), Some("timeout at 9.9.9.9")),
             error_webview("fetch to 172.16.0.1 failed", "app.js"),
+            unbounded_ice_gathering(&["host", "srflx via 1.2.3.4"], 2),
         ];
         for ev in evs {
             let line = ev.to_jsonl();
