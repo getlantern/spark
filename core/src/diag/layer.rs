@@ -215,6 +215,9 @@ impl<S: Subscriber> Layer<S> for DiagLayer {
         let diag_level = tracing_level_to_diag(tracing_level);
         let ev = events::log(diag_level, &message, target);
 
+        // §C2a: for errors this blocks the calling thread on a mutex + two write_all
+        // syscalls (the synchronous fast path). Accepted: errors are rare, and crash
+        // durability outweighs the one-off latency.
         self.forward_event(ev, is_error);
     }
 }
@@ -445,6 +448,15 @@ mod tests {
         {
             let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             set_capture_level(DiagLevel::Error);
+            // Drop-based restore: a panic mid-test must not leave the process-global
+            // knob at Error, which would spuriously filter the other tests' events.
+            struct RestoreKnob;
+            impl Drop for RestoreKnob {
+                fn drop(&mut self) {
+                    set_capture_level(DiagLevel::Debug);
+                }
+            }
+            let _restore = RestoreKnob;
 
             let layer = DiagLayer::with_sink(Arc::clone(&sink));
             let subscriber = tracing_subscriber::registry().with(layer);
@@ -453,10 +465,7 @@ mod tests {
                 tracing::info!(target: "spark_core::x", "should-be-dropped");
                 tracing::error!(target: "spark_core::x", "must-survive");
             });
-
-            // Restore before releasing the lock.
-            set_capture_level(DiagLevel::Debug);
-            // _guard drops here, releasing the lock.
+            // _restore then _guard drop here: knob restored before the lock releases.
         }
 
         // Error uses the §C2a synchronous fast path — no flush needed.
