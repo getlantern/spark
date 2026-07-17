@@ -185,6 +185,12 @@ still harvests the whole `tracing` stream so nothing is lost.
   local debugging. Only the local opt-out disables it.
 - **Never blocks a hot path.** Push is a lossy `try_send`, exactly like
   `LogForwarder::on_event`'s `tx.try_send`.
+- **Hard disk-footprint bound.** Every local file is size-capped with a single rotation
+  generation (never a `.2`): spool 4 MB + `.1` 4 MB, backup log 5 MB + `.1` 5 MB —
+  **worst-case ≈ 18 MB total** (plus a transient ≤4 MB take-file during an upload batch),
+  and that worst case only occurs when uploads fail for an extended period at full DEBUG
+  volume. Steady state is a few MB because the spool truncates on every successful
+  upload. Oldest data is dropped at rotation, by design.
 
 ### C2a. Unexpected-error capture (first-class — never lose an error)
 
