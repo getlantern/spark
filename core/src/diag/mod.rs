@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 pub mod events;
+pub mod layer;
 pub mod sink;
 
 pub use sink::{emit, emit_error, install, DiagSink};

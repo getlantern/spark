@@ -20,6 +20,11 @@ socket2.workspace = true
 libc.workspace = true
 bytes.workspace = true
 tracing.workspace = true
+# `Layer` trait used by `DiagLayer` (diag::layer). The whole crate is pure-Rust and has no C build;
+# env-filter (the only large optional piece) is not needed in core. Already in the workspace, so no
+# new pin; pulling it as a direct dep for the `Layer` trait impl is the right level (not dev-only,
+# because `DiagLayer` is a public production type).
+tracing-subscriber.workspace = true
 serde.workspace = true
 toml.workspace = true
 # JSON for the Lantern `config_raw.json` adapter (config::lantern). Pure-Rust, no C deps.
