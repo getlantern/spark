@@ -27,6 +27,8 @@ pub fn unbounded_attempt_started(slot: usize) -> DiagEvent {
 /// ICE candidate gathering complete; records candidate types seen and count.
 pub fn unbounded_ice_gathering(candidate_types: &[&str], count: u64) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Info, "app", "unbounded.ice_gathering");
+    // Can't use insert_str (it takes &str, not arrays): hand-roll the same
+    // redact_addrs call per element so array fields keep the §C5 backstop.
     let arr: Value = candidate_types
         .iter()
         .map(|s| Value::String(crate::redact::redact_addrs(s).into_owned()))
@@ -44,7 +46,9 @@ pub fn unbounded_peer_connected(
     peer_region: Option<&str>,
 ) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Info, "app", "unbounded.peer_connected");
-    ev.session = Some(session.to_string());
+    // Session ids are opaque tokens in practice, but the §C5 backstop applies to every
+    // string that reaches the wire — redact in case a caller embeds an address.
+    ev.session = Some(crate::redact::redact_addrs(session).into_owned());
     ev.fields
         .insert("nat_traversal_ms".into(), nat_traversal_ms.into());
     ev.insert_str("selected_pair_type", selected_pair_type);
@@ -62,7 +66,7 @@ pub fn unbounded_throughput_sample(
     interval_ms: u64,
 ) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Debug, "app", "unbounded.throughput_sample");
-    ev.session = Some(session.to_string());
+    ev.session = Some(crate::redact::redact_addrs(session).into_owned());
     ev.fields.insert("bytes_up".into(), bytes_up.into());
     ev.fields.insert("bytes_down".into(), bytes_down.into());
     ev.fields.insert("interval_ms".into(), interval_ms.into());
@@ -77,7 +81,7 @@ pub fn unbounded_peer_disconnected(
     reason: &str,
 ) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Info, "app", "unbounded.peer_disconnected");
-    ev.session = Some(session.to_string());
+    ev.session = Some(crate::redact::redact_addrs(session).into_owned());
     ev.fields.insert("duration_ms".into(), duration_ms.into());
     ev.fields.insert("bytes_total".into(), bytes_total.into());
     ev.insert_str("reason", reason);
@@ -213,6 +217,12 @@ mod tests {
             unbounded_signaling("connect", Some(5), Some("timeout at 9.9.9.9")),
             error_webview("fetch to 172.16.0.1 failed", "app.js"),
             unbounded_ice_gathering(&["host", "srflx via 1.2.3.4"], 2),
+            unbounded_peer_connected("peer-10.0.0.9", 1, "srflx", Some("region 10.0.0.1")),
+            unbounded_geo_failed("geoip 192.168.1.1 not found"),
+            config_fetch_outcome("ok", "direct from 1.2.3.4", 100),
+            diag_lock_poisoned("at 172.16.0.1"),
+            diag_config_applied("knob", "val with 8.8.8.8"),
+            error_task_failed("uploader", "connect to 10.0.0.1 refused"),
         ];
         for ev in evs {
             let line = ev.to_jsonl();
@@ -223,6 +233,8 @@ mod tests {
                 "8.8.8.8",
                 "9.9.9.9",
                 "172.16.0.1",
+                "192.168.1.1",
+                "10.0.0.9",
             ] {
                 assert!(!line.contains(ip), "leaked {ip} in {line}");
             }
