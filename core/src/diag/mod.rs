@@ -34,12 +34,18 @@ pub struct DiagEvent {
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// Raw field storage. Prefer [`DiagEvent::insert_str`] for strings — it applies IP
+    /// redaction (spec §C5); inserting a string Value directly bypasses that backstop.
+    /// Non-string values (numbers/bools/arrays) may be inserted directly.
     pub fields: BTreeMap<String, serde_json::Value>,
 }
 
 impl DiagEvent {
     /// Create a new event with the current wall-clock timestamp (unix millis).
     pub fn new(level: DiagLevel, component: &'static str, kind: &'static str) -> Self {
+        // A pre-epoch clock (badly-synced device) maps to ts=0 rather than erroring:
+        // the server's receipt time is the trusted clock (spec §C1), so a sentinel
+        // timestamp is preferable to dropping the event.
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -62,9 +68,16 @@ impl DiagEvent {
         );
     }
 
-    /// Serialize the event to a single-line JSON string (JSONL format).
+    /// One-line JSON for the spool / backup log.
     pub fn to_jsonl(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
+        // Serialization is infallible for this shape (serde_json::Number can't hold
+        // NaN/Inf, everything else is primitives); the fallback is defense in depth.
+        // debug!, not error!: diag internals must never re-enter the capture layer
+        // at a captured-by-default level.
+        serde_json::to_string(self).unwrap_or_else(|e| {
+            tracing::debug!(err = %e, "diag: event serialization failed");
+            "{}".into()
+        })
     }
 }
 
