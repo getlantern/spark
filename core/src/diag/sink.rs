@@ -32,6 +32,10 @@ const LOG_CAP: u64 = 5 * 1024 * 1024;
 
 const SPOOL_NAME: &str = "diagnostics.jsonl";
 const LOG_NAME: &str = "diag.log";
+/// Mid-take staging name: [`DiagSink::take_spool_batch`] renames the spool here so
+/// parsing happens with no lock held; a leftover file means an interrupted take and
+/// is folded back into the spool (at startup or before the next take), not lost.
+const TAKE_NAME: &str = "diagnostics.take.jsonl";
 
 /// Writer-task inbox: events to append, or a flush marker. The channel is FIFO, so a
 /// [`Msg::Flush`] ack proves everything queued before it has been written.
@@ -139,6 +143,32 @@ fn lock_files(files: &Mutex<Files>) -> MutexGuard<'_, Files> {
     files.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Fold a leftover `diagnostics.take.jsonl` back into the spool and delete it.
+///
+/// Spool only, NOT `diag.log`: these lines were already mirrored to the backup log
+/// when first written. A take-file survives a take that crashed or errored
+/// mid-flight; folding it back means an interrupted take degrades to re-delivery
+/// (the uploader may see some lines twice) rather than data loss.
+fn recover_take_file(spool: &mut CappedFile, take_path: &Path) {
+    let content = match fs::read_to_string(take_path) {
+        Ok(c) => c,
+        Err(e) => {
+            // Leave the file on disk so the next recovery attempt (startup or a
+            // later take) can retry; nothing has been consumed yet.
+            tracing::debug!(err = %e, "diag: take-file recovery read failed");
+            return;
+        }
+    };
+    for line in content.lines() {
+        spool.append_line(line);
+    }
+    if let Err(e) = fs::remove_file(take_path) {
+        // The lines now exist in both files, so a later recovery may re-deliver
+        // them. Duplicates are acceptable (the server orders by `ts`); loss isn't.
+        tracing::debug!(err = %e, "diag: take-file delete after recovery failed");
+    }
+}
+
 /// The diagnostics sink (§C2): lossy channel ring + spool + backup log + error fast-path.
 ///
 /// Cheap to share (`Arc`); [`push`](DiagSink::push) is non-blocking and safe on hot paths.
@@ -151,7 +181,9 @@ pub struct DiagSink {
     dropped: Arc<AtomicU64>,
     error_notify: Arc<Notify>,
     spool_path: PathBuf,
-    spool_tmp: PathBuf,
+    /// `diagnostics.take.jsonl` — the spool is renamed here at the start of a take
+    /// so the batch can be parsed with no lock held (see [`DiagSink::take_spool_batch`]).
+    take_path: PathBuf,
     writer: tokio::task::JoinHandle<()>,
 }
 
@@ -176,8 +208,16 @@ impl DiagSink {
     ) -> std::io::Result<Arc<DiagSink>> {
         fs::create_dir_all(dir)?;
         let spool_path = dir.join(SPOOL_NAME);
+        let take_path = dir.join(TAKE_NAME);
+        let mut spool = CappedFile::open(spool_path.clone(), spool_cap)?;
+        // A take-file on disk means a previous take_spool_batch crashed or errored
+        // mid-flight (or a reopen failure redirected live writes into it); fold it
+        // back before the writer starts so those events rejoin the upload queue.
+        if take_path.exists() {
+            recover_take_file(&mut spool, &take_path);
+        }
         let files = Arc::new(Mutex::new(Files {
-            spool: CappedFile::open(spool_path.clone(), spool_cap)?,
+            spool,
             log: CappedFile::open(dir.join(LOG_NAME), log_cap)?,
         }));
         let dropped = Arc::new(AtomicU64::new(0));
@@ -191,7 +231,7 @@ impl DiagSink {
             files,
             dropped,
             error_notify: Arc::new(Notify::new()),
-            spool_tmp: dir.join(format!("{SPOOL_NAME}.tmp")),
+            take_path,
             spool_path,
             writer,
         }))
@@ -233,17 +273,54 @@ impl DiagSink {
     }
 
     /// Take whole JSONL lines from the front of the spool, up to `max_bytes` (counting
-    /// each line's newline), and rewrite the spool to hold only the remainder
-    /// (temp-file + `fs::rename`, atomic-enough for a single-consumer upload queue).
+    /// each line's newline), leaving the remainder retrievable by a later call.
+    /// Single-consumer: one uploader task calls this at a time.
+    ///
+    /// The spool is renamed out to `diagnostics.take.jsonl` under a short lock,
+    /// parsed with no lock held, and the un-taken remainder is re-appended to the
+    /// fresh spool. A take that crashes or errors mid-flight leaves the take-file on
+    /// disk; startup and the next take fold it back into the spool, so an
+    /// interrupted take degrades to re-delivery, never loss.
     ///
     /// Returns the taken lines (without newlines). A first line larger than
     /// `max_bytes` yields an empty batch — the caller picks the budget.
     pub fn take_spool_batch(&self, max_bytes: usize) -> std::io::Result<Vec<String>> {
-        // Hold the lock across read-rewrite-reopen so the writer/push_error can't
-        // append between our snapshot and the rename (their lines would be lost).
-        // All-sync I/O, never held across an .await.
-        let mut files = lock_files(&self.files);
-        let content = fs::read_to_string(&self.spool_path)?;
+        // Phase 1 — rename the spool out and re-point the handle. Under the lock but
+        // O(1) I/O only: push_error (§C2a, the crash-preservation fast path) contends
+        // on this lock, so the bulk read/parse must never happen while holding it.
+        let reopened = {
+            let mut files = lock_files(&self.files);
+            if self.take_path.exists() {
+                // Leftover from an earlier failed take (read error, failed delete,
+                // or a reopen failure that redirected live writes into it). Re-point
+                // the handle first — recovery appends through it, and a stale fd
+                // would append the take-file onto itself — then fold the lines back
+                // so the rename below can't clobber them. Rare failure-recovery
+                // path, so its bulk I/O under the lock is acceptable.
+                files.spool.reopen()?;
+                recover_take_file(&mut files.spool, &self.take_path);
+            }
+            fs::rename(&self.spool_path, &self.take_path)?;
+            // Re-point the shared handle at a fresh spool (reopen also resets the
+            // tracked len, to the new file's 0). If this fails, keep going: the
+            // stale fd still points at the take-file inode, so subsequent appends
+            // (writer task and push_error) land in diagnostics.take.jsonl — which
+            // is folded back on the next take or next startup, NOT lost. That
+            // recoverability is why renaming OUT is safer than the old
+            // rewrite-and-rename-IN flow, where a reopen failure stranded every
+            // later write in an unlinked inode the uploader could never see.
+            match files.spool.reopen() {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::debug!(err = %e, "diag: spool reopen after take rename failed");
+                    false
+                }
+            }
+        };
+
+        // Phase 2 — no lock held: parse the renamed-out snapshot without stalling
+        // push_error. On error the take-file stays on disk and is recovered later.
+        let content = fs::read_to_string(&self.take_path)?;
         let lines: Vec<&str> = content.lines().collect();
         let mut taken = Vec::new();
         let mut budget = 0usize;
@@ -255,18 +332,31 @@ impl DiagSink {
             budget += cost;
             taken.push((*line).to_string());
         }
-        // Rebuild the remainder from lines (rather than slicing the raw content) so a
-        // torn, newline-less final line from a crash is re-terminated on rewrite.
-        let mut remainder = String::new();
-        for line in &lines[taken.len()..] {
-            remainder.push_str(line);
-            remainder.push('\n');
+
+        // Phase 3 — short lock again: put the remainder back, then retire the
+        // take-file. Spool only, NOT diag.log — these lines were already mirrored
+        // there when first written. The remainder lands after anything appended
+        // meanwhile; that reordering is acceptable because every event carries `ts`
+        // and the server orders by timestamp.
+        let mut files = lock_files(&self.files);
+        if reopened {
+            for line in &lines[taken.len()..] {
+                files.spool.append_line(line);
+            }
+            if let Err(e) = fs::remove_file(&self.take_path) {
+                // The take-file still holds the lines we just took/re-appended, so
+                // the next recovery may re-deliver them. Duplicates over loss.
+                tracing::debug!(err = %e, "diag: take-file delete failed");
+            }
+        } else {
+            // The stale fd means the remainder is still IN the take-file and live
+            // writes are landing there too — leave it for recovery (the taken lines
+            // ride along as potential duplicates), and retry the reopen so new
+            // events start reaching a fresh spool as soon as the fs allows.
+            if let Err(e) = files.spool.reopen() {
+                tracing::debug!(err = %e, "diag: spool reopen retry failed");
+            }
         }
-        fs::write(&self.spool_tmp, &remainder)?;
-        fs::rename(&self.spool_tmp, &self.spool_path)?;
-        // The rename swapped the spool's inode out from under the shared handle;
-        // re-point it or every later append lands in the unlinked old file.
-        files.spool.reopen()?;
         Ok(taken)
     }
 
@@ -410,14 +500,16 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
+    // The flavor is pinned (it's also tokio's default) because the determinism
+    // argument below depends on it — this fails loudly if the default ever changes.
+    #[tokio::test(flavor = "current_thread")]
     async fn ring_overflow_drops_and_counts() {
         let dir = test_dir(line!());
         let sink = DiagSink::new(&dir, "app").unwrap();
-        // Deterministic (not just probably-fast-enough): #[tokio::test] runs on the
-        // current-thread runtime, where the spawned writer only runs at an .await
-        // point — and push() never awaits, so nothing drains while this loop
-        // overfills the 4096-deep channel.
+        // Deterministic (not just probably-fast-enough): on the current-thread
+        // runtime, the spawned writer only runs at an .await point — and push()
+        // never awaits, so nothing drains while this loop overfills the
+        // 4096-deep channel.
         for i in 0..5000 {
             sink.push(ev(i));
         }
@@ -485,6 +577,27 @@ mod tests {
         let taken = sink.take_spool_batch(two).unwrap();
         assert_eq!(taken.len(), 2);
         assert_eq!(read_lines(&dir.join(SPOOL_NAME)).len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn startup_recovers_interrupted_take_file() {
+        let dir = test_dir(line!());
+        // Simulate a take that crashed mid-flight: a previous process renamed the
+        // spool out to the take-file and died before deleting it.
+        fs::create_dir_all(&dir).unwrap();
+        let line_a = r#"{"kind":"a"}"#;
+        let line_b = r#"{"kind":"b"}"#;
+        fs::write(dir.join(TAKE_NAME), format!("{line_a}\n{line_b}\n")).unwrap();
+        let sink = DiagSink::new(&dir, "app").unwrap();
+        assert!(
+            !dir.join(TAKE_NAME).exists(),
+            "startup must consume the leftover take-file"
+        );
+        let taken = sink.take_spool_batch(usize::MAX).unwrap();
+        assert_eq!(taken, vec![line_a.to_string(), line_b.to_string()]);
+        // Recovery is spool-only: these lines hit diag.log when first written.
+        assert_eq!(fs::read_to_string(dir.join(LOG_NAME)).unwrap(), "");
         let _ = fs::remove_dir_all(&dir);
     }
 
