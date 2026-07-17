@@ -142,11 +142,15 @@ impl SessionTrace {
 
     /// Close the named child span, optionally recording a redacted error.
     ///
-    /// No-op (silently) if no child with this name is currently open.
+    /// No-op if no child with this name is currently open (debug-logged: an
+    /// end-without-start usually means an instrumentation bug at the call site).
     pub fn child_end(&mut self, name: &'static str, error: Option<&str>) {
         let end_nano = now_nanos();
         let pos = self.open_children.iter().position(|c| c.name == name);
-        let Some(idx) = pos else { return };
+        let Some(idx) = pos else {
+            tracing::debug!(name, "diag: child_end ignored — span not open");
+            return;
+        };
         let child = self.open_children.remove(idx);
         self.finished_children
             .push(self.make_child_span(child, end_nano, error));
