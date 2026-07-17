@@ -43,18 +43,19 @@ pub struct ResourceAttrs {
 
 /// Encode events as one OTLP/HTTP JSON logs payload.
 ///
-/// `trace_id`, when given, is stamped on records whose `session` is `Some`
-/// (log↔trace correlation, spec §C3a). The `trace_id` bytes are formatted as
-/// 32 lowercase hex chars per OTLP/JSON spec.
+/// `trace_ctx`, when given as `Some((trace_id, span_id))`, is stamped on records whose
+/// `session` is `Some` (log↔trace correlation, spec §C3a — spanId anchors the log to the
+/// session's root span in the SigNoz waterfall). The `trace_id` bytes are formatted as 32
+/// lowercase hex chars and `span_id` as 16 lowercase hex chars per OTLP/JSON spec.
 pub fn encode_logs(
     res: &ResourceAttrs,
     events: &[DiagEvent],
-    trace_id: Option<&[u8; 16]>,
+    trace_ctx: Option<(&[u8; 16], &[u8; 8])>,
 ) -> Vec<u8> {
     let resource_attrs = build_resource_attrs(res);
     let log_records: Vec<Value> = events
         .iter()
-        .map(|ev| build_log_record(ev, trace_id))
+        .map(|ev| build_log_record(ev, trace_ctx))
         .collect();
 
     let payload = json!({
@@ -142,9 +143,12 @@ fn to_otlp_value(v: &Value) -> Value {
     }
 }
 
-fn build_log_record(ev: &DiagEvent, trace_id: Option<&[u8; 16]>) -> Value {
+fn build_log_record(ev: &DiagEvent, trace_ctx: Option<(&[u8; 16], &[u8; 8])>) -> Value {
     // timeUnixNano: millis * 1_000_000, as a string
     let time_unix_nano = (ev.ts as u128 * 1_000_000).to_string();
+    // observedTimeUnixNano: time observed ≈ event time on-device; the server's receipt time
+    // remains the trusted clock.
+    let observed_time_unix_nano = time_unix_nano.clone();
 
     // body: for "log" kind, use the "message" field; otherwise the kind string
     let body_str = if ev.kind == "log" {
@@ -173,6 +177,10 @@ fn build_log_record(ev: &DiagEvent, trace_id: Option<&[u8; 16]>) -> Value {
             // Already used as body — skip
             continue;
         }
+        // Omit Null fields — the pub fields map allows nulls but they carry no information
+        if v.is_null() {
+            continue;
+        }
         attributes.push(json!({
             "key": k,
             "value": to_otlp_value(v)
@@ -181,16 +189,19 @@ fn build_log_record(ev: &DiagEvent, trace_id: Option<&[u8; 16]>) -> Value {
 
     let mut record = json!({
         "timeUnixNano": time_unix_nano,
+        "observedTimeUnixNano": observed_time_unix_nano,
         "severityNumber": severity_number(ev.level),
         "severityText": severity_text(ev.level),
         "body": { "stringValue": body_str },
         "attributes": attributes
     });
 
-    // traceId: stamped when both trace_id and session are present
-    if let (Some(tid), Some(_)) = (trace_id, &ev.session) {
-        let hex: String = tid.iter().map(|b| format!("{b:02x}")).collect();
-        record["traceId"] = Value::String(hex);
+    // traceId + spanId: stamped when both trace_ctx and session are present
+    if let (Some((tid, sid)), Some(_)) = (trace_ctx, &ev.session) {
+        let trace_hex: String = tid.iter().map(|b| format!("{b:02x}")).collect();
+        let span_hex: String = sid.iter().map(|b| format!("{b:02x}")).collect();
+        record["traceId"] = Value::String(trace_hex);
+        record["spanId"] = Value::String(span_hex);
     }
 
     record
@@ -226,7 +237,11 @@ mod tests {
         let mut ev = DiagEvent::new(DiagLevel::Warn, "app", "unbounded.geo_failed");
         ev.session = Some("s1".into());
         ev.fields.insert("reason".into(), "timeout".into());
-        let body = encode_logs(&res, std::slice::from_ref(&ev), Some(b"0123456789abcdef"));
+        let body = encode_logs(
+            &res,
+            std::slice::from_ref(&ev),
+            Some((b"0123456789abcdef", b"01234567")),
+        );
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let attrs = &v["resourceLogs"][0]["resource"]["attributes"];
         let find = |k: &str| {
@@ -247,6 +262,8 @@ mod tests {
         assert_eq!(rec["severityNumber"], 13);
         assert_eq!(rec["body"]["stringValue"], "unbounded.geo_failed");
         assert_eq!(rec["traceId"], "30313233343536373839616263646566");
+        assert_eq!(rec["spanId"], "3031323334353637");
+        assert!(rec["observedTimeUnixNano"].as_str().unwrap().len() >= 18);
         let ra = rec["attributes"].as_array().unwrap();
         assert!(ra.iter().any(|a| a["key"] == "kind"));
         assert!(ra.iter().any(|a| a["key"] == "session"));
@@ -258,7 +275,11 @@ mod tests {
     fn log_kind_uses_message_as_body_and_drops_dup_attr() {
         let res = test_res();
         let ev = events::log(DiagLevel::Info, "hello world", "spark_core::x");
-        let body = encode_logs(&res, std::slice::from_ref(&ev), None);
+        let body = encode_logs(
+            &res,
+            std::slice::from_ref(&ev),
+            None::<(&[u8; 16], &[u8; 8])>,
+        );
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let rec = &v["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         // body comes from the message field
@@ -278,12 +299,20 @@ mod tests {
         let res = test_res();
         let ev = DiagEvent::new(DiagLevel::Info, "app", "unbounded.attempt_started");
         // session is None (default)
-        let body = encode_logs(&res, std::slice::from_ref(&ev), Some(b"0123456789abcdef"));
+        let body = encode_logs(
+            &res,
+            std::slice::from_ref(&ev),
+            Some((b"0123456789abcdef", b"01234567")),
+        );
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let rec = &v["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         assert!(
             rec.get("traceId").is_none() || rec["traceId"].is_null(),
             "traceId must be absent when session is None"
+        );
+        assert!(
+            rec.get("spanId").is_none() || rec["spanId"].is_null(),
+            "spanId must be absent when session is None"
         );
     }
 
@@ -296,7 +325,11 @@ mod tests {
         ev.fields.insert("ratio".into(), serde_json::json!(1.5f64));
         ev.fields
             .insert("tags".into(), serde_json::json!(["alpha", "beta"]));
-        let body = encode_logs(&res, std::slice::from_ref(&ev), None);
+        let body = encode_logs(
+            &res,
+            std::slice::from_ref(&ev),
+            None::<(&[u8; 16], &[u8; 8])>,
+        );
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let rec = &v["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         let ra = rec["attributes"].as_array().unwrap();
@@ -330,5 +363,29 @@ mod tests {
             .expect("arrayValue.values must be an array");
         assert_eq!(arr_vals[0]["stringValue"], "alpha");
         assert_eq!(arr_vals[1]["stringValue"], "beta");
+    }
+
+    #[test]
+    fn null_fields_are_omitted() {
+        let res = test_res();
+        let mut ev = DiagEvent::new(DiagLevel::Info, "app", "test.null_field");
+        ev.fields.insert("present".into(), serde_json::json!("yes"));
+        ev.fields.insert("absent".into(), serde_json::Value::Null);
+        let body = encode_logs(
+            &res,
+            std::slice::from_ref(&ev),
+            None::<(&[u8; 16], &[u8; 8])>,
+        );
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rec = &v["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+        let ra = rec["attributes"].as_array().unwrap();
+        assert!(
+            ra.iter().any(|a| a["key"] == "present"),
+            "non-null field must appear"
+        );
+        assert!(
+            !ra.iter().any(|a| a["key"] == "absent"),
+            "null field must be omitted"
+        );
     }
 }
