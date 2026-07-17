@@ -20,11 +20,11 @@ socket2.workspace = true
 libc.workspace = true
 bytes.workspace = true
 tracing.workspace = true
-# `Layer` trait used by `DiagLayer` (diag::layer). The whole crate is pure-Rust and has no C build;
-# env-filter (the only large optional piece) is not needed in core. Already in the workspace, so no
-# new pin; pulling it as a direct dep for the `Layer` trait impl is the right level (not dev-only,
-# because `DiagLayer` is a public production type).
-tracing-subscriber.workspace = true
+# `Layer` trait used by `DiagLayer` (diag::layer). Deliberately NOT workspace-inherited: the
+# workspace pin enables env-filter (and defaults pull fmt/ansi), none of which core needs — and
+# the Apple NE links core standalone (see log_bridge.rs), so this trimmed feature set is what
+# that size-sensitive graph gets. registry+std is exactly enough for Layer composition.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 serde.workspace = true
 toml.workspace = true
 # JSON for the Lantern `config_raw.json` adapter (config::lantern). Pure-Rust, no C deps.
