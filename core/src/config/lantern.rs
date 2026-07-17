@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use super::{
     Config, DnsConfig, DohEndpoint, Endpoint, Hysteria2Config, Hysteria2Tls, Hysteria2TlsMode,
@@ -399,6 +399,26 @@ fn ss_method(method: &str) -> Option<SsMethod> {
     }
 }
 
+// ---- Lenient serde helpers ----------------------------------------------------
+
+/// Deserialize a bool field leniently: `true`/`false` map as normal; any other type (integer,
+/// string, null, array, object) silently reads as `false` instead of hard-erroring the parse.
+/// This is critical for flag fields like `features.unbounded` / `features["otel.logs"]`:
+/// a server typo like `"otel.logs": 1` (integer) or `"unbounded": "yes"` (string) must degrade
+/// gracefully, not brick VPN config.
+fn de_bool_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Bool(b) => Ok(b),
+        // Any non-bool value (int, string, null, array, object) → false, never an error.
+        _ => Ok(false),
+    }
+}
+
+/// Default for `#[serde(default = "bool_false", deserialize_with = "de_bool_lenient")]` fields.
+fn bool_false() -> bool {
+    false
+}
+
 // ---- The `config_raw.json` slice spark consumes. Lenient: serde ignores unknown fields, so the
 // many sections spark doesn't use and per-outbound extras pass through untouched.
 
@@ -433,8 +453,9 @@ struct RawRoot {
     stall_trial_flows: Option<u32>,
     /// The `features` map (feature flags). Only `unbounded` and the dotted `otel.logs` /
     /// `otel.traces` keys are consumed here; other keys — including `otel.metrics` — pass through
-    /// untouched.
-    #[serde(default)]
+    /// untouched. `null` or a non-object value for the whole `features` field is treated as all
+    /// flags absent (default).
+    #[serde(default, deserialize_with = "de_features_lenient")]
     features: RawFeatures,
     /// The top-level `unbounded` (volunteer-proxy) block. Absent ⇒ default (empty endpoints).
     #[serde(default)]
@@ -443,6 +464,18 @@ struct RawRoot {
     /// which [`RawRoot::otel_config`] maps to `None`).
     #[serde(default)]
     otel: RawOtel,
+}
+
+/// Deserialize the `features` field leniently: if the value is absent, null, or not an object,
+/// treat it as default (all flags false). This prevents a `"features": null` from erroring the
+/// whole config parse.
+fn de_features_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<RawFeatures, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::Object(_) => serde_json::from_value(v).map_err(serde::de::Error::custom),
+        // null, bool, number, string, array — all degrade to default.
+        _ => Ok(RawFeatures::default()),
+    }
 }
 
 impl RawRoot {
@@ -463,30 +496,13 @@ impl RawRoot {
         if self.otel.endpoint.is_empty() {
             return None;
         }
-        let mut headers: Vec<(String, String)> = self
-            .otel
-            .headers
-            .iter()
-            .filter_map(|(k, v)| match v {
-                serde_json::Value::String(s) if !k.is_empty() && !s.is_empty() => {
-                    Some((k.clone(), s.clone()))
-                }
-                // Malformed entry (non-string/empty key or value): skip it, keep the rest. Header
-                // values are opaque secrets (the ingestion key) — log the KEY only, never the value.
-                _ => {
-                    tracing::debug!(key = %k, "config_raw: skipping malformed otel header entry");
-                    None
-                }
-            })
-            .collect();
-        // Sorted by key for determinism — the wire map has no order.
-        headers.sort_by(|a, b| a.0.cmp(&b.0));
+        let headers = self.otel.headers_vec();
         Some(OtelConfig {
             endpoint: self.otel.endpoint.clone(),
             headers,
             // Absent ⇒ 1.0 (always). Clamped: a server typo like `100` must not be interpreted as
             // anything but 'always', and a negative rate as anything but 'never'.
-            sample_rate: self.otel.sample_rate.unwrap_or(1.0).clamp(0.0, 1.0),
+            sample_rate: self.otel.sample_rate_f64(),
             logs_enabled: self.features.otel_logs,
             traces_enabled: self.features.otel_traces,
         })
@@ -496,15 +512,29 @@ impl RawRoot {
 /// The `features` flag map. Only `unbounded` and the dotted `otel.logs` / `otel.traces` keys are
 /// consumed; other keys (`otel.metrics`, `private.gcp`, …) and anything else are ignored by serde's
 /// unknown-field leniency.
+///
+/// All bool fields use lenient deserialization: a present-but-non-bool value (e.g. `1`, `"yes"`,
+/// `null`) reads as `false` instead of hard-erroring the parse. Same class of fragility as
+/// `otel_logs`/`otel_traces` — a wire typo must degrade, not brick VPN config.
 #[derive(Deserialize, Default)]
 struct RawFeatures {
-    #[serde(default)]
+    /// `features.unbounded` master gate. Same fragility class as the otel flags — a present-but-
+    /// non-bool value (e.g. `"unbounded": "yes"`) must read as false, not break config parsing.
+    #[serde(default = "bool_false", deserialize_with = "de_bool_lenient")]
     unbounded: bool,
     /// `features["otel.logs"]` → [`OtelConfig::logs_enabled`] (the diag logs-signal gate).
-    #[serde(rename = "otel.logs", default)]
+    #[serde(
+        rename = "otel.logs",
+        default = "bool_false",
+        deserialize_with = "de_bool_lenient"
+    )]
     otel_logs: bool,
     /// `features["otel.traces"]` → [`OtelConfig::traces_enabled`] (the traces-signal gate).
-    #[serde(rename = "otel.traces", default)]
+    #[serde(
+        rename = "otel.traces",
+        default = "bool_false",
+        deserialize_with = "de_bool_lenient"
+    )]
     otel_traces: bool,
 }
 
@@ -532,14 +562,76 @@ struct RawOtel {
     /// OTLP ingest endpoint → [`OtelConfig::endpoint`]. Empty/absent ⇒ telemetry off (`None`).
     #[serde(default)]
     endpoint: String,
-    /// Upload headers (ingestion key etc.) → [`OtelConfig::headers`]. Values are kept as raw JSON
-    /// so one malformed (non-string) entry skips that entry instead of failing the whole config
-    /// parse. The values are opaque secrets — never log them.
-    #[serde(default)]
+    /// Upload headers (ingestion key etc.) → [`OtelConfig::headers`]. Kept as raw JSON so one
+    /// malformed entry (non-string value) or a wrong shape (array instead of object) skips that
+    /// entry instead of failing the whole config parse. Values are opaque secrets — never log them.
+    #[serde(default, deserialize_with = "de_otel_headers_lenient")]
     headers: HashMap<String, serde_json::Value>,
-    /// Sampling rate → [`OtelConfig::sample_rate`]. Absent ⇒ 1.0 there.
-    #[serde(default)]
-    sample_rate: Option<f64>,
+    /// Sampling rate → [`OtelConfig::sample_rate`]. Kept as raw JSON so a wrong type (e.g.
+    /// `"0.5"` string) degrades to absent (returns 1.0) instead of hard-erroring the parse.
+    #[serde(default, deserialize_with = "de_otel_sample_rate_lenient")]
+    sample_rate: Option<serde_json::Value>,
+}
+
+impl RawOtel {
+    /// Extract `sample_rate` as f64. A non-number value (e.g. a string) is treated as absent
+    /// (returns 1.0). Result is clamped to [0.0, 1.0].
+    fn sample_rate_f64(&self) -> f64 {
+        self.sample_rate
+            .as_ref()
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0)
+    }
+
+    /// Extract headers as a sorted `Vec<(String, String)>`. Non-string or empty values are skipped
+    /// with a debug log. Values are opaque secrets — the key is logged, never the value.
+    fn headers_vec(&self) -> Vec<(String, String)> {
+        let mut headers: Vec<(String, String)> = self
+            .headers
+            .iter()
+            .filter_map(|(k, v)| match v {
+                serde_json::Value::String(s) if !k.is_empty() && !s.is_empty() => {
+                    Some((k.clone(), s.clone()))
+                }
+                // Malformed entry (non-string/empty key or value): skip it, keep the rest. Header
+                // values are opaque secrets (the ingestion key) — log the KEY only, never the value.
+                _ => {
+                    tracing::debug!(key = %k, "config_raw: skipping malformed otel header entry");
+                    None
+                }
+            })
+            .collect();
+        // Sorted by key for determinism — the wire map has no order.
+        headers.sort_by(|a, b| a.0.cmp(&b.0));
+        headers
+    }
+}
+
+/// Deserialize `otel.headers` leniently: if the value is not a JSON object (e.g. it's an array,
+/// string, or null), treat it as empty instead of hard-erroring. Per-entry leniency (non-string
+/// values within the object) is handled in [`RawOtel::headers_vec`].
+fn de_otel_headers_lenient<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<HashMap<String, serde_json::Value>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::Object(map) => Ok(map.into_iter().collect()),
+        // Non-object shape (array, string, null, …) → empty map + one debug log.
+        _ => {
+            tracing::debug!("config_raw: otel.headers is not an object — treating as empty");
+            Ok(HashMap::new())
+        }
+    }
+}
+
+/// Deserialize `otel.sample_rate` leniently: keep the raw JSON value so a wrong type (e.g.
+/// `"0.5"` string) can be detected and treated as absent in [`RawOtel::sample_rate_f64`] rather
+/// than hard-erroring the parse.
+fn de_otel_sample_rate_lenient<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    Ok(Some(serde_json::Value::deserialize(d)?))
 }
 
 #[derive(Deserialize, Default)]
@@ -1222,5 +1314,56 @@ mod tests {
         assert_eq!(cfg.transport.stall_quarantine_secs, 120);
         assert_eq!(cfg.transport.stall_quarantine_max_secs, 1200);
         assert_eq!(cfg.transport.stall_trial_flows, 5);
+    }
+
+    #[test]
+    fn otel_features_non_bool_is_lenient() {
+        // "otel.logs": 1 (integer) must parse OK and read as false.
+        // "otel.traces": null must parse OK and read as false.
+        // "unbounded": "yes" (string) must also parse OK and read as false.
+        let raw = r#"{
+          "features": { "otel.logs": 1, "otel.traces": null, "unbounded": "yes" },
+          "otel": { "endpoint": "e:443" },
+          "options": { "outbounds": [] }
+        }"#;
+        let o = otel_from_config_raw_json(raw)
+            .expect("parses despite non-bool flags")
+            .expect("otel block present");
+        assert!(!o.logs_enabled, "integer flag must read as false");
+        assert!(!o.traces_enabled, "null flag must read as false");
+        let u = unbounded_from_config_raw_json(raw).expect("unbounded parses despite non-bool");
+        assert!(!u.enabled, "string flag must read as false");
+    }
+
+    #[test]
+    fn otel_sample_rate_as_string_is_lenient() {
+        // "sample_rate": "0.5" (string instead of float) must parse OK and treat as absent → 1.0.
+        let raw = r#"{
+          "otel": { "endpoint": "e:443", "sample_rate": "0.5" },
+          "options": { "outbounds": [] }
+        }"#;
+        let o = otel_from_config_raw_json(raw)
+            .expect("parses despite string sample_rate")
+            .expect("otel block present");
+        assert_eq!(
+            o.sample_rate, 1.0,
+            "string sample_rate must degrade to absent (1.0)"
+        );
+    }
+
+    #[test]
+    fn otel_headers_as_array_is_lenient() {
+        // "headers": [["k","v"]] (array instead of object) must parse OK and return empty map.
+        let raw = r#"{
+          "otel": { "endpoint": "e:443", "headers": [["k", "v"]] },
+          "options": { "outbounds": [] }
+        }"#;
+        let o = otel_from_config_raw_json(raw)
+            .expect("parses despite array headers")
+            .expect("otel block present");
+        assert!(
+            o.headers.is_empty(),
+            "array-shaped headers must degrade to empty"
+        );
     }
 }
