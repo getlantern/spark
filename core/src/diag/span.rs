@@ -24,26 +24,39 @@ fn rng() -> &'static SystemRandom {
     RNG.get_or_init(SystemRandom::new)
 }
 
-/// Generate 16 random bytes for a trace id, falling back to the current
-/// timestamp on RNG failure (practically impossible, but we must never panic).
+/// Uniqueness source for the RNG-failure fallback: nanos alone collide within one
+/// tick (even root-vs-child in a single trace), so mix a process-global counter.
+/// Not cryptographic — just collision-free within the process, which is all a
+/// trace id needs here.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn fallback_unique() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    now_nanos() ^ CTR.fetch_add(1, Ordering::Relaxed).wrapping_shl(32)
+}
+
+/// Generate 16 random bytes for a trace id, falling back to best-effort unique
+/// values (not random) on RNG failure (practically impossible, but we must never panic).
 fn gen_trace_id() -> [u8; 16] {
     let mut buf = [0u8; 16];
     if rng().fill(&mut buf).is_ok() {
         return buf;
     }
-    // Fallback: fill from timestamp nanos (top 8 bytes) and zeros (low 8 bytes)
-    let nanos = now_nanos().to_le_bytes();
-    buf[..8].copy_from_slice(&nanos);
+    // Fallback: two independent best-effort unique values for high and low halves.
+    // Not cryptographic; collision-free within the process for the duration of a trace.
+    buf[..8].copy_from_slice(&fallback_unique().to_le_bytes());
+    buf[8..].copy_from_slice(&fallback_unique().to_le_bytes());
     buf
 }
 
-/// Generate 8 random bytes for a span id, with the same timestamp fallback.
+/// Generate 8 random bytes for a span id, with the same best-effort unique fallback.
 fn gen_span_id() -> [u8; 8] {
     let mut buf = [0u8; 8];
     if rng().fill(&mut buf).is_ok() {
         return buf;
     }
-    now_nanos().to_le_bytes()
+    // Fallback: best-effort unique, not random; see fallback_unique().
+    fallback_unique().to_le_bytes()
 }
 
 /// Current wall-clock time as Unix nanoseconds.
@@ -60,6 +73,14 @@ fn now_nanos() -> u64 {
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/// Maximum number of finished child spans retained per session.
+///
+/// Sessions can last hours with cycling child names (start/end repeated phases
+/// like "relay"), so without a cap the Vec grows without bound. 64 covers every
+/// legitimate phase-transition count with comfortable headroom while bounding
+/// memory to a fixed, small size.
+const MAX_FINISHED_CHILDREN: usize = 64;
 
 /// One finished span, ready for OTLP encoding.
 #[derive(Debug, Clone)]
@@ -90,6 +111,9 @@ struct OpenChild {
 /// Children may overlap; unclosed children are closed at [`finish`][Self::finish]
 /// with no error. The order of spans in the returned `Vec<DiagSpan>` is children
 /// first then root — OTLP receivers accept any order.
+///
+/// Dropping without calling [`finish`][Self::finish] discards the trace silently —
+/// the integrator owns calling finish.
 pub struct SessionTrace {
     trace_id: [u8; 16],
     root_span_id: [u8; 8],
@@ -152,6 +176,10 @@ impl SessionTrace {
             return;
         };
         let child = self.open_children.remove(idx);
+        if self.finished_children.len() >= MAX_FINISHED_CHILDREN {
+            tracing::debug!(name, "diag: finished_children cap reached, span dropped");
+            return;
+        }
         self.finished_children
             .push(self.make_child_span(child, end_nano, error));
     }
@@ -162,9 +190,16 @@ impl SessionTrace {
     pub fn finish(mut self, error: Option<&str>) -> Vec<DiagSpan> {
         let end_nano = now_nanos();
 
-        // Close lingering children with no error.
+        // Close lingering children with no error, respecting the cap.
         let lingering: Vec<OpenChild> = self.open_children.drain(..).collect();
         for child in lingering {
+            if self.finished_children.len() >= MAX_FINISHED_CHILDREN {
+                tracing::debug!(
+                    name = child.name,
+                    "diag: finished_children cap reached, span dropped"
+                );
+                continue;
+            }
             let span = self.make_child_span(child, end_nano, None);
             self.finished_children.push(span);
         }
@@ -315,6 +350,36 @@ mod tests {
             t1.root_span_id(),
             t2.root_span_id(),
             "two sessions must have different root span ids"
+        );
+    }
+
+    #[test]
+    fn fallback_ids_do_not_collide_within_a_tick() {
+        use std::collections::HashSet;
+        let values: Vec<u64> = (0..100).map(|_| fallback_unique()).collect();
+        let unique: HashSet<u64> = values.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            100,
+            "all 100 fallback_unique() values must be distinct"
+        );
+    }
+
+    #[test]
+    fn finished_children_are_capped() {
+        let mut t = SessionTrace::new("sess-cap");
+        // Cycle child_start/child_end 70 times — only the first 64 should be retained.
+        for _ in 0..70 {
+            t.child_start("relay");
+            t.child_end("relay", None);
+        }
+        let spans = t.finish(None);
+        // 64 children + 1 root = 65
+        assert_eq!(
+            spans.len(),
+            65,
+            "expected 64 capped children + root = 65, got {}",
+            spans.len()
         );
     }
 }
