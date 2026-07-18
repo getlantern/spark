@@ -304,6 +304,13 @@ pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Resu
     if let Some(loop_handle) = lock_recover(&state.loop_handle).take() {
         loop_handle.abort();
     }
+    // Aborting the loop can outrun the supervisor's Stopped events, stranding live trace ctx
+    // entries; retire them all to keep the SetCtx/RetireCtx pairing contract, with the same
+    // grace semantics (the uploader prunes after RETIRE_GRACE, so final log lines stay
+    // correlated).
+    if let Some(q) = crate::diag_host::span_queue() {
+        q.retire_all_ctxs();
+    }
     *lock_recover(&state.latest_status) = None;
 
     // Emit the stopped snapshot BEFORE persisting the flag: the pool is already torn down, so the

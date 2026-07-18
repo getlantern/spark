@@ -71,8 +71,16 @@ pub(crate) enum DiagAction {
     Emit(DiagEvent),
     EmitError(DiagEvent),
     PushSpans(Vec<DiagSpan>),
-    SetCtx { session: String, ctx: TraceCtx },
-    RemoveCtx { session: String },
+    SetCtx {
+        session: String,
+        ctx: TraceCtx,
+    },
+    /// Retire (NOT remove) the session's trace ctx: the ctx stays queryable until
+    /// the uploader's grace-period prune (`upload.rs` `RETIRE_GRACE`), because the
+    /// session's final spool lines are encoded on a later uploader tick.
+    RetireCtx {
+        session: String,
+    },
 }
 
 /// A session currently relaying on some slot: its trace plus the wall-clock start
@@ -252,7 +260,9 @@ fn end_session(
 }
 
 /// Finish a live session's trace — closing the "relay" child cleanly and stamping any
-/// error on the root span only — and return the push + ctx-removal actions.
+/// error on the root span only — and return the push + ctx-retirement actions. The
+/// ctx is retired, not removed: removal is grace-delayed via the uploader's prune
+/// (`upload.rs` `RETIRE_GRACE`) so the session's final log lines keep correlation.
 fn finish_live(live: LiveSession, error: Option<&str>) -> Vec<DiagAction> {
     let LiveSession {
         session_id,
@@ -263,7 +273,7 @@ fn finish_live(live: LiveSession, error: Option<&str>) -> Vec<DiagAction> {
     let spans = trace.finish(error);
     vec![
         DiagAction::PushSpans(spans),
-        DiagAction::RemoveCtx {
+        DiagAction::RetireCtx {
             session: session_id,
         },
     ]
@@ -289,9 +299,9 @@ pub(crate) fn apply_actions(actions: Vec<DiagAction>) {
                     q.set_trace_ctx(&session, ctx);
                 }
             }
-            DiagAction::RemoveCtx { session } => {
+            DiagAction::RetireCtx { session } => {
                 if let Some(q) = &queue {
-                    q.remove_trace_ctx(&session);
+                    q.retire_trace_ctx(&session);
                 }
             }
         }
@@ -494,7 +504,7 @@ mod tests {
         let nat = all[1].fields["nat_traversal_ms"].as_u64();
         assert!(nat.is_some(), "nat_traversal_ms must be a u64");
 
-        // SetCtx (at connect) strictly before RemoveCtx (at disconnect).
+        // SetCtx (at connect) strictly before RetireCtx (at disconnect).
         assert!(
             a2.iter()
                 .any(|a| matches!(a, DiagAction::SetCtx { session, .. } if session == "s1")),
@@ -502,8 +512,8 @@ mod tests {
         );
         assert!(
             a3.iter()
-                .any(|a| matches!(a, DiagAction::RemoveCtx { session } if session == "s1")),
-            "disconnect must remove the trace ctx"
+                .any(|a| matches!(a, DiagAction::RetireCtx { session } if session == "s1")),
+            "disconnect must retire the trace ctx"
         );
 
         // Spans: root "unbounded.session" + "relay" child sharing one trace_id.
@@ -593,8 +603,8 @@ mod tests {
         assert!(
             actions
                 .iter()
-                .any(|a| matches!(a, DiagAction::RemoveCtx { session } if session == "s1")),
-            "stop must remove the live session's trace ctx"
+                .any(|a| matches!(a, DiagAction::RetireCtx { session } if session == "s1")),
+            "stop must retire the live session's trace ctx"
         );
         assert_eq!(st.slots_filled(), 0);
     }
@@ -748,7 +758,7 @@ mod tests {
         assert!(relay.error.is_none(), "error is stamped on the root only");
         assert!(actions
             .iter()
-            .any(|a| matches!(a, DiagAction::RemoveCtx { session } if session == "s1")));
+            .any(|a| matches!(a, DiagAction::RetireCtx { session } if session == "s1")));
         assert_eq!(st.slots_filled(), 0);
     }
 

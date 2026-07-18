@@ -40,6 +40,9 @@ const BATCH_BYTES: usize = 256 * 1024;
 /// Queued-span bound: if trace uploads keep failing, drop the OLDEST spans rather
 /// than grow without bound (the correlated log records still ship independently).
 const MAX_QUEUED_SPANS: usize = 512;
+/// How long a retired trace ctx stays queryable ([`SpanQueue::retire_trace_ctx`]):
+/// 2.5 ticks — the batch holding a session's final spool lines has shipped by then.
+const RETIRE_GRACE: Duration = Duration::from_secs(150);
 
 /// A session's OTLP correlation pair: (trace id, root span id) — what
 /// [`super::otlp::encode_spool_logs`] stamps onto that session's log records (§C3a).
@@ -49,11 +52,14 @@ pub type TraceCtx = ([u8; 16], [u8; 8]);
 /// stamp log records with their session's trace context (§C3a).
 ///
 /// The instrumentation side (the plugin's aggregation loop) registers a context at
-/// session start and removes it after the session's spans are pushed; entries are
-/// therefore bounded by the number of live sessions.
+/// session start and *retires* it after the session's spans are pushed; the uploader
+/// prunes retired entries once their grace period lapses ([`Self::prune_retired`]).
+/// Entries are therefore bounded by the live sessions plus a grace window of
+/// recently ended ones.
 pub struct SpanQueue {
     spans: Mutex<Vec<DiagSpan>>,
     ctx: Mutex<HashMap<String, TraceCtx>>,
+    retired: Mutex<Vec<(String, std::time::Instant)>>,
 }
 
 /// Same poison policy as the sink: a panicking pusher leaves the data structurally
@@ -67,6 +73,7 @@ impl SpanQueue {
         Arc::new(SpanQueue {
             spans: Mutex::new(Vec::new()),
             ctx: Mutex::new(HashMap::new()),
+            retired: Mutex::new(Vec::new()),
         })
     }
 
@@ -95,8 +102,47 @@ impl SpanQueue {
         lock(&self.ctx).get(session).copied()
     }
 
+    /// Immediately drop a session's trace context. For tests/immediate use;
+    /// production paths [`retire`][Self::retire_trace_ctx] instead.
     pub fn remove_trace_ctx(&self, session: &str) {
         lock(&self.ctx).remove(session);
+    }
+
+    /// Retire a session's trace context: mark it for removal but leave the `ctx`
+    /// entry queryable for a grace period. The session's final spool lines
+    /// (including the disconnect event itself) are encoded on a LATER uploader
+    /// tick — removing the ctx immediately would strand them without correlation.
+    /// [`Self::prune_retired`] performs the actual removal once the grace lapses.
+    pub fn retire_trace_ctx(&self, session: &str) {
+        lock(&self.retired).push((session.to_string(), std::time::Instant::now()));
+    }
+
+    /// Retire every live trace context (see [`Self::retire_trace_ctx`]) — for pool
+    /// stop, where the per-session `Stopped` events may never arrive.
+    pub fn retire_all_ctxs(&self) {
+        let now = std::time::Instant::now();
+        let mut retired = lock(&self.retired);
+        for session in lock(&self.ctx).keys() {
+            retired.push((session.clone(), now));
+        }
+    }
+
+    /// Remove retired contexts older than `max_age`, keeping younger ones
+    /// queryable. Lock order: `retired` then `ctx`; both sync, never held across
+    /// an await.
+    pub fn prune_retired(&self, max_age: Duration) {
+        let mut retired = lock(&self.retired);
+        if retired.is_empty() {
+            return;
+        }
+        let mut ctx = lock(&self.ctx);
+        retired.retain(|(session, at)| {
+            if at.elapsed() < max_age {
+                return true;
+            }
+            ctx.remove(session);
+            false
+        });
     }
 
     fn drain(&self) -> Vec<DiagSpan> {
@@ -246,7 +292,13 @@ async fn run_loop(
                 if !events.is_empty() {
                     let body = encode_spool_logs(&res, &events, |s| spans.trace_ctx_for(s));
                     match try_post(&otel, "/v1/logs", &body).await {
-                        Ok(status) if (200..300).contains(&status) => fail = 0,
+                        Ok(status) if (200..300).contains(&status) => {
+                            fail = 0;
+                            // Ended sessions' ctx entries outlive them by RETIRE_GRACE
+                            // so their final spool lines (encoded above, possibly on a
+                            // later tick than the retirement) keep their correlation.
+                            spans.prune_retired(RETIRE_GRACE);
+                        }
                         Ok(status) => {
                             tracing::debug!(status, "diag: log upload rejected");
                             sink.restore_batch(&lines);
@@ -654,6 +706,35 @@ mod tests {
         assert!(q.trace_ctx_for("s").is_some());
         q.remove_trace_ctx("s");
         assert!(q.trace_ctx_for("s").is_none());
+    }
+
+    #[test]
+    fn retired_ctx_grace() {
+        let q = SpanQueue::new();
+        let ctx = (*b"0123456789abcdef", *b"01234567");
+        q.set_trace_ctx("s1", ctx);
+        q.set_trace_ctx("s2", ctx);
+
+        // Retirement keeps the ctx queryable (the session's final spool lines are
+        // encoded on a later uploader tick)...
+        q.retire_trace_ctx("s1");
+        assert!(q.trace_ctx_for("s1").is_some(), "retire must not remove");
+        // ...through a within-grace prune...
+        q.prune_retired(Duration::from_secs(3600));
+        assert!(q.trace_ctx_for("s1").is_some(), "young entry must survive");
+        // ...until the grace lapses.
+        q.prune_retired(Duration::ZERO);
+        assert!(q.trace_ctx_for("s1").is_none(), "expired entry pruned");
+        assert!(
+            q.trace_ctx_for("s2").is_some(),
+            "unretired ctx must survive prune"
+        );
+
+        // retire_all_ctxs retires every live key (pool stop).
+        q.retire_all_ctxs();
+        assert!(q.trace_ctx_for("s2").is_some());
+        q.prune_retired(Duration::ZERO);
+        assert!(q.trace_ctx_for("s2").is_none());
     }
 
     #[test]
