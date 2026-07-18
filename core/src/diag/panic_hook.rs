@@ -80,6 +80,10 @@ mod tests {
                 "--exact",
                 "diag::panic_hook::tests::panic_child",
                 "--nocapture",
+                // Explicit single-thread: one --exact test implies it today, but the
+                // child calls the process-global diag::install and must stay isolated
+                // if libtest defaults ever change.
+                "--test-threads=1",
             ])
             .env("SPARK_DIAG_PANIC_DIR", &dir)
             .output()

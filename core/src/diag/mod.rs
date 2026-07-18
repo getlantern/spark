@@ -88,7 +88,10 @@ impl DiagEvent {
         // Serialization is infallible for this shape (serde_json::Number can't hold
         // NaN/Inf, everything else is primitives); the fallback is defense in depth.
         // debug!, not error!: diag internals must never re-enter the capture layer
-        // at a captured-by-default level.
+        // at a captured-by-default level. Known accepted exception to the panic
+        // hook's "no tracing in the hook" rule: this arm is reachable from
+        // panic_hook → emit_error → to_jsonl, but only on a serialization failure
+        // that this shape cannot produce.
         serde_json::to_string(self).unwrap_or_else(|e| {
             tracing::debug!(err = %e, "diag: event serialization failed");
             "{}".into()
