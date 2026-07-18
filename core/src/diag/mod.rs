@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod events;
 pub mod layer;
 pub mod otlp;
+pub mod panic_hook;
 pub mod sink;
 pub mod span;
 // The uploader reuses config-fetch's HTTP/TLS plumbing, and its `tls_wrap` is a no-op
