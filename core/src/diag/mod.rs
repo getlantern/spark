@@ -7,18 +7,24 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub mod events;
 pub mod layer;
 pub mod otlp;
 pub mod sink;
 pub mod span;
+// The uploader reuses config-fetch's HTTP/TLS plumbing, and its `tls_wrap` is a no-op
+// passthrough without the `anytls` feature (which `config-fetch` implies) — gating the
+// whole module on `config-fetch` makes a plaintext upload build impossible.
+#[cfg(feature = "config-fetch")]
+pub mod upload;
 
 pub use sink::{emit, emit_error, install, DiagSink};
 
 /// Severity level for a [`DiagEvent`], serialized in lowercase for JSONL / OTLP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+/// `Deserialize` because the uploader re-reads spool lines to re-encode them as OTLP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagLevel {
     Error,

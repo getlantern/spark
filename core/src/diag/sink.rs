@@ -370,6 +370,18 @@ impl DiagSink {
     pub fn error_notify(&self) -> Arc<Notify> {
         self.error_notify.clone()
     }
+
+    /// Re-append taken lines to the spool after a failed upload, so a rejected batch
+    /// isn't lost. Spool only, NOT `diag.log` (already mirrored there when first
+    /// written). Short lock hold — one buffered append per line. An append failure is
+    /// debug-logged inside [`CappedFile::append_line`] and that line is dropped: at
+    /// that point the disk itself is failing and the backup log still has the copy.
+    pub fn restore_batch(&self, lines: &[String]) {
+        let mut files = lock_files(&self.files);
+        for line in lines {
+            files.spool.append_line(line);
+        }
+    }
 }
 
 impl Drop for DiagSink {

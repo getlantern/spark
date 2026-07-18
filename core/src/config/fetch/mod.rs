@@ -7,8 +7,10 @@
 //! TLS — no signature, matching radiance.
 
 mod cache;
-mod http;
-mod request;
+// http + request are pub(crate): the diag uploader (`diag::upload`) reuses the same
+// hand-rolled HTTP/1.1 POST + header hygiene for its OTLP uploads.
+pub(crate) mod http;
+pub(crate) mod request;
 mod user;
 
 use std::path::Path;

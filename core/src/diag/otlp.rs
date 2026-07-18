@@ -11,10 +11,28 @@
 //! - `timeUnixNano` is a string of nanoseconds.
 //! - `traceId` = 32 lowercase hex chars; `spanId` = 16 lowercase hex chars.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 
 use super::span::DiagSpan;
 use super::{DiagEvent, DiagLevel};
+
+/// An owned mirror of [`DiagEvent`] for spool replay: the live struct uses
+/// `&'static str` for `component`/`kind` (a zero-alloc emit path), which cannot
+/// `Deserialize` — spool lines re-enter as owned strings.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SpoolEvent {
+    pub ts: u64,
+    pub level: DiagLevel,
+    #[serde(default)]
+    pub component: String,
+    pub kind: String,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub fields: BTreeMap<String, Value>,
+}
 
 /// Resource-level identity attached to every batch (getlantern/semconv names; the
 /// version/build fields are what make per-build fleet queries possible).
@@ -145,36 +163,98 @@ fn to_otlp_value(v: &Value) -> Value {
 }
 
 fn build_log_record(ev: &DiagEvent, trace_ctx: Option<(&[u8; 16], &[u8; 8])>) -> Value {
+    build_record(
+        ev.ts,
+        ev.level,
+        ev.kind,
+        ev.session.as_deref(),
+        &ev.fields,
+        trace_ctx,
+    )
+}
+
+/// Encode spool-replayed events as one OTLP/HTTP JSON logs payload.
+///
+/// Unlike [`encode_logs`] (one trace context per batch), the context is looked up
+/// **per record** via `ctx_for(session)`: a spool batch interleaves events from many
+/// sessions, and OTLP stamps `traceId`/`spanId` per log record, so one payload can
+/// carry them all.
+pub fn encode_spool_logs<F>(res: &ResourceAttrs, events: &[SpoolEvent], mut ctx_for: F) -> Vec<u8>
+where
+    F: FnMut(&str) -> Option<([u8; 16], [u8; 8])>,
+{
+    let resource_attrs = build_resource_attrs(res);
+    let log_records: Vec<Value> = events
+        .iter()
+        .map(|ev| {
+            let ctx = ev.session.as_deref().and_then(&mut ctx_for);
+            build_record(
+                ev.ts,
+                ev.level,
+                &ev.kind,
+                ev.session.as_deref(),
+                &ev.fields,
+                ctx.as_ref().map(|(t, s)| (t, s)),
+            )
+        })
+        .collect();
+
+    let payload = json!({
+        "resourceLogs": [{
+            "resource": { "attributes": resource_attrs },
+            "scopeLogs": [{
+                "scope": { "name": "spark-diag" },
+                "logRecords": log_records
+            }]
+        }]
+    });
+
+    serde_json::to_vec(&payload).unwrap_or_else(|e| {
+        tracing::debug!(err = %e, "diag: OTLP spool encoding failed");
+        b"{}".to_vec()
+    })
+}
+
+/// The shared log-record builder behind [`encode_logs`] (live `DiagEvent`s) and
+/// [`encode_spool_logs`] (owned spool replays).
+fn build_record(
+    ts: u64,
+    level: DiagLevel,
+    kind: &str,
+    session: Option<&str>,
+    fields: &BTreeMap<String, Value>,
+    trace_ctx: Option<(&[u8; 16], &[u8; 8])>,
+) -> Value {
     // timeUnixNano: millis * 1_000_000, as a string
-    let time_unix_nano = (ev.ts as u128 * 1_000_000).to_string();
+    let time_unix_nano = (ts as u128 * 1_000_000).to_string();
     // observedTimeUnixNano: time observed ≈ event time on-device; the server's receipt time
     // remains the trusted clock.
     let observed_time_unix_nano = time_unix_nano.clone();
 
     // body: for "log" kind, use the "message" field; otherwise the kind string
-    let body_str = if ev.kind == "log" {
-        ev.fields
+    let body_str = if kind == "log" {
+        fields
             .get("message")
             .and_then(|v| v.as_str())
-            .unwrap_or(ev.kind)
+            .unwrap_or(kind)
     } else {
-        ev.kind
+        kind
     };
 
     // attributes: kind, session (when Some), then fields EXCEPT "message" when kind=="log"
     let mut attributes: Vec<Value> = Vec::new();
     attributes.push(json!({
         "key": "kind",
-        "value": { "stringValue": ev.kind }
+        "value": { "stringValue": kind }
     }));
-    if let Some(session) = &ev.session {
+    if let Some(session) = session {
         attributes.push(json!({
             "key": "session",
             "value": { "stringValue": session }
         }));
     }
-    for (k, v) in &ev.fields {
-        if ev.kind == "log" && k == "message" {
+    for (k, v) in fields {
+        if kind == "log" && k == "message" {
             // Already used as body — skip
             continue;
         }
@@ -191,18 +271,16 @@ fn build_log_record(ev: &DiagEvent, trace_ctx: Option<(&[u8; 16], &[u8; 8])>) ->
     let mut record = json!({
         "timeUnixNano": time_unix_nano,
         "observedTimeUnixNano": observed_time_unix_nano,
-        "severityNumber": severity_number(ev.level),
-        "severityText": severity_text(ev.level),
+        "severityNumber": severity_number(level),
+        "severityText": severity_text(level),
         "body": { "stringValue": body_str },
         "attributes": attributes
     });
 
     // traceId + spanId: stamped when both trace_ctx and session are present
-    if let (Some((tid, sid)), Some(_)) = (trace_ctx, &ev.session) {
-        let trace_hex: String = tid.iter().map(|b| format!("{b:02x}")).collect();
-        let span_hex: String = sid.iter().map(|b| format!("{b:02x}")).collect();
-        record["traceId"] = Value::String(trace_hex);
-        record["spanId"] = Value::String(span_hex);
+    if let (Some((tid, sid)), Some(_)) = (trace_ctx, session) {
+        record["traceId"] = Value::String(hex16(tid));
+        record["spanId"] = Value::String(hex8(sid));
     }
 
     record
