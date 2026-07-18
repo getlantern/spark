@@ -124,6 +124,64 @@ Wire mimicry alone fails active probing and IP-reputation checks. The strong pos
     the raw connection to the local `bitcoind`. The prober gets a genuine node — indistinguishable
     because it *is* one. This is the REALITY move (probe resistance by being real), adapted to Bitcoin.
 
+### 5.1 The side-door: keyed-garbage authenticator
+
+The server must decide tunnel-vs-node from the **cleartext prefix alone** — before it generates its
+own ephemeral key or does ECDH — so the node path can stay a zero-crypto raw TCP splice to `bitcoind`.
+(Once the front does ECDH it has committed to a responder key `bitcoind` doesn't share, and can no
+longer hand the connection off.) That rules out putting the token in the encrypted stream or at the
+ECDH-derived garbage terminator, and points to a **fixed-offset MAC at the very start of the garbage**.
+
+Wire layout the tunnel client emits (everything after the 64-byte ellswift is, to anyone without the
+PSK, just garbage):
+
+```
+ellswift_pubkey (64 B, uniform)      — BIP324
+mac             (16 B)               — keyed; the first bytes of the garbage
+filler          (random, var. len)   — pads garbage to a Core-matching length
+```
+
+**MAC** = `HMAC-SHA256(k_srv, ellswift_pubkey ‖ epoch ‖ "spark-btc-v1")[:16]`, where
+- `k_srv = HKDF(PSK, server_id)` — a per-server subkey (kills cross-server replay; no shared global secret);
+- `ellswift_pubkey` — the 64 wire bytes, binding the MAC to this connection's fresh ephemeral key;
+- `epoch = floor(unixtime / 600)` — a 10-minute window; the server accepts `epoch-1 … epoch+1` for
+  clock skew (≤ ~30-minute replay bound);
+- 16-byte tag → a real peer's random garbage matching by chance = 2⁻¹²⁸ (no legit peer is ever
+  misrouted into the tunnel path).
+
+The front reads exactly **64 + 16 bytes**, computes the expected MAC for each accepted epoch, compares:
+
+- **Match** → tunnel client; the front becomes the BIP324 responder (own ephemeral, ECDH, session).
+- **No match / replay-cache hit / MAC fail** → the front opens a connection to the local `bitcoind`,
+  **replays the 64 + 16 bytes it already read**, and pipes bytes both ways with zero interpretation.
+  `bitcoind` runs the full responder role; our 16 MAC bytes are simply the first 16 bytes of the
+  garbage it authenticates as AAD. No BIP324 crypto in the front on this path. (A real client that
+  sent 0 garbage — whose first 16 post-ellswift bytes are actually its garbage terminator — fails the
+  MAC and takes this same splice; it works.)
+
+Why it holds:
+
+- **Uniform to an observer.** ellswift, the MAC tag, and the filler are all uniform. The one
+  distributional constraint is **garbage length**, and it *is* observable: the initiator sends
+  `ellswift ‖ garbage` and then pauses a full RTT for the responder's ellswift before it can compute
+  the terminator, so an on-path observer reads the first-flight size as `64 + garbage_len`. Verified
+  against Bitcoin Core (`src/net.cpp GenerateRandomGarbage`): length is `randrange(MAX_GARBAGE_LEN+1)`
+  = **uniform over [0, 4095], random content** (`MAX_GARBAGE_LEN = 4095`, `net.h`). We therefore draw
+  total garbage length uniform over [0, 4095] **clamped to ≥ 16** (the MAC floor). The only deviation
+  from Core is the absent [0, 15] tail — 16/4096 ≈ **0.39%** of the distribution — a statistically
+  tiny, though not strictly zero, tell.
+- **No BIP324 weakening.** The MAC never touches the ECDH or key schedule; it is spec-legal arbitrary
+  garbage on both paths.
+- **PSK-gated.** A prober without the PSK sending fresh `ellswift + random garbage` never matches →
+  node path → real `bitcoind`, indistinguishable from any peer connecting.
+- **Replay-resistant.** Primary defense is a **fresh-ellswift LRU cache** (bounded; TTL ≥ the ~30-min
+  epoch span): legit clients never reuse an ephemeral, so a repeated ellswift → node path (real
+  `bitcoind`, trivially indistinguishable). Secondary: a replay that evicts past the cache still can't
+  complete — the replayer captured only the *public* ellswift, so it can't derive session keys (needs
+  the initiator's ephemeral *private* key) or send valid tunnel frames. For that cache-edge case the
+  front's responder behavior (own ellswift+garbage, first-packet size, idle-timeout) should mirror
+  `bitcoind`'s, but the cache carries the load so this need not be byte-perfect.
+
 ## 6. Detectability & residual risks (stated plainly)
 
 1. **Traffic shape is the real weakness.** A bulk proxy flow does not look like a gossiping node
@@ -154,9 +212,9 @@ Wire mimicry alone fails active probing and IP-reputation checks. The strong pos
 
 ## 8. Open questions
 
-- **Keyed-garbage authenticator** exact construction (MAC input, length, placement within the
-  0–4095 B garbage) so it is uniform to an observer yet cheaply checkable by the server, without
-  weakening BIP324's own security proof. See the follow-up note.
+- **Keyed-garbage authenticator** — specified in §5.1. Remaining sub-question: whether the
+  front-as-responder path is worth hardening to byte-level timing/size parity with `bitcoind`, or
+  whether the fresh-ellswift cache makes that moot.
 - **v2 adoption trajectory** — is v2-only acceptable now, or do we need a v1 gambit for some regions?
 - **Shaping budget** — how much decoy/pacing is worth the throughput cost for the target user segment.
 - **Reusing `bitcoind`'s own BIP324 stack** on the server vs. a standalone terminator (the former is
