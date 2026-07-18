@@ -48,13 +48,20 @@
   // (onerror returns false / no preventDefault), so errors still hit the devtools console.
   $effect(() => {
     const prevOnError = window.onerror;
-    window.onerror = (message, source) => {
+    window.onerror = (message, source, lineno, colno, error) => {
       try {
         void backend.reportError(String(message ?? "unknown"), source ?? "window").catch(() => {});
       } catch {
         /* swallow — never throw from the error hook */
       }
-      return false;
+      // Chain to any previously-installed handler so its reporting keeps working,
+      // and propagate its verdict on suppressing default handling. Without one,
+      // return false so errors still hit the devtools console.
+      try {
+        return prevOnError ? prevOnError.call(window, message, source, lineno, colno, error) === true : false;
+      } catch {
+        return false;
+      }
     };
     const onRejection = (e: PromiseRejectionEvent) => {
       try {

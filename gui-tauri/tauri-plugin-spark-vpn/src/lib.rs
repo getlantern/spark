@@ -30,9 +30,9 @@ mod unbounded_diag;
 mod config_fetch;
 
 // Diagnostics host for the APP process (diag design §C4/§5): sink + panic hook + tracing capture
-// layer + config-gated OTLP uploader, plus the webview error-report / opt-out commands. Desktop
-// only, like the other spark-core-backed modules — Android's diagnostics ride the tunnel-process
-// phase (spec Phase B).
+// layer + config-gated OTLP uploader, plus the webview error-report / opt-out commands. Compiled
+// everywhere except Android (desktop today, iOS when it lands), like the other spark-core-backed
+// modules — Android's diagnostics ride the tunnel-process phase (spec Phase B).
 #[cfg(not(target_os = "android"))]
 mod diag_host;
 
