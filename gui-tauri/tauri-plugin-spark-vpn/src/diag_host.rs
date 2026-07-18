@@ -73,6 +73,9 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
     }
 
     let app = app.clone();
+    // Detached on purpose: the handle is dropped, so a panic inside init_inner is
+    // swallowed by tokio's task machinery instead of unwinding plugin setup — the
+    // "init is infallible" contract. Diagnostics must never take the app down.
     tauri::async_runtime::spawn(async move {
         init_inner(&app, &base);
     });

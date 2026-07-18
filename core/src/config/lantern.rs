@@ -96,8 +96,9 @@ pub fn unbounded_from_config_raw_json(s: &str) -> Result<UnboundedConfig, Config
 /// `otel.metrics_interval` is deliberately NOT parsed: Phase A emits no metrics signal (spec §9),
 /// so carrying the knob would only invite dead wiring.
 ///
-/// Header VALUES are opaque secrets (the SigNoz ingestion key lives there) — never log them.
-#[derive(Debug, Clone, PartialEq)]
+/// Header VALUES are opaque secrets (the SigNoz ingestion key lives there) — the manual
+/// [`Debug`] impl below redacts them so a stray `{:?}` can never leak a key.
+#[derive(Clone, PartialEq)]
 pub struct OtelConfig {
     /// The OTLP ingest endpoint (`otel.endpoint`, e.g. `ingest.us.signoz.cloud:443`). Never empty:
     /// an empty/absent endpoint yields `None` from [`otel_from_config_raw_json`] instead.
@@ -111,6 +112,26 @@ pub struct OtelConfig {
     pub logs_enabled: bool,
     /// The `features["otel.traces"]` gate for the traces signal. Absent ⇒ `false`.
     pub traces_enabled: bool,
+}
+
+// Manual Debug: header values are ingestion keys; deriving Debug would let any
+// `{:?}` of a config (or a struct containing one) print them. Keys stay visible —
+// they're routing metadata, and seeing WHICH headers are set is diagnostic gold.
+impl std::fmt::Debug for OtelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, _)| (k.as_str(), "[redacted]"))
+            .collect();
+        f.debug_struct("OtelConfig")
+            .field("endpoint", &self.endpoint)
+            .field("headers", &headers)
+            .field("sample_rate", &self.sample_rate)
+            .field("logs_enabled", &self.logs_enabled)
+            .field("traces_enabled", &self.traces_enabled)
+            .finish()
+    }
 }
 
 /// Parse a Lantern `config_raw.json` string into its [`OtelConfig`] (the top-level `otel` block
@@ -1349,6 +1370,27 @@ mod tests {
             o.sample_rate, 1.0,
             "string sample_rate must degrade to absent (1.0)"
         );
+    }
+
+    #[test]
+    fn otel_debug_redacts_header_values() {
+        let cfg = OtelConfig {
+            endpoint: "h:443".into(),
+            headers: vec![("signoz-ingestion-key".into(), "SECRET-VALUE".into())],
+            sample_rate: 1.0,
+            logs_enabled: true,
+            traces_enabled: false,
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("SECRET-VALUE"),
+            "Debug leaked a header value: {dbg}"
+        );
+        assert!(
+            dbg.contains("signoz-ingestion-key"),
+            "header keys stay visible"
+        );
+        assert!(dbg.contains("[redacted]"));
     }
 
     #[test]
