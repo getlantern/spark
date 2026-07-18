@@ -127,6 +127,10 @@ impl Drop for UploaderHandle {
 /// The gate predicate (§C4): upload only when the local opt-out is off, the config
 /// delivered an otel block with a non-empty endpoint, the `otel.logs` feature is on,
 /// and this device is sampled in.
+///
+/// Deliberate asymmetry: `otel.logs` gates ALL uploads — `otel.traces` alone ships
+/// nothing. Logs are the primary diagnostic signal; a trace without its correlated
+/// log records is an orphan, so traces ride only alongside an enabled log stream.
 pub fn upload_allowed(otel: Option<&OtelConfig>, local_opt_out: bool, device_id: &str) -> bool {
     if local_opt_out {
         return false;
@@ -214,8 +218,16 @@ async fn run_loop(
     let notify = sink.error_notify();
     let mut fail = 0u32;
     loop {
-        let wait = if fail > 0 { backoff(fail) } else { TICK };
-        wait_wakeup(&notify, &stop, wait).await;
+        if fail > 0 {
+            // Backing off: sleep the full quadratic delay WITHOUT the error-notify
+            // shortcut. A sustained failure typically keeps generating error events,
+            // and letting each one cut the wait short would void the backoff into a
+            // sub-second hammer on a dead endpoint. §C2a expedited flush applies to
+            // the healthy path only.
+            sleep_or_stop(backoff(fail), &stop).await;
+        } else {
+            wait_wakeup(&notify, &stop, TICK).await;
+        }
         if stop.load(Ordering::Relaxed) {
             return;
         }
@@ -277,6 +289,19 @@ async fn run_loop(
     }
 }
 
+/// Sleep `d`, returning within ~1 s of `stop` flipping (mirrors
+/// `config::fetch::sleep_or_stop`). Used for the backoff path, where error
+/// notifications must NOT shorten the wait.
+async fn sleep_or_stop(d: Duration, stop: &AtomicBool) {
+    let step = Duration::from_secs(1);
+    let mut left = d;
+    while left > Duration::ZERO && !stop.load(Ordering::Relaxed) {
+        let s = left.min(step);
+        tokio::time::sleep(s).await;
+        left = left.saturating_sub(s);
+    }
+}
+
 /// Sleep up to `max`, waking early on an error notification (then debouncing ~5 s so
 /// an error burst ships as one batch) — and returning within ~1 s of `stop` flipping.
 async fn wait_wakeup(notify: &Notify, stop: &AtomicBool, max: Duration) {
@@ -301,6 +326,11 @@ async fn wait_wakeup(notify: &Notify, stop: &AtomicBool, max: Duration) {
 
 /// Parse spool JSONL lines back into events, skipping (and counting) unparseable
 /// lines — a torn trailing line from a crash must not wedge the whole batch.
+///
+/// Skipped lines are dropped from the upload queue BY DESIGN, not restored: they will
+/// never parse, so restoring them would poison every future batch into an endless
+/// take→fail→restore churn. The backup log (`diag.log`) retains the raw bytes for
+/// forensics — the one deliberate exception to the sink's duplicates-over-loss rule.
 fn parse_spool(lines: &[String]) -> Vec<SpoolEvent> {
     let mut out = Vec::with_capacity(lines.len());
     let mut bad = 0usize;
@@ -350,8 +380,13 @@ where
 }
 
 /// Split a config `endpoint` (`host:port`, radiance convention) into host + port,
-/// defaulting to 443 when no valid port is present.
+/// defaulting to 443 when no valid port is present. A bracketed IPv6 literal
+/// (`[::1]:443`) parses via `SocketAddr` and returns the UNbracketed address, which
+/// is what [`resolve`]'s `IpAddr` fast-path expects.
 fn split_host_port(endpoint: &str) -> (String, u16) {
+    if let Ok(sa) = endpoint.parse::<std::net::SocketAddr>() {
+        return (sa.ip().to_string(), sa.port());
+    }
     if let Some((h, p)) = endpoint.rsplit_once(':') {
         if let Ok(port) = p.parse::<u16>() {
             return (h.to_string(), port);
@@ -463,6 +498,15 @@ mod tests {
             upload_allowed(Some(&test_otel("h:443", true, 1.0)), false, did),
             "all good"
         );
+        // Deliberate asymmetry: traces alone (logs off) ship NOTHING — logs are the
+        // primary signal and gate all uploads. Don't "fix" without reading the
+        // upload_allowed doc.
+        let mut traces_only = test_otel("h:443", false, 1.0);
+        traces_only.traces_enabled = true;
+        assert!(
+            !upload_allowed(Some(&traces_only), false, did),
+            "otel.traces without otel.logs must not upload"
+        );
     }
 
     #[test]
@@ -516,6 +560,8 @@ mod tests {
             ("ingest.us.signoz.cloud".to_string(), 443)
         );
         assert_eq!(split_host_port("bare.host"), ("bare.host".to_string(), 443));
+        // Bracketed IPv6 → unbracketed address (what resolve's IpAddr fast-path wants).
+        assert_eq!(split_host_port("[::1]:8443"), ("::1".to_string(), 8443));
         assert_eq!(
             split_host_port("h:notaport"),
             ("h:notaport".to_string(), 443)
