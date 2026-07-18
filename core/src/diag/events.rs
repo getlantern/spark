@@ -5,8 +5,6 @@
 //! when `None`. The set of constructors here is the exhaustive allowlist: adding a new event
 //! kind means adding a new function with a typed signature, not reaching for `fields` directly.
 
-use std::borrow::Cow;
-
 use serde_json::Value;
 
 use super::{DiagEvent, DiagLevel};
@@ -190,50 +188,16 @@ pub fn error_task_failed(task: &str, error: &str) -> DiagEvent {
 /// A webview error (JS exception, load failure, or similar).
 ///
 /// Webview strings routinely embed full URLs (the reporting script's URL, a failed
-/// fetch target), which the §C5 deny-list forbids exporting. So beyond the usual IP
-/// backstop, `message` has `scheme://…` tokens redacted and `source` is reduced to its
-/// final path segment (no scheme/host/query/fragment) before insertion. This is the
-/// collection point, so every reporter (onerror, unhandledrejection, future callers of
-/// the plugin command) is covered regardless of what it sends.
+/// fetch target), which the §C5 deny-list forbids exporting. `insert_str` handles URL
+/// redaction in `message`; `source` is additionally reduced to its final path segment
+/// (no scheme/host/query/fragment) before insertion. This is the collection point, so
+/// every reporter (onerror, unhandledrejection, future callers of the plugin command)
+/// is covered regardless of what it sends.
 pub fn error_webview(message: &str, source: &str) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Error, "app", "error.webview");
-    ev.insert_str("message", &redact_urls(message));
+    ev.insert_str("message", message);
     ev.insert_str("source", source_basename(source));
     ev
-}
-
-/// Replace every `scheme://…` token (through the next whitespace) with `[redacted-url]`.
-///
-/// Anchored on `://` so ordinary prose, module paths, and version strings are never
-/// mangled (the reason `redact_addrs` itself doesn't match hostnames); the scheme is
-/// consumed backwards from the anchor, the rest of the token forwards to whitespace.
-fn redact_urls(input: &str) -> Cow<'_, str> {
-    if !input.contains("://") {
-        return Cow::Borrowed(input);
-    }
-    let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(anchor) = rest.find("://") {
-        // Walk the scheme backwards (RFC 3986 scheme chars are all ASCII, so byte
-        // stepping stays on char boundaries).
-        let before = rest.as_bytes();
-        let mut start = anchor;
-        while start > 0 {
-            let b = before[start - 1];
-            if b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.') {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
-        let after = &rest[anchor + 3..];
-        let end = anchor + 3 + after.find(char::is_whitespace).unwrap_or(after.len());
-        out.push_str(&rest[..start]);
-        out.push_str("[redacted-url]");
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    Cow::Owned(out)
 }
 
 /// Reduce a webview `source` to its final path segment: strip any scheme+authority,
@@ -349,13 +313,6 @@ mod tests {
             error_webview("m", "C:\\Users\\someone\\bundle.js").fields["source"],
             "bundle.js"
         );
-    }
-
-    #[test]
-    fn redact_urls_leaves_plain_text_borrowed() {
-        for s in ["no urls here", "module spark_core::proxy v0.2.2", ""] {
-            assert!(matches!(redact_urls(s), Cow::Borrowed(_)), "{s:?}");
-        }
     }
 
     #[test]

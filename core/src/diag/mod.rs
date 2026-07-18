@@ -1,8 +1,8 @@
 //! On-device diagnostics: structured events captured to a ring/spool/backup-log and
 //! uploaded as OTLP logs+traces to the config-delivered otel endpoint (design:
 //! docs/superpowers/specs/2026-07-17-spark-diagnostics-design.md). Privacy: every
-//! string field is IP-redacted on insert; kinds/fields follow the spec §C5 allowlist
-//! (enforced by the typed constructors in `events`, a later task).
+//! string field is IP- and URL-redacted on insert; kinds/fields follow the spec §C5
+//! allowlist (enforced by the typed constructors in `events`, a later task).
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,6 +22,16 @@ pub mod span;
 pub mod upload;
 
 pub use sink::{emit, emit_error, install, DiagSink};
+
+/// Per-field byte cap for string values, applied in [`DiagEvent::insert_str`].
+///
+/// Keeps any single spool line far below the uploader's 256 KiB batch budget: an
+/// unbounded field (a huge webview error string, a pathological log message) would
+/// otherwise produce a first line no `take_spool_batch` budget can fit, making every
+/// take return an empty batch and stalling uploads until rotation discards the line.
+const MAX_STR_FIELD: usize = 8 * 1024;
+/// Marker appended when [`MAX_STR_FIELD`] truncates a field.
+const TRUNCATED: &str = "…[truncated]";
 
 /// Severity level for a [`DiagEvent`], serialized in lowercase for JSONL / OTLP.
 /// `Deserialize` because the uploader re-reads spool lines to re-encode them as OTLP.
@@ -75,12 +85,26 @@ impl DiagEvent {
         }
     }
 
-    /// Insert a string field, IP-redacted (the §C5 backstop applies to every string).
+    /// Insert a string field with the §C5 backstops — IP-literal redaction, URL
+    /// redaction — and a size bound ([`MAX_STR_FIELD`], UTF-8-safe truncation).
     pub fn insert_str(&mut self, key: &str, value: &str) {
-        self.fields.insert(
-            key.to_string(),
-            crate::redact::redact_addrs(value).into_owned().into(),
-        );
+        let no_ips = crate::redact::redact_addrs(value);
+        let clean = crate::redact::redact_urls(&no_ips);
+        let bounded: String = if clean.len() > MAX_STR_FIELD {
+            // Walk down to a char boundary so truncation can't split a multibyte
+            // char and produce invalid UTF-8 (which would fail serialization).
+            let mut end = MAX_STR_FIELD;
+            while !clean.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut s = String::with_capacity(end + TRUNCATED.len());
+            s.push_str(&clean[..end]);
+            s.push_str(TRUNCATED);
+            s
+        } else {
+            clean.into_owned()
+        };
+        self.fields.insert(key.to_string(), bounded.into());
     }
 
     /// One-line JSON for the spool / backup log.
@@ -124,5 +148,35 @@ mod tests {
         let mut ev = DiagEvent::new(DiagLevel::Error, "app", "log");
         ev.insert_str("message", "dial 1.2.3.4:443 failed");
         assert_eq!(ev.fields["message"], "dial [redacted-ip]:443 failed");
+    }
+
+    #[test]
+    fn string_fields_are_url_redacted_on_insert() {
+        // §C5 deny-lists URLs; the general `log` bridge flows through here too.
+        let mut ev = DiagEvent::new(DiagLevel::Info, "app", "log");
+        ev.insert_str("message", "GET https://api.example.com/cfg?k=v failed");
+        assert_eq!(ev.fields["message"], "GET [redacted-url] failed");
+    }
+
+    #[test]
+    fn oversized_string_fields_truncate_on_char_boundary() {
+        let mut ev = DiagEvent::new(DiagLevel::Error, "app", "log");
+        // 2-byte chars so the byte cap lands mid-char: truncation must back up to a
+        // boundary rather than produce invalid UTF-8.
+        let big = "é".repeat(MAX_STR_FIELD); // 2 * MAX_STR_FIELD bytes
+        ev.insert_str("message", &big);
+        let stored = ev.fields["message"].as_str().unwrap();
+        assert!(stored.ends_with(TRUNCATED));
+        assert!(stored.len() <= MAX_STR_FIELD + TRUNCATED.len());
+        // The resulting spool line stays far below the uploader's batch budget, so a
+        // single event can never wedge take_spool_batch into empty batches.
+        assert!(ev.to_jsonl().len() < 4 * MAX_STR_FIELD);
+    }
+
+    #[test]
+    fn small_string_fields_are_not_truncated() {
+        let mut ev = DiagEvent::new(DiagLevel::Info, "app", "log");
+        ev.insert_str("message", "short");
+        assert_eq!(ev.fields["message"], "short");
     }
 }
