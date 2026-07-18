@@ -5,6 +5,8 @@
 //! when `None`. The set of constructors here is the exhaustive allowlist: adding a new event
 //! kind means adding a new function with a typed signature, not reaching for `fields` directly.
 
+use std::borrow::Cow;
+
 use serde_json::Value;
 
 use super::{DiagEvent, DiagLevel};
@@ -186,11 +188,74 @@ pub fn error_task_failed(task: &str, error: &str) -> DiagEvent {
 }
 
 /// A webview error (JS exception, load failure, or similar).
+///
+/// Webview strings routinely embed full URLs (the reporting script's URL, a failed
+/// fetch target), which the §C5 deny-list forbids exporting. So beyond the usual IP
+/// backstop, `message` has `scheme://…` tokens redacted and `source` is reduced to its
+/// final path segment (no scheme/host/query/fragment) before insertion. This is the
+/// collection point, so every reporter (onerror, unhandledrejection, future callers of
+/// the plugin command) is covered regardless of what it sends.
 pub fn error_webview(message: &str, source: &str) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Error, "app", "error.webview");
-    ev.insert_str("message", message);
-    ev.insert_str("source", source);
+    ev.insert_str("message", &redact_urls(message));
+    ev.insert_str("source", source_basename(source));
     ev
+}
+
+/// Replace every `scheme://…` token (through the next whitespace) with `[redacted-url]`.
+///
+/// Anchored on `://` so ordinary prose, module paths, and version strings are never
+/// mangled (the reason `redact_addrs` itself doesn't match hostnames); the scheme is
+/// consumed backwards from the anchor, the rest of the token forwards to whitespace.
+fn redact_urls(input: &str) -> Cow<'_, str> {
+    if !input.contains("://") {
+        return Cow::Borrowed(input);
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(anchor) = rest.find("://") {
+        // Walk the scheme backwards (RFC 3986 scheme chars are all ASCII, so byte
+        // stepping stays on char boundaries).
+        let before = rest.as_bytes();
+        let mut start = anchor;
+        while start > 0 {
+            let b = before[start - 1];
+            if b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.') {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let after = &rest[anchor + 3..];
+        let end = anchor + 3 + after.find(char::is_whitespace).unwrap_or(after.len());
+        out.push_str(&rest[..start]);
+        out.push_str("[redacted-url]");
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+/// Reduce a webview `source` to its final path segment: strip any scheme+authority,
+/// query, and fragment, then take the last `/`- (or `\`-) delimited component. A
+/// path-less URL (bare origin) or empty result degrades to `"webview"` rather than
+/// leaking the host. Non-URL markers (`window`, `unhandledrejection`) pass through.
+fn source_basename(source: &str) -> &str {
+    let path = match source.find("://") {
+        // Skip scheme + authority; without a path there is only a host to leak.
+        Some(i) => match source[i + 3..].find('/') {
+            Some(j) => &source[i + 3 + j + 1..],
+            None => return "webview",
+        },
+        None => source,
+    };
+    let no_query = path.split(['?', '#']).next().unwrap_or(path);
+    let base = no_query.rsplit(['/', '\\']).next().unwrap_or(no_query);
+    if base.is_empty() {
+        "webview"
+    } else {
+        base
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +303,58 @@ mod tests {
             ] {
                 assert!(!line.contains(ip), "leaked {ip} in {line}");
             }
+        }
+    }
+
+    #[test]
+    fn webview_error_strips_urls_from_message_and_paths_from_source() {
+        let ev = error_webview(
+            "fetch https://api.example.com/config?key=abc failed, retry wss://sig.example.net/ws later",
+            "https://app.example.com/assets/index-4f2a.js?v=1#L10",
+        );
+        let line = ev.to_jsonl();
+        assert!(!line.contains("example.com"), "leaked host in {line}");
+        assert!(!line.contains("example.net"), "leaked host in {line}");
+        assert!(!line.contains("key=abc"), "leaked query in {line}");
+        assert_eq!(
+            ev.fields["message"],
+            "fetch [redacted-url] failed, retry [redacted-url] later"
+        );
+        assert_eq!(ev.fields["source"], "index-4f2a.js");
+    }
+
+    #[test]
+    fn webview_source_shapes() {
+        // Bare origin (no path): nothing safe to keep — placeholder, never the host.
+        assert_eq!(
+            error_webview("m", "https://example.com").fields["source"],
+            "webview"
+        );
+        assert_eq!(
+            error_webview("m", "tauri://localhost/").fields["source"],
+            "webview"
+        );
+        // Non-URL markers from the bridge pass through.
+        assert_eq!(error_webview("m", "window").fields["source"], "window");
+        assert_eq!(
+            error_webview("m", "unhandledrejection").fields["source"],
+            "unhandledrejection"
+        );
+        // Filesystem paths reduce to the basename (no user-bearing directories, §C5).
+        assert_eq!(
+            error_webview("m", "/Users/someone/app/bundle.js").fields["source"],
+            "bundle.js"
+        );
+        assert_eq!(
+            error_webview("m", "C:\\Users\\someone\\bundle.js").fields["source"],
+            "bundle.js"
+        );
+    }
+
+    #[test]
+    fn redact_urls_leaves_plain_text_borrowed() {
+        for s in ["no urls here", "module spark_core::proxy v0.2.2", ""] {
+            assert!(matches!(redact_urls(s), Cow::Borrowed(_)), "{s:?}");
         }
     }
 
