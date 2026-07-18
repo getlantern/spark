@@ -89,6 +89,13 @@ export interface SparkBackend {
   /** Whether Unbounded is available for this client (server `features.unbounded` gate + a config
    * block with the endpoints to dial). Gates whether the UI surfaces the feature at all. */
   unboundedAvailable(): Promise<boolean>;
+  /** Forward a webview error (JS exception / unhandled rejection) to diagnostics.
+   * Fire-and-forget safe: callers may ignore the promise. */
+  reportError(message: string, source: string): Promise<void>;
+  /** Whether the diagnostics opt-out toggle is on (defaults on). */
+  diagnosticsEnabled(): Promise<boolean>;
+  /** Persist the diagnostics toggle; takes effect on next launch (the sink installs once at startup). */
+  setDiagnosticsEnabled(enabled: boolean): Promise<void>;
 }
 
 // MockBackend simulates the service for U0: connect → connecting → (≈900ms) →
@@ -111,7 +118,8 @@ const mockState: {
   autoEnable: boolean;
   hidden: boolean;
   welcomeSeen: boolean;
-} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [] }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false };
+  diagnosticsEnabled: boolean;
+} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [] }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false, diagnosticsEnabled: true };
 
 export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
@@ -237,4 +245,11 @@ export class MockBackend implements SparkBackend {
   }
   // Dev-visible: the mock always reports Unbounded available so the tab/row shows at `npm run dev`.
   async unboundedAvailable(): Promise<boolean> { return true; }
+
+  // Dev stand-in for the diag spool: just make the forwarded error visible in the console.
+  async reportError(message: string, source: string): Promise<void> {
+    console.error(`[mock diag] ${source}: ${message}`);
+  }
+  async diagnosticsEnabled(): Promise<boolean> { return mockState.diagnosticsEnabled; }
+  async setDiagnosticsEnabled(enabled: boolean): Promise<void> { mockState.diagnosticsEnabled = enabled; }
 }

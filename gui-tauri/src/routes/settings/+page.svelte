@@ -11,6 +11,9 @@
 
   // Ad-block defaults on (persisted flag defaults true); load the real value on mount.
   let adBlock = $state(true);
+  // Diagnostics opt-out defaults on; changes take effect on next launch (the diag sink
+  // installs once at startup), which the row's description line spells out.
+  let diagnostics = $state(true);
   let snack = $state<string | null>(null);
   let snackTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -25,6 +28,7 @@
 
   onMount(async () => {
     try { adBlock = await backend.getAdBlockEnabled(); } catch {}
+    try { diagnostics = await backend.diagnosticsEnabled(); } catch {}
     try { unboundedServerEnabled = await backend.unboundedAvailable(); } catch {}
   });
 
@@ -46,6 +50,18 @@
     } catch {
       adBlock = prev;
       showSnack($_("err_ad_block"));
+    }
+  }
+
+  // Same optimistic-toggle-with-revert shape as ad-block.
+  async function toggleDiagnostics() {
+    const prev = diagnostics;
+    diagnostics = !diagnostics;
+    try {
+      await backend.setDiagnosticsEnabled(diagnostics);
+    } catch {
+      diagnostics = prev;
+      showSnack($_("err_save_changes"));
     }
   }
 
@@ -94,6 +110,15 @@
         <div class="meta"><div class="name">{$_("built_in_ad_blocking")}</div></div>
         <button class="switch" class:on={adBlock} role="switch" aria-checked={adBlock} aria-label={$_("built_in_ad_blocking")} onclick={toggleAdBlock}><span class="knob"></span></button>
       </div>
+      <div class="divider"></div>
+      <div class="row toggle-row">
+        <span class="ic">{@render pulse()}</span>
+        <div class="meta">
+          <div class="name">{$_("settings_diagnostics")}</div>
+          <div class="sub">{$_("settings_diagnostics_desc")}</div>
+        </div>
+        <button class="switch" class:on={diagnostics} role="switch" aria-checked={diagnostics} aria-label={$_("settings_diagnostics")} onclick={toggleDiagnostics}><span class="knob"></span></button>
+      </div>
     </div>
   </div>
 
@@ -114,6 +139,9 @@
 {/snippet}
 {#snippet bridge()}
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9v9"/><path d="M22 9v9"/><path d="M2 12a6 6 0 0 1 6-6h8a6 6 0 0 1 6 6"/><path d="M7 12v6"/><path d="M12 10v8"/><path d="M17 12v6"/></svg>
+{/snippet}
+{#snippet pulse()}
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
 {/snippet}
 
 <style>
@@ -148,6 +176,11 @@
   .name {
     font-size: 15px; font-weight: 600; color: var(--text-primary);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* Small description line under a toggle name (matches the Unbounded settings screen). */
+  .sub {
+    margin-top: 2px; font-size: 12px; font-weight: 500; color: var(--text-tertiary);
+    letter-spacing: 0.01em;
   }
   .value { font-size: 14px; font-weight: 500; color: var(--text-tertiary); white-space: nowrap; }
   .chev { color: var(--text-tertiary); display: inline-flex; }

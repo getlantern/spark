@@ -81,6 +81,15 @@ export class TauriBackend implements SparkBackend {
   async unboundedAvailable(): Promise<boolean> {
     return await invoke<boolean>("plugin:spark-vpn|unbounded_available");
   }
+  async reportError(message: string, source: string): Promise<void> {
+    await invoke("plugin:spark-vpn|diag_report_webview_error", { message, source });
+  }
+  async diagnosticsEnabled(): Promise<boolean> {
+    return await invoke<boolean>("plugin:spark-vpn|diag_get_enabled");
+  }
+  async setDiagnosticsEnabled(enabled: boolean): Promise<void> {
+    await invoke("plugin:spark-vpn|diag_set_enabled", { enabled });
+  }
 }
 
 // True when running inside the Tauri webview (vs a plain browser at `npm run dev`).
