@@ -144,9 +144,13 @@ fn to_otlp_value(v: &Value) -> Value {
         Value::Number(n) => {
             if n.is_f64() {
                 json!({ "doubleValue": n })
-            } else {
+            } else if let Some(i) = n.as_i64() {
                 // OTLP/JSON: 64-bit ints encoded as strings in intValue
-                json!({ "intValue": n.to_string() })
+                json!({ "intValue": i.to_string() })
+            } else {
+                // A u64 above i64::MAX doesn't fit OTLP's int64 `intValue`; ship it as
+                // a string rather than risk the receiver rejecting the whole payload.
+                json!({ "stringValue": n.to_string() })
             }
         }
         Value::Bool(b) => json!({ "boolValue": b }),
@@ -515,6 +519,21 @@ mod tests {
             .expect("arrayValue.values must be an array");
         assert_eq!(arr_vals[0]["stringValue"], "alpha");
         assert_eq!(arr_vals[1]["stringValue"], "beta");
+    }
+
+    #[test]
+    fn u64_above_i64_max_falls_back_to_string_value() {
+        // OTLP's intValue is an int64; a larger u64 must not be emitted there.
+        let big = u64::MAX;
+        let v = to_otlp_value(&serde_json::json!(big));
+        assert!(v.get("intValue").is_none(), "must not overflow intValue");
+        assert_eq!(v["stringValue"], big.to_string());
+        // The i64 boundary itself still rides intValue.
+        let edge = to_otlp_value(&serde_json::json!(i64::MAX as u64));
+        assert_eq!(edge["intValue"], i64::MAX.to_string());
+        // Negative ints ride intValue too.
+        let neg = to_otlp_value(&serde_json::json!(-7));
+        assert_eq!(neg["intValue"], "-7");
     }
 
     #[test]

@@ -221,13 +221,15 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
             let delta = agg.apply_with_geo(ev, &resolver).await;
             // peer_region rides the geo the aggregator just resolved for the globe
             // (country only — §C5); None both when unresolved and for non-join deltas.
+            // Borrowed from `delta`: the borrow ends at the diag_for_event call, before
+            // the `if let` below moves `delta`.
             let region = match &delta {
-                Some(SharingDelta::Joined(p)) => p.geo.as_ref().map(|g| g.country_code.clone()),
+                Some(SharingDelta::Joined(p)) => p.geo.as_ref().map(|g| g.country_code.as_str()),
                 _ => None,
             };
             unbounded_diag::apply_actions(unbounded_diag::diag_for_event(
                 &view,
-                region.as_deref(),
+                region,
                 &mut pool_diag,
             ));
             if let Some(delta) = delta {
