@@ -44,8 +44,8 @@ static STATE: OnceLock<DiagState> = OnceLock::new();
 
 /// The live [`SpanQueue`], for pushing finished session spans (spec §C3a). `None`
 /// until [`init`] has completed its async body — or forever, when diagnostics are
-/// disabled — so instrumentation callers must treat `None` as "spans off".
-#[allow(dead_code)] // consumed by Task 11 (Unbounded session-span instrumentation)
+/// disabled — so instrumentation callers (`unbounded_diag::apply_actions`) must treat
+/// `None` as "spans off".
 pub fn span_queue() -> Option<Arc<SpanQueue>> {
     STATE.get().map(|s| s.queue.clone())
 }

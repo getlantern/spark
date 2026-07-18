@@ -18,6 +18,12 @@ mod desktop;
 #[cfg(not(target_os = "android"))]
 mod unbounded;
 
+// §C6 diagnostic timeline + §C3a session traces for the Unbounded pool: a pure
+// PoolEvent → diag-action mapper applied fire-and-forget by `unbounded`'s aggregation
+// loop. Gated with `unbounded` (and `diag_host`, whose span queue it feeds).
+#[cfg(not(target_os = "android"))]
+mod unbounded_diag;
+
 // Phase 2a: app-side startup config fetch (links spark-core's kindling fetch). Desktop only —
 // Android fetches in the :vpn process over IPC (Phase 2b).
 #[cfg(not(target_os = "android"))]
