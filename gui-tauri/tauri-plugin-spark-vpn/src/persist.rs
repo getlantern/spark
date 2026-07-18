@@ -277,6 +277,34 @@ pub fn save_unbounded_total_helped(base: &Path, total: u64) -> crate::Result<()>
     Ok(())
 }
 
+// ── Diagnostics persistence ───────────────────────────────────────────────────
+
+/// Read the persisted diagnostics toggle from `<base>/diagnostics_enabled.txt`.
+///
+/// Diagnostics are ON by default (diag design §C4: default-on, so the opt-out switch is
+/// load-bearing): returns `true` unless the file holds `"false"` (trimmed,
+/// case-insensitive) — the same default-on shape as the ad-block toggle.
+pub fn load_diagnostics_enabled(base: &Path) -> bool {
+    std::fs::read_to_string(base.join("diagnostics_enabled.txt"))
+        .ok()
+        // Only an explicit "false" opts out; anything else (incl. missing) stays on.
+        .map(|s| !s.trim().eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+/// Persist the diagnostics toggle to `<base>/diagnostics_enabled.txt` as
+/// `"true"`/`"false"`. Takes effect on next launch (`diag_host::init` runs once).
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_diagnostics_enabled(base: &Path, enabled: bool) -> crate::Result<()> {
+    std::fs::create_dir_all(base)?;
+    std::fs::write(
+        base.join("diagnostics_enabled.txt"),
+        if enabled { "true" } else { "false" },
+    )?;
+    Ok(())
+}
+
 /// Read an opt-in bool setting from `<base>/<file>`: `true` only when the file holds exactly
 /// `"true"` (trimmed, case-insensitive); missing/unreadable/other contents default to `false`.
 fn load_unbounded_bool(base: &Path, file: &str) -> bool {
@@ -529,6 +557,32 @@ mod tests {
         assert!(load_unbounded_welcome_seen(&base));
         save_unbounded_welcome_seen(&base, false).expect("save_unbounded_welcome_seen(false)");
         assert!(!load_unbounded_welcome_seen(&base));
+    }
+
+    // (k') diagnostics toggle defaults to ON (opt-out) on a missing dir, unlike the
+    // opt-in unbounded bools.
+    #[test]
+    fn diagnostics_enabled_defaults_true_on_missing_dir() {
+        let base = tmp("diagnostics_enabled_default");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            load_diagnostics_enabled(&base),
+            "load_diagnostics_enabled must default to on (true) on missing dir"
+        );
+    }
+
+    // (k'') diagnostics toggle round-trips: save(false) → load()==false, save(true) → true.
+    #[test]
+    fn diagnostics_enabled_round_trip() {
+        let base = tmp("diagnostics_enabled_round_trip");
+        let _ = std::fs::remove_dir_all(&base);
+
+        save_diagnostics_enabled(&base, false).expect("save_diagnostics_enabled(false)");
+        assert!(!load_diagnostics_enabled(&base));
+
+        save_diagnostics_enabled(&base, true).expect("save_diagnostics_enabled(true)");
+        assert!(load_diagnostics_enabled(&base));
     }
 
     // (k) unbounded_total_helped round-trips a non-default u64 value.

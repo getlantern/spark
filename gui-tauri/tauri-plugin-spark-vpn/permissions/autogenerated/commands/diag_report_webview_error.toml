@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-diag-report-webview-error"
+description = "Enables the diag_report_webview_error command without any pre-configured scope."
+commands.allow = ["diag_report_webview_error"]
+
+[[permission]]
+identifier = "deny-diag-report-webview-error"
+description = "Denies the diag_report_webview_error command without any pre-configured scope."
+commands.deny = ["diag_report_webview_error"]

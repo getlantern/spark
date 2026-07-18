@@ -24,6 +24,9 @@ Allows all spark-vpn tunnel-control commands.
 - `allow-unbounded-available`
 - `allow-unbounded-get-settings`
 - `allow-unbounded-set-settings`
+- `allow-diag-report-webview-error`
+- `allow-diag-set-enabled`
+- `allow-diag-get-enabled`
 
 ## Permission Table
 
@@ -56,6 +59,84 @@ Enables the connect command without any pre-configured scope.
 <td>
 
 Denies the connect command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-diag-get-enabled`
+
+</td>
+<td>
+
+Enables the diag_get_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-diag-get-enabled`
+
+</td>
+<td>
+
+Denies the diag_get_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-diag-report-webview-error`
+
+</td>
+<td>
+
+Enables the diag_report_webview_error command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-diag-report-webview-error`
+
+</td>
+<td>
+
+Denies the diag_report_webview_error command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-diag-set-enabled`
+
+</td>
+<td>
+
+Enables the diag_set_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-diag-set-enabled`
+
+</td>
+<td>
+
+Denies the diag_set_enabled command without any pre-configured scope.
 
 </td>
 </tr>
