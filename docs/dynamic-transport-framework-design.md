@@ -80,8 +80,9 @@ usable by many transports, exposed to WASM modules via the host `env` ABI:
    *same* connection) can't be expressed because one engine can't hand the live byte-stream to another
    (typically the TLS engine) and resume. This unlocks the whole STARTTLS family — RDP, SMTP/IMAP/POP3,
    XMPP, LDAP, FTPS — as composed engines instead of native code. The boring connector already takes an
-   *established byte stream* (`connect<S: AsyncRead+AsyncWrite>`), so the handoff is mechanically close;
-   the missing pieces are the orchestration seam and non-Chrome anchors (§6.1).
+   *established byte stream* (`connect<S: AsyncRead + AsyncWrite + Unpin>(stream, sni, profile)` in
+   `flint-tls/src/connector.rs`), so the handoff is mechanically close; the missing pieces are the
+   orchestration seam and non-Chrome anchors (§6.1).
 
 **Deferred primitives — named, not built (no current forcing function).** Keeping the set driven by
 real transports, not speculation: a **datagram/UDP transport + per-packet ABI + DTLS handshake mode**

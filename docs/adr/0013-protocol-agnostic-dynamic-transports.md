@@ -34,9 +34,10 @@ expressed by composing generic primitives, distributable as WASM+config.
 2. **Add generic primitives** (each general, exposed to WASM via the host ABI): secp256k1 +
    ElligatorSwift + X-only ECDH and raw ChaCha20 (crypto); opening random-padding with a sampled length
    distribution + scheduled decoy/cover injection, and generalize `record_fragment` (shaping); and two
-   ABI additions — a **generic interactive-handshake channel** (`handshake_step(inbound) -> (outbound,
-   done)`), the gap that today forces handshake protocols to be native, and a **mid-stream
-   engine-composition seam** (`upgrade_to`), which unlocks the STARTTLS family (RDP, SMTP/IMAP/POP3, …).
+   ABI additions — a **generic interactive-handshake channel** (`handshake_step(inbound) ->
+   (outbound_wire, done)`), the gap that today forces handshake protocols to be native, and a
+   **mid-stream engine-composition seam** (`upgrade_to`), which unlocks the STARTTLS family (RDP,
+   SMTP/IMAP/POP3, …).
    Datagram/UDP transport + DTLS + legacy STUN crypto (HMAC-SHA1/MD5/CRC-32) are **explicitly deferred**
    — no current forcing function; TURN's worthwhile variants ride TLS, not datagrams (design §3, §6.1).
 3. **De-TLS the structure:** neutral genome (header + generic wire + opaque params), engine registry
