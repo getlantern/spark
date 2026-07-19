@@ -21,16 +21,16 @@ Two layers are already protocol-neutral and stay as-is:
   (`core/src/transport/wasm/signing.rs`) and flint's `SignedGambit` build on it.
 - **`flint-shaping`** — Layer-C `WirePlan` (segment splits, inter-segment delay, `tcp_nodelay`).
 
-Everything else assumes TLS:
+Everything else assumes TLS (`flint ·` = the `getlantern/flint` repo; `spark ·` = this repo):
 
-| Piece | Where | TLS coupling |
+| Piece | Repo · path | TLS coupling |
 |---|---|---|
-| genome `Gambit` | `flint-tls/src/gambit.rs` | bundles a generic header (`id`/`version`/`requires`/`wire`) with `anchor: Chrome137` + Layer-A `ClientHello` + Layer-B `Records` |
-| executor `Profile::for_boring` | `flint-tls/src/profile.rs` | the *only* engine — resolves the genome onto the boring/btls TLS connector |
-| `Capability` vocabulary | `flint-tls/src/gambit.rs` | closed set, all TLS (`Ech`/`Alps`/`PqKem`/`SessionIdInject`/`RawClienthello`) |
-| `compute_gambit` return type | `wasm/mod.rs`, `transport/mod.rs` | returns a `flint_tls::gambit::Gambit` |
-| discovery GA | `transport/discovery.rs` | `mutate`/`crossover` operate on ClientHello/records/wire |
-| `record_fragment` | `flint-shaping` | TLS-record-shaped, in the otherwise-generic shaper |
+| genome `Gambit` | flint · `crates/flint-tls/src/gambit.rs` | bundles a generic header (`id`/`version`/`requires`/`wire`) with `anchor: Chrome137` + Layer-A `ClientHello` + Layer-B `Records` |
+| executor `Profile::for_boring` | flint · `crates/flint-tls/src/profile.rs` | the *only* engine — resolves the genome onto the boring/btls TLS connector |
+| `Capability` vocabulary | flint · `crates/flint-tls/src/gambit.rs` | closed set, all TLS (`Ech`/`Alps`/`PqKem`/`SessionIdInject`/`RawClienthello`) |
+| `compute_gambit` return type | spark · `core/src/transport/wasm/mod.rs`, `core/src/transport/mod.rs` | returns a `flint_tls::gambit::Gambit` |
+| discovery GA | spark · `core/src/transport/discovery.rs` | `mutate`/`crossover` operate on ClientHello/records/wire |
+| `record_fragment` | flint · `crates/flint-shaping/src/lib.rs` | TLS-record-shaped, in the otherwise-generic shaper |
 
 Consequence: **every new transport today needs native code + a client release** — samizdat, hysteria2,
 anytls, and (as currently specced) the BIP324 native-engine fallback are all native. That is exactly
