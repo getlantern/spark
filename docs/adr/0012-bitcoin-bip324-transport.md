@@ -4,9 +4,10 @@
   `docs/bitcoin-transport-design.md`.
 - **Scope:** Add a spark client `Transport` (TCP byte-stream) that carries proxied traffic inside the
   **genuine Bitcoin P2P v2 encrypted transport (BIP324)** on **TCP 8333**, so DPI classifies the flow
-  as a Bitcoin node connection. The blockable part (opening choreography + framing) ships as a signed,
-  dynamically-delivered opening-move WASM byte-transform; the heavy crypto stays native. The matching
-  server runs a real `bitcoind` with a keyed side-door for probe resistance (new infra Lantern deploys).
+  as a Bitcoin node connection. The handshake + framing run in a **native** BIP324 engine; the
+  blockable, polymorphic part (garbage-length distribution, decoy cadence, keyed-garbage MAC, shaping)
+  ships as a signed, dynamically-delivered `BitcoinGambit` (see Decision 2). The matching server runs a
+  real `bitcoind` with a keyed side-door for probe resistance (new infra Lantern deploys).
 - **Builds on:** the `Transport` seam (`core/src/transport/mod.rs`); the dynamic-transport WASM sandbox
   (ADR 0003) — pure byte-transform, no WASI/sockets, native crypto via `env` imports; the early-bytes /
   opening-shaping thesis (ADR 0006); the signed/key-pinned/versioned gambit delivery
@@ -36,14 +37,16 @@ already restrict crypto (e.g. China). We defeat generic DPI, not a decision to t
 1. **Be BIP324, don't mimic it.** v2-only for the initial design (v1 legacy framing documented as a
    fallback but not built). Port 8333.
 2. **Native BIP324 engine + signed gambit (not a WASM handshake).** The live handshake + framing run
-   in a native `core/src/transport/bitcoin/` engine (secp256k1 ellswift, ChaCha20-Poly1305, HKDF via
-   the rust-bitcoin crates), mirroring the native transports (samizdat/hysteria2/anytls) and the
+   in a native `core/src/transport/bitcoin/` engine (HKDF + ChaCha20-Poly1305 via the existing `ring`;
+   secp256k1 ellswift via the rust-bitcoin `secp256k1` crate; raw ChaCha20 for the length field),
+   mirroring the native transports (samizdat/hysteria2/anytls) and the
    TLS side's native-boring-engine-plus-flint-gambit pattern. The **polymorphic opening** (garbage-
    length distribution, decoy cadence, keyed-garbage MAC, shaping budget) ships as a signed, versioned
    `BitcoinGambit` via the reused `SignedModule` envelope. Rationale (design §7): the WASM byte-
    transform ABI can't express BIP324's *interactive* handshake — X25519-only KEX and no
    inbound-triggered outbound write — so forcing the handshake into a WASM module is the wrong path
-   for v1; the stable crypto belongs native, the gambit carries the part that changes when blocked.
+   for the initial build; the stable crypto belongs native, the gambit carries the part that changes
+   when blocked.
 3. **Probe resistance by being real.** The server runs an actual `bitcoind` on 8333 (joins the
    network, appears in `addr` gossip and node crawlers). A thin BIP324-terminating front reads a keyed
    MAC hidden in the client's BIP324 garbage: match → tunnel; no match (real peer or active prober) →

@@ -99,16 +99,18 @@ frequently-changing choreography dynamic.
 
 - **Host owns the socket.** `Transport::dial(target)` connects TCP to `server:8333` and drives I/O;
   the module never touches the network.
-- **Module = BIP324 opening move + framing.** An explicit `enum` state machine (spark's stated
-  preference for handshake cores, not nested async): `init(config)` receives per-deployment config
-  (server static key / PSK, garbage-length distribution, decoy policy); the outbound transform emits
-  the ellswift pubkey + keyed garbage + terminator, runs the handshake, then frames plaintext into
-  BIP324 packets; the inbound transform reverses it.
-- **Native crypto via `env` imports** (the escape hatch): secp256k1 ellswift decode + X-only ECDH,
-  HKDF-SHA256, ChaCha20-Poly1305 / FSChaCha20. These are stable and fast, so they stay native
-  (`secp256k1` with the ellswift module; `chacha20poly1305`; `hkdf`), the WASM stays tiny and
-  iOS-interpreter-safe, and only the choreography — garbage lengths, decoy timing, the keyed-auth
-  encoding, v1-vs-v2 selection — lives in the sandboxed module (the part you change when blocked).
+- **Logical decomposition of the opening move.** An explicit `enum` state machine (spark's stated
+  preference for handshake cores, not nested async) sends the ellswift pubkey + keyed garbage +
+  terminator, completes the BIP324 handshake, then frames plaintext into BIP324 packets. Per §7 this
+  state machine runs in a **native engine** (the interactive handshake can't live in the byte-transform
+  ABI); the gambit layer carries only the per-deployment opening parameters (garbage-length
+  distribution, decoy policy, keyed-auth spec).
+- **Heavy crypto stays native** (the escape hatch): HKDF-SHA256 and ChaCha20-Poly1305 are already
+  spark's baseline via **`ring`** (and are exposed in the WASM host ABI as `host_hkdf_*` /
+  `host_aead_*`). The genuinely new primitives are **secp256k1 ellswift + X-only ECDH** (the KEX menu
+  is otherwise X25519-only) and a **raw ChaCha20** keystream for BIP324's FSChaCha20 length-field
+  cipher. Only the choreography — garbage lengths, decoy timing, keyed-auth encoding — is dynamic (the
+  part you change when blocked). See §7 for the concrete crate/gap list.
 - **Delivery = the gambit model.** The module and its parameter set (a *Bitcoin gambit*) are
   Ed25519-signed, key-pinned, versioned (anti-rollback), and capability-gated (`requires` the host to
   expose the ellswift/AEAD primitives), delivered over the config/fronting channel. The
@@ -338,13 +340,14 @@ core/src/transport/bitcoin/
                 //   behind a `bitcoin` feature; ServerSpec-wired like hysteria2/anytls.
   handshake.rs  // enum Bip324State { SendKey, AwaitPeerKey, DeriveKeys, SendTerminator, Ready }
                 //   — explicit state machine (spark's stated preference for handshake cores).
-  framing.rs    // FSChaCha20Poly1305 packet framing over the live stream.
+  framing.rs    // BIP324 framing: FSChaCha20Poly1305 for packets, FSChaCha20 for the 3-byte length.
   gambit.rs     // BitcoinGambit { garbage_len_dist, decoy_policy, mac_spec, shaping } — a NEW genome,
                 //   delivered via the reused SignedModule / SignedGambit envelope (Ed25519, versioned).
 ```
 
-Crypto runs native via the `secp256k1` (ellswift), `chacha20poly1305`, and `hkdf` crates — no
-interpreter on the data path. The **gambit** is the signed, per-region opening plan: the Core-matching
+Crypto runs native: HKDF-SHA256 + ChaCha20-Poly1305 via **`ring`** (spark's existing baseline — no new
+dep), **`secp256k1`** (ellswift module) for the KEX, and a raw ChaCha20 keystream for the FSChaCha20
+length-field cipher — no interpreter on the data path. The **gambit** is the signed, per-region opening plan: the Core-matching
 garbage-length distribution (§6.1), decoy cadence, the §5.1 keyed-garbage MAC spec, and the §6.1
 shaping budget. This *is* the Opening Book model — a BIP324 engine parameterized by a signed gambit,
 in place of the boring TLS engine parameterized by a flint gambit.
@@ -353,8 +356,9 @@ in place of the boring TLS engine parameterized by a flint gambit.
 
 1. This design + **ADR 0012**.
 2. `BitcoinGambit` genome + reuse the `SignedModule` delivery/verify path.
-3. Native `core/src/transport/bitcoin/` (handshake + framing) on `secp256k1` / `chacha20poly1305` /
-   `hkdf`; behind a `bitcoin` feature; `ServerSpec`-wired like hysteria2/anytls.
+3. Native `core/src/transport/bitcoin/` (handshake + framing) — HKDF + ChaCha20-Poly1305 via the
+   existing `ring`; add `secp256k1` (ellswift) for the KEX + a raw ChaCha20 for the length field;
+   behind a `bitcoin` feature; `ServerSpec`-wired like hysteria2/anytls.
 4. Server: `bitcoind` on `:8333` + the keyed-garbage front (tunnel-vs-node fork, §5).
 5. Instrumentation: handshake-completion + probe-detection counters (a connection that completes
    BIP324 but fails the keyed-garbage MAC = probe / real-peer signal).
