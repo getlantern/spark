@@ -33,9 +33,13 @@ expressed by composing generic primitives, distributable as WASM+config.
    config; TLS `ClientHello`/`Records` move into the TLS engine's param schema.
 2. **Add generic primitives** (each general, exposed to WASM via the host ABI): secp256k1 +
    ElligatorSwift + X-only ECDH and raw ChaCha20 (crypto); opening random-padding with a sampled length
-   distribution + scheduled decoy/cover injection, and generalize `record_fragment` (shaping); and — the
-   key one — a **generic interactive-handshake ABI** (`handshake_step(inbound) -> (outbound, done)`), the
-   gap that today forces handshake protocols to be native.
+   distribution + scheduled decoy/cover injection, and generalize `record_fragment` (shaping); and two
+   ABI additions — a **generic interactive-handshake channel** (`handshake_step(inbound) ->
+   (outbound_wire, done)`), the gap that today forces handshake protocols to be native, and a
+   **mid-stream engine-composition seam** (`upgrade_to`), which unlocks the STARTTLS family (RDP,
+   SMTP/IMAP/POP3, …).
+   Datagram/UDP transport + DTLS + legacy STUN crypto (HMAC-SHA1/MD5/CRC-32) are **explicitly deferred**
+   — no current forcing function; TURN's worthwhile variants ride TLS, not datagrams (design §3, §6.1).
 3. **De-TLS the structure:** neutral genome (header + generic wire + opaque params), engine registry
    keyed by engine-id, open/extensible capability vocabulary, `compute_gambit` returns the neutral
    genome, discovery GA over generic shaping + per-engine param hooks.
@@ -48,7 +52,13 @@ expressed by composing generic primitives, distributable as WASM+config.
 - **Positive:** new transports expressible from the primitive set ship as WASM+config with **no client
   release**; the core stays lean and protocol-blind; `flint-verify`/`flint-shaping` reused; the TLS path
   is unchanged (it just becomes "the TLS engine"); each future cover protocol is an engine + params +
-  maybe one primitive.
+  maybe one primitive. Worked examples (design §6.1): **RDP-SSL** and **TURNS-over-TCP** both fall
+  inside the envelope after only engine composition + a non-Chrome anchor set — no datagram work, no new
+  crypto — while plain TURN and TURN-over-DTLS are correctly excluded (positive-fingerprint liability /
+  not real browser cover).
+- **Anchor-set boundary:** the TLS engine's anchor is Chrome-singular today (`flint-tls/src/anchor.rs`);
+  non-browser and WebRTC anchors (+ a randomize mode, à la `covert-dtls`) are recurring config/data
+  authoring, not core primitives.
 - **Negative / boundary:** a genuinely new primitive (curve, cipher, ABI feature) still needs a release
   to add — the goal holds only for transports inside the primitive envelope (BIP324 is the stress test
   that makes the envelope wide). Opaque params → core can't GA/validate protocol specifics (engine
