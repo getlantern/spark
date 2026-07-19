@@ -36,7 +36,11 @@ already restrict crypto (e.g. China). We defeat generic DPI, not a decision to t
 
 1. **Be BIP324, don't mimic it.** v2-only for the initial design (v1 legacy framing documented as a
    fallback but not built). Port 8333.
-2. **Native BIP324 engine + signed gambit (not a WASM handshake).** The live handshake + framing run
+2. **Native BIP324 engine + signed gambit (first-ship path; ADR 0013 makes it the fallback).** The
+   generic primitives BIP324 needs — secp256k1/ellswift, raw ChaCha20, an interactive-handshake ABI,
+   opening padding/decoy shaping — are being added to the core generically (ADR 0013), with the goal of
+   authoring BIP324 as a distributable WASM engine + config (no client release). The native engine here
+   is the fallback / first ship. The live handshake + framing run
    in a native `core/src/transport/bitcoin/` engine (HKDF + ChaCha20-Poly1305 via the existing `ring`;
    secp256k1 ellswift via the rust-bitcoin `secp256k1` crate; raw ChaCha20 for the length field),
    mirroring the native transports (samizdat/hysteria2/anytls) and the
