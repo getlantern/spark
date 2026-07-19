@@ -1,0 +1,147 @@
+# Protocol-agnostic dynamic transports — design
+
+- **Status:** Proposed — 2026-07-19. Recorded as **ADR 0013**. Extends **ADR 0003** (dynamically-loaded
+  transports / the `wasmi` Path-B ABI) and generalizes the opening-move framework of **ADR 0006**
+  (which is TLS-only today). No code yet.
+- **North star:** be able to **create and distribute a new transport as a signed WASM module +
+  config, runnable by an unchanged client** — no client release in the loop. Censorship is fast; the
+  app-store release pipeline is the chokepoint (ADR 0003 §1). A transport we can ship in hours is worth
+  more than a perfect one gated on a weeks-long release.
+- **Scope:** generalize the opening-move / gambit framework from "a TLS gambit executed by the native
+  boring engine" to "a protocol-agnostic set of **primitives** that a distributable engine composes."
+  The core gains only *generic* primitives; nothing protocol-specific (no TLS types, no Bitcoin types)
+  lives in it. BIP324 (`docs/bitcoin-transport-design.md`, ADR 0012) is the **forcing function** that
+  defines the primitive set and the first transport to prove the model end-to-end.
+
+## 1. Today: the framework is TLS-hardwired
+
+Two layers are already protocol-neutral and stay as-is:
+
+- **`flint-verify`** — Ed25519 + versioned framing + anti-rollback. Both spark's `SignedModule`
+  (`core/src/transport/wasm/signing.rs`) and flint's `SignedGambit` build on it.
+- **`flint-shaping`** — Layer-C `WirePlan` (segment splits, inter-segment delay, `tcp_nodelay`).
+
+Everything else assumes TLS (`flint ·` = the `getlantern/flint` repo; `spark ·` = this repo):
+
+| Piece | Repo · path | TLS coupling |
+|---|---|---|
+| genome `Gambit` | flint · `crates/flint-tls/src/gambit.rs` | bundles a generic header (`id`/`version`/`requires`/`wire`) with `anchor: Chrome137` + Layer-A `ClientHello` + Layer-B `Records` |
+| executor `Profile::for_boring` | flint · `crates/flint-tls/src/profile.rs` | the *only* engine — resolves the genome onto the boring/btls TLS connector |
+| `Capability` vocabulary | flint · `crates/flint-tls/src/gambit.rs` | closed set, all TLS (`Ech`/`Alps`/`PqKem`/`SessionIdInject`/`RawClienthello`) |
+| `compute_gambit` return type | spark · `core/src/transport/wasm/mod.rs`, `core/src/transport/mod.rs` | returns a `flint_tls::gambit::Gambit` |
+| discovery GA | spark · `core/src/transport/discovery.rs` | `mutate`/`crossover` operate on ClientHello/records/wire |
+| `record_fragment` | flint · `crates/flint-shaping/src/lib.rs` | TLS-record-shaped, in the otherwise-generic shaper |
+
+Consequence: **every new transport today needs native code + a client release** — samizdat, hysteria2,
+anytls, and (as currently specced) the BIP324 native-engine fallback are all native. That is exactly
+the release-pipeline chokepoint the north star is trying to remove.
+
+## 2. The model: generic primitives + opaque engine params + an engine registry
+
+- The genome carries a **generic header** (`id`, `version`, `requires`), a **generic wire-shaping
+  plan**, and an **opaque, signed `engine_params` blob** that only the engine interprets. The core
+  validates signature / version / capabilities and hands the params to the engine — it never parses
+  them.
+- An **engine registry** keyed by engine-id routes a plan to its engine. Engines are protocol-specific
+  and live *outside* the core; the core is protocol-blind.
+- A **transport = a (WASM) engine that composes host primitives + a signed config** (the params /
+  gambit). Both are signed, versioned, capability-gated, and delivered over the existing config /
+  fronting channel — so a new transport is a distribution artifact, not a code release.
+- TLS `ClientHello`/`Records` stop being core types — they become the *TLS engine's* param schema
+  (staying in `flint-tls`). Bitcoin's params live in the Bitcoin engine. The core mentions neither.
+
+The performance escape hatch (ADR 0003 §2) is what makes WASM engines viable: **heavy per-byte crypto
+runs natively via host primitives; the module runs only the light, changeable choreography**
+(handshake sequencing, framing, param interpretation). WASM-interpreter overhead is irrelevant for
+RTT-bound handshakes and is never on the bulk-crypto path.
+
+## 3. The generic primitives to add (Bitcoin exercises them; all general)
+
+This is the heart of "the primitives we need, nothing protocol-specific." Each is a general capability
+usable by many transports, exposed to WASM modules via the host `env` ABI:
+
+1. **Crypto menu** — add **secp256k1 keygen + ElligatorSwift encode/decode + X-only ECDH** and a **raw
+   ChaCha20 stream** cipher, alongside the existing X25519 / AES-GCM / ChaCha20-Poly1305 / HKDF-SHA256 /
+   SHA-256 / CSRNG. secp256k1+ellswift is a general curve + uniform-point encoding (Bitcoin, Nostr,
+   others); raw ChaCha20 is a general stream cipher. Neither is "BIP324."
+2. **Shaping** (`flint-shaping` today has only `segment_split` + `inter_segment_delay` + `tcp_nodelay`
+   + the TLS-ish `record_fragment`) — add **opening random-padding with a sampled length distribution**
+   and **scheduled decoy / cover-traffic injection**, and **generalize `record_fragment`** (or move it
+   into the TLS engine). "Garbage of length uniform[0,4095]" and "decoy packets" then become a transport
+   *parameterizing generic knobs*, not core concepts.
+3. **ABI — a generic interactive-handshake channel.** Today's byte-transform pair
+   (`transform_out(app)→wire`, `transform_in(wire)→app`) cannot express an interactive opening: no
+   channel for an inbound read to trigger an outbound wire write, and no emit-at-connect. Add a generic
+   handshake driver (e.g. `handshake_step(inbound) -> (outbound_wire, done)`) so *any* interactive-
+   opening protocol runs in the sandbox. **This is the single most important addition** — it is the gap
+   that today forces handshake protocols to be native.
+
+## 4. Structural de-TLS-ing (removes coupling, adds nothing protocol-specific)
+
+4. **Neutral genome** = header + generic wire plan + opaque `engine_params` (reuses `flint-verify` +
+   `flint-shaping` unchanged). Home it in a protocol-neutral crate (`flint-gambit`) or spark
+   `core/src/transport/gambit/`. TLS's `ClientHello`/`Records` become the TLS engine's param schema.
+5. **Engine registry** keyed by engine-id / capability; each engine decodes its own params. `for_boring`
+   becomes "the TLS engine" behind the seam — no behavior change to the TLS path.
+6. **Open/extensible capability vocabulary** — capabilities name the *generic host primitives* above,
+   so adding a transport that needs a new primitive doesn't force edits to a closed core enum.
+7. **`compute_gambit` returns the neutral genome;** the discovery GA mutates the generic shaping knobs
+   generically and delegates protocol-param mutation to an optional per-engine hook.
+
+## 5. BIP324 as the forcing function / first fully-dynamic transport
+
+BIP324 exercises **every** primitive above — secp256k1/ellswift, raw ChaCha20, the interactive
+handshake, opening random-padding (garbage), decoy injection — **without** adding one Bitcoin concept
+to the core. Its Bitcoin-specific parts (handshake sequence, garbage semantics, the keyed-garbage
+side-door MAC, message framing, port 8333) live entirely in the Bitcoin engine + its signed config.
+Proving BIP324 as **WASM module + config** validates the whole model: if a protocol this demanding
+(custom curve, interactive handshake, custom framing) ships without a client release, the framework has
+met the north star.
+
+**Sequencing / fallback (honest):** the native BIP324 engine in ADR 0012 remains a documented fallback
+for the initial ship or if the interpreter can't meet the interactive-handshake bar — but it does *not*
+advance the north star (each native transport needs a release). The strategic investment is the core
+primitives + handshake ABI (§3), after which BIP324 is authored as WASM+config and every subsequent
+transport is too.
+
+## 6. Distribution & the boundary of the goal
+
+Delivery reuses the signed path: Ed25519 (`flint-verify`), key-pinned, versioned (anti-rollback),
+capability-gated, over the config/fronting channel (HTTPS + BitTorrent-magnet per `lantern-water`). The
+client advertises the **capabilities** (primitives + ABI features) it provides; a transport's
+module+config declares `requires`; the client runs it iff supported.
+
+**The honest boundary:** a transport expressible from the **existing** primitive set ships as pure
+WASM+config — **no release**. A transport needing a **genuinely new primitive** (a curve, cipher, or
+ABI feature the host doesn't expose) still gates on a client release to add that primitive. The design's
+job is to make the primitive set rich enough that the second case is rare. BIP324 is the stress test:
+after its primitives land, the set covers "interactive handshake + AEAD stream + uniform-key KEX +
+opening shaping" — most cover-protocol transports fall inside that envelope.
+
+## 7. Work breakdown
+
+Critical path (each builds on the last):
+
+1. **Neutral genome + engine-registry seam** — extract header + opaque `engine_params`; make the
+   existing TLS path "the TLS engine." No new transport, no behavior change. (Lowest-churn first step.)
+2. **Generic primitives** — crypto (secp256k1/ellswift, raw ChaCha20), shaping (opening padding from a
+   distribution, decoy injection; generalize `record_fragment`), each exposed as a host capability.
+3. **Interactive-handshake ABI** — the `handshake_step` channel; the enabler for handshake protocols
+   in WASM.
+4. **BIP324 as a WASM engine + signed config** — the first fully-dynamic transport, composing 1–3.
+   (Native engine per ADR 0012 only as fallback.)
+5. **Discovery generalization** — GA over the generic shaping knobs + per-engine param hooks.
+
+## 8. Tradeoffs (stated plainly)
+
+- **Opaque engine params** → the core can't validate or GA-optimize protocol-specific fields; the
+  engine owns that. The generic shaping layer stays core-GA-able, so the "discovered against the live
+  network" property survives where most opening-move adaptivity lives.
+- **WASM interpreter perf** is fine for RTT-bound handshakes and framing but caps bulk throughput; the
+  native-crypto host primitives keep the bulk path off the interpreter (ADR 0003 §3 numbers).
+- **iOS is interpreter-only** (no JIT) — the reason spark is on `wasmi`; all of the above must hold in
+  the interpreter.
+- **Capability/version surface** grows: clients and transports must negotiate primitives and
+  anti-rollback carefully. The gate **must fail loud** — log/alert on an unmet `requires` — never
+  silently disable a transport; silent disable is the failure mode to design against (this is the
+  required behavior in ADR 0013's consequences, stated here as the risk it guards against).

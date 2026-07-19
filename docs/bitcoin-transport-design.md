@@ -313,6 +313,13 @@ Design consequences:
 
 ## 7. Implementation
 
+> **Direction of travel (ADR 0013).** The gaps this section finds in the WASM path are being closed
+> generically in `docs/dynamic-transport-framework-design.md`: the north star is to express transports
+> as distributable WASM + config with **no client release**, and BIP324 is the forcing function for the
+> generic primitives (secp256k1/ellswift, raw ChaCha20, an interactive-handshake ABI, opening
+> padding/decoy shaping). The **native engine below is the fallback / first-ship path**; the target is
+> BIP324 authored as a WASM engine + signed config once those primitives land.
+
 ### 7.1 What the existing "gambit" machinery reaches — and what it doesn't
 
 "Gambit" means two different things here:
