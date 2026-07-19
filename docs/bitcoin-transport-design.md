@@ -90,6 +90,13 @@ functions under `env`. This is a better fit than raw WATER and it lands directly
 "performance escape hatch" — keep the heavy, stable crypto native; make only the light,
 frequently-changing choreography dynamic.
 
+> **Engine placement is settled in §7, and it is not "run the handshake in the transform."** This
+> section is the *logical* decomposition of the opening move. §7 shows that BIP324's *interactive*
+> handshake cannot run inside today's byte-transform ABI (no inbound-triggered outbound write, and the
+> KEX menu is X25519-only), so the live handshake runs in a **native BIP324 engine** while the signed
+> *gambit* carries the polymorphic opening — mirroring how the TLS side pairs a native boring engine
+> with a flint gambit. Read §4 for the shape, §7 for what actually executes where.
+
 - **Host owns the socket.** `Transport::dial(target)` connects TCP to `server:8333` and drives I/O;
   the module never touches the network.
 - **Module = BIP324 opening move + framing.** An explicit `enum` state machine (spark's stated
@@ -290,17 +297,74 @@ Design consequences:
   and TSG-light regions — not a censor running heavy per-flow ML, where a bulk tunnel is inherently
   exposed regardless of shaping.
 
-## 7. Build order
+## 7. Implementation
+
+### 7.1 What the existing "gambit" machinery reaches — and what it doesn't
+
+"Gambit" means two different things here:
+
+- **The flint `Gambit` genome** (what `compute_gambit` returns) — a `Chrome137` anchor plus deltas over
+  three TLS layers (ClientHello content / TLS record framing / TCP segment-timing), *executed by the
+  native boring TLS engine*. **TLS-only, not reusable**: there is no BIP324 executor, and the genome
+  models a TLS handshake.
+- **The signed-delivery envelope** (`SignedModule` / `signing.rs` — Ed25519, versioned,
+  capability-gated) and the **Opening Book concept** (a signed opening plan run by a native engine,
+  shippable without a client release). **Fully reusable** — this is what makes any of this a "gambit."
+
+So the concept transfers; the TLS genome and its executor do not.
+
+### 7.2 WASM sandbox: most crypto is present, three gaps
+
+The host `env` menu already provides, natively: `host_rand` (CSPRNG), `host_hash` (SHA-256),
+`host_hkdf_extract/expand` (HKDF-SHA256), and `host_aead_seal/open` (**ChaCha20-Poly1305**). HKDF-SHA256
+is BIP324's KDF and ChaCha20-Poly1305 is its AEAD exactly — most of BIP324's crypto is already native,
+validating the escape hatch. The gaps:
+
+| Gap | What BIP324 needs | Status in spark |
+|---|---|---|
+| **Key exchange** | secp256k1 **ElligatorSwift** encoding + secp256k1 X-only ECDH (`ellswift_ecdh`) | KEX menu is **X25519-only** (built for TLS 1.3). Add native `host_secp256k1_ellswift_keygen` / `host_secp256k1_ellswift_ecdh` (rust-bitcoin `secp256k1`) as a `bip324` capability. In-guest secp256k1 in the interpreter is a non-starter. |
+| **Length-field cipher** | raw ChaCha20 keystream (FSChaCha20, no tag) for the 3-byte packet length | menu exposes ChaCha20-**Poly1305** only. Add a raw-ChaCha20 host fn, or diverge on framing (breaks byte-faithfulness). Minor. |
+| **Interactive handshake** | an inbound read must trigger an outbound wire write (recv peer ellswift ⇒ send garbage-terminator + version packet), plus emit-at-connect | `stream.rs` is a one-way-per-direction obfuscator (`transform_out(app)→wire`, `transform_in(wire)→app`); **there is no channel for inbound-triggered outbound.** `compute_gambit` can't help — it's bound to the TLS genome + boring executor. **Structural.** |
+
+### 7.3 The build: native BIP324 engine + signed `BitcoinGambit`
+
+Because of the interactive-handshake gap, don't run the handshake in the transform. Mirror the native
+transports (samizdat / hysteria2 / anytls) — which is also exactly how a flint gambit relates to the
+native boring engine:
+
+```
+core/src/transport/bitcoin/
+  transport.rs  // impl Transport: dial ":8333", run handshake, return BoxedStream.
+                //   behind a `bitcoin` feature; ServerSpec-wired like hysteria2/anytls.
+  handshake.rs  // enum Bip324State { SendKey, AwaitPeerKey, DeriveKeys, SendTerminator, Ready }
+                //   — explicit state machine (spark's stated preference for handshake cores).
+  framing.rs    // FSChaCha20Poly1305 packet framing over the live stream.
+  gambit.rs     // BitcoinGambit { garbage_len_dist, decoy_policy, mac_spec, shaping } — a NEW genome,
+                //   delivered via the reused SignedModule / SignedGambit envelope (Ed25519, versioned).
+```
+
+Crypto runs native via the `secp256k1` (ellswift), `chacha20poly1305`, and `hkdf` crates — no
+interpreter on the data path. The **gambit** is the signed, per-region opening plan: the Core-matching
+garbage-length distribution (§6.1), decoy cadence, the §5.1 keyed-garbage MAC spec, and the §6.1
+shaping budget. This *is* the Opening Book model — a BIP324 engine parameterized by a signed gambit,
+in place of the boring TLS engine parameterized by a flint gambit.
+
+### 7.4 Build order
 
 1. This design + **ADR 0012**.
-2. Native `env` primitives (ellswift/ECDH via `secp256k1`, `chacha20poly1305`, `hkdf`), advertised as
-   host capabilities the gambit `requires`.
-3. The BIP324 WASM transform module (Rust → `wasm32`), delivered/signed via the existing gambit path.
-4. `BitcoinTransport` `Transport` impl that dials `:8333` and drives the module; behind a `bitcoin`
-   feature, mirroring `anytls`/`hysteria2` gating and `ServerSpec` wiring.
-5. Server: `bitcoind` + the BIP324-terminating front (keyed-garbage check, tunnel-vs-node fork).
-6. Instrumentation: per-gambit handshake-completion + probe-detection counters (a connection that
-   completes BIP324 but fails the keyed-garbage check = probe/real-peer signal).
+2. `BitcoinGambit` genome + reuse the `SignedModule` delivery/verify path.
+3. Native `core/src/transport/bitcoin/` (handshake + framing) on `secp256k1` / `chacha20poly1305` /
+   `hkdf`; behind a `bitcoin` feature; `ServerSpec`-wired like hysteria2/anytls.
+4. Server: `bitcoind` on `:8333` + the keyed-garbage front (tunnel-vs-node fork, §5).
+5. Instrumentation: handshake-completion + probe-detection counters (a connection that completes
+   BIP324 but fails the keyed-garbage MAC = probe / real-peer signal).
+
+### 7.5 If we later want WASM-swappable *framing*
+
+Close all three gaps: add the secp256k1/ellswift + raw-ChaCha20 host fns, and extend the ABI with a
+handshake channel (e.g. `transform_handshake(inbound) -> (outbound_wire, done)`). That's real ABI
+work and not worth it for v1 — the stable engine belongs native; the gambit already carries the part
+that changes when a region blocks us.
 
 ## 8. Open questions
 

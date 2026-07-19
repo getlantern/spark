@@ -35,12 +35,15 @@ already restrict crypto (e.g. China). We defeat generic DPI, not a decision to t
 
 1. **Be BIP324, don't mimic it.** v2-only for the initial design (v1 legacy framing documented as a
    fallback but not built). Port 8333.
-2. **Opening move in the WASM sandbox (ADR 0003).** The module is a pure byte-transform doing the
-   BIP324 handshake + packet framing; heavy crypto (secp256k1 ellswift/ECDH, HKDF, ChaCha20-Poly1305/
-   FSChaCha20) is native via `env` imports (the performance escape hatch). Only the choreography —
-   garbage lengths, decoy timing, keyed-auth encoding — is dynamic. Delivered signed/key-pinned/
-   versioned as a "Bitcoin gambit," parameterized via the `gambit-compute` export so the repertoire
-   stays polymorphic without reshipping the module.
+2. **Native BIP324 engine + signed gambit (not a WASM handshake).** The live handshake + framing run
+   in a native `core/src/transport/bitcoin/` engine (secp256k1 ellswift, ChaCha20-Poly1305, HKDF via
+   the rust-bitcoin crates), mirroring the native transports (samizdat/hysteria2/anytls) and the
+   TLS side's native-boring-engine-plus-flint-gambit pattern. The **polymorphic opening** (garbage-
+   length distribution, decoy cadence, keyed-garbage MAC, shaping budget) ships as a signed, versioned
+   `BitcoinGambit` via the reused `SignedModule` envelope. Rationale (design §7): the WASM byte-
+   transform ABI can't express BIP324's *interactive* handshake — X25519-only KEX and no
+   inbound-triggered outbound write — so forcing the handshake into a WASM module is the wrong path
+   for v1; the stable crypto belongs native, the gambit carries the part that changes when blocked.
 3. **Probe resistance by being real.** The server runs an actual `bitcoind` on 8333 (joins the
    network, appears in `addr` gossip and node crawlers). A thin BIP324-terminating front reads a keyed
    MAC hidden in the client's BIP324 garbage: match → tunnel; no match (real peer or active prober) →
@@ -51,8 +54,9 @@ already restrict crypto (e.g. China). We defeat generic DPI, not a decision to t
 ## Consequences
 
 - **Positive:** no fingerprint to match (much cheaper to maintain than TLS gambits); genuine protocol
-  = strongest possible wire-level indistinguishability; probe-resistant by running a real node; slots
-  into the existing WASM/gambit + `Transport` seams with no core changes; new infra is a stock
+  = strongest possible wire-level indistinguishability; probe-resistant by running a real node; adds a
+  native transport alongside hysteria2/anytls plus a new `BitcoinGambit` genome, and reuses the
+  existing signed-delivery envelope (no changes to the netstack/forwarder); new infra is a stock
   `bitcoind` plus a small front.
 - **Negative / residual:** bulk-flow traffic shape ≠ a gossiping node (the real weakness — behavioral
   analysis is the exposure); weak collateral freedom against Bitcoin-specific blocking; **BIP324's
