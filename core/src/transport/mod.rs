@@ -62,9 +62,9 @@ pub fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
 /// paths working; the former `WirePlan::from_config` is now [`wire_plan_from_config`].
 pub use flint_shaping as shaping;
 
-/// Back-compat shim: the gambit ClientHello genome and JA4 fingerprinting now live in the `flint-tls`
-/// crate. Keeps the `crate::transport::{gambit, ja4}::…` import paths working.
-pub use flint_tls::{gambit, ja4};
+/// Opening-move engine seam (ADR 0013 §7 step 1): the engine trait + registry. The TLS/boring
+/// realization lives behind it in [`engine::tls`]; the core no longer surfaces TLS types directly.
+pub mod engine;
 
 pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
@@ -522,14 +522,25 @@ fn anytls_transport(
     // `records.split_offsets` won't reach this static WirePlan (a per-connection WirePlan refactor is
     // deferred), so dynamic per-connection record-split is a known limitation.
     let wire = with_record_split(wire, &cfg.records);
-    // Resolve the inline gambit genome (Layers A/B) onto the boring executor (ADR 0006 P2). Knobs
-    // boring2 can't realize are surfaced once here, never silently dropped. This is also the fallback
-    // profile when a dynamic gambit module (P3, below) faults or over-reaches.
+    // Resolve the inline gambit once here only to surface (log) knobs boring can't realize — the
+    // resulting Profile is discarded, since the TLS engine re-resolves the opaque params itself.
     let resolved = flint_tls::Profile::resolve(&cfg.clienthello, &cfg.records);
     for note in &resolved.unrealizable {
         tracing::warn!(knob = note, "anytls gambit knob not realizable on boring");
     }
-    let profile = resolved.profile;
+    // The static-config plan the TLS engine falls back to, opaque to the core: a postcard `Gambit`
+    // carrying the config ClientHello/records with no capability requirements (always realizable).
+    let static_params = postcard::to_stdvec(&flint_tls::gambit::Gambit {
+        genome_version: 1,
+        version: 1,
+        id: "static".to_owned(),
+        anchor: Default::default(),
+        clienthello: cfg.clienthello.clone(),
+        records: cfg.records.clone(),
+        wire: Default::default(),
+        requires: Vec::new(),
+    })
+    .map_err(|e| io::Error::other(format!("encode static gambit: {e}")))?;
 
     // P3: an optional signed Path-B module that computes a fresh gambit per connection.
     #[cfg(feature = "wasm-transport")]
@@ -541,7 +552,7 @@ fn anytls_transport(
             sni,
             protector,
             wire,
-            profile,
+            static_params,
             gambit,
         ));
         return Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>));
@@ -560,7 +571,7 @@ fn anytls_transport(
         sni,
         protector,
         wire,
-        profile,
+        static_params,
     ));
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
 }
