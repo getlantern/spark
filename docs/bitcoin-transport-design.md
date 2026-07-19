@@ -61,9 +61,12 @@ it via `addr`/`addrv2` gossip, but 8333 is what a port-based classifier keys on.
 ### 3.1 v2 / BIP324 (primary)
 
 1. Host dials TCP to `server:8333`.
-2. Initiator sends **`ellswift_pubkey` (64 B) ‖ `garbage` (0–4095 B)**. The first bytes must **not**
-   equal the v1 network magic `F9 BE B4 D9`; a responder uses "first bytes ≠ v1 magic" to detect v2.
-   ellswift output is uniform, so this holds automatically.
+2. Initiator sends **`ellswift_pubkey` (64 B) ‖ `garbage` (0–4095 B)**. The responder tells v2 from v1
+   by matching the first 16 received bytes against the v1 `version` message-start
+   (`magic(4) ‖ "version\x00\x00\x00\x00\x00"`, Core `net.cpp`); anything else is v2. A uniform
+   ellswift colliding with that full 16-byte prefix is ~2⁻¹²⁸ — negligible — so a v2 opening is taken
+   as v2 essentially always. (Core additionally treats a matching `version` command with a *wrong*
+   magic as a wrong-network v1 peer and disconnects.)
 3. Responder replies with its own `ellswift_pubkey (64 B) ‖ garbage`. Both sides run X-only ECDH on
    the ellswift-decoded points → HKDF-SHA256 to derive session keys, then exchange 16-byte
    **garbage terminators** and optional decoy packets.
@@ -158,15 +161,24 @@ filler          (random, var. len)   — pads garbage to a Core-matching length
 - 16-byte tag → a real peer's random garbage matching by chance = 2⁻¹²⁸ (no legit peer is ever
   misrouted into the tunnel path).
 
-The front reads exactly **64 + 16 bytes**, computes the expected MAC for each accepted epoch, compares:
+The front reads the 64-byte key, then reads **up to 16 more bytes under a short deadline** — our
+tunnel clients coalesce `key ‖ mac ‖ filler` into the first segment, so for a real tunnel client all
+80 bytes arrive together. It computes the expected MAC for each accepted epoch and decides:
 
-- **Match** → tunnel client; the front becomes the BIP324 responder (own ephemeral, ECDH, session).
-- **No match / replay-cache hit / MAC fail** → the front opens a connection to the local `bitcoind`,
-  **replays the 64 + 16 bytes it already read**, and pipes bytes both ways with zero interpretation.
-  `bitcoind` runs the full responder role; our 16 MAC bytes are simply the first 16 bytes of the
-  garbage it authenticates as AAD. No BIP324 crypto in the front on this path. (A real client that
-  sent 0 garbage — whose first 16 post-ellswift bytes are actually its garbage terminator — fails the
-  MAC and takes this same splice; it works.)
+- **80 bytes within the deadline *and* the MAC matches** → tunnel client; the front becomes the BIP324
+  responder (own ephemeral, ECDH, session).
+- **Otherwise** — MAC mismatch, replay-cache hit, or **fewer than 80 bytes before the deadline** → the
+  front opens a connection to the local `bitcoind`, **replays whatever bytes it read**, and pipes both
+  ways with zero interpretation. `bitcoind` runs the full responder role (our MAC bytes, if present,
+  are just leading garbage it authenticates as AAD). No BIP324 crypto in the front on this path.
+
+The deadline is load-bearing: a real BIP324 initiator that sends **0–15 garbage bytes** transmits only
+`key ‖ garbage` and then **blocks waiting for the responder's key**, so a fixed 80-byte read would
+*deadlock*. Bounding the read and falling back to the splice on a short-read keeps every non-tunnel
+client (which we hand to `bitcoind` anyway) safe, while our own clients — always sending ≥16 coalesced
+bytes — take the tunnel path. A tunnel client on a badly fragmented path could in principle miss the
+deadline and get bounced to `bitcoind`; it simply redials (cheap, and the coalesced single-segment
+write makes it rare).
 
 Why it holds:
 
