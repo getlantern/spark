@@ -182,6 +182,42 @@ Why it holds:
   front's responder behavior (own ellswift+garbage, first-packet size, idle-timeout) should mirror
   `bitcoind`'s, but the cache carries the load so this need not be byte-perfect.
 
+### 5.2 Why this survives "The Parrot is Dead"
+
+Houmansadr et al. (IEEE S&P 2013) showed that a *partial reimplementation* of a protocol is undone by
+an active censor who can **perturb and probe** — drop/malform packets, drive error paths, engage
+side-protocols — because the mimic diverges from the real software somewhere. Their prescribed escape
+is to *run the actual software*, not to mimic harder; byte/timing parity of a fake is therefore not
+merely expensive but **insufficient** against a probe that can engage the protocol.
+
+The design is shaped by that result, through an asymmetry between the two paths:
+
+- **Node path = genuine `bitcoind`** (raw TCP splice). Real peers and probers reach Core's actual
+  BIP324 stack; perturb it however you like and it reacts as `bitcoind` because it *is* `bitcoind` —
+  exactly the "run the real software" escape. This is also why raw-splice beats a terminate-and-relay
+  front: relay would place *our* BIP324-transport reimplementation in front of probers, which Parrot
+  *would* defeat; splicing hands them Core's stack.
+- **Tunnel path = our reimplementation**, so a prober must never reach it — and cannot. Every deep
+  Parrot attack requires *engaging* the session (producing valid packets, driving error paths), which
+  requires the session keys, which require **both** a fresh ephemeral private key **and** the PSK. A
+  credential-less adversary has neither: no PSK → no valid MAC → routed to real `bitcoind`; a replayed
+  MAC → no ephemeral private key → can't derive keys → can't send a single valid packet.
+
+So the path where mimicry is fatal is the path a credential-less prober cannot reach, and the path it
+can reach is real. The lone residual — a keyless replay that slips the fresh-ellswift cache onto the
+tunnel path — is **shallow**: keyless, it can only observe the responder's opening flight and
+disconnect timing (it cannot derive keys to perturb anything). That narrow surface is what the coarse
+size/timing parity in §5.1 covers, and the cache makes it rare. Full byte parity is thus neither
+required nor — per Parrot — sufficient were the path actually exposed; the real defense is **gating
+access, not perfecting the fake**.
+
+**Boundary of the probe-resistance claim (stated honestly):** it holds against a **credential-less**
+censor. A censor who extracts a valid PSK from a captured client can forge MACs with fresh keys,
+complete real sessions, reach the tunnel path, and then run full Parrot perturbation against our
+partial front — and win. This is inherent to every credentialed probe-resistant design (REALITY
+included: steal the client secret and you can confirm the server). The answer is containment, not
+prevention: **per-track / per-server PSKs** so one compromise doesn't burn the fleet, plus rotation.
+
 ## 6. Detectability & residual risks (stated plainly)
 
 1. **Traffic shape is the real weakness.** A bulk proxy flow does not look like a gossiping node
@@ -212,10 +248,12 @@ Why it holds:
 
 ## 8. Open questions
 
-- **Keyed-garbage authenticator** — specified in §5.1. Remaining sub-question: whether the
-  front-as-responder path is worth hardening to byte-level timing/size parity with `bitcoind`, or
-  whether the fresh-ellswift cache makes that moot.
+- **Keyed-garbage authenticator** — specified in §5.1; the timing-parity-vs-cache question is
+  resolved in §5.2 (byte parity is *insufficient* per Parrot-is-Dead, so we gate access with auth +
+  the fresh-ellswift cache rather than perfect a fake — raw-splice is the Parrot-optimal node path).
+  Residual limit: probe resistance assumes a credential-less censor (PSK-compromise caveat, §5.2).
 - **v2 adoption trajectory** — is v2-only acceptable now, or do we need a v1 gambit for some regions?
 - **Shaping budget** — how much decoy/pacing is worth the throughput cost for the target user segment.
-- **Reusing `bitcoind`'s own BIP324 stack** on the server vs. a standalone terminator (the former is
-  more faithful; the latter is easier to fork tunnel-vs-node).
+- **Server front: raw-splice vs. terminate-and-relay** — §5.2 settles this in favor of raw-splice
+  (probers reach Core's real BIP324 stack, not our reimplementation). Reopen only if a future need to
+  shape/relay real-peer traffic is judged to outweigh that probe-resistance advantage.

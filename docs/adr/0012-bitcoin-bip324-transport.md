@@ -57,5 +57,9 @@ already restrict crypto (e.g. China). We defeat generic DPI, not a decision to t
 - **Negative / residual:** bulk-flow traffic shape ≠ a gossiping node (the real weakness — behavioral
   analysis is the exposure); weak collateral freedom against Bitcoin-specific blocking; v2 is still a
   minority of the network; server IPs must actually run nodes to have node reputation.
-- **Open questions** (see design doc §8): exact keyed-garbage authenticator construction; v2-only
-  acceptability; shaping budget; reuse `bitcoind`'s BIP324 stack vs. a standalone terminator.
+- **Probe-resistance boundary:** holds against a *credential-less* censor; a censor who extracts a
+  valid PSK from a captured client can probe as a real client (inherent to all credentialed
+  probe-resistant designs). Contain via per-track/per-server PSKs + rotation (design §5.2).
+- **Open questions** (see design doc §8): v2-only acceptability; shaping budget. The keyed-garbage
+  authenticator is now specified (§5.1), and the raw-splice-vs-relay + timing-parity questions are
+  resolved via Parrot-is-Dead reasoning (§5.2).
