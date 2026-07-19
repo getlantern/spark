@@ -10,6 +10,9 @@ use async_trait::async_trait;
 
 use crate::BoxedStream;
 
+pub mod genome;
+pub use genome::Genome;
+
 #[cfg(feature = "anytls")]
 pub mod tls;
 
@@ -19,17 +22,18 @@ pub type EngineId = &'static str;
 /// The boring/flint-tls Chrome realization — the one engine this step ships.
 pub const TLS: EngineId = "tls";
 
-/// A verified opening plan handed across the core→engine boundary. `params` / `fallback` are
-/// engine-interpreted bytes the core never parses (for the TLS engine, a postcard `Gambit`). PR2
-/// swaps these for the neutral genome's `engine_params` — an engine-internal change, since the core
-/// already treats them as opaque.
+/// A verified opening plan handed across the core→engine boundary. `params` / `fallback` are opaque
+/// postcard [`Genome`] blobs the core never parses; the engine selected by [`Self::engine`] decodes
+/// their `engine_params`.
 pub struct OpeningPlan {
+    /// Engine registry key selecting which engine realizes this plan (set by the transport builder).
+    pub engine: EngineId,
     /// Peer name (TLS SNI for the TLS engine).
     pub sni: String,
-    /// Dynamic params to attempt; empty ⇒ use `fallback`.
+    /// Dynamic params to attempt (a postcard `Genome`); empty ⇒ use `fallback`.
     pub params: Vec<u8>,
-    /// Always-realizable static-config params, used when `params` is empty or unrealizable — so
-    /// connectivity never depends on a dynamic plan succeeding.
+    /// Always-realizable static-config params (a postcard `Genome`), used when `params` is empty or
+    /// unrealizable — so connectivity never depends on a dynamic plan succeeding.
     pub fallback: Vec<u8>,
 }
 

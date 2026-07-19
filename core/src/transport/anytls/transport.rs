@@ -46,8 +46,9 @@ struct Inner {
     protector: Option<SocketProtector>,
     /// Opening-handshake shaping for each new TLS connection (ADR 0006 Phase 1).
     wire: WirePlan,
-    /// The static-config opening plan (an opaque postcard `Gambit`) the TLS engine falls back to when
-    /// a dynamic [`Inner::gambit_source`] faults or yields a gambit boring can't realize (ADR 0006 P2).
+    /// The static-config opening plan (an opaque postcard neutral `Genome` for the `tls` engine) the
+    /// TLS engine falls back to when a dynamic [`Inner::gambit_source`] faults or yields a gambit
+    /// boring can't realize (ADR 0006 P2).
     static_params: Vec<u8>,
     /// Optional Path-B module that **computes** a fresh gambit per connection (ADR 0006 P3). When
     /// present, each new TLS session resolves its [`Profile`] from this module instead of `profile`.
@@ -148,15 +149,17 @@ impl Inner {
         // Shape the opening write (the ClientHello) — e.g. fragment it across the SNI boundary —
         // by sitting between boring and the socket (ADR 0006 Phase 1).
         let shaped = SegmentShapingStream::new(tcp, self.wire.clone());
-        // Realize the TLS opening move through the engine seam (ADR 0013 §7 step 1): the engine
-        // decodes the opaque dynamic params (or the static fallback) and drives the boring handshake.
-        let engine = crate::transport::engine::get(crate::transport::engine::TLS)
-            .ok_or_else(|| io::Error::other("tls engine not compiled"))?;
+        // Realize the TLS opening move through the engine seam (ADR 0013 §7 step 1): the engine,
+        // routed by the plan's engine id, decodes the opaque dynamic params (or the static fallback)
+        // and drives the boring handshake.
         let plan = crate::transport::engine::OpeningPlan {
+            engine: crate::transport::engine::TLS,
             sni: self.sni.clone(),
             params: self.compute_params(),
             fallback: self.static_params.clone(),
         };
+        let engine = crate::transport::engine::get(plan.engine)
+            .ok_or_else(|| io::Error::other("tls engine not compiled"))?;
         let tls = engine.realize(Box::new(shaped), &plan).await?;
         let session = Arc::new(Session::client(
             tls,
@@ -169,9 +172,10 @@ impl Inner {
     }
 
     /// The dynamic opening params for a new TLS session: with a [`gambit_source`](Self::
-    /// gambit_source) (ADR 0006 P3), invoke the module and return its opaque computed-gambit bytes
-    /// for the TLS engine to decode + gate. Returns empty — so the engine uses the static fallback —
-    /// when there's no source or the module faults; a dynamic gambit must never break connectivity.
+    /// gambit_source) (ADR 0006 P3), invoke the module and return its opaque computed bytes (a neutral
+    /// `Genome`) for the TLS engine to decode + gate. Returns empty — so the engine uses the static
+    /// fallback — when there's no source or the module faults; a dynamic gambit must never break
+    /// connectivity.
     #[cfg(feature = "wasm-transport")]
     fn compute_params(&self) -> Vec<u8> {
         let Some(source) = &self.gambit_source else {
@@ -280,12 +284,21 @@ impl UdpTransport for AnytlsTransport {
 #[cfg(all(test, feature = "wasm-transport"))]
 mod tests {
     use super::*;
+    use crate::transport::engine::Genome;
     use crate::transport::wasm::{Transform, TransformModule};
     use flint_tls::gambit::{Capability, ClientHello, EchMode, Gambit, Records};
 
-    /// A Path-B module that, on `compute_gambit`, returns the postcard encoding of `g`.
+    /// A Path-B module that, on `compute_gambit`, returns `g` wrapped in the neutral `Genome` the TLS
+    /// engine expects (engine = `tls`, `engine_params` = postcard `Gambit`).
     fn gambit_transform(g: &Gambit) -> Transform {
-        let bytes = postcard::to_stdvec(g).expect("encode gambit");
+        let bytes = Genome::new(
+            "dyn",
+            crate::transport::engine::TLS,
+            Default::default(),
+            postcard::to_stdvec(g).expect("encode gambit"),
+        )
+        .encode()
+        .expect("encode genome");
         let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
         let wat = format!(
             r#"
@@ -342,10 +355,12 @@ mod tests {
             vec![Capability::Ech],
         );
         let t = transport_with(&g);
-        // The dynamic module's computed gambit is threaded through verbatim; the TLS engine (tested
-        // in `engine::tls`) decodes + resolves it onto boring.
+        // The dynamic module's computed genome is threaded through verbatim; the TLS engine (tested
+        // in `engine::tls`) decodes the Genome + resolves its engine_params onto boring.
         let params = t.inner.compute_params();
-        let got: Gambit = postcard::from_bytes(&params).expect("decode computed gambit");
+        let genome = Genome::decode(&params).expect("decode computed genome");
+        assert_eq!(genome.engine, crate::transport::engine::TLS);
+        let got: Gambit = postcard::from_bytes(&genome.engine_params).expect("decode gambit");
         assert_eq!(got, g);
     }
 
