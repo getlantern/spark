@@ -143,13 +143,13 @@ diverge by variant:
 
 | Variant | TLS? | Stack | Verdict |
 |---|---|---|---|
-| **RDP** modern, TCP/3389 | yes — real TLS **after** a cleartext X.224 prelude (STARTTLS) | Schannel (mstsc.exe) / OpenSSL (FreeRDP, xrdp) — never Chrome | **Pursue.** Needs engine composition (§3.3b) + a Schannel/OpenSSL anchor + a real `xrdp` backing. Crypto is free (existing connector) |
+| **RDP** modern, TCP/3389 | yes — real TLS **after** a cleartext X.224 prelude (STARTTLS) | Schannel (mstsc.exe) / OpenSSL (FreeRDP, xrdp) — never Chrome | **Pursue.** Needs the `upgrade_to` engine-composition seam (§3) + a Schannel/OpenSSL anchor (§4) + a real `xrdp` backing. Crypto is free (existing connector) |
 | **TURNS-over-TCP**, best on 443 | yes — TLS wrapping the whole TURN exchange | WebRTC BoringSSL / NSS / Apple / Schannel | **Pursue.** Reuses the TLS engine wholesale + a WebRTC-TLS anchor + a real `coturn`. The only high-value TURN variant |
 | **Plain TURN**, UDP/3478 | **no** — raw STUN, cleartext control plane | n/a | **Skip.** The magic-cookie shape is a *positive-fingerprint liability* (classified from one packet), has no collateral umbrella, no prior art — it would cost the whole deferred datagram + legacy-crypto bill for negative value |
 | **TURN-over-DTLS**, UDP/5349 | DTLS | — | **Not real cover.** RFC 8835 browsers dial `turns:` over TCP+TLS only, never UDP+DTLS; real WebRTC UDP-DTLS is DTLS-SRTP media on ephemeral ports — the **cover-dtls** surface, not TURN |
 
 So both worthwhile variants (RDP-SSL, TURNS-over-TCP) fall **inside** the envelope after two cheap,
-protocol-agnostic additions — **engine composition** (§3.3b) and a **non-Chrome anchor set** (§4.5) —
+protocol-agnostic additions — the **`upgrade_to` engine-composition seam** (§3) and a **non-Chrome anchor set** (§4) —
 with *no* datagram transport and *no* new crypto. The recurring config-layer cost is anchor authoring:
 one profile plus its JA4/JA4D validation per stack.
 
