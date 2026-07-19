@@ -1963,7 +1963,10 @@ mod tests {
 "#;
         let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
         let mut t = module.instantiate().expect("instantiate");
-        assert_eq!(t.compute_gambit(&[]).expect("returns raw bytes"), vec![0xFF]);
+        assert_eq!(
+            t.compute_gambit(&[]).expect("returns raw bytes"),
+            vec![0xFF]
+        );
     }
 
     /// End-to-end P3 (needs both features): a module computes a gambit, and it resolves onto the

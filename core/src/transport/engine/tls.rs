@@ -47,7 +47,10 @@ impl TlsEngine {
             Ok(resolved) => {
                 if warn {
                     for note in &resolved.unrealizable {
-                        tracing::warn!(knob = note, "computed gambit knob not realizable on boring");
+                        tracing::warn!(
+                            knob = note,
+                            "computed gambit knob not realizable on boring"
+                        );
                     }
                 }
                 Some(resolved.profile)

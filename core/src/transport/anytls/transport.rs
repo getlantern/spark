@@ -158,7 +158,11 @@ impl Inner {
             fallback: self.static_params.clone(),
         };
         let tls = engine.realize(Box::new(shaped), &plan).await?;
-        let session = Arc::new(Session::client(tls, &self.password, PaddingScheme::default()));
+        let session = Arc::new(Session::client(
+            tls,
+            &self.password,
+            PaddingScheme::default(),
+        ));
         let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         pool.push(Arc::clone(&session));
         Ok(session)
