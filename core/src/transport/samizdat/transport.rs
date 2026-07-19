@@ -67,6 +67,10 @@ impl SamizdatTransport {
 
     /// Establish a fresh TLS + HTTP/2 connection to the server: TCP → inject the auth SessionID into
     /// the Chrome ClientHello → TLS handshake → HTTP/2 handshake.
+    ///
+    /// Realizes TLS via flint directly, not the `engine::tls` seam: it needs a pre-handshake
+    /// `ConnectConfiguration` mutation (`inject_session_id`) and a post-handshake `.ssl()` ALPN check
+    /// that `OpeningEngine::realize` (stream→stream) can't carry yet — deferred to ADR 0013 §7 step 3.
     async fn establish(&self) -> io::Result<Arc<H2Conn>> {
         let tcp = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
         if self.wire.tcp_nodelay {

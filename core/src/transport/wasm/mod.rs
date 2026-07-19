@@ -18,11 +18,11 @@
 //!   `(out_ptr << 32) | out_len`.
 //! - `transform_in(ptr: i32, len: i32) -> i64` — the inverse (wire → application), same packing.
 //! - `compute_gambit(ctx_ptr: i32, ctx_len: i32) -> i64` — *gambit-compute mode* (ADR 0006 P3);
-//!   invoked once per connection with a (reserved) per-connection context, returns a
-//!   **postcard-encoded [`flint_tls::gambit::Gambit`]** packed the same way — the opening
-//!   *plan* (CH knobs + record/segment framing), not stream bytes. The host decodes it and runs it
-//!   through the boring executor (`Profile::for_boring`), which stays the TLS engine. Lets a gambit
-//!   be **computed per connection** (adaptive/stateful) rather than shipped as static signed config.
+//!   invoked once per connection with a (reserved) per-connection context, returns **opaque engine
+//!   params** packed the same way — the opening *plan*, not stream bytes. The core does not parse
+//!   them; the engine that consumes them (the TLS engine, `engine::tls`) decodes + realizes them
+//!   (ADR 0013 §7 step 1). Lets a plan be **computed per connection** (adaptive/stateful) rather than
+//!   shipped as static signed config.
 //! - `init(config_ptr: i32, config_len: i32)` — *optional*; called once after instantiation to
 //!   deliver per-deployment configuration (e.g. a key or seed). See [`TransformModule::instantiate_with_config`].
 //! - `reset()` — *optional*; called by the host after each transform (and after `init`) so a module
@@ -74,8 +74,6 @@ use wasmi::{
     TypedFunc,
 };
 
-use flint_tls::gambit::Gambit;
-
 mod signing;
 mod stream;
 mod transport;
@@ -121,8 +119,8 @@ const EXPORT_ALLOC: &str = "alloc";
 const EXPORT_TRANSFORM_OUT: &str = "transform_out";
 /// Export: `transform_in(ptr, len) -> packed`.
 const EXPORT_TRANSFORM_IN: &str = "transform_in";
-/// Export (optional): `compute_gambit(ctx_ptr, ctx_len) -> packed` — emits a postcard-encoded
-/// [`Gambit`] genome (the per-connection opening plan), not stream bytes (ADR 0006 P3).
+/// Export (optional): `compute_gambit(ctx_ptr, ctx_len) -> packed` — emits opaque per-connection
+/// engine params (the opening plan), not stream bytes; the consuming engine decodes them (ADR 0006 P3).
 const EXPORT_COMPUTE_GAMBIT: &str = "compute_gambit";
 
 /// Upper bound on a single transform's input or output length. Caps how much guest memory one call
@@ -194,9 +192,6 @@ pub enum WasmError {
     /// A host function recorded a fault during the guest call (CSPRNG failure, bad length, …).
     #[error("host function fault: {0}")]
     HostFault(String),
-    /// `compute_gambit` returned bytes that did not decode as a [`Gambit`] genome (ADR 0006 P3).
-    #[error("compute_gambit returned an undecodable gambit genome: {0}")]
-    GambitDecode(String),
     /// The module exhausted its per-call execution fuel — a runaway or pathologically slow module.
     #[error("fuel: {0}")]
     Fuel(String),
@@ -445,17 +440,16 @@ impl Transform {
         self.run(Direction::In, input)
     }
 
-    /// Invoke the module's `compute_gambit` export (ADR 0006 P3): pass the per-connection context
-    /// and decode the returned bytes as a [`Gambit`] genome — the opening *plan*, not stream bytes.
-    /// The trust root is the module's own signature (the genome is *not* separately signed); the
-    /// caller still gates it via `Profile::for_boring` so boring only runs gambits it can realize.
+    /// Invoke the module's `compute_gambit` export (ADR 0006 P3): pass the per-connection context and
+    /// return the raw computed-gambit bytes — **opaque** here. The core no longer parses them; the
+    /// engine that consumes them (the TLS engine) decodes + gates them (ADR 0013 §7 step 1). The trust
+    /// root is the module's own signature (the bytes are not separately signed).
     /// Errors with [`WasmError::MissingExport`] if the module is byte-transform-only.
-    pub fn compute_gambit(&mut self, ctx: &[u8]) -> Result<Gambit, WasmError> {
+    pub fn compute_gambit(&mut self, ctx: &[u8]) -> Result<Vec<u8>, WasmError> {
         let func = self
             .compute_gambit
             .ok_or(WasmError::MissingExport(EXPORT_COMPUTE_GAMBIT))?;
-        let bytes = self.call_io(func, EXPORT_COMPUTE_GAMBIT, ctx)?;
-        postcard::from_bytes::<Gambit>(&bytes).map_err(|e| WasmError::GambitDecode(e.to_string()))
+        self.call_io(func, EXPORT_COMPUTE_GAMBIT, ctx)
     }
 
     /// Total bytes this session has drawn from the `host_rand` capability — observability for how
@@ -1231,6 +1225,7 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::xor_module;
     use super::*;
+    use flint_tls::gambit::Gambit;
 
     /// Throughput floor of the transform layer: a trivial XOR transform whose `alloc` resets to a
     /// fixed scratch base each call (no arena growth), so it isolates wasmi dispatch + host
@@ -1938,9 +1933,10 @@ mod tests {
         let expected = sample_gambit();
         let module = gambit_module_emitting(&expected);
         let mut t = module.instantiate().expect("instantiate");
-        // The per-connection context is reserved; an empty ctx is valid.
+        // The per-connection context is reserved; an empty ctx is valid. `compute_gambit` returns the
+        // module's raw bytes verbatim (opaque to the core) — here, the postcard encoding of `expected`.
         let got = t.compute_gambit(&[]).expect("compute gambit");
-        assert_eq!(got, expected);
+        assert_eq!(got, postcard::to_stdvec(&expected).expect("encode"));
     }
 
     #[test]
@@ -1954,9 +1950,9 @@ mod tests {
     }
 
     #[test]
-    fn compute_gambit_rejects_undecodable_bytes() {
-        // A module whose compute_gambit returns a single 0xFF byte (a truncated varint) — not a
-        // decodable genome.
+    fn compute_gambit_returns_bytes_opaquely() {
+        // A module whose compute_gambit returns a single 0xFF byte. The core no longer validates it
+        // (decoding is the consuming engine's job); compute_gambit hands the bytes back verbatim.
         const WAT: &str = r#"
 (module
   (memory (export "memory") 1)
@@ -1967,10 +1963,10 @@ mod tests {
 "#;
         let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
         let mut t = module.instantiate().expect("instantiate");
-        assert!(matches!(
-            t.compute_gambit(&[]),
-            Err(WasmError::GambitDecode(_))
-        ));
+        assert_eq!(
+            t.compute_gambit(&[]).expect("returns raw bytes"),
+            vec![0xFF]
+        );
     }
 
     /// End-to-end P3 (needs both features): a module computes a gambit, and it resolves onto the
@@ -1981,7 +1977,9 @@ mod tests {
         use flint_tls::Profile;
         let module = gambit_module_emitting(&sample_gambit());
         let mut t = module.instantiate().expect("instantiate");
-        let gambit = t.compute_gambit(&[]).expect("compute gambit");
+        // compute_gambit is opaque now; decode here (as the TLS engine does) before resolving.
+        let bytes = t.compute_gambit(&[]).expect("compute gambit");
+        let gambit: Gambit = postcard::from_bytes(&bytes).expect("decode gambit");
         let resolved = Profile::for_boring(&gambit).expect("within boring capabilities");
         // The gambit set ech=off and pq_kem=off; boring honors both.
         assert!(!resolved.profile.ech_grease);
