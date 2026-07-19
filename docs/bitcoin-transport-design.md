@@ -49,7 +49,7 @@ running. Here we run the real protocol.
 | Generic DPI / protocol classification from the opening (CN/IR/RU) | classified as Bitcoin v2 | BIP324 by construction |
 | Active probing (GFW replays / connects to `:8333`) | prober reaches a **real node** | server-side `bitcoind` + keyed side-door (§5) |
 | TLS/JA3 fingerprinting | N/A — no TLS on the wire | — |
-| Entropy / fully-encrypted-traffic detection (USENIX '23) | Bitcoin v2 is *expected* high-entropy on `:8333` | port + protocol context |
+| Entropy / fully-encrypted-traffic detection (USENIX '23) | **not defeated** — a v2 opening *is* high-entropy; flagged on monitored VPS ranges | IP placement: residential / non-flagged ASNs (§6 item 5) |
 | Behavioral / statistical flow analysis | **residual risk** — a bulk flow ≠ a gossiping node | partial shaping only (§6) |
 | Bitcoin-specific / port-8333 targeting | **weak collateral freedom** — blocking Bitcoin is politically cheap for some censors | none; use as one regional gambit, not a default (§6) |
 
@@ -231,9 +231,21 @@ prevention: **per-track / per-server PSKs** so one compromise doesn't burn the f
    censors who already restrict crypto (e.g. China). Collateral freedom here is **weak** — we defeat
    generic DPI, not a decision to target Bitcoin. Use as one regional gambit where Bitcoin is
    tolerated, not a universal default.
-3. **v2 is still a minority** of the network (growing since Bitcoin Core 26). Plausible, not dominant.
+3. **v2 is the majority** of global Bitcoin P2P traffic as of early 2026 (Wuille, *Bitcoin Magazine*,
+   Feb 2026; on-by-default since Core 27.0, Apr 2024). A v2 flow is the *common* case — v2-only blends
+   fine and needs no v1 fallback for cover.
 4. **IP reputation.** A bare `:8333` that is not a known node is itself a signal — only solved by
    actually running the node (§5).
+5. **Entropy / fully-encrypted-traffic detection is *not* defeated by BIP324 — it is the one opening
+   filter BIP324's randomness walks *into*.** The GFW's fully-encrypted detector (USENIX '23) blocks
+   high-entropy first packets (avg set-bits/byte in [3.4, 4.6], no TLS/HTTP exemption) on ~2% of IPs —
+   specifically VPS provider ranges (DigitalOcean/Linode/Alibaba) — at ~26% sampling. A BIP324 opening
+   (ellswift + random garbage) *is* exactly such a packet, so a v2 flow to a **monitored VPS IP is
+   flagged like any other look-like-random protocol.** Wuille frames the only-out as collateral cost
+   ("to block Bitcoin using v2 you must block anything that looks random") — but on those ranges the
+   GFW already pays it. **Defense is IP placement, not wire shape:** run the node on residential /
+   non-flagged ASNs — which also supplies the real-node reputation item 4 wants and matches the
+   residential-peer strategy. This is the sharpest China-specific constraint.
 
 ### 6.1 Shaping budget — grounded in deployed-censor evidence
 
@@ -249,11 +261,14 @@ decision, not a settled spec line. What the evidence (deployed vs. academic) say
   connection frequency**. NDSS 2025 adds protocol-agnostic **cross-layer RTT fingerprinting**. Master
   & Garman (FOCI 2023) find NGFW / encrypted-traffic-analysis flow classification in ~6–13% of
   countries, "underdetected — assume higher."
-- **…but the primary at-scale passive filter is opening-based.** The GFW's fully-encrypted-traffic
-  detector (Wu et al., USENIX '23; live since the Oct 2022 blocking wave) inspects **only the first
-  data packet and does not reassemble flows.** That is exactly what BIP324 content-indistinguishability
-  + the opening move defeat, and it is the highest-volume filter. So flow-shape analysis is a real
-  *escalation*, not the first thing that catches us.
+- **…but the primary at-scale passive filters are opening-based and don't reassemble flows.** What
+  BIP324 defeats is byte-*pattern* DPI (the v1 Bitcoin magic, protocol signatures) — Wuille/Optech
+  (Feb 2026) put it exactly: today's v2 implementations "only defeat protocol signatures that involve
+  patterns in the sent bytes, not in traffic." And the GFW's fully-encrypted detector (USENIX '23)
+  inspects **only the first packet, not the flow.** So flow-shape analysis is a real *escalation* —
+  not the first thing that runs. (Flip side, kept honest: that same entropy detector is *not* defeated
+  by BIP324 — its random opening is caught on monitored ranges, §6 item 5 — but that's an
+  opening/IP-placement problem, not a flow-shape one.)
 
 Design consequences:
 
@@ -293,7 +308,9 @@ Design consequences:
   resolved in §5.2 (byte parity is *insufficient* per Parrot-is-Dead, so we gate access with auth +
   the fresh-ellswift cache rather than perfect a fake — raw-splice is the Parrot-optimal node path).
   Residual limit: probe resistance assumes a credential-less censor (PSK-compromise caveat, §5.2).
-- **v2 adoption trajectory** — is v2-only acceptable now, or do we need a v1 gambit for some regions?
+- **v2 adoption** — resolved: v2 is the majority of global Bitcoin P2P traffic (Wuille, Feb 2026), so
+  v2-only blends fine and no v1 gambit is needed for cover. The v1 framing (§3.2) stays documented only
+  as a contingency, not a shipped path.
 - **Shaping budget** — framed and grounded in §6.1 (low default; region-tunable escalation vs.
   TSG-class classifiers; pace volume, don't rotate sessions). Open only as a per-region, telemetry-driven
   tuning call, not a design question.

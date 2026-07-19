@@ -55,8 +55,11 @@ already restrict crypto (e.g. China). We defeat generic DPI, not a decision to t
   into the existing WASM/gambit + `Transport` seams with no core changes; new infra is a stock
   `bitcoind` plus a small front.
 - **Negative / residual:** bulk-flow traffic shape ≠ a gossiping node (the real weakness — behavioral
-  analysis is the exposure); weak collateral freedom against Bitcoin-specific blocking; v2 is still a
-  minority of the network; server IPs must actually run nodes to have node reputation.
+  analysis is the exposure); weak collateral freedom against Bitcoin-specific blocking; **BIP324's
+  random opening is *not* exempt from the GFW's fully-encrypted-traffic detector** — a v2 flow to a
+  monitored VPS range is flagged, so the node must run on residential / non-flagged ASNs (design §6
+  item 5); server IPs must actually run nodes to have node reputation. (v2 adoption is *not* a
+  concern: it is now the majority of global Bitcoin P2P traffic, so v2-only is the mainstream case.)
 - **Probe-resistance boundary:** holds against a *credential-less* censor; a censor who extracts a
   valid PSK from a captured client can probe as a real client (inherent to all credentialed
   probe-resistant designs). Contain via per-track/per-server PSKs + rotation (design §5.2).
