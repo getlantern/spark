@@ -142,5 +142,6 @@ Critical path (each builds on the last):
 - **iOS is interpreter-only** (no JIT) — the reason spark is on `wasmi`; all of the above must hold in
   the interpreter.
 - **Capability/version surface** grows: clients and transports must negotiate primitives and
-  anti-rollback carefully; a botched capability gate silently disables a transport rather than failing
-  loud.
+  anti-rollback carefully. The gate **must fail loud** — log/alert on an unmet `requires` — never
+  silently disable a transport; silent disable is the failure mode to design against (this is the
+  required behavior in ADR 0013's consequences, stated here as the risk it guards against).
