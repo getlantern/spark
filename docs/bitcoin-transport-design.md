@@ -81,14 +81,14 @@ plausible `version` payload (protocol version, `services` bitfield, `timestamp` 
 a real-looking user-agent such as `/Satoshi:26.0.0/`, `start_height` near the current chain tip,
 `relay`). We would only fall back to v1 to blend with the still-large v1 population, and it is
 **strictly worse** for us: the handshake is cleartext (must be byte-perfect) and tunnel data must
-masquerade as `tx`/`block` payloads with valid double-SHA256 checksums. **Recommendation: v2-only**,
-accepting v2's growing-but-minority share.
+masquerade as `tx`/`block` payloads with valid double-SHA256 checksums. **Recommendation: v2-only** —
+v2 is now the majority of Bitcoin P2P traffic (§6 item 3), so it is the mainstream case, not a rarity.
 
 ## 4. The opening move in spark's WASM sandbox
 
 spark's dynamic-transport sandbox (ADR 0003, `core/src/transport/wasm/`) is a **pure byte-transform**:
 no WASI, no sockets, no filesystem; the module exports `memory` + `alloc` and a transform pair (plus
-optional `init`/`reset` and a `gambit-compute` export), and its **entire** capability is the host
+optional `init`/`reset` and a `compute_gambit` export), and its **entire** capability is the host
 functions under `env`. This is a better fit than raw WATER and it lands directly on the design doc's
 "performance escape hatch" — keep the heavy, stable crypto native; make only the light,
 frequently-changing choreography dynamic.
@@ -117,7 +117,7 @@ frequently-changing choreography dynamic.
 - **Delivery = the gambit model.** The module and its parameter set (a *Bitcoin gambit*) are
   Ed25519-signed, key-pinned, versioned (anti-rollback), and capability-gated (`requires` the host to
   expose the ellswift/AEAD primitives), delivered over the config/fronting channel. The
-  `gambit-compute` export emits the polymorphic opening parameters (garbage-length sampling, decoy
+  `compute_gambit` export emits the polymorphic opening parameters (garbage-length sampling, decoy
   count, v1 user-agent) so the repertoire stays ever-changing without reshipping the module — the
   Opening Book philosophy, extended from ClientHello to BIP324.
 
