@@ -69,12 +69,26 @@ usable by many transports, exposed to WASM modules via the host `env` ABI:
    and **scheduled decoy / cover-traffic injection**, and **generalize `record_fragment`** (or move it
    into the TLS engine). "Garbage of length uniform[0,4095]" and "decoy packets" then become a transport
    *parameterizing generic knobs*, not core concepts.
-3. **ABI — a generic interactive-handshake channel.** Today's byte-transform pair
-   (`transform_out(app)→wire`, `transform_in(wire)→app`) cannot express an interactive opening: no
+3. **ABI — two additions.** (a) **A generic interactive-handshake channel.** Today's byte-transform
+   pair (`transform_out(app)→wire`, `transform_in(wire)→app`) cannot express an interactive opening: no
    channel for an inbound read to trigger an outbound wire write, and no emit-at-connect. Add a generic
    handshake driver (e.g. `handshake_step(inbound) -> (outbound_wire, done)`) so *any* interactive-
    opening protocol runs in the sandbox. **This is the single most important addition** — it is the gap
-   that today forces handshake protocols to be native.
+   that today forces handshake protocols to be native. (b) **Engine composition — a mid-stream
+   sub-engine upgrade** (`upgrade_to(sub_engine)`). Today an engine owns a connection end to end;
+   STARTTLS-shaped protocols (cleartext prelude on a fixed port, then an inline TLS upgrade on the
+   *same* connection) can't be expressed because one engine can't hand the live byte-stream to another
+   (typically the TLS engine) and resume. This unlocks the whole STARTTLS family — RDP, SMTP/IMAP/POP3,
+   XMPP, LDAP, FTPS — as composed engines instead of native code. The boring connector already takes an
+   *established byte stream* (`connect<S: AsyncRead+AsyncWrite>`), so the handoff is mechanically close;
+   the missing pieces are the orchestration seam and non-Chrome anchors (§6.1).
+
+**Deferred primitives — named, not built (no current forcing function).** Keeping the set driven by
+real transports, not speculation: a **datagram/UDP transport + per-packet ABI + DTLS handshake mode**
+(forcing function = DTLS-SRTP UDP-media cover, which Lantern already ships *outside* spark in Unbounded
+`common/covertdtls/`; no spark transport needs it, and TURN does **not** justify it — §6.1), and
+**legacy fidelity crypto** (HMAC-SHA1 / MD5 / CRC-32, only needed for plain STUN/TURN on 3478, which
+§6.1 concludes we should not pursue). Revisit only when a UDP-media cover enters spark's scope.
 
 ## 4. Structural de-TLS-ing (removes coupling, adds nothing protocol-specific)
 
@@ -82,7 +96,10 @@ usable by many transports, exposed to WASM modules via the host `env` ABI:
    `flint-shaping` unchanged). Home it in a protocol-neutral crate (`flint-gambit`) or spark
    `core/src/transport/gambit/`. TLS's `ClientHello`/`Records` become the TLS engine's param schema.
 5. **Engine registry** keyed by engine-id / capability; each engine decodes its own params. `for_boring`
-   becomes "the TLS engine" behind the seam — no behavior change to the TLS path.
+   becomes "the TLS engine" behind the seam — no behavior change to the TLS path. Its **anchor is
+   Chrome-singular today** (`flint-tls/src/anchor.rs` pins one Chrome-137 JA4); the TLS engine grows an
+   **anchor *set*** — non-browser stacks (Schannel, OpenSSL) and a WebRTC profile, plus a per-connection
+   randomize mode — carried as signed config/data, not as a core primitive (§6.1).
 6. **Open/extensible capability vocabulary** — capabilities name the *generic host primitives* above,
    so adding a transport that needs a new primitive doesn't force edits to a closed core enum.
 7. **`compute_gambit` returns the neutral genome;** the discovery GA mutates the generic shaping knobs
@@ -118,6 +135,30 @@ job is to make the primitive set rich enough that the second case is rare. BIP32
 after its primitives land, the set covers "interactive handshake + AEAD stream + uniform-key KEX +
 opening shaping" — most cover-protocol transports fall inside that envelope.
 
+### 6.1 Worked examples: RDP and TURN (what "inside the envelope" costs)
+
+Two candidate cover protocols make the boundary concrete. Both mostly ride TLS — but *not* the
+Chrome-HTTPS profile the engine pins today, so "**what** TLS?" is the real question, and the answers
+diverge by variant:
+
+| Variant | TLS? | Stack | Verdict |
+|---|---|---|---|
+| **RDP** modern, TCP/3389 | yes — real TLS **after** a cleartext X.224 prelude (STARTTLS) | Schannel (mstsc.exe) / OpenSSL (FreeRDP, xrdp) — never Chrome | **Pursue.** Needs engine composition (§3.3b) + a Schannel/OpenSSL anchor + a real `xrdp` backing. Crypto is free (existing connector) |
+| **TURNS-over-TCP**, best on 443 | yes — TLS wrapping the whole TURN exchange | WebRTC BoringSSL / NSS / Apple / Schannel | **Pursue.** Reuses the TLS engine wholesale + a WebRTC-TLS anchor + a real `coturn`. The only high-value TURN variant |
+| **Plain TURN**, UDP/3478 | **no** — raw STUN, cleartext control plane | n/a | **Skip.** The magic-cookie shape is a *positive-fingerprint liability* (classified from one packet), has no collateral umbrella, no prior art — it would cost the whole deferred datagram + legacy-crypto bill for negative value |
+| **TURN-over-DTLS**, UDP/5349 | DTLS | — | **Not real cover.** RFC 8835 browsers dial `turns:` over TCP+TLS only, never UDP+DTLS; real WebRTC UDP-DTLS is DTLS-SRTP media on ephemeral ports — the **cover-dtls** surface, not TURN |
+
+So both worthwhile variants (RDP-SSL, TURNS-over-TCP) fall **inside** the envelope after two cheap,
+protocol-agnostic additions — **engine composition** (§3.3b) and a **non-Chrome anchor set** (§4.5) —
+with *no* datagram transport and *no* new crypto. The recurring config-layer cost is anchor authoring:
+one profile plus its JA4/JA4D validation per stack.
+
+**Caution for any DTLS-adjacent path:** `pion/dtls`'s default ClientHello is a *blocked* fingerprint —
+TSPU/Russia matched it in March 2026 (net4people#603), breaking Snowflake. Any DTLS transport must
+randomize per-connection or replay a real browser exactly (Psiphon's `covert-dtls`, already vendored in
+Unbounded). That live attack surface is precisely why the datagram/DTLS primitive stays *deferred*
+rather than speculative — it belongs in scope only with a concrete UDP-media cover target.
+
 ## 7. Work breakdown
 
 Critical path (each builds on the last):
@@ -126,11 +167,14 @@ Critical path (each builds on the last):
    existing TLS path "the TLS engine." No new transport, no behavior change. (Lowest-churn first step.)
 2. **Generic primitives** — crypto (secp256k1/ellswift, raw ChaCha20), shaping (opening padding from a
    distribution, decoy injection; generalize `record_fragment`), each exposed as a host capability.
-3. **Interactive-handshake ABI** — the `handshake_step` channel; the enabler for handshake protocols
-   in WASM.
+3. **ABI — interactive handshake + engine composition** — the `handshake_step` channel (enabler for
+   handshake protocols in WASM) and the `upgrade_to` sub-engine seam (enabler for the STARTTLS family).
 4. **BIP324 as a WASM engine + signed config** — the first fully-dynamic transport, composing 1–3.
    (Native engine per ADR 0012 only as fallback.)
-5. **Discovery generalization** — GA over the generic shaping knobs + per-engine param hooks.
+5. **Non-Chrome anchor set + a STARTTLS proof (RDP-SSL / TURNS-over-TCP)** — author the Schannel/OpenSSL
+   and WebRTC-TLS anchors and validate one composed engine end to end (§6.1). No datagram work — that
+   primitive stays deferred.
+6. **Discovery generalization** — GA over the generic shaping knobs + per-engine param hooks.
 
 ## 8. Tradeoffs (stated plainly)
 
