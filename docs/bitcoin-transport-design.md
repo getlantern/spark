@@ -224,8 +224,9 @@ prevention: **per-track / per-server PSKs** so one compromise doesn't burn the f
    (many peers, periodic `inv`/`addr`/`ping`, ~10-min block bursts, mostly small messages). Partial
    mitigations: pace/cap toward relay-like patterns, run several concurrent "peer" connections, inject
    decoy `inv`/`ping` cadence. None fully resolve "bulk throughput looks wrong" — the ceiling every
-   tunnel hits; BIP324 does not lift it. Fine under an opening-move threat model (classify on the
-   open, no per-flow behavioral ML at scale); exposed against a determined behavioral analyzer.
+   tunnel hits; BIP324 does not lift it. Fine under an opening-move threat model; exposed against a
+   determined behavioral analyzer — and flow/behavioral analysis *is* deployed in practice, though as
+   a secondary layer, which sets the shaping budget (§6.1).
 2. **Bitcoin is politically blockable.** Unlike TLS-to-a-CDN, blocking `:8333` / Bitcoin is cheap for
    censors who already restrict crypto (e.g. China). Collateral freedom here is **weak** — we defeat
    generic DPI, not a decision to target Bitcoin. Use as one regional gambit where Bitcoin is
@@ -233,6 +234,46 @@ prevention: **per-track / per-server PSKs** so one compromise doesn't burn the f
 3. **v2 is still a minority** of the network (growing since Bitcoin Core 26). Plausible, not dominant.
 4. **IP reputation.** A bare `:8333` that is not a known node is itself a signal — only solved by
    actually running the node (§5).
+
+### 6.1 Shaping budget — grounded in deployed-censor evidence
+
+"How much performance do we spend making the flow look node-like?" is a real, region-dependent
+decision, not a settled spec line. What the evidence (deployed vs. academic) says:
+
+- **Flow / behavioral analysis is deployed — but as a secondary layer.** The clearest deployed case
+  is the exported Chinese **Tiangou Secure Gateway** (Geedge/MESA leak; InterSecLab, *The Internet
+  Coup*, 2025) — a commercial stack with **ML + traffic-shape classifiers** sold to Kazakhstan,
+  Ethiopia, Pakistan, and Myanmar, characterized as "the hardest component to defeat with static
+  mimicry … trained on real circumvention traffic and updated over time." DomainTools' analysis of the
+  same leak reports a GFW `PROTO_DEVIATE` flag keyed on **connection duration, session timing, and
+  connection frequency**. NDSS 2025 adds protocol-agnostic **cross-layer RTT fingerprinting**. Master
+  & Garman (FOCI 2023) find NGFW / encrypted-traffic-analysis flow classification in ~6–13% of
+  countries, "underdetected — assume higher."
+- **…but the primary at-scale passive filter is opening-based.** The GFW's fully-encrypted-traffic
+  detector (Wu et al., USENIX '23; live since the Oct 2022 blocking wave) inspects **only the first
+  data packet and does not reassemble flows.** That is exactly what BIP324 content-indistinguishability
+  + the opening move defeat, and it is the highest-volume filter. So flow-shape analysis is a real
+  *escalation*, not the first thing that catches us.
+
+Design consequences:
+
+- **Low default budget, region-tunable escalation.** Rely on the opening + BIP324 + `:8333` against
+  the dominant deployed methods; expose shaping (decoy cadence, volume pacing, burst matching) as a
+  **signed gambit parameter dialed up per-region only where telemetry shows a TSG-class classifier** —
+  the "discovered against the live network" Opening Book approach, which also counters the fact that a
+  *static* shaping profile gets learned around (the ML classifiers retrain cheaply).
+- **Bitcoin inverts samizdat's shaping priorities — do not copy them blindly.** samizdat (a
+  TLS/browsing cover) rotates sessions because long-lived connections are *suspicious* for browsing. A
+  Bitcoin cover is the opposite: real nodes hold peers for hours, so long-lived is *expected* —
+  rotating would make us **less** node-like. The behavioral tell against a Bitcoin cover is not
+  duration but **bulk asymmetric volume** (nodes exchange small bidirectional relay + ~10-min block
+  bursts; a proxy pulls megabytes downstream). So the budget here is spent on **volume / burst pacing,
+  not session rotation** — while RTT jitter (shared with samizdat) is still worth carrying against
+  NDSS-2025-class timing analysis.
+- **The ceiling stands.** No shaping fully disguises a heavy bulk user as a gossiping node; past a
+  point you can only throttle to a trickle. This transport fits an opening-classification threat model
+  and TSG-light regions — not a censor running heavy per-flow ML, where a bulk tunnel is inherently
+  exposed regardless of shaping.
 
 ## 7. Build order
 
@@ -253,7 +294,9 @@ prevention: **per-track / per-server PSKs** so one compromise doesn't burn the f
   the fresh-ellswift cache rather than perfect a fake — raw-splice is the Parrot-optimal node path).
   Residual limit: probe resistance assumes a credential-less censor (PSK-compromise caveat, §5.2).
 - **v2 adoption trajectory** — is v2-only acceptable now, or do we need a v1 gambit for some regions?
-- **Shaping budget** — how much decoy/pacing is worth the throughput cost for the target user segment.
+- **Shaping budget** — framed and grounded in §6.1 (low default; region-tunable escalation vs.
+  TSG-class classifiers; pace volume, don't rotate sessions). Open only as a per-region, telemetry-driven
+  tuning call, not a design question.
 - **Server front: raw-splice vs. terminate-and-relay** — §5.2 settles this in favor of raw-splice
   (probers reach Core's real BIP324 stack, not our reimplementation). Reopen only if a future need to
   shape/relay real-peer traffic is judged to outweigh that probe-resistance advantage.
