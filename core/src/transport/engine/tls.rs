@@ -27,27 +27,35 @@ impl TlsEngine {
 
     /// Decode opaque params into a boring [`Profile`], gating `requires` via `Profile::for_boring`.
     /// `None` on empty / undecodable / declined params — the caller then falls back (connectivity
-    /// must never depend on a dynamic plan succeeding).
-    fn resolve(params: &[u8]) -> Option<Profile> {
+    /// must never depend on a dynamic plan succeeding). `warn` narrates the attempt (undecodable /
+    /// declined / unrealizable knobs); pass `false` for the static fallback, whose knobs are already
+    /// surfaced once at transport construction, to avoid per-connection log spam.
+    fn resolve(params: &[u8], warn: bool) -> Option<Profile> {
         if params.is_empty() {
             return None;
         }
         let gambit = match postcard::from_bytes::<Gambit>(params) {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!(error = %e, "opening params undecodable; using fallback");
+                if warn {
+                    tracing::warn!(error = %e, "computed gambit undecodable; using fallback");
+                }
                 return None;
             }
         };
         match Profile::for_boring(&gambit) {
             Ok(resolved) => {
-                for note in &resolved.unrealizable {
-                    tracing::warn!(knob = note, "computed gambit knob not realizable on boring");
+                if warn {
+                    for note in &resolved.unrealizable {
+                        tracing::warn!(knob = note, "computed gambit knob not realizable on boring");
+                    }
                 }
                 Some(resolved.profile)
             }
             Err(e) => {
-                tracing::warn!(error = %e, "computed gambit declined by boring; using fallback");
+                if warn {
+                    tracing::warn!(error = %e, "computed gambit declined by boring; using fallback");
+                }
                 None
             }
         }
@@ -61,10 +69,20 @@ impl OpeningEngine for TlsEngine {
     }
 
     async fn realize(&self, stream: BoxedStream, plan: &OpeningPlan) -> io::Result<BoxedStream> {
-        // Prefer the dynamic params, fall back to the static plan, last-resort the Chrome anchor.
-        let profile = Self::resolve(&plan.params)
-            .or_else(|| Self::resolve(&plan.fallback))
-            .unwrap_or_default();
+        // Prefer the dynamic params (narrated per-computation); else the static fallback (resolved
+        // quietly — its knobs were already logged at construction). If neither realizes, degrade to
+        // the Chrome anchor but say so loudly, so an empty/invalid fallback surfaces as a bug rather
+        // than silently masking the configured profile.
+        let profile = match Self::resolve(&plan.params, true) {
+            Some(p) => p,
+            None => Self::resolve(&plan.fallback, false).unwrap_or_else(|| {
+                tracing::warn!(
+                    "no realizable opening plan (params and fallback both declined); \
+                     using the default Chrome profile"
+                );
+                Profile::default()
+            }),
+        };
         let tls = flint_tls::connect(stream, &plan.sni, &profile).await?;
         Ok(Box::new(tls))
     }
@@ -109,14 +127,14 @@ mod tests {
         ];
         for (ch, rec) in cases {
             let want = Profile::resolve(&ch, &rec).profile;
-            let got = TlsEngine::resolve(&blob(ch, rec)).expect("static params resolve");
+            let got = TlsEngine::resolve(&blob(ch, rec), false).expect("static params resolve");
             assert_eq!(got, want);
         }
     }
 
     #[test]
     fn empty_and_undecodable_params_decline() {
-        assert!(TlsEngine::resolve(&[]).is_none());
-        assert!(TlsEngine::resolve(&[0xFF]).is_none());
+        assert!(TlsEngine::resolve(&[], true).is_none());
+        assert!(TlsEngine::resolve(&[0xFF], true).is_none());
     }
 }
