@@ -88,8 +88,14 @@ fn init_inner<R: Runtime>(app: &AppHandle<R>, base: &Path) {
     let Ok(sink) = DiagSink::new(base, "app") else {
         return;
     };
-    // First-install-wins (OnceLock); setup runs once per process so this is the one.
-    diag::install(sink.clone());
+    // First-install-wins (OnceLock); setup runs once per process so this normally
+    // wins. Bail if an earlier caller beat us to it: continuing would wire a second
+    // sink + uploader rotating the same spool/log files as the installed one, while
+    // the capture layer and emit() feed only the winner.
+    if !diag::install(sink.clone()) {
+        tracing::debug!("diag: sink already installed — skipping duplicate host init");
+        return;
+    }
 
     // 2. Crash capture (§C2a): a panic's message + location reach the spool before
     //    the process dies, uploading on next launch.
