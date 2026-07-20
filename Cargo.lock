@@ -289,6 +289,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bip324-core"
+version = "0.1.0"
+dependencies = [
+ "chacha20",
+ "ring",
+ "secp256k1",
+]
+
+[[package]]
 name = "bitcoin-consensus-encoding"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

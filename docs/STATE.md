@@ -2446,6 +2446,23 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   production `ModuleVerifier::pinned().verify` → `instantiate` path and round-trips — so `cargo test`
   and CI stay wasm32-free; only the fixture-regen script needs the target. Base build stays C-free (the
   feature + bin never build in release). Next: the BIP324 WASM module itself (step 4 proper).
+- 2026-07-20 (ADR 0013 §7 step 4 — BIP324 protocol core `bip324-core`, PR1 of several): the intricate
+  BIP324 crypto now lives in a new sans-io workspace crate `bip324-core` (`#![no_std]`, zero runtime
+  deps) generic over a `Bip324Crypto` provider trait whose method set mirrors the wasm `env` host fns
+  1:1. Implements the ellswift tagged-hash ECDH (`ecdh.rs`), the HKDF key schedule + FSChaCha20 length
+  cipher + FSChaCha20Poly1305 rekeying packet cipher (`session.rs`), packet framing + a streaming
+  steady-state `Session` (`packet.rs`), and the both-roles handshake state machine (`handshake.rs`,
+  emit-at-connect, garbage/terminator scan, version packet, v1/wrong-network detection). Validated
+  byte-exact against the official BIP324 packet-encoding vectors (`tests/vectors.rs` — shared secret,
+  session id, terminators, and full packet ciphertext incl. the high-index vectors that cross the
+  224-message rekey; mainnet magic) and a core-vs-core handshake round-trip (`tests/handshake.rs` —
+  both roles derive a matching session id, app messages round-trip, decoys drop, 500 messages survive
+  a rekey boundary fed in 7-byte fragments), via a `NativeCrypto` test provider (secp256k1/ring/chacha20
+  dev-deps — the base crate is C-free). **Deviation from the plan:** the live rust-bitcoin `bip324`
+  interop round-trip moved from PR1 to PR2 (the wasm module's end-to-end test is its natural home, and
+  the official vectors — which that crate is itself validated against — are the canonical oracle), so
+  PR1 stays hermetic + deterministic (no threads/TCP). Next: PR2 = the `modules/bip324` wasm guest
+  (host-fn provider + ABI + signed `.spkw`) driven against the rust-bitcoin crate end-to-end.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

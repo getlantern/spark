@@ -1,0 +1,28 @@
+[package]
+name = "bip324-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sans-io BIP324 (Bitcoin v2 P2P encrypted transport) protocol core, generic over a crypto provider (ADR 0013 §7 step 4)."
+
+# Pure, no-I/O, `no_std` crate. All crypto flows through the `Bip324Crypto` provider trait, so this
+# crate has ZERO runtime dependencies and compiles into the wasm dynamic-transport guest (PR2, provider
+# = the `env` host fns) as well as any native engine (provider = RustCrypto/secp256k1). See
+# docs/bitcoin-transport-design.md and docs/dynamic-transport-framework-design.md §5.
+# The default build has ZERO dependencies — all crypto flows through the `Bip324Crypto` provider trait.
+# The crypto below is used ONLY by the `NativeCrypto` conformance-test provider and is gated behind the
+# off-by-default `native-crypto` feature, so a default `cargo test`/CI build of this member never
+# compiles the C-backed secp256k1 (docs/GOAL.md: C deps are strictly off-by-default + feature-gated —
+# spark-core gates the same secp256k1 under its `bip324` feature). CI's `--all-features` run exercises
+# the tests. (Live interop against the rust-bitcoin `bip324` crate is exercised end-to-end in PR2; PR1's
+# official vectors are the same ones that crate is itself validated against.)
+[dependencies]
+secp256k1 = { workspace = true, optional = true }   # ellswift keygen + X-only ECDH (raw x) — C-backed
+ring = { workspace = true, optional = true }         # SHA-256, HKDF-SHA256, ChaCha20-Poly1305 AEAD
+chacha20 = { workspace = true, optional = true }     # raw ChaCha20 block (length-cipher keystream)
+
+[features]
+# Enables the `NativeCrypto` provider + the conformance tests (packet-encoding vectors + handshake
+# round-trip). Off by default; pulls the C-backed secp256k1, so it stays out of the base test path.
+native-crypto = ["dep:secp256k1", "dep:ring", "dep:chacha20"]
