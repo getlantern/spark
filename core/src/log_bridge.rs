@@ -152,7 +152,10 @@ impl Subscriber for BridgeSubscriber {
             {
                 // Message + non-message fields (without the "[target] " prefix — the
                 // target rides as its own event field, mirroring DiagLayer/events::log).
-                let msg = format!("{}{}", visitor.message, visitor.fields);
+                // Reuses the message String's buffer (the visitor is done) instead of
+                // format!-ing a fresh allocation — this runs per captured event.
+                let mut msg = visitor.message;
+                msg.push_str(&visitor.fields);
                 let ev = crate::diag::events::log(diag_level, &msg, meta.target());
                 if diag_level == crate::diag::DiagLevel::Error {
                     crate::diag::emit_error(ev);
