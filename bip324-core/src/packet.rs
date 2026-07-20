@@ -161,8 +161,10 @@ impl Session {
                     if self.recv_buf.len() < need {
                         break;
                     }
-                    let aead: Vec<u8> = self.recv_buf.drain(..need).collect();
-                    let packet = decrypt_packet(crypto, &mut self.recv_p, &aead, &[])?;
+                    // Decrypt in place from the buffer; drain only after authentication succeeds.
+                    let packet =
+                        decrypt_packet(crypto, &mut self.recv_p, &self.recv_buf[..need], &[])?;
+                    self.recv_buf.drain(..need);
                     self.pending_len = None;
                     if !packet.ignore {
                         out.push(packet.contents);

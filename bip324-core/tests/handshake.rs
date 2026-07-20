@@ -5,7 +5,8 @@
 
 use std::mem;
 
-use bip324_core::{Handshake, Role, Session};
+use bip324_core::crypto::Bip324Crypto;
+use bip324_core::{Error, Handshake, Role, Session, GARBAGE_TERMINATOR_LEN, MAX_GARBAGE_LEN};
 
 mod native;
 use native::NativeCrypto;
@@ -104,4 +105,21 @@ fn packets_survive_a_rekey_boundary_and_fragmentation() {
     // The reverse direction still works after the forward burst (independent ciphers).
     let wire = sr.encrypt(&cr, b"final").unwrap();
     assert_eq!(si.decrypt(&ci, &wire).unwrap(), vec![b"final".to_vec()]);
+}
+
+#[test]
+fn oversized_garbage_without_terminator_errors() {
+    // Feed a valid peer key followed by exactly MAX_GARBAGE_LEN + terminator bytes with no terminator:
+    // every valid terminator position has now been searched, so the handshake must fail immediately
+    // (the off-by-one boundary in `find_terminator`).
+    let mut ci = NativeCrypto::new();
+    let mut hi = Handshake::<NativeCrypto>::new(Role::Initiator, MAGIC, b"").unwrap();
+    hi.step(&mut ci, &[]).unwrap(); // emit our key
+
+    let (_key, peer_ell) = ci.ellswift_generate();
+    let mut inbound = peer_ell.to_vec();
+    inbound.resize(inbound.len() + MAX_GARBAGE_LEN + GARBAGE_TERMINATOR_LEN, 0);
+    // Map the Ok value (`HandshakeStep` isn't `Debug`) so `unwrap_err` can format it.
+    let err = hi.step(&mut ci, &inbound).map(|_| ()).unwrap_err();
+    assert_eq!(err, Error::NoGarbageTerminator);
 }

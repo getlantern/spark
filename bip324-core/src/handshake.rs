@@ -183,9 +183,15 @@ impl<C: Bip324Crypto> Handshake<C> {
                                 if self.buf.len() < need {
                                     break false;
                                 }
-                                let aead: Vec<u8> = self.buf.drain(..need).collect();
                                 let aad: &[u8] = if first_recv { &recv_garbage } else { &[] };
-                                let packet = decrypt_packet(crypto, &mut keys.recv_p, &aead, aad)?;
+                                // Decrypt in place from the buffer; drain only after authentication.
+                                let packet = decrypt_packet(
+                                    crypto,
+                                    &mut keys.recv_p,
+                                    &self.buf[..need],
+                                    aad,
+                                )?;
+                                self.buf.drain(..need);
                                 first_recv = false;
                                 pending_len = None;
                                 if !packet.ignore {
@@ -232,7 +238,9 @@ fn find_terminator(buf: &[u8], term: &[u8; GARBAGE_TERMINATOR_LEN]) -> Result<Op
             return Ok(Some(pos));
         }
     }
-    if last_start > MAX_GARBAGE_LEN {
+    if last_start >= MAX_GARBAGE_LEN {
+        // Every valid terminator start (0..=MAX_GARBAGE_LEN) has been searched with no match; a
+        // terminator can no longer appear within the allowed garbage window.
         Err(Error::NoGarbageTerminator)
     } else {
         Ok(None)
