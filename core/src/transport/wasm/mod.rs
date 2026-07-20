@@ -10,7 +10,7 @@
 //! # ABI
 //!
 //! The module **exports** (`memory` + `alloc` always; then at least one *mode* — the byte-transform
-//! pair and/or the gambit-compute export):
+//! pair, the gambit-compute export, and/or the interactive-handshake export):
 //! - `memory` — its linear memory.
 //! - `alloc(len: i32) -> i32` — return a pointer to `len` writable bytes (the host writes input here).
 //! - `transform_out(ptr: i32, len: i32) -> i64` — *byte-transform mode*; transform `len` bytes at
@@ -23,6 +23,12 @@
 //!   them; the engine that consumes them (the TLS engine, `engine::tls`) decodes + realizes them
 //!   (ADR 0013 §7 step 1). Lets a plan be **computed per connection** (adaptive/stateful) rather than
 //!   shipped as static signed config.
+//! - `handshake_step(in_ptr: i32, in_len: i32) -> i64` — *interactive-handshake mode* (ADR 0013 §7
+//!   step 3); drive one step of an opening handshake. Output is packed the same way but **framed** as
+//!   `[status: u8][outbound_wire …]` (status 0 = continue, 1 = done). Called with empty input at
+//!   connect (emit-at-connect), then per inbound chunk until done — the one mode where an inbound read
+//!   drives an outbound write. The module keeps handshake state + derived keys for the steady-state
+//!   `transform_*` to use.
 //! - `init(config_ptr: i32, config_len: i32)` — *optional*; called once after instantiation to
 //!   deliver per-deployment configuration (e.g. a key or seed). See [`TransformModule::instantiate_with_config`].
 //! - `reset()` — *optional*; called by the host after each transform (and after `init`) so a module
@@ -77,6 +83,7 @@
 //! `reset` can allocate per-call scratch freely; one that does not must avoid unbounded memory growth
 //! across calls itself (e.g. reuse a fixed scratch region).
 
+use std::io;
 use std::sync::Arc;
 
 use ring::rand::{SecureRandom, SystemRandom};
@@ -92,6 +99,7 @@ use chacha20::{ChaCha20, Key, Nonce};
 use secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftSharedSecret, Party};
 #[cfg(feature = "bip324")]
 use secp256k1::SecretKey;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 mod signing;
 mod stream;
@@ -149,6 +157,12 @@ const EXPORT_TRANSFORM_IN: &str = "transform_in";
 /// Export (optional): `compute_gambit(ctx_ptr, ctx_len) -> packed` — emits opaque per-connection
 /// engine params (the opening plan), not stream bytes; the consuming engine decodes them (ADR 0006 P3).
 const EXPORT_COMPUTE_GAMBIT: &str = "compute_gambit";
+/// Export (optional): `handshake_step(in_ptr, in_len) -> packed` — one step of an interactive opening
+/// handshake (ADR 0013 §7 step 3). The output region is framed `[status: u8][outbound_wire …]`: status
+/// 0 = continue, 1 = done. Called with empty input at connect (emit-at-connect), then per inbound chunk.
+const EXPORT_HANDSHAKE_STEP: &str = "handshake_step";
+/// Chunk size for reading inbound handshake bytes; the module buffers partial reads internally.
+const HANDSHAKE_READ_CHUNK: usize = 4096;
 
 /// Upper bound on a single transform's input or output length. Caps how much guest memory one call
 /// can drive the host to touch or allocate — the module is untrusted, so every length crossing the
@@ -232,6 +246,9 @@ pub enum WasmError {
     /// A host function recorded a fault during the guest call (CSPRNG failure, bad length, …).
     #[error("host function fault: {0}")]
     HostFault(String),
+    /// `handshake_step` returned a malformed frame (empty, or a status byte that isn't 0/1).
+    #[error("handshake_step returned a malformed frame: {0}")]
+    HandshakeFrame(String),
     /// The module exhausted its per-call execution fuel — a runaway or pathologically slow module.
     #[error("fuel: {0}")]
     Fuel(String),
@@ -327,6 +344,8 @@ pub struct Transform {
     transform_in: Option<TypedFunc<(i32, i32), i64>>,
     /// Gambit-compute mode (ADR 0006 P3); absent for a byte-transform-only module.
     compute_gambit: Option<TypedFunc<(i32, i32), i64>>,
+    /// Interactive-handshake mode (ADR 0013 §7 step 3); absent unless the module drives a handshake.
+    handshake_step: Option<TypedFunc<(i32, i32), i64>>,
     /// Optional `reset()` — rewinds the module's scratch arena after each transform.
     reset: Option<TypedFunc<(), ()>>,
 }
@@ -444,7 +463,14 @@ impl Transform {
         let compute_gambit = instance
             .get_typed_func::<(i32, i32), i64>(&store, EXPORT_COMPUTE_GAMBIT)
             .ok();
-        if transform_out.is_none() && transform_in.is_none() && compute_gambit.is_none() {
+        let handshake_step = instance
+            .get_typed_func::<(i32, i32), i64>(&store, EXPORT_HANDSHAKE_STEP)
+            .ok();
+        if transform_out.is_none()
+            && transform_in.is_none()
+            && compute_gambit.is_none()
+            && handshake_step.is_none()
+        {
             return Err(WasmError::MissingExport(EXPORT_TRANSFORM_OUT));
         }
         // Optional `reset()` — arena management; absent for modules that manage memory themselves.
@@ -492,6 +518,7 @@ impl Transform {
             transform_out,
             transform_in,
             compute_gambit,
+            handshake_step,
             reset,
         })
     }
@@ -518,6 +545,67 @@ impl Transform {
         self.call_io(func, EXPORT_COMPUTE_GAMBIT, ctx)
     }
 
+    /// Drive one step of an interactive opening handshake (ADR 0013 §7 step 3): feed the module the
+    /// `inbound` wire bytes (empty at connect — emit-at-connect) and return `(outbound_wire, done)`.
+    /// The module frames its output as `[status: u8][outbound …]`; `done` is `status == 1`. Keys the
+    /// handshake derives stay in the module and are used by the steady-state `transform_*` afterward.
+    /// Errors with [`WasmError::MissingExport`] if the module has no `handshake_step`, or
+    /// [`WasmError::HandshakeFrame`] on a malformed frame.
+    pub fn handshake_step(&mut self, inbound: &[u8]) -> Result<(Vec<u8>, bool), WasmError> {
+        let func = self
+            .handshake_step
+            .ok_or(WasmError::MissingExport(EXPORT_HANDSHAKE_STEP))?;
+        let mut out = self.call_io(func, EXPORT_HANDSHAKE_STEP, inbound)?;
+        if out.is_empty() {
+            return Err(WasmError::HandshakeFrame(
+                "empty frame (no status byte)".into(),
+            ));
+        }
+        let done = match out.remove(0) {
+            0 => false,
+            1 => true,
+            other => {
+                return Err(WasmError::HandshakeFrame(format!(
+                    "status byte {other} is not 0 (continue) or 1 (done)"
+                )))
+            }
+        };
+        Ok((out, done))
+    }
+
+    /// Drive an interactive opening handshake to completion over `stream` (ADR 0013 §7 step 3): emit
+    /// the module's opening message (emit-at-connect), then loop — write each outbound message, read
+    /// the peer's reply, step again — until the module signals done. The module owns all protocol
+    /// state + derived keys; the caller then runs the steady-state byte transforms (e.g. via
+    /// [`TransformStream`]) on the same `stream`. Returns `UnexpectedEof` if the peer closes mid-handshake.
+    pub async fn run_handshake<S>(&mut self, stream: &mut S) -> io::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut inbound: Vec<u8> = Vec::new();
+        loop {
+            let (outbound, done) = self.handshake_step(&inbound).map_err(io::Error::other)?;
+            if !outbound.is_empty() {
+                stream.write_all(&outbound).await?;
+                stream.flush().await?;
+            }
+            if done {
+                return Ok(());
+            }
+            let mut buf = [0u8; HANDSHAKE_READ_CHUNK];
+            let n = stream.read(&mut buf).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "peer closed during handshake",
+                ));
+            }
+            inbound = buf[..n].to_vec();
+        }
+    }
+
     /// Total bytes this session has drawn from the `host_rand` capability — observability for how
     /// much entropy the module consumes.
     pub fn entropy_drawn(&self) -> u64 {
@@ -534,7 +622,7 @@ impl Transform {
     }
 
     /// The shared guest-call sequence for any `(ptr, len) -> packed(out_ptr, out_len)` export
-    /// (`transform_out`/`transform_in`/`compute_gambit`): refill fuel, `alloc` + write the input,
+    /// (`transform_out`/`transform_in`/`compute_gambit`/`handshake_step`): refill fuel, `alloc` + write the input,
     /// call `func`, read the packed output region, then `reset` the scratch arena (if any).
     fn call_io(
         &mut self,
@@ -2026,6 +2114,87 @@ mod tests {
         assert!(matches!(
             t.transform_out(&[0u8; 64]),
             Err(WasmError::HostFault(_))
+        ));
+    }
+
+    /// A toy 2-step handshake module: emit-at-connect → `(continue, "PING")`; any inbound →
+    /// `(done, "OK")`. The output is the `[status: u8][outbound]` frame the ABI defines.
+    const HANDSHAKE_WAT: &str = r#"
+(module
+  (memory (export "memory") 2)
+  (data (i32.const 8192) "\00PING")
+  (data (i32.const 8200) "\01OK")
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "handshake_step") (param $ptr i32) (param $len i32) (result i64)
+    (if (result i64) (i32.eqz (local.get $len))
+      (then (i64.or (i64.shl (i64.const 8192) (i64.const 32)) (i64.const 5)))
+      (else (i64.or (i64.shl (i64.const 8200) (i64.const 32)) (i64.const 3))))))
+"#;
+
+    #[test]
+    fn handshake_step_frames_status_and_outbound() {
+        let module =
+            TransformModule::load(&wat::parse_str(HANDSHAKE_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        // Emit-at-connect: empty inbound → the opening message, not done.
+        let (out, done) = t.handshake_step(&[]).expect("step 1");
+        assert_eq!(out, b"PING");
+        assert!(!done);
+        // Any inbound → the final message + done.
+        let (out, done) = t.handshake_step(b"PONG").expect("step 2");
+        assert_eq!(out, b"OK");
+        assert!(done);
+    }
+
+    #[tokio::test]
+    async fn run_handshake_drives_to_completion() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let module =
+            TransformModule::load(&wat::parse_str(HANDSHAKE_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let (mut client, mut peer) = tokio::io::duplex(1024);
+
+        // Native peer: read the opening PING, reply PONG, read the final OK.
+        let peer_task = tokio::spawn(async move {
+            let mut buf = [0u8; 16];
+            let n = peer.read(&mut buf).await.expect("read ping");
+            assert_eq!(&buf[..n], b"PING");
+            peer.write_all(b"PONG").await.expect("write pong");
+            peer.flush().await.expect("flush");
+            let n = peer.read(&mut buf).await.expect("read ok");
+            assert_eq!(&buf[..n], b"OK");
+        });
+
+        t.run_handshake(&mut client).await.expect("handshake");
+        peer_task.await.expect("peer task");
+    }
+
+    #[test]
+    fn handshake_step_absent_on_a_transform_only_module() {
+        // The XOR fixture exports transforms but not handshake_step.
+        let mut t = xor_module().instantiate().expect("instantiate");
+        assert!(matches!(
+            t.handshake_step(&[]),
+            Err(WasmError::MissingExport(EXPORT_HANDSHAKE_STEP))
+        ));
+    }
+
+    #[test]
+    fn handshake_step_rejects_an_empty_frame() {
+        // A module whose handshake_step returns a zero-length region — no status byte → malformed.
+        const WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "handshake_step") (param $ptr i32) (param $len i32) (result i64)
+    (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        assert!(matches!(
+            t.handshake_step(&[]),
+            Err(WasmError::HandshakeFrame(_))
         ));
     }
 
