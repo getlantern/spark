@@ -228,11 +228,11 @@ pub fn sign_artifact(
     wasm: &[u8],
 ) -> Vec<u8> {
     let signature = keypair.sign(&signing_payload(name, version, wasm));
-    let signature: &[u8; SIG_LEN] = signature
-        .as_ref()
-        .try_into()
-        .expect("Ed25519 signature is 64 bytes");
-    build_artifact(name, version, wasm, signature)
+    // ring's Ed25519 signature is always 64 bytes; copy into the fixed array `build_artifact` wants —
+    // the same infallible shape this file's test helper uses.
+    let mut sig = [0u8; SIG_LEN];
+    sig.copy_from_slice(signature.as_ref());
+    build_artifact(name, version, wasm, &sig)
 }
 
 #[cfg(test)]

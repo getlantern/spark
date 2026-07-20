@@ -113,9 +113,8 @@ pub use transport::{WasmServer, WasmTransport};
 
 /// PKCS#8 of the **development** module-signing keypair — the private half of
 /// `signing::DEV_MODULE_PUBKEY` (the dev fallback `ModuleVerifier::pinned()` trusts when no production
-/// key is pinned). Available to this crate's tests and, under `module-signer`, to the `sign-module`
-/// tool's `--dev` mode; never in a normal/release build, so the private key stays out of shipped
-/// binaries.
+/// key is pinned). Compiled only under `#[cfg(test)]` or the off-by-default `module-signer` feature —
+/// which shipped/product builds never enable — so the private key stays out of every shipped binary.
 #[cfg(any(test, feature = "module-signer"))]
 pub const DEV_MODULE_PKCS8: &[u8] = &[
     48, 81, 2, 1, 1, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 47, 96, 208, 79, 38, 102, 119, 122,

@@ -19,11 +19,10 @@ use core::ptr::addr_of_mut;
 /// The transform key. Involutive XOR, so `transform_in` reverses `transform_out`.
 const XOR_KEY: u8 = 0x5A;
 
-/// Scratch arena inside the exported linear memory. `alloc` hands out offsets here; 64 KiB is far
-/// above any single tunnel read, so one live buffer at a time never overflows it.
+/// Scratch arena inside the exported linear memory. `alloc` hands out one buffer at offset 0 per call;
+/// 64 KiB is far above any single tunnel read, and `alloc` traps on a larger request.
 const ARENA: usize = 64 * 1024;
 static mut MEM: [u8; ARENA] = [0; ARENA];
-static mut BUMP: usize = 0;
 
 /// A dedicated sink for the `host_rand` binding-proof write, so it never scribbles offset 0 (which a
 /// cdylib may place the shadow stack / static data at).
@@ -36,15 +35,14 @@ extern "C" {
 }
 
 /// The host's per-transform allocation hook. `call_io` invokes it exactly once before each transform,
-/// so resetting the bump every call keeps the arena bounded (one live buffer at a time).
+/// so every call reuses the one buffer at offset 0. Traps deterministically on a negative or oversized
+/// request rather than letting unchecked pointer math corrupt adjacent linear memory.
 #[no_mangle]
 pub extern "C" fn alloc(len: i32) -> i32 {
-    unsafe {
-        BUMP = 0;
-        let p = (addr_of_mut!(MEM) as *mut u8).add(BUMP);
-        BUMP += len as usize;
-        p as i32
+    if len < 0 || len as usize > ARENA {
+        core::arch::wasm32::unreachable()
     }
+    addr_of_mut!(MEM) as *mut u8 as i32
 }
 
 /// Pack a `(ptr, len)` pair into the ABI's `i64` return.
