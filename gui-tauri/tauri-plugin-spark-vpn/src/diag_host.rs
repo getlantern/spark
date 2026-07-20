@@ -21,6 +21,7 @@ use tauri::{AppHandle, Manager, Runtime};
 use spark_core::config::lantern::{otel_from_config_raw_json, OtelConfig};
 use spark_core::diag::layer::DiagLayer;
 use spark_core::diag::otlp::ResourceAttrs;
+use spark_core::diag::sentinel::SessionSentinel;
 use spark_core::diag::upload::{self, SpanQueue, UploaderHandle};
 use spark_core::diag::{self, events, panic_hook, DiagSink};
 use tracing_subscriber::prelude::*;
@@ -32,10 +33,12 @@ use tracing_subscriber::prelude::*;
 const CONFIG_REPARSE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Live handles the rest of the plugin needs after init: the span queue (Task 11's
-/// Unbounded session spans push here) and the uploader handle (kept alive for the
-/// process lifetime — dropping it would abort the upload loop).
+/// Unbounded session spans push here), the unclean-exit sentinel (heartbeat + clean
+/// disarm), and the uploader handle (kept alive for the process lifetime — dropping
+/// it would abort the upload loop).
 struct DiagState {
     queue: Arc<SpanQueue>,
+    sentinel: Arc<SessionSentinel>,
     _uploader: UploaderHandle,
 }
 
@@ -48,6 +51,13 @@ static STATE: OnceLock<DiagState> = OnceLock::new();
 /// `None` as "spans off".
 pub fn span_queue() -> Option<Arc<SpanQueue>> {
     STATE.get().map(|s| s.queue.clone())
+}
+
+/// The live unclean-exit [`SessionSentinel`] (spec §C2a), for the clean-shutdown
+/// disarm in `lib.rs`'s `RunEvent::Exit` hook. Same `None` semantics as
+/// [`span_queue`]: `None` until init completes, or forever when diagnostics are off.
+pub(crate) fn sentinel() -> Option<Arc<SessionSentinel>> {
+    STATE.get().map(|s| s.sentinel.clone())
 }
 
 /// One-time diagnostics init for the APP process (spec §C4/§5). Gated entirely on the
@@ -101,6 +111,17 @@ fn init_inner<R: Runtime>(app: &AppHandle<R>, base: &Path) {
     //    the process dies, uploading on next launch.
     panic_hook::install();
 
+    // 2a. Unclean-exit sentinel (§C2a): catches the crash classes the panic hook
+    //     can't see (segfault, OOM kill, watchdog, kill -9). Armed AFTER the sink is
+    //     created + installed so the previous session's `error.unclean_exit` lands in
+    //     the live sink via the error fast path; a crash before this point goes
+    //     undetected (accepted — the window is milliseconds of init).
+    let (sentinel, prev) = SessionSentinel::arm(base, &app.package_info().version.to_string());
+    if let Some(ev) = prev {
+        diag::emit_error(ev);
+    }
+    let sentinel = Arc::new(sentinel);
+
     // 3. The tracing capture layer. `try_init` so an existing global subscriber is
     //    never clobbered. Neither this plugin nor the app crate installs one today
     //    (verified: no tracing_subscriber init anywhere under gui-tauri), so this
@@ -127,9 +148,14 @@ fn init_inner<R: Runtime>(app: &AppHandle<R>, base: &Path) {
     //    tunnel's poll loop rewriting the cache) without coupling to the fetch path;
     //    a fetch-completion hook can replace the polling later.
     let (cfg_tx, cfg_rx) = tokio::sync::watch::channel(otel_from_cache(&cache_path));
+    let beat_sentinel = sentinel.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(CONFIG_REPARSE_INTERVAL).await;
+            // The sentinel heartbeat rides this existing 60s tick rather than owning
+            // a timer task: one process-lifetime loop instead of two, and ~1 min
+            // last_alive resolution is all an unclean-exit timestamp needs.
+            beat_sentinel.beat();
             let next = otel_from_cache(&cache_path);
             // send_if_modified + PartialEq: wake the uploader's receiver only on a
             // real change, not on every re-parse.
@@ -150,6 +176,7 @@ fn init_inner<R: Runtime>(app: &AppHandle<R>, base: &Path) {
     let uploader = upload::spawn(sink, cfg_rx, res, false, device_id, queue.clone());
     let _ = STATE.set(DiagState {
         queue,
+        sentinel,
         _uploader: uploader,
     });
 }
@@ -365,5 +392,12 @@ mod tests {
     fn span_queue_none_before_init() {
         // STATE is only set by init_inner, which no test runs.
         assert!(span_queue().is_none());
+    }
+
+    #[test]
+    fn sentinel_none_before_init() {
+        // Same STATE gate as span_queue: the Exit-hook disarm in lib.rs must be a
+        // safe no-op when diagnostics never initialized.
+        assert!(sentinel().is_none());
     }
 }
