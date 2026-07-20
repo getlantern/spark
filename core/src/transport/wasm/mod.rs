@@ -1886,7 +1886,7 @@ mod tests {
 
     // --- ADR 0006 P3: a module that *computes* a gambit (the open/shape mode) ---
 
-    /// A module that, on `compute_gambit`, returns the postcard encoding of `g` (held in a data
+    /// A module that, on `compute_gambit`, returns `g` wrapped in a neutral `Genome` (held in a data
     /// segment) — the minimal gambit-compute-mode module: `memory` + `alloc` + `compute_gambit`,
     /// **no** `transform_*` exports.
     fn gambit_module_emitting(g: &Gambit) -> TransformModule {

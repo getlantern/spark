@@ -44,6 +44,15 @@ impl TlsEngine {
                 return None;
             }
         };
+        if genome.genome_version != Genome::SCHEMA_VERSION {
+            if warn {
+                tracing::warn!(
+                    version = genome.genome_version,
+                    "unsupported genome schema version; using fallback"
+                );
+            }
+            return None;
+        }
         if genome.engine != super::TLS {
             if warn {
                 tracing::warn!(engine = %genome.engine, "genome is not for the TLS engine; using fallback");
@@ -156,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_undecodable_and_wrong_engine_decline() {
+    fn resolve_declines_unusable_params() {
         assert!(
             TlsEngine::resolve(&[], true).is_none(),
             "empty ⇒ use fallback"
@@ -170,6 +179,13 @@ mod tests {
         let other = Genome::new("x", "bitcoin", Default::default(), vec![1, 2, 3])
             .encode()
             .unwrap();
-        assert!(TlsEngine::resolve(&other, true).is_none());
+        assert!(TlsEngine::resolve(&other, true).is_none(), "wrong engine");
+        // An unknown envelope schema version must decline too (postcard is positional).
+        let mut bad = Genome::new("x", super::super::TLS, Default::default(), Vec::new());
+        bad.genome_version = 99;
+        assert!(
+            TlsEngine::resolve(&bad.encode().unwrap(), true).is_none(),
+            "unknown schema version"
+        );
     }
 }

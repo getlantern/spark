@@ -33,8 +33,13 @@ pub struct Genome {
 }
 
 impl Genome {
-    /// Wrap an engine's opaque params in the neutral envelope (v1 schema; `version` initialized to 1,
-    /// anti-rollback not yet enforced).
+    /// The envelope schema version this build understands. Consuming engines reject a decoded genome
+    /// with a different `genome_version` — postcard is positional, so a mismatched version can't be
+    /// safely reinterpreted.
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    /// Wrap an engine's opaque params in the neutral envelope (current schema; `version` initialized
+    /// to 1, anti-rollback not yet enforced).
     pub fn new(
         id: impl Into<String>,
         engine: EngineId,
@@ -42,7 +47,7 @@ impl Genome {
         engine_params: Vec<u8>,
     ) -> Self {
         Self {
-            genome_version: 1,
+            genome_version: Self::SCHEMA_VERSION,
             version: 1,
             id: id.into(),
             engine: engine.to_owned(),
