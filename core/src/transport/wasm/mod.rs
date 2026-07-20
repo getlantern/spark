@@ -572,6 +572,14 @@ impl Transform {
         self.call_io(func, EXPORT_COMPUTE_GAMBIT, ctx)
     }
 
+    /// Whether the module drives an interactive opening handshake (exports `handshake_step`). The dial
+    /// path runs [`run_handshake`](Self::run_handshake) before steady-state iff this is true — so the
+    /// wiring stays protocol-blind (a transform-only module like obfs-xor returns false and is dialed
+    /// straight through).
+    pub fn drives_handshake(&self) -> bool {
+        self.handshake_step.is_some()
+    }
+
     /// Drive one step of an interactive opening handshake (ADR 0013 §7 step 3): feed the module the
     /// `inbound` wire bytes (empty at connect — emit-at-connect) and return `(outbound_wire, done)`.
     /// The module frames its output as `[status: u8][outbound …]`; `done` is `status == 1`. Keys the

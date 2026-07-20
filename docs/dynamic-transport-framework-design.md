@@ -195,9 +195,16 @@ shim of the `env` primitives) + the `init` / `handshake_step` / `transform_*` AB
 committed `bip324.spkw`. Validated end-to-end by running an initiator + a responder instance against each
 other through the real `TransformModule` runtime (handshake + app round-trip incl. a fragmented,
 past-the-rekey burst) — a full BIP324 transport as a signed WASM module + config, crypto entirely via
-host primitives. Next: wiring `run_handshake` into a dial path + the transport/config surface (PR3), then
-the bitcoind server + keyed-garbage side-door MAC (PR4); the live rust-bitcoin `bip324` interop lands
-with that real end-to-end.
+host primitives. The interactive handshake is now **wired into the dial path** (PR3): `WasmTransport`
+(client/initiator) and `WasmServer` (server/responder) each run `run_handshake` on the raw connection
+before the steady-state transform, gated on a protocol-blind `Transform::drives_handshake()` (run it iff
+the module exports `handshake_step`; transform-only modules like obfs-xor are unaffected) — reusing
+`ServerSpec::Wasm` / `WasmConfig` with no schema change (`init_config` = `role ++ magic ++ garbage`).
+Validated by a real-TCP loopback tunnel (client ↔ server, both handshaking, byte round-trip through the
+BIP324 tunnel to an echo). PR3 also fixed a latent `bip324-core` bug the streaming path surfaced: the
+handshake's leftover bytes (the peer's first steady-state packet, coalesced with the handshake over TCP)
+must seed the session's receive buffer, not be dropped. Next: the bitcoind server + keyed-garbage
+side-door MAC (PR4); the live rust-bitcoin `bip324` interop lands with that real end-to-end.
 
 ## 8. Tradeoffs (stated plainly)
 

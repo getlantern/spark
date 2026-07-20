@@ -202,7 +202,14 @@ impl<C: Bip324Crypto> Handshake<C> {
                     };
                     if done {
                         self.state = State::Done;
-                        break Some(Session::new(self.role, keys));
+                        // Any bytes read past the version packet are the peer's first steady-state wire
+                        // (coalesced with the handshake over a real stream) — carry them into the
+                        // session so the first packet isn't dropped.
+                        break Some(Session::new(
+                            self.role,
+                            keys,
+                            core::mem::take(&mut self.buf),
+                        ));
                     }
                     self.state = State::AwaitVersion {
                         keys,

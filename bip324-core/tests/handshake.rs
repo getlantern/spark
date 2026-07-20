@@ -124,3 +124,40 @@ fn oversized_garbage_without_terminator_errors() {
     let err = hi.step(&mut ci, &inbound).map(|_| ()).unwrap_err();
     assert_eq!(err, Error::NoGarbageTerminator);
 }
+
+#[test]
+fn handshake_carries_coalesced_steady_state_bytes() {
+    // Over a real stream the initiator's final handshake message arrives coalesced with its first
+    // steady-state packet, so the responder's final step reads *past* the handshake. Those leftover
+    // bytes must survive into the session (dropping them corrupts the stream — the bug PR3 surfaced).
+    let mut ci = NativeCrypto::new();
+    let mut cr = NativeCrypto::new();
+    let mut hi = Handshake::<NativeCrypto>::new(Role::Initiator, MAGIC, b"").unwrap();
+    let mut hr = Handshake::<NativeCrypto>::new(Role::Responder, MAGIC, b"").unwrap();
+
+    let init_open = hi.step(&mut ci, &[]).unwrap().outbound; // key + garbage
+    let _ = hr.step(&mut cr, &[]); // responder emits nothing at connect
+    let resp_reply = hr.step(&mut cr, &init_open).unwrap().outbound; // key + garbage + term + version
+    let init_final = hi.step(&mut ci, &resp_reply).unwrap();
+    let mut si = init_final.session.expect("initiator completes");
+
+    // The initiator immediately sends a steady-state packet; it coalesces with its handshake tail.
+    let msg = b"first payload, coalesced with the handshake tail";
+    let payload = si.encrypt(&ci, msg).unwrap();
+    let mut coalesced = init_final.outbound; // terminator + version packet
+    coalesced.extend_from_slice(&payload);
+
+    // The responder's final step reads the handshake tail AND the payload in one shot.
+    let mut sr = hr
+        .step(&mut cr, &coalesced)
+        .unwrap()
+        .session
+        .expect("responder completes");
+
+    // The payload must be recoverable from the session's seeded buffer (feed no further wire).
+    assert_eq!(
+        sr.decrypt(&cr, &[]).unwrap(),
+        vec![msg.to_vec()],
+        "the coalesced steady-state packet survives the handshake boundary"
+    );
+}

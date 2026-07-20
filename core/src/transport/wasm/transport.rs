@@ -81,11 +81,17 @@ impl WasmTransport {
     /// Connect, wrap in the transform, and announce `target` (an IP or a domain the exit resolves) in
     /// the address header. Shared by [`dial`]/[`dial_addr`].
     async fn dial_target(&self, target: Address) -> io::Result<BoxedStream> {
-        let conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
-        let transform = self
+        let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        let mut transform = self
             .module
             .instantiate_with_config(&self.config)
             .map_err(|e| io::Error::other(e.to_string()))?;
+        // If the module has an interactive opening (e.g. BIP324), run it on the raw connection as the
+        // initiator before any steady-state bytes; the derived keys stay in the module for the
+        // transform that follows. Transform-only modules skip this (protocol-blind).
+        if transform.drives_handshake() {
+            transform.run_handshake(&mut conn).await?;
+        }
         let mut wrapped = TransformStream::new(conn, transform);
 
         // The address header is the first thing through the transform; the server reads it back
@@ -113,12 +119,23 @@ impl Transport for WasmTransport {
 /// transform and recovers the target the client announced.
 pub struct WasmServer {
     module: TransformModule,
+    config: Vec<u8>,
 }
 
 impl WasmServer {
     /// Create a server that deobfuscates connections with `module`.
     pub fn new(module: TransformModule) -> Self {
-        Self { module }
+        Self {
+            module,
+            config: Vec::new(),
+        }
+    }
+
+    /// Set the per-deployment configuration delivered to the module's `init` export on each accept
+    /// (e.g. the responder role + network magic for a handshake module). Empty by default.
+    pub fn with_config(mut self, config: Vec<u8>) -> Self {
+        self.config = config;
+        self
     }
 
     /// Wrap an accepted connection in the inverse transform and read the tunnel address header.
@@ -126,14 +143,22 @@ impl WasmServer {
     /// Returns the target [`Address`] the client announced, any payload bytes already read past the
     /// header (forward these to the target before relaying further), and the wrapped stream to relay
     /// through. A fresh [`Transform`](super::Transform) is instantiated for this connection.
-    pub async fn accept<S>(&self, conn: S) -> io::Result<(Address, BytesMut, TransformStream<S>)>
+    pub async fn accept<S>(
+        &self,
+        mut conn: S,
+    ) -> io::Result<(Address, BytesMut, TransformStream<S>)>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let transform = self
+        let mut transform = self
             .module
-            .instantiate()
+            .instantiate_with_config(&self.config)
             .map_err(|e| io::Error::other(e.to_string()))?;
+        // Mirror the client: run the module's interactive opening (as the responder) before steady
+        // state. Transform-only modules skip this (protocol-blind).
+        if transform.drives_handshake() {
+            transform.run_handshake(&mut conn).await?;
+        }
         let mut wrapped = TransformStream::new(conn, transform);
         let (target, leftover) = read_header(&mut wrapped).await?;
         Ok((target, leftover, wrapped))
@@ -330,6 +355,80 @@ mod tests {
         let transport = WasmTransport::new(server_addr, module);
         let mut stream = transport.dial(echo_addr).await.expect("dial");
         let message = b"hello via the wasm-obfuscated tunnel";
+        stream.write_all(message).await.expect("write");
+        let mut got = vec![0u8; message.len()];
+        stream.read_exact(&mut got).await.expect("read");
+        assert_eq!(got.as_slice(), &message[..]);
+    }
+
+    /// The full BIP324 dial path over real TCP: the client (initiator) and server (responder) each run
+    /// the interactive handshake — driven by `run_handshake` now that it's wired into `dial_target` /
+    /// `accept` — then the address header + tunneled bytes ride the steady-state transform to an echo
+    /// and back. Uses the committed signed `bip324.spkw`. Proves a handshake-based module actually
+    /// tunnels (which the obfs-xor test above, a transform-only module, cannot exercise).
+    #[cfg(feature = "bip324")]
+    #[tokio::test]
+    async fn bip324_tunnel_round_trips_over_real_tcp() {
+        use crate::transport::wasm::ModuleVerifier;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/bip324.spkw");
+        let artifact = std::fs::read(&path).expect("read bip324.spkw");
+        let module = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify bip324 module")
+            .into_module();
+
+        // init_config: [role][network_magic(4)][garbage…]. Mainnet magic; matching on both ends.
+        const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+        let cfg = |role: u8| {
+            let mut c = vec![role];
+            c.extend_from_slice(&MAGIC);
+            c
+        };
+
+        let echo = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
+        let echo_addr = echo.local_addr().expect("echo addr");
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 256];
+                    loop {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) if s.write_all(&buf[..n]).await.is_err() => break,
+                            Ok(_) => {}
+                        }
+                    }
+                });
+            }
+        });
+
+        // BIP324 tunnel server (responder): accept → run the handshake → read the target → relay.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let server_addr = listener.local_addr().expect("server addr");
+        let server = WasmServer::new(module.clone()).with_config(cfg(1));
+        tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.expect("accept");
+            let (target, leftover, mut wrapped) =
+                server.accept(conn).await.expect("accept + handshake");
+            let mut upstream = match target {
+                Address::Ip(sa) => TcpStream::connect(sa).await.expect("connect target"),
+                Address::Domain { .. } => panic!("test announces an IP target"),
+            };
+            if !leftover.is_empty() {
+                upstream
+                    .write_all(&leftover)
+                    .await
+                    .expect("forward leftover");
+            }
+            let _ = copy_bidirectional(&mut wrapped, &mut upstream).await;
+        });
+
+        // Client (initiator): dial the echo target through the BIP324 tunnel.
+        let transport = WasmTransport::new(server_addr, module).with_config(cfg(0));
+        let mut stream = transport.dial(echo_addr).await.expect("dial");
+        let message = b"hello through a bip324 wasm tunnel over real tcp";
         stream.write_all(message).await.expect("write");
         let mut got = vec![0u8; message.len()];
         stream.read_exact(&mut got).await.expect("read");
