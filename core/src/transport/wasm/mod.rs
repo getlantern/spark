@@ -1268,25 +1268,34 @@ fn host_secp256k1_ellswift_generate(mut caller: Caller<HostState>, out_ellswift_
         return -1;
     }
     // Draw the secret key + the ElligatorSwift aux randomness from the OS CSPRNG (no `rand`-trait dep).
-    let mut seed = [0u8; 64];
-    if SystemRandom::new().fill(&mut seed).is_err() {
-        caller.data_mut().fault =
-            Some("host_secp256k1_ellswift_generate: CSPRNG failed".to_string());
-        return -1;
-    }
-    let mut sk_bytes = [0u8; 32];
-    sk_bytes.copy_from_slice(&seed[..32]);
-    let secret = match SecretKey::from_byte_array(sk_bytes) {
-        Ok(s) => s,
-        Err(_) => {
-            // A uniformly random 32 bytes is an invalid scalar only with ~2^-128 probability.
+    // A uniform 32-byte scalar is out of range only with ~2^-128 probability; retry the draw a few
+    // times rather than sticky-fault (brick) the module on that near-impossible event.
+    let rng = SystemRandom::new();
+    let mut found = None;
+    for _ in 0..8 {
+        let mut seed = [0u8; 64];
+        if rng.fill(&mut seed).is_err() {
             caller.data_mut().fault =
-                Some("host_secp256k1_ellswift_generate: invalid scalar".to_string());
+                Some("host_secp256k1_ellswift_generate: CSPRNG failed".to_string());
+            return -1;
+        }
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes.copy_from_slice(&seed[..32]);
+        if let Ok(secret) = SecretKey::from_byte_array(sk_bytes) {
+            let mut aux = [0u8; 32];
+            aux.copy_from_slice(&seed[32..]);
+            found = Some((secret, aux));
+            break;
+        }
+    }
+    let (secret, aux) = match found {
+        Some(pair) => pair,
+        None => {
+            caller.data_mut().fault =
+                Some("host_secp256k1_ellswift_generate: no valid scalar after retries".to_string());
             return -1;
         }
     };
-    let mut aux = [0u8; 32];
-    aux.copy_from_slice(&seed[32..]);
     let ellswift = ElligatorSwift::from_seckey(secp_context(), secret, Some(aux));
     if let Err(msg) = write_guest(&mut caller, out_ellswift_ptr, &ellswift.to_array()) {
         caller.data_mut().fault = Some(format!("host_secp256k1_ellswift_generate: {msg}"));
