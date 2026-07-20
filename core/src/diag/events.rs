@@ -1,6 +1,6 @@
 //! Typed event constructors — the privacy allowlist for on-device diagnostics (spec §C5/§C6).
 //!
-//! Every string parameter flows through [`DiagEvent::insert_str`] (IP redaction backstop).
+//! Every string parameter flows through [`DiagEvent::insert_str`] (IP + URL redaction backstop).
 //! Numeric parameters are inserted directly into `fields`. Optional parameters are omitted
 //! when `None`. The set of constructors here is the exhaustive allowlist: adding a new event
 //! kind means adding a new function with a typed signature, not reaching for `fields` directly.
@@ -27,11 +27,11 @@ pub fn unbounded_attempt_started(slot: usize) -> DiagEvent {
 /// ICE candidate gathering complete; records candidate types seen and count.
 pub fn unbounded_ice_gathering(candidate_types: &[&str], count: u64) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Info, "app", "unbounded.ice_gathering");
-    // Can't use insert_str (it takes &str, not arrays): hand-roll the same
-    // redact_addrs call per element so array fields keep the §C5 backstop.
+    // Can't use insert_str (it takes &str, not arrays): apply the same composite
+    // redaction (`redact_all`) per element so array fields keep the §C5 backstop.
     let arr: Value = candidate_types
         .iter()
-        .map(|s| Value::String(crate::redact::redact_addrs(s).into_owned()))
+        .map(|s| Value::String(crate::redact::redact_all(s).into_owned()))
         .collect();
     ev.fields.insert("candidate_types".into(), arr);
     ev.fields.insert("count".into(), count.into());
@@ -47,8 +47,8 @@ pub fn unbounded_peer_connected(
 ) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Info, "app", "unbounded.peer_connected");
     // Session ids are opaque tokens in practice, but the §C5 backstop applies to every
-    // string that reaches the wire — redact in case a caller embeds an address.
-    ev.session = Some(crate::redact::redact_addrs(session).into_owned());
+    // string that reaches the wire — redact in case a caller embeds an address or URL.
+    ev.session = Some(crate::redact::redact_all(session).into_owned());
     ev.fields
         .insert("nat_traversal_ms".into(), nat_traversal_ms.into());
     ev.insert_str("selected_pair_type", selected_pair_type);
@@ -66,7 +66,7 @@ pub fn unbounded_throughput_sample(
     interval_ms: u64,
 ) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Debug, "app", "unbounded.throughput_sample");
-    ev.session = Some(crate::redact::redact_addrs(session).into_owned());
+    ev.session = Some(crate::redact::redact_all(session).into_owned());
     ev.fields.insert("bytes_up".into(), bytes_up.into());
     ev.fields.insert("bytes_down".into(), bytes_down.into());
     ev.fields.insert("interval_ms".into(), interval_ms.into());
@@ -81,7 +81,7 @@ pub fn unbounded_peer_disconnected(
     reason: &str,
 ) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Info, "app", "unbounded.peer_disconnected");
-    ev.session = Some(crate::redact::redact_addrs(session).into_owned());
+    ev.session = Some(crate::redact::redact_all(session).into_owned());
     ev.fields.insert("duration_ms".into(), duration_ms.into());
     ev.fields.insert("bytes_total".into(), bytes_total.into());
     ev.insert_str("reason", reason);

@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ring::rand::{SecureRandom, SystemRandom};
 
-use crate::redact::redact_addrs;
+use crate::redact::redact_all;
 
 // ---------------------------------------------------------------------------
 // Shared RNG — constructed once, cheap to call repeatedly.
@@ -131,7 +131,7 @@ impl SessionTrace {
             trace_id: gen_trace_id(),
             root_span_id: gen_span_id(),
             root_start_nano: now_nanos(),
-            session_attr: redact_addrs(session_id).into_owned(),
+            session_attr: redact_all(session_id).into_owned(),
             open_children: Vec::new(),
             finished_children: Vec::new(),
         }
@@ -217,7 +217,7 @@ impl SessionTrace {
             name: "unbounded.session",
             start_unix_nano: self.root_start_nano,
             end_unix_nano: end_nano,
-            error: error.map(|e| redact_addrs(e).into_owned()),
+            error: error.map(|e| redact_all(e).into_owned()),
             attrs: root_attrs,
         };
 
@@ -238,7 +238,7 @@ impl SessionTrace {
             name: child.name,
             start_unix_nano: child.start_unix_nano,
             end_unix_nano: end_nano,
-            error: error.map(|e| redact_addrs(e).into_owned()),
+            error: error.map(|e| redact_all(e).into_owned()),
             attrs: BTreeMap::new(),
         }
     }

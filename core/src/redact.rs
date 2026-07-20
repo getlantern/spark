@@ -53,6 +53,22 @@ pub fn redact_addrs(input: &str) -> Cow<'_, str> {
     }
 }
 
+/// The full diagnostics-path backstop: [`redact_addrs`] then [`redact_urls`], composed.
+///
+/// Every string that reaches the diagnostics wire (event fields via
+/// `DiagEvent::insert_str`, session ids, span error strings, array elements) goes
+/// through this one function so the two redactions can never drift apart per-site
+/// again. Borrows when nothing needed redacting.
+pub fn redact_all(input: &str) -> Cow<'_, str> {
+    match redact_addrs(input) {
+        Cow::Borrowed(s) => redact_urls(s),
+        Cow::Owned(s) => match redact_urls(&s) {
+            Cow::Borrowed(_) => Cow::Owned(s),
+            Cow::Owned(o) => Cow::Owned(o),
+        },
+    }
+}
+
 /// Replacement token for a redacted URL.
 const REDACTED_URL: &str = "[redacted-url]";
 
@@ -224,6 +240,18 @@ mod tests {
         );
         // Trailing URL (no whitespace after) still redacts to end of string.
         assert_eq!(redact_urls("see http://example.com"), "see [redacted-url]");
+    }
+
+    #[test]
+    fn redact_all_composes_both() {
+        assert_eq!(
+            redact_all("dial 1.2.3.4:443 via https://relay.example.com/x failed"),
+            "dial [redacted-ip]:443 via [redacted-url] failed"
+        );
+        // IP-only and URL-only inputs each still redact through the composite.
+        assert_eq!(redact_all("from 192.0.2.10"), "from [redacted-ip]");
+        assert_eq!(redact_all("see http://example.com"), "see [redacted-url]");
+        assert!(matches!(redact_all("clean text"), Cow::Borrowed(_)));
     }
 
     #[test]

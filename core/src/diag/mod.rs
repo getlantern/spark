@@ -85,11 +85,12 @@ impl DiagEvent {
         }
     }
 
-    /// Insert a string field with the §C5 backstops — IP-literal redaction, URL
-    /// redaction — and a size bound ([`MAX_STR_FIELD`], UTF-8-safe truncation).
+    /// Insert a string field with the §C5 backstops — IP-literal + URL redaction
+    /// ([`redact_all`]) — and a size bound ([`MAX_STR_FIELD`], UTF-8-safe truncation).
+    ///
+    /// [`redact_all`]: crate::redact::redact_all
     pub fn insert_str(&mut self, key: &str, value: &str) {
-        let no_ips = crate::redact::redact_addrs(value);
-        let clean = crate::redact::redact_urls(&no_ips);
+        let clean = crate::redact::redact_all(value);
         let bounded: String = if clean.len() > MAX_STR_FIELD {
             // Walk down to a char boundary so truncation can't split a multibyte
             // char and produce invalid UTF-8 (which would fail serialization).
