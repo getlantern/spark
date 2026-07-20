@@ -83,6 +83,59 @@ pub fn capture_level() -> DiagLevel {
 }
 
 // ---------------------------------------------------------------------------
+// Shared capture policy
+// ---------------------------------------------------------------------------
+
+/// The single capture-policy decision for a tracing event: `Some(level)` = capture at
+/// that diag level, `None` = drop. Shared by [`DiagLayer`] (the app process's
+/// subscriber layer) and `log_bridge::BridgeSubscriber` (the NE, where the bridge owns
+/// the global subscriber slot and forwards into diag itself), so the two processes
+/// apply one policy.
+///
+/// Encapsulates, in order:
+/// 1. Self-suppression: `spark_core::diag*` targets are dropped unconditionally
+///    (even ERROR) — diag internals must never re-enter the capture pipeline.
+/// 2. Level policy (spec §C1): TRACE never; `spark*` targets DEBUG+; foreign INFO+.
+/// 3. The remote capture-level knob (§C4), with the ERROR exemption (§C2a: errors
+///    are never dropped by the knob).
+pub(crate) fn capture_decision(level: &Level, target: &str) -> Option<DiagLevel> {
+    // Re-entrancy guard: the sink internals log via tracing::debug! with target
+    // "spark_core::diag::sink" (the module path). Capturing those events would recurse back
+    // into the sink. Drop all events from the "spark_core::diag" prefix, which covers
+    // ::sink, ::layer, ::events, and any future sibling.
+    if target.starts_with("spark_core::diag") {
+        return None;
+    }
+
+    // Level policy (spec §C1):
+    // - TRACE: never captured.
+    // - spark* targets: DEBUG and above.
+    // - everything else: INFO and above.
+    let is_spark = target.starts_with("spark");
+    let passes_policy = match *level {
+        Level::TRACE => false,
+        Level::DEBUG => is_spark,
+        Level::INFO | Level::WARN | Level::ERROR => true,
+    };
+    if !passes_policy {
+        return None;
+    }
+
+    // Remote volume knob (§C4): drop events below the configured capture level,
+    // but errors always pass (§C2a: errors are never dropped).
+    if *level != Level::ERROR {
+        let knob = CAPTURE_LEVEL.load(Ordering::Relaxed);
+        let event_severity = tracing_level_to_u8(level);
+        // Higher u8 = less severe; drop if the event is less severe than the knob.
+        if event_severity > knob {
+            return None;
+        }
+    }
+
+    Some(tracing_level_to_diag(level))
+}
+
+// ---------------------------------------------------------------------------
 // MessageVisitor — duplicated from `service/src/logbus.rs` (see module doc)
 // ---------------------------------------------------------------------------
 
@@ -168,42 +221,15 @@ impl<S: Subscriber> Layer<S> for DiagLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
         let target = meta.target();
-        let tracing_level = meta.level();
 
-        // Re-entrancy guard: the sink internals log via tracing::debug! with target
-        // "spark_core::diag::sink" (the module path). Capturing those events would recurse back
-        // into the sink. Drop all events from the "spark_core::diag" prefix, which covers
-        // ::sink, ::layer, ::events, and any future sibling.
-        if target.starts_with("spark_core::diag") {
+        // The shared capture policy (self-suppression, §C1 level policy, §C4 knob
+        // with the §C2a error exemption) — see [`capture_decision`].
+        let Some(diag_level) = capture_decision(meta.level(), target) else {
             return;
-        }
-
-        // Level policy (spec §C1):
-        // - TRACE: never captured.
-        // - spark* targets: DEBUG and above.
-        // - everything else: INFO and above.
-        let is_spark = target.starts_with("spark");
-        let passes_policy = match *tracing_level {
-            Level::TRACE => false,
-            Level::DEBUG => is_spark,
-            Level::INFO | Level::WARN | Level::ERROR => true,
         };
-        if !passes_policy {
-            return;
-        }
-
-        let is_error = *tracing_level == Level::ERROR;
-
-        // Remote volume knob (§C4): drop events below the configured capture level,
-        // but errors always pass (§C2a: errors are never dropped).
-        if !is_error {
-            let knob = CAPTURE_LEVEL.load(Ordering::Relaxed);
-            let event_severity = tracing_level_to_u8(tracing_level);
-            // Higher u8 = less severe; drop if the event is less severe than the knob.
-            if event_severity > knob {
-                return;
-            }
-        }
+        // `tracing_level_to_diag` maps exactly `Level::ERROR` to `DiagLevel::Error`,
+        // so this recovers the §C2a fast-path decision from the policy result.
+        let is_error = diag_level == DiagLevel::Error;
 
         // Pull the message field (MessageVisitor pattern — see module doc).
         let mut visitor = MessageVisitor(None);
@@ -212,7 +238,6 @@ impl<S: Subscriber> Layer<S> for DiagLayer {
             return; // no message field — nothing to forward
         };
 
-        let diag_level = tracing_level_to_diag(tracing_level);
         let ev = events::log(diag_level, &message, target);
 
         // §C2a: for errors this blocks the calling thread on a mutex + two write_all
@@ -486,6 +511,73 @@ mod tests {
             "error should always survive; got {messages:?}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // capture_decision matrix — the shared policy consumed by both DiagLayer
+    // and log_bridge::BridgeSubscriber. Tested here (not in log_bridge) because
+    // the bridge's diag forwarding goes through the process-global `diag::emit`
+    // OnceLock, which no test may install (it would leak into every other test);
+    // the policy itself is the testable seam.
+    //
+    // Holds KNOB_LOCK for the knob cases (serializes with test 5).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn capture_decision_matrix() {
+        let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // TRACE: never captured, spark or foreign.
+        assert_eq!(capture_decision(&Level::TRACE, "spark_core::x"), None);
+        assert_eq!(capture_decision(&Level::TRACE, "hyper::y"), None);
+
+        // DEBUG: spark targets only.
+        assert_eq!(
+            capture_decision(&Level::DEBUG, "spark_core::x"),
+            Some(DiagLevel::Debug)
+        );
+        assert_eq!(capture_decision(&Level::DEBUG, "hyper::y"), None);
+
+        // INFO+: everything.
+        assert_eq!(
+            capture_decision(&Level::INFO, "hyper::y"),
+            Some(DiagLevel::Info)
+        );
+        assert_eq!(
+            capture_decision(&Level::WARN, "spark_core::x"),
+            Some(DiagLevel::Warn)
+        );
+        assert_eq!(
+            capture_decision(&Level::ERROR, "hyper::y"),
+            Some(DiagLevel::Error)
+        );
+
+        // Self-suppression: diag internals dropped unconditionally — even ERROR.
+        assert_eq!(
+            capture_decision(&Level::DEBUG, "spark_core::diag::sink"),
+            None
+        );
+        assert_eq!(
+            capture_decision(&Level::ERROR, "spark_core::diag::sink"),
+            None
+        );
+
+        // Knob: below-knob events drop, errors always pass (§C2a). Drop-based
+        // restore so a panicking assert can't leave the global knob at Error.
+        set_capture_level(DiagLevel::Error);
+        struct RestoreKnob;
+        impl Drop for RestoreKnob {
+            fn drop(&mut self) {
+                set_capture_level(DiagLevel::Debug);
+            }
+        }
+        let _restore = RestoreKnob;
+        assert_eq!(capture_decision(&Level::INFO, "spark_core::x"), None);
+        assert_eq!(capture_decision(&Level::WARN, "spark_core::x"), None);
+        assert_eq!(
+            capture_decision(&Level::ERROR, "spark_core::x"),
+            Some(DiagLevel::Error)
+        );
     }
 
     // -----------------------------------------------------------------------
