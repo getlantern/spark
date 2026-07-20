@@ -149,18 +149,16 @@ impl Inner {
         // Shape the opening write (the ClientHello) — e.g. fragment it across the SNI boundary —
         // by sitting between boring and the socket (ADR 0006 Phase 1).
         let shaped = SegmentShapingStream::new(tcp, self.wire.clone());
-        // Realize the TLS opening move through the engine seam (ADR 0013 §7 step 1): the engine,
-        // routed by the plan's engine id, decodes the opaque dynamic params (or the static fallback)
-        // and drives the boring handshake.
+        // Realize the TLS opening move through the engine seam (ADR 0013 §7 step 1): routed by the
+        // plan's engine id via `upgrade_to`, the engine decodes the opaque dynamic params (or the
+        // static fallback) and drives the boring handshake.
         let plan = crate::transport::engine::OpeningPlan {
             engine: crate::transport::engine::TLS,
             sni: self.sni.clone(),
             params: self.compute_params(),
             fallback: self.static_params.clone(),
         };
-        let engine = crate::transport::engine::get(plan.engine)
-            .ok_or_else(|| io::Error::other(format!("engine '{}' not compiled", plan.engine)))?;
-        let tls = engine.realize(Box::new(shaped), &plan).await?;
+        let tls = crate::transport::engine::upgrade_to(Box::new(shaped), &plan).await?;
         let session = Arc::new(Session::client(
             tls,
             &self.password,
