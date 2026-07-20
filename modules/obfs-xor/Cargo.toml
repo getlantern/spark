@@ -1,0 +1,18 @@
+# The reference dynamic-transport guest module (ADR 0013 §7). A wasm32-unknown-unknown cdylib —
+# kept OUT of the root workspace (see the root Cargo.toml `exclude` comment): its target, ABI, and
+# `no_std` shape must never enter the core workspace graph or the size-tuned release profile. Built +
+# signed by scripts/build-module.sh into core/tests/fixtures/wasm/obfs-xor.spkw.
+[package]
+name = "obfs-xor"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# cdylib → wasm32 exports `memory` + the `#[no_mangle]` ABI fns (alloc / transform_out / transform_in).
+crate-type = ["cdylib"]
+
+# Its own profile (a standalone crate, not a workspace member). Size-first: this artifact is committed.
+[profile.release]
+opt-level = "z"
+lto = true

@@ -10,7 +10,10 @@ members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/appl
 #    it builds standalone via its own `npm run tauri build` / `cargo build`.
 #  - spark-sharing: the optional unprivileged WebRTC sharing subsystem. It has its own
 #    workspace and CI gate so its crypto features cannot inflate core/service binaries.
-exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing"]
+#  - modules/obfs-xor: the reference dynamic-transport guest module (ADR 0013 §7). A
+#    wasm32-unknown-unknown `no_std` cdylib — a different target + ABI + profile than the
+#    host workspace; built + signed on demand by scripts/build-module.sh, never by `cargo build`.
+exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing", "modules/obfs-xor"]
 
 [workspace.package]
 version = "0.1.0"

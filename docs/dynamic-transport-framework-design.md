@@ -177,6 +177,14 @@ Critical path (each builds on the last):
    primitive stays deferred.
 6. **Discovery generalization** — GA over the generic shaping knobs + per-engine param hooks.
 
+**Status (2026-07-20):** steps 1–3 and 6 have landed (engine seam + neutral genome + generalized
+discovery, the crypto primitives, and `handshake_step` + `upgrade_to`). Step 4 is underway: its
+prerequisite — the **Rust→wasm32 build-and-sign pipeline** that was missing (every module was inline
+`wat!`) — now exists. `modules/obfs-xor` is a reference guest module compiled and signed by
+`scripts/build-module.sh` (via the `sign-module` tool, `--features module-signer`) into a committed
+`.spkw` fixture that a toolchain-free `cargo test` loads through the production
+`ModuleVerifier::pinned().verify` path and round-trips. The BIP324 module itself is the next increment.
+
 ## 8. Tradeoffs (stated plainly)
 
 - **Opaque engine params** → the core can't validate or GA-optimize protocol-specific fields; the

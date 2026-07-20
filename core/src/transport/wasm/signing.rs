@@ -216,6 +216,25 @@ pub fn build_artifact(name: &str, version: u32, wasm: &[u8], signature: &[u8; SI
     flint_verify::build_artifact(&MAGIC, name, version, wasm, signature)
 }
 
+/// Sign `wasm` into a complete `.spkw` artifact with `keypair` — the offline operation the
+/// `sign-module` tool performs (the one place the private key is used). Assembles the
+/// [`signing_payload`], signs it (Ed25519), and appends the detached signature via [`build_artifact`].
+/// Compiled only under the off-by-default `module-signer` feature, so it never enters a shipped binary.
+#[cfg(feature = "module-signer")]
+pub fn sign_artifact(
+    keypair: &ring::signature::Ed25519KeyPair,
+    name: &str,
+    version: u32,
+    wasm: &[u8],
+) -> Vec<u8> {
+    let signature = keypair.sign(&signing_payload(name, version, wasm));
+    let signature: &[u8; SIG_LEN] = signature
+        .as_ref()
+        .try_into()
+        .expect("Ed25519 signature is 64 bytes");
+    build_artifact(name, version, wasm, signature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::testutil::XOR_WAT;

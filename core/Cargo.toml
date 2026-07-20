@@ -125,6 +125,10 @@ wasm-transport = ["dep:wasmi", "dep:flint-verify", "dep:chacha20"]
 # it's off by default and the base build stays C-free (docs/GOAL.md). Implies `wasm-transport` (the
 # primitives are wasm host fns).
 bip324 = ["wasm-transport", "dep:secp256k1"]
+# Offline module-signing tool (`sign-module` bin, ADR 0013 §7 step 4). Compiles `signing::sign_artifact`
+# + the dev keypair so scripts/build-module.sh can turn a compiled `.wasm` into a signed `.spkw`. Off by
+# default — a build/dev tool, never in a shipped binary; the private key stays out of the release surface.
+module-signer = ["wasm-transport"]
 # Un-poisoned control-plane DNS for startup (design: docs/bootstrap-resolver-design.md). Pulls
 # flint-dns/flint-dial with their boring Chrome-mimicry connector, so a proxy `server` can be a
 # hostname resolved before the tunnel exists. Off by default — the base build stays boring/cmake-free.
@@ -176,3 +180,10 @@ hysteria2 = ["dep:quinn", "dep:quinn-udp", "dep:blake2", "dep:webpki-roots"]
 # recursive resolvers. Pulls the shared `dns-tunnel-core` crate (+ its pure-Rust lz4_flex). Off by
 # default so the base build stays free of DNS-tunnel code. See docs/dns-tunnel-design.md.
 dns-tunnel = ["dep:dns-tunnel-core"]
+
+# Offline tool that signs a compiled `.wasm` into a `.spkw` artifact (scripts/build-module.sh). Not a
+# product binary — `required-features` keeps it out of every normal/release build.
+[[bin]]
+name = "sign-module"
+path = "src/bin/sign-module.rs"
+required-features = ["module-signer"]
