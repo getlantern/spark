@@ -8,6 +8,19 @@
 //! One sentinel per process, host-owned: same-process re-arm is not supported (the
 //! host arms once at init and holds the sentinel for the process lifetime).
 //!
+//! A Rust panic leaves the marker too — an aborting panic ends the process without
+//! `RunEvent::Exit`, so no disarm runs. One panic therefore produces BOTH an
+//! `error.panic` (spooled at crash time by the panic hook) and an
+//! `error.unclean_exit` (at the next launch). That double-report is expected: SigNoz
+//! analyses should dedup crash counts by session (`prev_started_ms`) rather than
+//! summing the two event kinds.
+//!
+//! A crash marker also survives a diagnostics-off period: the local opt-out skips
+//! diag init entirely (nothing arms, reads, or removes the marker), so a crash
+//! followed by any stretch of disabled diagnostics fires `error.unclean_exit` on the
+//! first re-enabled launch. `prev_started_ms`/`prev_version` date the ACTUAL crash —
+//! dashboards should bucket by those, not by receipt time.
+//!
 //! I/O failures here are logged at `tracing::debug!` and swallowed — diag internals
 //! must never re-enter the capture layer at a captured-by-default level (same rule and
 //! rationale as `sink.rs`), and crash detection must never break init.
