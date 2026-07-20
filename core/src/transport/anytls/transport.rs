@@ -159,7 +159,7 @@ impl Inner {
             fallback: self.static_params.clone(),
         };
         let engine = crate::transport::engine::get(plan.engine)
-            .ok_or_else(|| io::Error::other("tls engine not compiled"))?;
+            .ok_or_else(|| io::Error::other(format!("engine '{}' not compiled", plan.engine)))?;
         let tls = engine.realize(Box::new(shaped), &plan).await?;
         let session = Arc::new(Session::client(
             tls,

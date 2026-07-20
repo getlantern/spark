@@ -33,7 +33,8 @@ pub struct Genome {
 }
 
 impl Genome {
-    /// Wrap an engine's opaque params in the neutral envelope (v1 schema, no rollback set).
+    /// Wrap an engine's opaque params in the neutral envelope (v1 schema; `version` initialized to 1,
+    /// anti-rollback not yet enforced).
     pub fn new(
         id: impl Into<String>,
         engine: EngineId,
