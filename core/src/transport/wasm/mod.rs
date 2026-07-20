@@ -1764,11 +1764,9 @@ mod tests {
     /// through it. Needs no wasm32 toolchain: it consumes the committed artifact.
     #[test]
     fn signed_module_fixture_verifies_and_round_trips() {
-        let artifact = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/wasm/obfs-xor.spkw"
-        ))
-        .expect("read the committed obfs-xor.spkw fixture");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/obfs-xor.spkw");
+        let artifact = std::fs::read(&path).expect("read the committed obfs-xor.spkw fixture");
 
         // The pinned key is the dev key in a debug/test build (signing::SPARK_MODULE_PUBKEY); a zero
         // anti-rollback floor accepts the fixture's version.

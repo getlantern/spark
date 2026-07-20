@@ -77,6 +77,14 @@ fn run() -> Result<(), String> {
 
     let wasm = std::fs::read(&wasm_path).map_err(|e| format!("reading {wasm_path}: {e}"))?;
     let artifact = sign_artifact(&keypair, &name, version, &wasm);
+    // Create the output directory so a fresh checkout (or a new module's fixture dir) just works.
+    if let Some(parent) = std::path::Path::new(&out_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
     std::fs::write(&out_path, &artifact).map_err(|e| format!("writing {out_path}: {e}"))?;
 
     eprintln!(

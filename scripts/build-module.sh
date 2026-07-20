@@ -20,7 +20,8 @@ echo "==> ensuring $TARGET is installed" >&2
 rustup target list --installed | grep -qx "$TARGET" || rustup target add "$TARGET"
 
 echo "==> building modules/$MODULE (release, $TARGET)" >&2
-cargo build --release --target "$TARGET" --manifest-path "modules/$MODULE/Cargo.toml"
+# --locked: the artifact is committed, so build against the committed lockfiles (no silent resolve).
+cargo build --release --locked --target "$TARGET" --manifest-path "modules/$MODULE/Cargo.toml"
 WASM="modules/$MODULE/target/$TARGET/release/${LIB}.wasm"
 
 echo "==> signing $WASM with the dev key -> $OUT" >&2
@@ -28,7 +29,7 @@ mkdir -p "$(dirname "$OUT")"
 # `sign-module` lives behind the `module-signer` feature (never in a shipped build). `--dev` uses the
 # development key that `ModuleVerifier::pinned()` accepts in a debug build; a release artifact would
 # pass `--key-pkcs8 <real-key>` instead.
-cargo run --quiet -p spark-core --features module-signer --bin sign-module -- \
+cargo run --quiet --locked -p spark-core --features module-signer --bin sign-module -- \
     --dev --name "$MODULE" --version "$VERSION" --wasm "$WASM" --out "$OUT"
 
 echo "==> done: $OUT" >&2

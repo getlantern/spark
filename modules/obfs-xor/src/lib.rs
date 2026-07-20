@@ -19,9 +19,9 @@ use core::ptr::addr_of_mut;
 /// The transform key. Involutive XOR, so `transform_in` reverses `transform_out`.
 const XOR_KEY: u8 = 0x5A;
 
-/// Scratch arena inside the exported linear memory. `alloc` hands out one buffer at offset 0 per call.
-/// Sized to the host's 1 MiB `MAX_TRANSFORM_LEN` — the largest input the host will pass — so no valid
-/// transform is rejected; `alloc` traps on anything larger.
+/// Scratch arena inside the exported linear memory. `alloc` hands the host this one `MEM` buffer each
+/// call (the host allocs once per transform). Sized to the host's 1 MiB `MAX_TRANSFORM_LEN` — the
+/// largest input the host will pass — so no valid transform is rejected; `alloc` traps on anything larger.
 const ARENA: usize = 1 << 20;
 static mut MEM: [u8; ARENA] = [0; ARENA];
 
@@ -36,8 +36,9 @@ extern "C" {
 }
 
 /// The host's per-transform allocation hook. `call_io` invokes it exactly once before each transform,
-/// so every call reuses the one buffer at offset 0. Traps deterministically on a negative or oversized
-/// request rather than letting unchecked pointer math corrupt adjacent linear memory.
+/// so every call reuses the single `MEM` buffer. Traps deterministically on a negative or oversized
+/// request rather than letting unchecked pointer math corrupt adjacent linear memory. Returns `MEM`'s
+/// address in linear memory (wherever the linker placed it), which the host reads/writes at.
 #[no_mangle]
 pub extern "C" fn alloc(len: i32) -> i32 {
     if len < 0 || len as usize > ARENA {
