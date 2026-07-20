@@ -249,6 +249,12 @@ pub enum WasmError {
     /// `handshake_step` returned a malformed frame (empty, or a status byte that isn't 0/1).
     #[error("handshake_step returned a malformed frame: {0}")]
     HandshakeFrame(String),
+    /// The module exports no *mode* entrypoint (needs at least one of `transform_out`,
+    /// `transform_in`, `compute_gambit`, or `handshake_step`).
+    #[error(
+        "transform module exports no mode entrypoint (transform_out / transform_in / compute_gambit / handshake_step)"
+    )]
+    NoMode,
     /// The module exhausted its per-call execution fuel — a runaway or pathologically slow module.
     #[error("fuel: {0}")]
     Fuel(String),
@@ -471,7 +477,7 @@ impl Transform {
             && compute_gambit.is_none()
             && handshake_step.is_none()
         {
-            return Err(WasmError::MissingExport(EXPORT_TRANSFORM_OUT));
+            return Err(WasmError::NoMode);
         }
         // Optional `reset()` — arena management; absent for modules that manage memory themselves.
         let reset = instance.get_typed_func::<(), ()>(&store, EXPORT_RESET).ok();
@@ -584,9 +590,12 @@ impl Transform {
     {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let mut inbound: Vec<u8> = Vec::new();
+        // One reusable stack buffer across steps (no per-iteration alloc). `n == 0` on the first
+        // iteration is emit-at-connect: the module produces its opening message from empty input.
+        let mut buf = [0u8; HANDSHAKE_READ_CHUNK];
+        let mut n = 0usize;
         loop {
-            let (outbound, done) = self.handshake_step(&inbound).map_err(io::Error::other)?;
+            let (outbound, done) = self.handshake_step(&buf[..n]).map_err(io::Error::other)?;
             if !outbound.is_empty() {
                 stream.write_all(&outbound).await?;
                 stream.flush().await?;
@@ -594,15 +603,13 @@ impl Transform {
             if done {
                 return Ok(());
             }
-            let mut buf = [0u8; HANDSHAKE_READ_CHUNK];
-            let n = stream.read(&mut buf).await?;
+            n = stream.read(&mut buf).await?;
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "peer closed during handshake",
                 ));
             }
-            inbound = buf[..n].to_vec();
         }
     }
 
@@ -2380,14 +2387,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_export_is_rejected() {
-        // A module with no `transform_out` export must fail to instantiate as a transform.
-        let wasm = wat::parse_str(r#"(module (memory (export "memory") 1))"#).expect("assemble");
+    fn a_module_with_no_mode_export_is_rejected() {
+        // `memory` + `alloc` present but no mode entrypoint (transform_out/in, compute_gambit,
+        // handshake_step) → `NoMode` (not a misleading single-export error).
+        let wasm = wat::parse_str(
+            r#"(module (memory (export "memory") 1) (func (export "alloc") (param i32) (result i32) (i32.const 0)))"#,
+        )
+        .expect("assemble");
         let module = TransformModule::load(&wasm).expect("load");
-        assert!(
-            matches!(module.instantiate(), Err(WasmError::MissingExport(_))),
-            "a module without transform exports must be rejected"
-        );
+        assert!(matches!(module.instantiate(), Err(WasmError::NoMode)));
     }
 
     #[test]
