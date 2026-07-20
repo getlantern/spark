@@ -2539,6 +2539,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "tun-rs",
  "wasmi",
  "wat",

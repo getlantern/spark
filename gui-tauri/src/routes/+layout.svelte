@@ -12,9 +12,12 @@
   import { listen } from "@tauri-apps/api/event";
   import { goto } from "$app/navigation";
   import { initSelectedIndex } from "$lib/selection";
-  import { isTauri } from "$lib/tauri_backend";
+  import { MockBackend, type SparkBackend } from "$lib/spark_backend";
+  import { TauriBackend, isTauri } from "$lib/tauri_backend";
 
   let { children } = $props();
+
+  const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
   let ready = $state(false);
   setupI18n().then(() => (ready = true));
@@ -36,6 +39,48 @@
   });
   $effect(() => {
     document.documentElement.dataset.theme = resolveTheme($theme, prefersDark);
+  });
+
+  // Webview error bridge: uncaught JS exceptions and unhandled rejections are otherwise
+  // invisible to diagnostics (spec §C2a), so forward them fire-and-forget to the plugin's
+  // diag spool. Everything is wrapped so the handlers themselves can NEVER throw — an
+  // error inside the error hook would just re-enter it. Default handling is not suppressed
+  // (onerror returns false / no preventDefault), so errors still hit the devtools console.
+  $effect(() => {
+    const prevOnError = window.onerror;
+    window.onerror = (message, source, lineno, colno, error) => {
+      try {
+        void backend.reportError(String(message ?? "unknown"), source ?? "window").catch(() => {});
+      } catch {
+        /* swallow — never throw from the error hook */
+      }
+      // Chain to any previously-installed handler so its reporting keeps working,
+      // and propagate its verdict on suppressing default handling. Without one,
+      // return false so errors still hit the devtools console.
+      try {
+        return prevOnError ? prevOnError.call(window, message, source, lineno, colno, error) === true : false;
+      } catch {
+        return false;
+      }
+    };
+    const onRejection = (e: PromiseRejectionEvent) => {
+      try {
+        let reason: string;
+        try {
+          reason = String(e.reason);
+        } catch {
+          reason = "unstringifiable rejection reason";
+        }
+        void backend.reportError(reason, "unhandledrejection").catch(() => {});
+      } catch {
+        /* swallow — never throw from the error hook */
+      }
+    };
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.onerror = prevOnError ?? null;
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
   });
 
   // Tray ↔ window sync: pull the pin on load + whenever the tray changes state; handle tray-driven

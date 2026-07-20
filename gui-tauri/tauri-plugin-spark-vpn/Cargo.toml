@@ -37,6 +37,16 @@ tokio = { version = "1", features = ["rt", "net", "io-util", "time", "sync"] }
 # resistant fetch (Phase 2a spike, docs/superpowers/specs/2026-07-10-locations-before-vpn-design.md).
 # Desktop only; Android fetches in the :vpn process over IPC (Phase 2b).
 spark-core = { path = "../../core", features = ["config-fetch"] }
+# Diagnostics host (diag_host.rs): installs core's DiagLayer into the tracing registry.
+# Minimal features, matching core's own dep (registry + std — no fmt/env-filter output;
+# the layer only captures into the diag sink).
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "registry",
+    "std",
+] }
+# tracing macros: error-level events ride DiagLayer's §C2a fast path (e.g. the
+# unbounded total_helped persist failure). Version matches core's dep.
+tracing = "0.1"
 
 # Apple (macOS + iOS): AppleControl drives the NE via objc2 (NETunnelProviderManager). Shared by
 # both Apple targets — iOS reuses the same control path, minus the system-extension activation.

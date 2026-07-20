@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-diag-get-enabled"
+description = "Enables the diag_get_enabled command without any pre-configured scope."
+commands.allow = ["diag_get_enabled"]
+
+[[permission]]
+identifier = "deny-diag-get-enabled"
+description = "Denies the diag_get_enabled command without any pre-configured scope."
+commands.deny = ["diag_get_enabled"]

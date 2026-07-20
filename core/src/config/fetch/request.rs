@@ -119,7 +119,7 @@ pub struct Conditional {
 /// Strip CR/LF from a value before it's interpolated into a header line, so a tampered/corrupt
 /// non-constant source (the on-disk device id, the env-derived timezone, or a cached server-origin
 /// `ETag`/`Last-Modified`) can't inject extra headers or break request framing. Borrows when clean.
-fn header_safe(v: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn header_safe(v: &str) -> std::borrow::Cow<'_, str> {
     if v.contains(['\r', '\n']) {
         std::borrow::Cow::Owned(v.replace(['\r', '\n'], ""))
     } else {

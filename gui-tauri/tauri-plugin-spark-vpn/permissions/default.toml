@@ -23,4 +23,7 @@ permissions = [
   "allow-unbounded-available",
   "allow-unbounded-get-settings",
   "allow-unbounded-set-settings",
+  "allow-diag-report-webview-error",
+  "allow-diag-set-enabled",
+  "allow-diag-get-enabled",
 ]

@@ -18,10 +18,23 @@ mod desktop;
 #[cfg(not(target_os = "android"))]
 mod unbounded;
 
+// §C6 diagnostic timeline + §C3a session traces for the Unbounded pool: a pure
+// PoolEvent → diag-action mapper applied fire-and-forget by `unbounded`'s aggregation
+// loop. Gated with `unbounded` (and `diag_host`, whose span queue it feeds).
+#[cfg(not(target_os = "android"))]
+mod unbounded_diag;
+
 // Phase 2a: app-side startup config fetch (links spark-core's kindling fetch). Desktop only —
 // Android fetches in the :vpn process over IPC (Phase 2b).
 #[cfg(not(target_os = "android"))]
 mod config_fetch;
+
+// Diagnostics host for the APP process (diag design §C4/§5): sink + panic hook + tracing capture
+// layer + config-gated OTLP uploader, plus the webview error-report / opt-out commands. Compiled
+// everywhere except Android (desktop today, iOS when it lands), like the other spark-core-backed
+// modules — Android's diagnostics ride the tunnel-process phase (spec Phase B).
+#[cfg(not(target_os = "android"))]
+mod diag_host;
 
 // macOS installed-apps catalog for desktop app-based split tunneling (AppleControl uses it).
 #[cfg(target_os = "macos")]
@@ -137,6 +150,14 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             unbounded::unbounded_get_settings,
             #[cfg(not(target_os = "android"))]
             unbounded::unbounded_set_settings,
+            // Diagnostics commands (webview error report + opt-out toggle). Desktop only —
+            // gated the same as the diag_host module.
+            #[cfg(not(target_os = "android"))]
+            diag_host::diag_report_webview_error,
+            #[cfg(not(target_os = "android"))]
+            diag_host::diag_set_enabled,
+            #[cfg(not(target_os = "android"))]
+            diag_host::diag_get_enabled,
         ])
         .setup(|app, _api| {
             app.manage(commands::SelectedServer::default());
@@ -153,6 +174,12 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             }
             #[cfg(not(target_os = "android"))]
             {
+                // Diagnostics first (diag design §C4/§5), so the panic hook and tracing
+                // capture layer are in place before the startup tasks below spawn and any
+                // of their failures can be captured. Infallible and internally detached —
+                // never blocks or fails setup. No-op when the user opted out.
+                diag_host::init(app);
+
                 let ctl = platform::control(app)?;
                 app.manage(ctl);
 

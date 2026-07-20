@@ -20,6 +20,8 @@ use spark_sharing::{
     SharingDelta, SharingHandle, SharingStatus,
 };
 
+use crate::unbounded_diag;
+
 /// Live handles for a running sharing pool. The `SharingHandle` is dropped (cooperative cancel) and
 /// the aggregation loop `JoinHandle` is aborted on stop; the latest [`SharingStatus`] is kept so
 /// `unbounded_status` can report `helpingNow`/`peers` without a live `Aggregator` on hand.
@@ -208,19 +210,55 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         // join. Avoids a disk read on every delta, and a poisoned lock can no longer panic the loop
         // (which would leave the pool running but the UI/tray frozen).
         let mut total = crate::persist::load_unbounded_total_helped(&loop_base);
+        // §C6 diagnostics: pure per-slot mapper state + snapshot pacing, both on this
+        // task's stack. Everything diag-related below is fire-and-forget (see
+        // unbounded_diag::apply_actions) — no path can error out of or stall the loop.
+        let mut pool_diag = unbounded_diag::PoolDiag::default();
+        let mut last_snapshot = std::time::Instant::now();
         while let Some(ev) = rx.recv().await {
-            if let Some(delta) = agg.apply_with_geo(ev, &resolver).await {
+            // Copy the diag-relevant fields out before the aggregator consumes the event.
+            let view = unbounded_diag::EventView::capture(&ev);
+            let delta = agg.apply_with_geo(ev, &resolver).await;
+            // peer_region rides the geo the aggregator just resolved for the globe
+            // (country only — §C5); None both when unresolved and for non-join deltas.
+            // Borrowed from `delta`: the borrow ends at the diag_for_event call, before
+            // the `if let` below moves `delta`.
+            let region = match &delta {
+                Some(SharingDelta::Joined(p)) => p.geo.as_ref().map(|g| g.country_code.as_str()),
+                _ => None,
+            };
+            unbounded_diag::apply_actions(unbounded_diag::diag_for_event(
+                &view,
+                region,
+                &mut pool_diag,
+            ));
+            if let Some(delta) = delta {
                 let joined = matches!(delta, SharingDelta::Joined(_));
                 on_delta(&mut total, &delta);
                 if joined {
                     if let Err(e) = crate::persist::save_unbounded_total_helped(&loop_base, total) {
-                        eprintln!("[spark-unbounded] failed to persist total_helped: {e}");
+                        // error!, not eprintln!: rides the DiagLayer's §C2a error
+                        // fast-path so a persist failure is visible in diagnostics.
+                        tracing::error!(
+                            error = %e,
+                            "unbounded: failed to persist total_helped"
+                        );
                     }
                 }
                 let status = agg.status();
                 *lock_recover(&loop_app.state::<UnboundedState>().latest_status) =
                     Some(status.clone());
                 emit_snapshot(&loop_app, true, &status, total);
+            }
+            // ~60s §C6 pool snapshot, paced by event arrival (no extra timer task; an
+            // idle pool emits none, which the timeline already makes unambiguous).
+            if last_snapshot.elapsed() >= unbounded_diag::SNAPSHOT_INTERVAL {
+                last_snapshot = std::time::Instant::now();
+                spark_core::diag::emit(spark_core::diag::events::unbounded_pool_snapshot(
+                    agg.status().helping_now as u64,
+                    pool_diag.slots_filled(),
+                    total,
+                ));
             }
         }
 
@@ -267,6 +305,13 @@ pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Resu
     // by the supervisor, but abort is deterministic and stops emits immediately).
     if let Some(loop_handle) = lock_recover(&state.loop_handle).take() {
         loop_handle.abort();
+    }
+    // Aborting the loop can outrun the supervisor's Stopped events, stranding live trace ctx
+    // entries; retire them all to keep the SetCtx/RetireCtx pairing contract, with the same
+    // grace semantics (the uploader prunes after RETIRE_GRACE, so final log lines stay
+    // correlated).
+    if let Some(q) = crate::diag_host::span_queue() {
+        q.retire_all_ctxs();
     }
     *lock_recover(&state.latest_status) = None;
 
