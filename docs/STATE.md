@@ -2435,6 +2435,17 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   tears down clean. Fixed a shipped split-tunnel toggle clip (border-box, PR #51). **`platforms/android/demo`
   RETIRED** (Kotlin migrated into the plugin). PR #51 (Figma UI + Routing Mode) merged to `main` first.
   Spec/plan/goal: `docs/superpowers/{specs,plans}/2026-07-06-tauri-android*.md`.
+- 2026-07-20 (ADR 0013 §7 step 4 — Rust→wasm32 build-and-sign pipeline): the missing half of the
+  dynamic-transport goal (every module was inline `wat!` — no wasm32 build, no signer, no on-disk
+  artifact) now exists. `modules/obfs-xor` is a workspace-**excluded** `no_std` cdylib reference guest
+  (mirrors `XOR_WAT`); `scripts/build-module.sh` compiles it to `wasm32-unknown-unknown` and signs it
+  via the `sign-module` tool (`core/src/bin/sign-module.rs`, off-by-default `module-signer` feature,
+  reusing `signing::sign_artifact` + the dev key) into the committed
+  `core/tests/fixtures/wasm/obfs-xor.spkw`. A toolchain-free `cargo test`
+  (`transport::wasm::tests::signed_module_fixture_verifies_and_round_trips`) loads it through the
+  production `ModuleVerifier::pinned().verify` → `instantiate` path and round-trips — so `cargo test`
+  and CI stay wasm32-free; only the fixture-regen script needs the target. Base build stays C-free (the
+  feature + bin never build in release). Next: the BIP324 WASM module itself (step 4 proper).
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

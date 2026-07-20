@@ -104,9 +104,30 @@ use tokio::io::{AsyncRead, AsyncWrite};
 mod signing;
 mod stream;
 mod transport;
+/// The offline artifact-signing helper — only compiled for the `sign-module` tool.
+#[cfg(feature = "module-signer")]
+pub use signing::sign_artifact;
 pub use signing::{build_artifact, signing_payload, ModuleError, ModuleVerifier, SignedModule};
 pub use stream::TransformStream;
 pub use transport::{WasmServer, WasmTransport};
+
+/// PKCS#8 of the **development** module-signing keypair — the private half of
+/// `signing::DEV_MODULE_PUBKEY` (the dev fallback `ModuleVerifier::pinned()` trusts when no production
+/// key is pinned). Compiled only under `#[cfg(test)]` or the off-by-default `module-signer` feature —
+/// which shipped/product builds never enable — so the private key stays out of every shipped binary.
+#[cfg(any(test, feature = "module-signer"))]
+const DEV_MODULE_PKCS8: &[u8] = &[
+    48, 81, 2, 1, 1, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 47, 96, 208, 79, 38, 102, 119, 122,
+    12, 75, 231, 119, 191, 58, 165, 37, 216, 16, 180, 152, 96, 30, 105, 41, 180, 223, 163, 204, 55,
+    11, 100, 103, 129, 33, 0, 114, 43, 155, 15, 166, 26, 80, 178, 3, 21, 71, 211, 20, 223, 38, 197,
+    127, 114, 13, 201, 119, 147, 135, 224, 208, 160, 39, 52, 129, 224, 249, 213,
+];
+
+/// The development signing keypair (see [`DEV_MODULE_PKCS8`]).
+#[cfg(any(test, feature = "module-signer"))]
+pub fn dev_keypair() -> ring::signature::Ed25519KeyPair {
+    ring::signature::Ed25519KeyPair::from_pkcs8(DEV_MODULE_PKCS8).expect("dev pkcs8")
+}
 
 /// Import module name the host functions are defined under.
 const HOST_MODULE: &str = "env";
@@ -1565,20 +1586,10 @@ pub(crate) mod testutil {
         TransformModule::load(&wasm).expect("load module")
     }
 
-    /// PKCS#8 of the **development** module-signing keypair — the private half of
-    /// `signing::DEV_MODULE_PUBKEY`. Test-only (this never compiles into a shipped binary), so tests
-    /// can produce artifacts that `ModuleVerifier::pinned()` accepts when no production key is pinned.
-    pub const DEV_MODULE_PKCS8: &[u8] = &[
-        48, 81, 2, 1, 1, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 47, 96, 208, 79, 38, 102, 119,
-        122, 12, 75, 231, 119, 191, 58, 165, 37, 216, 16, 180, 152, 96, 30, 105, 41, 180, 223, 163,
-        204, 55, 11, 100, 103, 129, 33, 0, 114, 43, 155, 15, 166, 26, 80, 178, 3, 21, 71, 211, 20,
-        223, 38, 197, 127, 114, 13, 201, 119, 147, 135, 224, 208, 160, 39, 52, 129, 224, 249, 213,
-    ];
-
-    /// The development signing keypair (see [`DEV_MODULE_PKCS8`]).
-    pub fn dev_keypair() -> ring::signature::Ed25519KeyPair {
-        ring::signature::Ed25519KeyPair::from_pkcs8(DEV_MODULE_PKCS8).expect("dev pkcs8")
-    }
+    // The dev signing key + keypair moved to the module level (`super`), gated
+    // `#[cfg(any(test, feature = "module-signer"))]` so the `sign-module` tool can reuse them. Kept
+    // reachable here as `testutil::dev_keypair` for the existing tests.
+    pub(crate) use super::dev_keypair;
 }
 
 #[cfg(test)]
@@ -1744,6 +1755,45 @@ mod tests {
             &plaintext[..],
             "round-trip must recover the input"
         );
+    }
+
+    /// End-to-end proof of the Rust→wasm32 build-and-sign pipeline (ADR 0013 §7 step 4): load the
+    /// committed, dev-key-signed `obfs-xor.spkw` — compiled by `scripts/build-module.sh` from the
+    /// Rust guest in `modules/obfs-xor`, which mirrors [`testutil::XOR_WAT`] — through the exact
+    /// production path (`ModuleVerifier::pinned().verify` → `instantiate`) and round-trip bytes
+    /// through it. Needs no wasm32 toolchain: it consumes the committed artifact.
+    #[test]
+    fn signed_module_fixture_verifies_and_round_trips() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/obfs-xor.spkw");
+        let artifact = std::fs::read(&path).expect("read the committed obfs-xor.spkw fixture");
+
+        // The pinned key is the dev key in a debug/test build (signing::SPARK_MODULE_PUBKEY); a zero
+        // anti-rollback floor accepts the fixture's version.
+        let signed = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify + compile the signed fixture");
+        assert_eq!(signed.name(), "obfs-xor");
+        assert_eq!(signed.version(), 1);
+
+        let mut t = signed.into_module().instantiate().expect("instantiate");
+        let plaintext = b"hello pipeline";
+        let wire = t.transform_out(plaintext).expect("transform_out");
+        assert_ne!(
+            wire.as_slice(),
+            &plaintext[..],
+            "compiled module transformed the bytes"
+        );
+        let recovered = t.transform_in(&wire).expect("transform_in");
+        assert_eq!(
+            recovered.as_slice(),
+            &plaintext[..],
+            "round-trip recovers the input"
+        );
+        // Large-input coverage isn't automatable here: a single big transform overflows wasmi's
+        // debug interpreter stack (the release-only `transforms_a_large_payload_in_one_call_release`
+        // artifact), and a release build can't reach `pinned()` without `SPARK_MODULE_PUBKEY_HEX`. The
+        // guest arena is sized to the host's `MAX_TRANSFORM_LEN`, so no valid input is rejected.
     }
 
     #[test]
