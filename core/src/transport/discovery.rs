@@ -1,23 +1,26 @@
 //! The discovery harness — *inner loop* (ADR 0006 P5, design §5).
 //!
 //! The full search loop is **server-side** (§5.5): the servers are the sensors, fitness is the
-//! arrival rate of successful connections, and only signed gambit assignments cross to clients. What
+//! arrival rate of successful connections, and only signed genome assignments cross to clients. What
 //! lives here is the **inner tier** (§5.2) — the *cheap, fast, no-censor-contact* pre-filter that
-//! spark can run because it owns the boring engine: generate candidate gambits (GA mutation +
-//! crossover over the genome, §5.1), **realize** each through boring into an actual ClientHello, and
-//! score its **fidelity to the anchor** via JA4 + structural distance. This guards the
-//! `fidelity_floor` term of the composite fitness so a gambit can't win by becoming a glaring anomaly
-//! — it does *not* decide evasion (that's the outer/server loop's arrival signal).
+//! spark can run because it owns the boring engine: generate candidate genomes (GA mutation +
+//! crossover, §5.1), **realize** each through boring into an actual ClientHello, and score its
+//! **fidelity to the anchor** via JA4 + structural distance. This guards the `fidelity_floor` term of
+//! the composite fitness so a genome can't win by becoming a glaring anomaly — it does *not* decide
+//! evasion (that's the outer/server loop's arrival signal).
 //!
-//! Note: for **constrained** gambits the fidelity signal is intentionally coarse — boring keeps them
+//! Note: for **constrained** genomes the fidelity signal is intentionally coarse — boring keeps them
 //! Chrome-faithful by construction, so only knobs that change the *extension set* (ECH, ALPS,
 //! record_size_limit) move the JA4. The scorer earns its keep on the **unconstrained** (P4) regime,
 //! where a module emits arbitrary ClientHello bytes and fidelity can vary widely.
 //!
-//! The GA operators are pure and deterministic given a seed (reproducible search + auditability,
-//! per §5.5); the realize/score half is behind the `anytls` feature (it needs boring).
+//! The GA operators are **protocol-neutral** (ADR 0013 §4 item 7): they evolve the neutral
+//! [`Genome`]'s wire-shaping plan directly and delegate protocol-specific `engine_params` evolution to
+//! a per-engine [`EngineDiscovery`] hook. They stay pure and deterministic given a seed (reproducible
+//! search + auditability, §5.5). The realize/score half (JA4 fidelity) is TLS-specific and lives
+//! behind the `anytls` feature with the [`TlsDiscovery`] hook.
 
-use flint_tls::gambit::{ClientHello, EchMode, Gambit, Perm};
+use super::engine::Genome;
 
 /// A small, seedable PRNG (SplitMix64) — dependency-free and **deterministic** so a search run (and
 /// its tests) reproduce exactly from a seed. Not cryptographic; only steers mutation choices.
@@ -49,93 +52,81 @@ impl SplitMix64 {
     }
 }
 
-/// Perturb exactly one knob of `g` (GA mutation, §5.1) — a Layer-A ClientHello knob, a Layer-B
-/// record knob, or a Layer-C wire knob. Returns a new gambit; the input is unchanged.
-pub fn mutate(g: &Gambit, rng: &mut SplitMix64) -> Gambit {
+/// Per-engine genetic operators over the opaque `engine_params` (ADR 0013 §4 item 7). The generic GA
+/// evolves the neutral [`Genome`]'s wire plan; protocol-specific param evolution is delegated here —
+/// the engine owns any internal sub-layer structure (for TLS, the ClientHello / records knobs).
+pub trait EngineDiscovery {
+    /// Perturb one protocol-specific knob of `params`. Returns `params` unchanged if it can't decode.
+    fn mutate_params(&self, params: &[u8], rng: &mut SplitMix64) -> Vec<u8>;
+    /// Recombine two parents' params. Returns one parent's bytes if either can't decode.
+    fn crossover_params(&self, a: &[u8], b: &[u8], rng: &mut SplitMix64) -> Vec<u8>;
+}
+
+/// Perturb exactly one knob of `g` (GA mutation, §5.1): a generic Layer-C wire knob, or — via the
+/// engine hook — a protocol-specific param knob. Returns a new genome; the input is unchanged.
+pub fn mutate<D: EngineDiscovery>(g: &Genome, rng: &mut SplitMix64, engine: &D) -> Genome {
     let mut m = g.clone();
-    match rng.below(9) {
+    // Two engine-neutral wire arms; everything protocol-specific is delegated to the engine hook.
+    match rng.below(4) {
         0 => {
-            // ECH mode cycle.
-            m.clienthello.ech = Some(match m.clienthello.ech {
-                None | Some(EchMode::Grease) => EchMode::Off,
-                Some(EchMode::Off) => EchMode::Real,
-                Some(EchMode::Real) => EchMode::Grease,
-            });
-        }
-        1 => m.clienthello.alps = Some(!m.clienthello.alps.unwrap_or(true)),
-        2 => m.clienthello.pq_kem = Some(!m.clienthello.pq_kem.unwrap_or(true)),
-        3 => m.clienthello.grease_seed = Some(rng.next_u64() as u32),
-        4 => m.clienthello.extension_order = Some(Perm::PermuteSeed(rng.next_u64() as u32)),
-        5 => {
-            m.clienthello.padding_target = if rng.coin() {
-                Some(256 + rng.below(768) as u16)
-            } else {
-                None
-            }
-        }
-        6 => {
-            m.records.size_limit = if rng.coin() {
-                Some(512 + rng.below(3585) as u16)
-            } else {
-                None
-            }
-        }
-        7 => {
             m.wire.segment_split = match rng.below(3) {
                 0 => "none".to_string(),
                 1 => "sni_boundary".to_string(),
                 _ => format!("{}", 1 + rng.below(20)),
             }
         }
-        _ => {
+        1 => {
             m.wire.delay_ms = if rng.coin() {
                 Some(rng.below(30))
             } else {
                 None
             }
         }
+        _ => m.engine_params = engine.mutate_params(&m.engine_params, rng),
     }
     m
 }
 
-/// Recombine two gambits (GA crossover, §5.1): each of the three layers (A=ClientHello, B=records,
-/// C=wire) is taken independently from one parent — the layers are natural crossover units.
-/// `requires`/`anchor`/`id`/`version` follow parent `a`.
-pub fn crossover(a: &Gambit, b: &Gambit, rng: &mut SplitMix64) -> Gambit {
-    let pick =
-        |from_a: bool, x: &ClientHello, y: &ClientHello| if from_a { x.clone() } else { y.clone() };
-    Gambit {
+/// Recombine two genomes (GA crossover, §5.1): the generic `wire` layer is taken from one parent, and
+/// `engine_params` recombination is delegated to the engine hook. Header (`id`/`engine`/versions)
+/// follows parent `a`.
+pub fn crossover<D: EngineDiscovery>(
+    a: &Genome,
+    b: &Genome,
+    rng: &mut SplitMix64,
+    engine: &D,
+) -> Genome {
+    Genome {
         genome_version: a.genome_version,
         version: a.version,
         id: a.id.clone(),
-        anchor: a.anchor,
-        clienthello: pick(rng.coin(), &a.clienthello, &b.clienthello),
-        records: if rng.coin() {
-            a.records.clone()
-        } else {
-            b.records.clone()
-        },
+        engine: a.engine.clone(),
         wire: if rng.coin() {
             a.wire.clone()
         } else {
             b.wire.clone()
         },
-        requires: a.requires.clone(),
+        engine_params: engine.crossover_params(&a.engine_params, &b.engine_params, rng),
     }
 }
 
 /// Generate a population of `size` candidates from `seed`: the seed itself, then mutants (and
 /// crossovers once there are two parents). Deterministic given `rng`.
-pub fn generate_population(seed: &Gambit, size: usize, rng: &mut SplitMix64) -> Vec<Gambit> {
+pub fn generate_population<D: EngineDiscovery>(
+    seed: &Genome,
+    size: usize,
+    rng: &mut SplitMix64,
+    engine: &D,
+) -> Vec<Genome> {
     let mut pop = Vec::with_capacity(size.max(1));
     pop.push(seed.clone());
     while pop.len() < size {
-        let parent = &pop[rng.below(pop.len() as u64) as usize].clone();
+        let parent = pop[rng.below(pop.len() as u64) as usize].clone();
         let child = if pop.len() >= 2 && rng.coin() {
-            let other = &pop[rng.below(pop.len() as u64) as usize].clone();
-            crossover(parent, other, rng)
+            let other = pop[rng.below(pop.len() as u64) as usize].clone();
+            crossover(&parent, &other, rng, engine)
         } else {
-            mutate(parent, rng)
+            mutate(&parent, rng, engine)
         };
         pop.push(child);
     }
@@ -143,16 +134,82 @@ pub fn generate_population(seed: &Gambit, size: usize, rng: &mut SplitMix64) -> 
 }
 
 #[cfg(feature = "anytls")]
-pub use realize::{run_inner_loop, Fidelity, Scored};
+pub use realize::{run_inner_loop, Fidelity, Scored, TlsDiscovery};
 
-/// The realize-and-score half of the inner loop — needs the boring engine, so it's behind `anytls`.
+/// The realize-and-score half of the inner loop + the TLS engine's discovery hook — both need the
+/// boring engine (and TLS types), so they're behind `anytls`.
 #[cfg(feature = "anytls")]
 mod realize {
     use super::*;
     use flint_tls::anchor::capture_client_hello;
+    use flint_tls::gambit::{EchMode, Gambit, Perm};
     use flint_tls::ja4::{ja4, parse_client_hello, ClientHelloSummary};
     use flint_tls::Profile;
     use std::collections::BTreeSet;
+
+    /// The TLS engine's discovery hook (ADR 0013 §4 item 7). The opaque `engine_params` are a postcard
+    /// `Gambit`, so param evolution decodes it, perturbs one ClientHello/records knob, and re-encodes.
+    pub struct TlsDiscovery;
+
+    impl EngineDiscovery for TlsDiscovery {
+        fn mutate_params(&self, params: &[u8], rng: &mut SplitMix64) -> Vec<u8> {
+            let mut g = match postcard::from_bytes::<Gambit>(params) {
+                Ok(g) => g,
+                Err(_) => {
+                    tracing::warn!("TlsDiscovery: undecodable engine_params; left unchanged");
+                    return params.to_vec();
+                }
+            };
+            match rng.below(7) {
+                0 => {
+                    // ECH mode cycle.
+                    g.clienthello.ech = Some(match g.clienthello.ech {
+                        None | Some(EchMode::Grease) => EchMode::Off,
+                        Some(EchMode::Off) => EchMode::Real,
+                        Some(EchMode::Real) => EchMode::Grease,
+                    });
+                }
+                1 => g.clienthello.alps = Some(!g.clienthello.alps.unwrap_or(true)),
+                2 => g.clienthello.pq_kem = Some(!g.clienthello.pq_kem.unwrap_or(true)),
+                3 => g.clienthello.grease_seed = Some(rng.next_u64() as u32),
+                4 => g.clienthello.extension_order = Some(Perm::PermuteSeed(rng.next_u64() as u32)),
+                5 => {
+                    g.clienthello.padding_target = if rng.coin() {
+                        Some(256 + rng.below(768) as u16)
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    g.records.size_limit = if rng.coin() {
+                        Some(512 + rng.below(3585) as u16)
+                    } else {
+                        None
+                    }
+                }
+            }
+            postcard::to_stdvec(&g).unwrap_or_else(|_| params.to_vec())
+        }
+
+        fn crossover_params(&self, a: &[u8], b: &[u8], rng: &mut SplitMix64) -> Vec<u8> {
+            let (ga, gb) = match (
+                postcard::from_bytes::<Gambit>(a),
+                postcard::from_bytes::<Gambit>(b),
+            ) {
+                (Ok(ga), Ok(gb)) => (ga, gb),
+                _ => return a.to_vec(),
+            };
+            // Each TLS layer (A = ClientHello, B = records) taken independently; default to parent a.
+            let mut child = ga.clone();
+            if rng.coin() {
+                child.clienthello = gb.clienthello;
+            }
+            if rng.coin() {
+                child.records = gb.records;
+            }
+            postcard::to_stdvec(&child).unwrap_or_else(|_| a.to_vec())
+        }
+    }
 
     /// RFC 8701 GREASE check, mirroring `flint_tls::ja4`'s internal filter (not public): a
     /// GREASE-reserved 16-bit value has both bytes equal and of the form `0x?a`.
@@ -163,7 +220,7 @@ mod realize {
     /// A candidate's fidelity to the anchor, from realizing it through boring.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Fidelity {
-        /// `false` if boring declined the gambit (capability gate) or the ClientHello didn't parse.
+        /// `false` if boring declined the genome (capability gate) or the ClientHello didn't parse.
         pub realized: bool,
         /// The realized ClientHello's JA4, if realized.
         pub ja4: Option<String>,
@@ -177,7 +234,7 @@ mod realize {
     /// A scored candidate, ready for ranking / the outer-loop field trial.
     #[derive(Debug, Clone)]
     pub struct Scored {
-        pub gambit: Gambit,
+        pub genome: Genome,
         pub fidelity: Fidelity,
     }
 
@@ -206,16 +263,18 @@ mod realize {
     }
 
     /// Realize `g` through boring (the constrained executor) and parse the emitted ClientHello.
-    /// `None` if boring declines the gambit or no ClientHello is produced.
-    async fn realize_summary(g: &Gambit, sni: &str) -> Option<ClientHelloSummary> {
-        let resolved = Profile::for_boring(g).ok()?;
+    /// `None` if the genome isn't decodable as a TLS gambit, boring declines it, or no ClientHello is
+    /// produced.
+    async fn realize_summary(g: &Genome, sni: &str) -> Option<ClientHelloSummary> {
+        let gambit = postcard::from_bytes::<Gambit>(&g.engine_params).ok()?;
+        let resolved = Profile::for_boring(&gambit).ok()?;
         let ch = capture_client_hello(&resolved.profile, sni).await.ok()?;
         parse_client_hello(&ch)
     }
 
     /// Score one candidate against a pre-captured anchor summary + its JA4.
     async fn score(
-        g: &Gambit,
+        g: &Genome,
         anchor: &ClientHelloSummary,
         anchor_ja4: &str,
         sni: &str,
@@ -240,23 +299,23 @@ mod realize {
     }
 
     /// Run the inner loop: from `seed`, evolve over `generations`, each generation generating a
-    /// `pop_size` population (mutation + crossover), realizing + scoring every candidate's fidelity,
-    /// and selecting the fittest (lowest distance) **distinct-JA4** survivors as the next generation's
-    /// parents (novelty pressure, §5.1 — so the population doesn't collapse onto one fingerprint).
-    /// Returns the final population, ranked most-faithful first.
+    /// `pop_size` population (mutation + crossover via the [`TlsDiscovery`] hook), realizing + scoring
+    /// every candidate's fidelity, and selecting the fittest (lowest distance) **distinct-JA4**
+    /// survivors as the next generation's parents (novelty pressure, §5.1 — so the population doesn't
+    /// collapse onto one fingerprint). Returns the final population, ranked most-faithful first.
     ///
-    /// This is the cheap, no-censor pre-filter: its output is a fidelity-ranked, diverse candidate
-    /// set for the server-side outer loop to field-trial — it does not itself judge evasion.
+    /// This is the cheap, no-censor pre-filter: its output is a fidelity-ranked, diverse candidate set
+    /// for the server-side outer loop to field-trial — it does not itself judge evasion.
     pub async fn run_inner_loop(
-        seed: &Gambit,
+        seed: &Genome,
         pop_size: usize,
         generations: usize,
         rng_seed: u64,
         sni: &str,
     ) -> Vec<Scored> {
         let mut rng = SplitMix64::new(rng_seed);
-        // The reference is always the Chrome-137 anchor (boring's default profile), independent of
-        // the seed — a deviating seed is scored against genuine Chrome, not against itself.
+        // The reference is always the Chrome-137 anchor (boring's default profile), independent of the
+        // seed — a deviating seed is scored against genuine Chrome, not against itself.
         let anchor = match capture_client_hello(&Profile::default(), sni)
             .await
             .ok()
@@ -275,12 +334,12 @@ mod realize {
             let mut pop = Vec::with_capacity(pop_size.max(1));
             pop.extend(parents.iter().cloned());
             while pop.len() < pop_size {
-                let a = &pop[rng.below(pop.len() as u64) as usize].clone();
+                let a = pop[rng.below(pop.len() as u64) as usize].clone();
                 let child = if pop.len() >= 2 && rng.coin() {
-                    let b = &pop[rng.below(pop.len() as u64) as usize].clone();
-                    crossover(a, b, &mut rng)
+                    let b = pop[rng.below(pop.len() as u64) as usize].clone();
+                    crossover(&a, &b, &mut rng, &TlsDiscovery)
                 } else {
-                    mutate(a, &mut rng)
+                    mutate(&a, &mut rng, &TlsDiscovery)
                 };
                 pop.push(child);
             }
@@ -289,7 +348,7 @@ mod realize {
             for g in pop {
                 let fidelity = score(&g, &anchor, &anchor_ja4, sni).await;
                 scored.push(Scored {
-                    gambit: g,
+                    genome: g,
                     fidelity,
                 });
             }
@@ -307,7 +366,7 @@ mod realize {
                 .filter(|s| s.fidelity.realized)
                 .filter(|s| seen.insert(s.fidelity.ja4.clone()))
                 .take(pop_size.max(1))
-                .map(|s| s.gambit.clone())
+                .map(|s| s.genome.clone())
                 .collect();
             ranked = scored;
             if parents.is_empty() {
@@ -321,19 +380,32 @@ mod realize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flint_tls::gambit::{Records, Wire};
 
-    fn seed() -> Gambit {
-        Gambit {
-            genome_version: 1,
-            version: 1,
-            id: "seed".into(),
-            anchor: Default::default(),
-            clienthello: ClientHello::default(),
-            records: Records::default(),
-            wire: Wire::default(),
-            requires: Vec::new(),
+    /// A trivial protocol-blind hook for the generic GA tests: perturbs the opaque bytes without any
+    /// engine knowledge, proving the generic (wire) GA is engine-neutral and runs without boring.
+    struct FlipByte;
+
+    impl EngineDiscovery for FlipByte {
+        fn mutate_params(&self, params: &[u8], _rng: &mut SplitMix64) -> Vec<u8> {
+            let mut p = params.to_vec();
+            match p.first_mut() {
+                Some(b) => *b ^= 1,
+                None => p.push(1),
+            }
+            p
         }
+        fn crossover_params(&self, a: &[u8], _b: &[u8], _rng: &mut SplitMix64) -> Vec<u8> {
+            a.to_vec()
+        }
+    }
+
+    fn seed() -> Genome {
+        Genome::new(
+            "seed",
+            super::super::engine::TLS,
+            Default::default(),
+            vec![0u8; 4],
+        )
     }
 
     #[test]
@@ -348,34 +420,37 @@ mod tests {
     #[test]
     fn mutate_is_reproducible_and_changes_the_genome() {
         let s = seed();
-        let m1 = mutate(&s, &mut SplitMix64::new(7));
-        let m2 = mutate(&s, &mut SplitMix64::new(7));
+        let m1 = mutate(&s, &mut SplitMix64::new(7), &FlipByte);
+        let m2 = mutate(&s, &mut SplitMix64::new(7), &FlipByte);
         assert_eq!(m1, m2, "same seed → same mutation");
         // Over a spread of seeds, a mutation must actually change something.
-        let changed = (0..32).any(|k| mutate(&s, &mut SplitMix64::new(k)) != s);
+        let changed = (0..32).any(|k| mutate(&s, &mut SplitMix64::new(k), &FlipByte) != s);
         assert!(changed, "mutation should alter the genome");
     }
 
     #[test]
-    fn crossover_takes_each_layer_from_a_parent() {
+    fn crossover_uses_generic_wire_and_delegates_params() {
         let mut a = seed();
-        a.clienthello.ech = Some(EchMode::Off);
         a.wire.segment_split = "sni_boundary".into();
+        a.engine_params = vec![0xAA];
         let mut b = seed();
-        b.clienthello.ech = Some(EchMode::Grease);
         b.wire.segment_split = "none".into();
+        b.engine_params = vec![0xBB];
         for k in 0..16 {
-            let c = crossover(&a, &b, &mut SplitMix64::new(k));
-            assert!(c.clienthello == a.clienthello || c.clienthello == b.clienthello);
-            assert!(c.wire == a.wire || c.wire == b.wire);
+            let c = crossover(&a, &b, &mut SplitMix64::new(k), &FlipByte);
+            assert!(c.wire == a.wire || c.wire == b.wire, "wire from one parent");
+            assert_eq!(
+                c.engine_params, a.engine_params,
+                "FlipByte crossover delegates to parent a's params"
+            );
         }
     }
 
     #[test]
     fn generate_population_is_sized_and_reproducible() {
         let s = seed();
-        let p1 = generate_population(&s, 12, &mut SplitMix64::new(99));
-        let p2 = generate_population(&s, 12, &mut SplitMix64::new(99));
+        let p1 = generate_population(&s, 12, &mut SplitMix64::new(99), &FlipByte);
+        let p2 = generate_population(&s, 12, &mut SplitMix64::new(99), &FlipByte);
         assert_eq!(p1.len(), 12);
         assert_eq!(p1, p2);
         assert_eq!(p1[0], s, "the seed leads the population");
@@ -386,25 +461,33 @@ mod tests {
 mod realize_tests {
     use super::*;
     use flint_tls::anchor::ANCHOR_JA4;
-    use flint_tls::gambit::{Records, Wire};
+    use flint_tls::gambit::{ClientHello, Gambit, Records, Wire};
 
-    fn seed() -> Gambit {
-        Gambit {
+    /// A neutral genome for the `tls` engine wrapping `clienthello` (records/wire default).
+    fn tls_seed(clienthello: ClientHello) -> Genome {
+        let gambit = Gambit {
             genome_version: 1,
             version: 1,
             id: "seed".into(),
             anchor: Default::default(),
-            clienthello: ClientHello::default(),
+            clienthello,
             records: Records::default(),
             wire: Wire::default(),
             requires: Vec::new(),
-        }
+        };
+        Genome::new(
+            "seed",
+            super::super::engine::TLS,
+            Default::default(),
+            postcard::to_stdvec(&gambit).expect("encode gambit"),
+        )
     }
 
     #[tokio::test]
     async fn the_seed_realizes_to_the_anchor() {
         // An empty genome → boring's default profile → the anchor ClientHello: distance 0, matches.
-        let ranked = run_inner_loop(&seed(), 1, 1, 1, "example.com").await;
+        let ranked =
+            run_inner_loop(&tls_seed(ClientHello::default()), 1, 1, 1, "example.com").await;
         assert_eq!(ranked.len(), 1);
         let f = &ranked[0].fidelity;
         assert!(f.realized);
@@ -416,9 +499,11 @@ mod realize_tests {
     #[tokio::test]
     async fn dropping_alps_lowers_fidelity() {
         // ALPS off removes the application_settings extension → a different JA4, nonzero distance.
-        let mut g = seed();
-        g.clienthello.alps = Some(false);
-        let ranked = run_inner_loop(&g, 1, 1, 1, "example.com").await;
+        let seed = tls_seed(ClientHello {
+            alps: Some(false),
+            ..Default::default()
+        });
+        let ranked = run_inner_loop(&seed, 1, 1, 1, "example.com").await;
         let f = &ranked[0].fidelity;
         assert!(f.realized);
         assert!(
@@ -430,7 +515,8 @@ mod realize_tests {
 
     #[tokio::test]
     async fn loop_ranks_most_faithful_first_and_stays_diverse() {
-        let ranked = run_inner_loop(&seed(), 10, 2, 123, "example.com").await;
+        let ranked =
+            run_inner_loop(&tls_seed(ClientHello::default()), 10, 2, 123, "example.com").await;
         assert!(!ranked.is_empty());
         // Sorted: realized-first, then non-decreasing distance.
         for w in ranked.windows(2) {
