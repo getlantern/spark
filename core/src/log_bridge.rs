@@ -138,22 +138,27 @@ impl Subscriber for BridgeSubscriber {
         // there — the bridge forwards itself instead, applying the same shared policy
         // (`capture_decision`: self-suppression, level policy, capture knob).
         //
-        // Free where diag never initializes: `emit`/`emit_error` are no-ops until a
-        // sink installs, so hosts that never call a diag init see zero behavior
-        // change. No feedback loop either: diag internals log at debug! ONLY with
+        // Free where diag never initializes: the `installed()` guard sits BEFORE any
+        // event construction because this bridge is the NE's subscriber — it sits on
+        // the packet path's logging — so hosts that never init diag must pay zero
+        // allocations here, not just have `emit` drop the finished event. No
+        // feedback loop either: diag internals log at debug! ONLY with
         // `spark_core::diag*` targets, which `capture_decision` suppresses
         // unconditionally (the host callback above still receives them — useful in
         // Console.app — but they never re-enter the sink).
-        if let Some(diag_level) = crate::diag::layer::capture_decision(meta.level(), meta.target())
-        {
-            // Message + non-message fields (without the "[target] " prefix — the
-            // target rides as its own event field, mirroring DiagLayer/events::log).
-            let msg = format!("{}{}", visitor.message, visitor.fields);
-            let ev = crate::diag::events::log(diag_level, &msg, meta.target());
-            if diag_level == crate::diag::DiagLevel::Error {
-                crate::diag::emit_error(ev);
-            } else {
-                crate::diag::emit(ev);
+        if crate::diag::sink::installed() {
+            if let Some(diag_level) =
+                crate::diag::layer::capture_decision(meta.level(), meta.target())
+            {
+                // Message + non-message fields (without the "[target] " prefix — the
+                // target rides as its own event field, mirroring DiagLayer/events::log).
+                let msg = format!("{}{}", visitor.message, visitor.fields);
+                let ev = crate::diag::events::log(diag_level, &msg, meta.target());
+                if diag_level == crate::diag::DiagLevel::Error {
+                    crate::diag::emit_error(ev);
+                } else {
+                    crate::diag::emit(ev);
+                }
             }
         }
     }

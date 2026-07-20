@@ -1,11 +1,22 @@
 //! Diagnostics host for a TUNNEL process (design spec §5 / Phase B: the NE sysext on
 //! macOS today). Mirrors the app-process host (the plugin's `diag_host.rs`): one-time
-//! wiring of sink (spool + backup log), panic hook, unclean-exit sentinel, and the
-//! config-gated OTLP uploader — fed by re-parsing the tunnel's own `config_raw.json`
-//! cache. There is NO tracing-subscriber layer here: in the NE the `log_bridge` owns
-//! the process-global subscriber slot and forwards into the sink itself (see
-//! `log_bridge::BridgeSubscriber::event` + `layer::capture_decision`), so installing
-//! this sink is what turns that forwarding on.
+//! wiring of sink (spool + backup log), panic hook, and the config-gated OTLP
+//! uploader — fed by re-parsing the tunnel's own `config_raw.json` cache — plus a
+//! per-SESSION unclean-exit sentinel (see below). There is NO tracing-subscriber
+//! layer here: in the NE the `log_bridge` owns the process-global subscriber slot and
+//! forwards into the sink itself (see `log_bridge::BridgeSubscriber::event` +
+//! `layer::capture_decision`), so installing this sink is what turns that
+//! forwarding on.
+//!
+//! ## Sentinel lifetime — one tunnel SESSION, not one process
+//! The NE sysext process persists across stopTunnel→startTunnel, so [`init`] runs
+//! once per tunnel session while the once-only wiring (sink, panic hook, uploader,
+//! config re-parse loop) runs once per process. The unclean-exit sentinel is the
+//! per-session piece: armed on EVERY `init` (session start) and disarmed by
+//! [`disarm_sentinel`] at clean stop — so every session is crash-protected. (An
+//! earlier design early-returned whole on the second `init`, leaving the sentinel
+//! disarmed after the first clean stop: a crash in any later session in the same
+//! process went undetected.)
 //!
 //! ## Device identity (deliberate split)
 //! The NE and the app run in separate containers by platform constraint — the root
@@ -26,7 +37,7 @@
 //! ONLY (diag internals must never re-enter the capture pipeline at a captured level).
 
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use super::otlp::ResourceAttrs;
@@ -53,20 +64,32 @@ struct TunnelDiagState {
 /// Set once at the END of [`init_with_sink`]; never set when diagnostics are off.
 static STATE: OnceLock<TunnelDiagState> = OnceLock::new();
 
-/// The armed unclean-exit sentinel, set by [`arm_and_register`] the instant
-/// `SessionSentinel::arm` returns. Deliberately separate from [`STATE`], which is
-/// only set at the END of init (after uploader construction): the clean-stop disarm
-/// ([`disarm_sentinel`], called from the NE's stop path) races the rest of init, so a
-/// clean fast-stop in that window would find a `STATE`-backed accessor `None`, leave
-/// the marker armed, and flag a false `error.unclean_exit` on the next launch.
-/// Armed-to-reachable must be one atomic step. (Same rationale and pattern as the
-/// plugin's `diag_host::SENTINEL`.)
-static SENTINEL: OnceLock<Arc<SessionSentinel>> = OnceLock::new();
+/// The CURRENT session's armed unclean-exit sentinel, set by [`arm_and_register`]
+/// the instant `SessionSentinel::arm` returns. Deliberately separate from [`STATE`],
+/// which is only set at the END of init (after uploader construction): the
+/// clean-stop disarm ([`disarm_sentinel`], called from the NE's stop path) races the
+/// rest of init, so a clean fast-stop in that window would find a `STATE`-backed
+/// accessor `None`, leave the marker armed, and flag a false `error.unclean_exit` on
+/// the next launch. Armed-to-reachable must be one atomic step. (Same rationale and
+/// pattern as the plugin's `diag_host::SENTINEL`.)
+///
+/// A `Mutex<Option<..>>`, NOT a OnceLock: the sentinel is per tunnel SESSION and the
+/// NE process outlives sessions (see the module doc), so every [`init`] re-arms and
+/// replaces the stored Arc.
+static SENTINEL: Mutex<Option<Arc<SessionSentinel>>> = Mutex::new(None);
 
-/// One-shot diagnostics init for a TUNNEL process (NE sysext today). **Must be called
-/// from within a tokio runtime** — the sink writer, the config re-parse task, and the
-/// uploader all `tokio::spawn`. Infallible; a second call is a no-op (the global sink
-/// OnceLock rejects the duplicate install and we bail).
+/// A poisoned lock means another thread panicked while swapping/reading the slot;
+/// the `Option` inside is still structurally sound, so keep going (same posture as
+/// `sink::lock_files` and `sentinel::lock_disarmed`).
+fn lock_sentinel() -> MutexGuard<'static, Option<Arc<SessionSentinel>>> {
+    SENTINEL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Per-session diagnostics init for a TUNNEL process (NE sysext today). **Must be
+/// called from within a tokio runtime** — the sink writer, the config re-parse task,
+/// and the uploader all `tokio::spawn`. Infallible. The first call in a process does
+/// the full once-only wiring; later calls (a new tunnel session in the same process)
+/// only re-arm the unclean-exit sentinel (see the module doc).
 ///
 /// `data_dir` is the tunnel's own cache dir — the same one its config fetch uses
 /// (`fetch::run_loop`), so the `device_id` and the re-parsed `config_raw.json` match
@@ -77,14 +100,25 @@ pub fn init(data_dir: &Path, version: &str) {
     if std::env::var("SPARK_DIAGNOSTICS").as_deref() == Ok("off") {
         return;
     }
+    // A later session in this same process (the NE persists across
+    // stopTunnel→startTunnel): the once-only wiring is already up from the first
+    // call — only the sentinel is per-session, so re-arm it and bail. Checked
+    // BEFORE constructing a sink: a throwaway second `DiagSink` would race the live
+    // one (its constructor folds any leftover take-file into its own spool handle,
+    // colliding with an uploader take in flight).
+    if super::sink::installed() {
+        rearm_sentinel(data_dir, version);
+        return;
+    }
     // The sink: ring + `diagnostics.jsonl` spool + `diag.log` backup, directly under
     // the tunnel's data dir. An unwritable dir means no diagnostics this run.
     let Ok(sink) = DiagSink::new(data_dir, "tunnel") else {
         return;
     };
-    // First-install-wins (OnceLock). Bail if an earlier caller beat us to it:
-    // continuing would wire a second uploader rotating the same spool/log files as
-    // the installed one, while emit() feeds only the winner.
+    // First-install-wins (OnceLock). Bail if a concurrent caller won the race
+    // between the installed() check above and here: continuing would wire a second
+    // uploader rotating the same spool/log files as the winner's, while emit() feeds
+    // only the winner — and the winner's init arms the sentinel itself.
     if !super::install(sink.clone()) {
         tracing::debug!("diag: sink already installed — skipping duplicate tunnel host init");
         return;
@@ -97,7 +131,10 @@ pub fn init(data_dir: &Path, version: &str) {
 /// idempotent, so both the NE's `stop()` path and the lantern-api loop's clean exit
 /// may call it (belt and suspenders).
 pub fn disarm_sentinel() {
-    if let Some(s) = SENTINEL.get() {
+    // Clone out of the lock so the marker-file I/O in disarm() runs without holding
+    // the slot (a racing re-arm swaps the Arc, not the sentinel we're disarming).
+    let current = lock_sentinel().clone();
+    if let Some(s) = current {
         s.disarm();
     }
 }
@@ -134,16 +171,19 @@ fn init_with_sink(sink: Arc<DiagSink>, data_dir: &Path, version: &str) {
     // (process-lifetime, genuinely fire-and-forget) task. This piggybacks on the
     // tunnel's own poll loop rewriting the cache, without coupling to the fetch path.
     let (cfg_tx, cfg_rx) = tokio::sync::watch::channel(otel_from_cache(&cache_path));
-    // Cloned from the SENTINEL lock (the single source of truth since
-    // arm_and_register) rather than a local binding.
-    let beat_sentinel = SENTINEL.get().cloned();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(CONFIG_REPARSE_INTERVAL).await;
             // The sentinel heartbeat rides this existing 60s tick rather than owning
             // a timer task: one process-lifetime loop instead of two, and ~1 min
-            // last_alive resolution is all an unclean-exit timestamp needs.
-            if let Some(s) = &beat_sentinel {
+            // last_alive resolution is all an unclean-exit timestamp needs. Read the
+            // CURRENT sentinel from the lock each tick (never a captured Arc): this
+            // task outlives tunnel sessions and re-arms replace the stored sentinel,
+            // so beats must follow the live session's marker, not keep poking a
+            // disarmed prior session's. Cloned out so the guard isn't held across
+            // the marker-file I/O.
+            let sentinel = lock_sentinel().clone();
+            if let Some(s) = sentinel {
                 s.beat();
             }
             let next = otel_from_cache(&cache_path);
@@ -171,9 +211,28 @@ fn init_with_sink(sink: Arc<DiagSink>, data_dir: &Path, version: &str) {
     });
 }
 
-/// Arm the unclean-exit sentinel in `dir` and make it reachable via [`SENTINEL`] in
-/// the same step, returning the previous session's leftover `error.unclean_exit`
-/// event (if any) for the caller to emit.
+/// Sentinel-only init for the second and later tunnel sessions in one process: arm a
+/// fresh sentinel — replacing the previous session's, which that session's clean
+/// stop disarmed — and emit any leftover marker's event through the already-installed
+/// global sink.
+///
+/// In practice the leftover emit is dead code on this path: a leftover here would
+/// mean the previous session in this same process crashed, but a crash kills the
+/// whole process, so the next `init` is a FIRST init in a fresh process and the
+/// leftover surfaces there instead. The arm-time check is harmless, and keeping it
+/// covers marker-file weirdness (partial disarm I/O failure, an externally restored
+/// file) rather than special-casing it away.
+fn rearm_sentinel(dir: &Path, version: &str) {
+    if let Some(ev) = arm_and_register(dir, version) {
+        super::emit_error(ev);
+    }
+}
+
+/// Arm the unclean-exit sentinel in `dir` and make it the CURRENT one — the one
+/// [`disarm_sentinel`] and the heartbeat reach via [`SENTINEL`] — in the same step,
+/// returning the previous session's leftover `error.unclean_exit` event (if any) for
+/// the caller to emit. Called once per tunnel SESSION (first init and every re-arm),
+/// not once per process.
 ///
 /// Armed-to-reachable must be one atomic step: the moment `SessionSentinel::arm` has
 /// written the marker, the clean-stop path must be able to disarm it — the stop path
@@ -182,11 +241,7 @@ fn init_with_sink(sink: Arc<DiagSink>, data_dir: &Path, version: &str) {
 /// accepted window as a crash before arm).
 fn arm_and_register(dir: &Path, version: &str) -> Option<DiagEvent> {
     let (sentinel, prev) = SessionSentinel::arm(dir, version);
-    // First-set-wins. A second call can't happen in production (the global sink
-    // install gates duplicate host init before this point); if one ever did, the
-    // registered sentinel owns the same marker path, so its beats/disarm still
-    // cover it.
-    let _ = SENTINEL.set(Arc::new(sentinel));
+    *lock_sentinel() = Some(Arc::new(sentinel));
     prev
 }
 
@@ -338,20 +393,36 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The process-global [`SENTINEL`] slot is mutable (per-session re-arm), so the
+    /// tests that arm/disarm through the module globals serialize here — otherwise a
+    /// parallel test could swap the stored sentinel between one test's arm and its
+    /// disarm assertions.
+    static SENTINEL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn serialize_sentinel_tests() -> MutexGuard<'static, ()> {
+        SENTINEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn read_marker(dir: &Path) -> serde_json::Value {
+        let raw = fs::read_to_string(dir.join("diag.session")).expect("marker must exist");
+        serde_json::from_str(&raw).expect("marker parses")
+    }
+
     // The one test allowed to exercise init_with_sink: it sets the process-global
-    // SENTINEL and STATE OnceLocks, which can only be set once per process — so it
-    // owns the whole lifecycle (init → files exist → disarm). init() itself is NOT
+    // STATE OnceLock, which can only be set once per process — so it owns the
+    // uploader-wiring lifecycle (init → files exist → disarm). init() itself is NOT
     // driven here: it installs the process-global diag SINK, which would leak into
     // every other test in this binary (the documented constraint that init_with_sink
     // exists to work around).
     #[tokio::test]
     async fn init_with_sink_wires_files_sentinel_and_disarm() {
+        let _serial = serialize_sentinel_tests();
         let dir = test_dir("init_with_sink");
-        assert!(
-            SENTINEL.get().is_none(),
-            "no sentinel before init — disarm_sentinel must be a safe no-op"
-        );
-        disarm_sentinel(); // must not panic pre-init
+        // Safe whenever: a no-op before any arm, idempotent after (whether the slot
+        // is empty or holds another test's already-disarmed sentinel).
+        disarm_sentinel();
 
         let sink = DiagSink::new(&dir, "tunnel").expect("sink in tempdir");
         init_with_sink(sink, &dir, "9.9.9");
@@ -361,7 +432,7 @@ mod tests {
         assert!(dir.join("diagnostics.jsonl").exists());
         assert!(dir.join("diag.log").exists());
         assert!(dir.join("diag.session").exists(), "sentinel must be armed");
-        assert!(SENTINEL.get().is_some(), "sentinel reachable after init");
+        assert!(lock_sentinel().is_some(), "sentinel reachable after init");
         assert!(STATE.get().is_some(), "uploader state set after init");
 
         // Clean-stop path: disarm removes the marker so next launch is clean.
@@ -370,6 +441,69 @@ mod tests {
             !dir.join("diag.session").exists(),
             "disarm_sentinel must remove the marker"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Re-arm across tunnel sessions in ONE process (the NE sysext persists across
+    // stopTunnel→startTunnel). Drives the exact pieces init()'s re-arm path uses —
+    // arm_and_register, disarm_sentinel, and the SENTINEL slot the beat task reads —
+    // NOT init()/rearm_sentinel themselves: init() installs the process-global SINK
+    // (leaks into every other test) and rearm_sentinel only adds emit_error on top,
+    // a no-op without that global sink. So what this can't cover is the leftover
+    // event reaching the global sink and the 60s beat timer itself; the
+    // beats-follow-re-arms property is asserted by beating through the stored Arc
+    // the task clones each tick.
+    #[test]
+    fn rearm_after_disarm_protects_second_session() {
+        let _serial = serialize_sentinel_tests();
+        let dir = test_dir("rearm_second_session");
+
+        // Session 1: arm, then clean stop.
+        let prev = arm_and_register(&dir, "1.0.0");
+        assert!(prev.is_none(), "fresh dir must not flag an unclean exit");
+        assert!(dir.join("diag.session").exists());
+        disarm_sentinel();
+        assert!(
+            !dir.join("diag.session").exists(),
+            "clean stop removes the marker"
+        );
+
+        // Session 2 in the SAME process: the re-arm must write a fresh marker (the
+        // old OnceLock design left the slot holding session 1's disarmed sentinel,
+        // so a crash from here on was invisible).
+        let prev = arm_and_register(&dir, "2.0.0");
+        assert!(
+            prev.is_none(),
+            "a cleanly-stopped previous session must not flag an unclean exit"
+        );
+        let marker = read_marker(&dir);
+        assert_eq!(
+            marker["version"], "2.0.0",
+            "marker must be the NEW session's"
+        );
+
+        // Beats follow the re-arm: the beat task clones the stored Arc each tick,
+        // and that Arc must now be session 2's live sentinel (session 1's is
+        // disarmed — beating it would be a no-op and last_alive would go stale).
+        let current = lock_sentinel().clone().expect("re-arm stores the sentinel");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        current.beat();
+        let beaten = read_marker(&dir);
+        assert!(
+            beaten["last_alive"].as_u64().unwrap() > marker["last_alive"].as_u64().unwrap(),
+            "beat must refresh the re-armed session's marker"
+        );
+
+        // Session 2 "crashes" (a real crash kills the process, so simulate by never
+        // disarming): the next arm must surface it — the re-armed session was
+        // crash-protected.
+        let ev = arm_and_register(&dir, "3.0.0")
+            .expect("a leftover marker from the re-armed session must flag an unclean exit");
+        assert_eq!(ev.kind, "error.unclean_exit");
+        assert_eq!(ev.fields["prev_version"], "2.0.0");
+
+        // Leave the slot disarmed and the dir clean for other tests.
+        disarm_sentinel();
         let _ = fs::remove_dir_all(&dir);
     }
 }

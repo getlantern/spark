@@ -5,8 +5,12 @@
 //! launch means the previous session died without running its exit path, and is
 //! surfaced as an `error.unclean_exit` event for the §C2a error fast path.
 //!
-//! One sentinel per process, host-owned: same-process re-arm is not supported (the
-//! host arms once at init and holds the sentinel for the process lifetime).
+//! One sentinel per SESSION, host-owned. A `SessionSentinel` instance arms once and
+//! is never itself re-armed; a host whose process outlives sessions (the NE sysext
+//! persists across stopTunnel→startTunnel — see `tunnel_host`) arms a FRESH instance
+//! per session, replacing the previous (disarmed) one, so every session is
+//! crash-protected. Hosts whose process IS the session (app, service) arm once at
+//! init and hold that sentinel for the process lifetime.
 //!
 //! A Rust panic leaves the marker too — an aborting panic ends the process without
 //! `RunEvent::Exit`, so no disarm runs. One panic therefore produces BOTH an
