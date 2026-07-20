@@ -190,9 +190,14 @@ crate (`no_std`, zero runtime deps) generic over a crypto-provider trait — the
 ECDH, HKDF key schedule, FSChaCha20 length cipher, FSChaCha20Poly1305 rekeying packets, and the
 both-roles handshake state machine. It is validated byte-exact against the official BIP324
 packet-encoding vectors (incl. the 224-message rekey boundary) and a core-vs-core handshake round-trip.
-Next: the WASM guest (`modules/bip324`) wraps it with a host-fn provider (mechanical 1:1 shim of the
-`env` primitives) + the `handshake_step`/`transform_*`/`init` ABI, then wiring `run_handshake` into a
-dial path + the transport/config surface, then the bitcoind server + side-door MAC.
+The WASM guest **`modules/bip324`** now wraps it: a host-fn `Bip324Crypto` provider (a mechanical 1:1
+shim of the `env` primitives) + the `init` / `handshake_step` / `transform_*` ABI, built + signed into a
+committed `bip324.spkw`. Validated end-to-end by running an initiator + a responder instance against each
+other through the real `TransformModule` runtime (handshake + app round-trip incl. a fragmented,
+past-the-rekey burst) — a full BIP324 transport as a signed WASM module + config, crypto entirely via
+host primitives. Next: wiring `run_handshake` into a dial path + the transport/config surface (PR3), then
+the bitcoind server + keyed-garbage side-door MAC (PR4); the live rust-bitcoin `bip324` interop lands
+with that real end-to-end.
 
 ## 8. Tradeoffs (stated plainly)
 

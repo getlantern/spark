@@ -2152,6 +2152,91 @@ mod tests {
         assert_ne!(shared_module, &[0u8; 32], "shared x must be non-trivial");
     }
 
+    /// End-to-end proof of the BIP324 WASM module (ADR 0013 §7 step 4, PR2): load the committed, signed
+    /// `bip324.spkw` through the production verify path, instantiate an initiator + a responder from it,
+    /// drive the handshake through the real runtime + host-fn provider, and round-trip application bytes
+    /// both ways (incl. a fragmented, past-the-rekey burst). Gated on `bip324` so the module's
+    /// secp256k1 host imports resolve.
+    #[cfg(feature = "bip324")]
+    #[test]
+    fn bip324_module_handshakes_and_round_trips() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/bip324.spkw");
+        let artifact = std::fs::read(&path).expect("read the committed bip324.spkw fixture");
+        let module = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify + compile the signed bip324 module")
+            .into_module();
+
+        // Config blob: [role][network_magic(4)][garbage…]. Mainnet magic; a little garbage each side.
+        const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+        let cfg = |role: u8, garbage: &[u8]| {
+            let mut c = vec![role];
+            c.extend_from_slice(&MAGIC);
+            c.extend_from_slice(garbage);
+            c
+        };
+        let mut initiator = module
+            .instantiate_with_config(&cfg(0, b"initiator garbage"))
+            .expect("instantiate initiator");
+        let mut responder = module
+            .instantiate_with_config(&cfg(1, b"resp garbage"))
+            .expect("instantiate responder");
+
+        // Two independent wasm instances (each has its own memory + state). Drive the 1.5-RTT handshake
+        // by shuttling handshake_step outputs, emit-at-connect first.
+        let (mut to_r, mut init_done) = initiator.handshake_step(&[]).expect("init open");
+        let (mut to_i, mut resp_done) = responder.handshake_step(&[]).expect("resp open");
+        for _ in 0..8 {
+            if !init_done && !to_i.is_empty() {
+                let (out, done) = initiator
+                    .handshake_step(&std::mem::take(&mut to_i))
+                    .expect("init step");
+                to_r.extend_from_slice(&out);
+                init_done = done;
+            }
+            if !resp_done && !to_r.is_empty() {
+                let (out, done) = responder
+                    .handshake_step(&std::mem::take(&mut to_r))
+                    .expect("resp step");
+                to_i.extend_from_slice(&out);
+                resp_done = done;
+            }
+            if init_done && resp_done {
+                break;
+            }
+        }
+        assert!(init_done && resp_done, "both sides complete the handshake");
+
+        // App bytes round-trip both directions through the steady-state transforms.
+        let wire = initiator
+            .transform_out(b"hello via wasm bip324")
+            .expect("out");
+        assert_eq!(
+            responder.transform_in(&wire).expect("in"),
+            b"hello via wasm bip324"
+        );
+        let wire = responder.transform_out(b"pong").expect("out");
+        assert_eq!(initiator.transform_in(&wire).expect("in"), b"pong");
+
+        // A burst past the 224-message rekey, fed to transform_in in 5-byte fragments (buffering path).
+        let mut stream = Vec::new();
+        let mut expected = Vec::new();
+        for i in 0..300u32 {
+            let msg = format!("msg {i}");
+            stream.extend_from_slice(&initiator.transform_out(msg.as_bytes()).expect("out"));
+            expected.extend_from_slice(msg.as_bytes());
+        }
+        let mut recovered = Vec::new();
+        for chunk in stream.chunks(5) {
+            recovered.extend_from_slice(&responder.transform_in(chunk).expect("in"));
+        }
+        assert_eq!(
+            recovered, expected,
+            "all messages recovered across the rekey"
+        );
+    }
+
     #[cfg(feature = "bip324")]
     #[test]
     fn host_secp256k1_ellswift_ecdh_rejects_an_unknown_key_id() {
