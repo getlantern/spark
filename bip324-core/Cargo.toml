@@ -1,0 +1,23 @@
+[package]
+name = "bip324-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sans-io BIP324 (Bitcoin v2 P2P encrypted transport) protocol core, generic over a crypto provider (ADR 0013 §7 step 4)."
+
+# Pure, no-I/O, `no_std` crate. All crypto flows through the `Bip324Crypto` provider trait, so this
+# crate has ZERO runtime dependencies and compiles into the wasm dynamic-transport guest (PR2, provider
+# = the `env` host fns) as well as any native engine (provider = RustCrypto/secp256k1). See
+# docs/bitcoin-transport-design.md and docs/dynamic-transport-framework-design.md §5.
+[dependencies]
+
+[dev-dependencies]
+# A `NativeCrypto` provider that backs the protocol logic with real crypto, purely to validate the core
+# against the official BIP324 packet-encoding vectors (the canonical byte-exact oracle) and a
+# core-vs-core handshake round-trip. Test-only — never in the guest. (Live interop against the
+# rust-bitcoin `bip324` crate is exercised end-to-end in PR2, where the signed wasm module runs against
+# it; PR1's vectors are the same ones that crate is itself validated against.)
+secp256k1 = { workspace = true }   # ellswift keygen + X-only ECDH (raw x)
+ring = { workspace = true }        # SHA-256, HKDF-SHA256, ChaCha20-Poly1305 AEAD
+chacha20 = { workspace = true }    # raw ChaCha20 block function (length-cipher keystream)

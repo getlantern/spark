@@ -183,7 +183,16 @@ prerequisite — the **Rust→wasm32 build-and-sign pipeline** that was missing 
 `wat!`) — now exists. `modules/obfs-xor` is a reference guest module compiled and signed by
 `scripts/build-module.sh` (via the `sign-module` tool, `--features module-signer`) into a committed
 `.spkw` fixture that a toolchain-free `cargo test` loads through the production
-`ModuleVerifier::pinned().verify` path and round-trips. The BIP324 module itself is the next increment.
+`ModuleVerifier::pinned().verify` path and round-trips.
+
+**Step 4 in progress (2026-07-20):** the BIP324 protocol logic now lives in a sans-io **`bip324-core`**
+crate (`no_std`, zero runtime deps) generic over a crypto-provider trait — the ellswift tagged-hash
+ECDH, HKDF key schedule, FSChaCha20 length cipher, FSChaCha20Poly1305 rekeying packets, and the
+both-roles handshake state machine. It is validated byte-exact against the official BIP324
+packet-encoding vectors (incl. the 224-message rekey boundary) and a core-vs-core handshake round-trip.
+Next: the WASM guest (`modules/bip324`) wraps it with a host-fn provider (mechanical 1:1 shim of the
+`env` primitives) + the `handshake_step`/`transform_*`/`init` ABI, then wiring `run_handshake` into a
+dial path + the transport/config surface, then the bitcoind server + side-door MAC.
 
 ## 8. Tradeoffs (stated plainly)
 
