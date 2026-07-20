@@ -1,35 +1,36 @@
 #!/usr/bin/env bash
-# Build a dynamic-transport guest module (ADR 0013 §7) from Rust to wasm32 and sign it into the
-# `.spkw` artifact the core's wasm-transport test loads. This is the ONLY step that needs the wasm32
-# toolchain — `cargo build` / `cargo test` / CI never touch it; they consume the committed artifact.
+# Build the dynamic-transport guest modules (ADR 0013 §7) from Rust to wasm32 and sign each into the
+# `.spkw` artifact the core's wasm-transport tests load. This is the ONLY step that needs the wasm32
+# toolchain — `cargo build` / `cargo test` / CI never touch it; they consume the committed artifacts.
 #
-# Regenerate the reference fixture after editing modules/obfs-xor:
+# Regenerate the committed fixtures after editing a module (or bip324-core):
 #     bash scripts/build-module.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# The reference module. A second module (e.g. BIP324) adds another block like this.
-MODULE=obfs-xor          # crate + artifact name
-LIB=obfs_xor             # cdylib output stem (crate name, `-` → `_`)
-VERSION=1
-OUT="core/tests/fixtures/wasm/${MODULE}.spkw"
-
 TARGET=wasm32-unknown-unknown
-
 echo "==> ensuring $TARGET is installed" >&2
 rustup target list --installed | grep -qx "$TARGET" || rustup target add "$TARGET"
 
-echo "==> building modules/$MODULE (release, $TARGET)" >&2
-# --locked: the artifact is committed, so build against the committed lockfiles (no silent resolve).
-cargo build --release --locked --target "$TARGET" --manifest-path "modules/$MODULE/Cargo.toml"
-WASM="modules/$MODULE/target/$TARGET/release/${LIB}.wasm"
+# build_and_sign <module-dir/artifact-name> <cdylib-output-stem> <version>
+build_and_sign() {
+    local module="$1" lib="$2" version="$3"
+    local out="core/tests/fixtures/wasm/${module}.spkw"
+    echo "==> building modules/$module (release, $TARGET)" >&2
+    # --locked: the artifacts are committed, so build against the committed lockfiles (no silent resolve).
+    cargo build --release --locked --target "$TARGET" --manifest-path "modules/$module/Cargo.toml"
+    local wasm="modules/$module/target/$TARGET/release/${lib}.wasm"
 
-echo "==> signing $WASM with the dev key -> $OUT" >&2
-mkdir -p "$(dirname "$OUT")"
-# `sign-module` lives behind the `module-signer` feature (never in a shipped build). `--dev` uses the
-# development key that `ModuleVerifier::pinned()` accepts in a debug build; a release artifact would
-# pass `--key-pkcs8 <real-key>` instead.
-cargo run --quiet --locked -p spark-core --features module-signer --bin sign-module -- \
-    --dev --name "$MODULE" --version "$VERSION" --wasm "$WASM" --out "$OUT"
+    echo "==> signing $wasm with the dev key -> $out" >&2
+    mkdir -p "$(dirname "$out")"
+    # `sign-module` lives behind the `module-signer` feature (never in a shipped build). `--dev` uses the
+    # development key that `ModuleVerifier::pinned()` accepts in a debug build; a release artifact would
+    # pass `--key-pkcs8 <real-key>` instead.
+    cargo run --quiet --locked -p spark-core --features module-signer --bin sign-module -- \
+        --dev --name "$module" --version "$version" --wasm "$wasm" --out "$out"
+    echo "==> done: $out" >&2
+}
 
-echo "==> done: $OUT" >&2
+# module dir/name    cdylib stem (crate name, `-` → `_`)    version
+build_and_sign obfs-xor obfs_xor 1
+build_and_sign bip324   bip324   1

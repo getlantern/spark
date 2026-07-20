@@ -2463,6 +2463,21 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   the official vectors — which that crate is itself validated against — are the canonical oracle), so
   PR1 stays hermetic + deterministic (no threads/TCP). Next: PR2 = the `modules/bip324` wasm guest
   (host-fn provider + ABI + signed `.spkw`) driven against the rust-bitcoin crate end-to-end.
+- 2026-07-20 (ADR 0013 §7 step 4 — BIP324 WASM module `modules/bip324`, PR2): the sans-io `bip324-core`
+  is now wrapped as an actual signed WASM dynamic transport. `modules/bip324` is a workspace-excluded
+  wasm32 cdylib (path-deps `bip324-core`; first heap-using guest → `dlmalloc` `#[global_allocator]`)
+  whose `HostCrypto` provider is a 1:1 shim of the `env` host fns and whose exports are the module ABI:
+  `init` (config `[role][magic:4][garbage]`), `handshake_step` (`[status][outbound]` framing), and
+  `transform_out`/`transform_in` (steady-state packets; buffering `transform_in` is fine — `TransformStream`
+  loops on empty output). `scripts/build-module.sh` now builds + signs BOTH modules; the committed
+  `core/tests/fixtures/wasm/bip324.spkw` (~22 KB) is validated end-to-end by
+  `transport::wasm::tests::bip324_module_handshakes_and_round_trips` (`#[cfg(feature = "bip324")]`):
+  two module instances (initiator + responder) complete the handshake through the real `TransformModule`
+  runtime + host-fn provider and round-trip app bytes both ways, incl. a 300-message burst past the 224
+  rekey fed in 5-byte fragments. No host changes needed. **First transport expressed purely as a signed
+  module + config — the north star in miniature.** Next: PR3 wires `run_handshake` into a dial path
+  (today wired nowhere) + the transport/config surface; PR4 = bitcoind + side-door MAC; the live
+  rust-bitcoin `bip324` interop lands with that real end-to-end.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

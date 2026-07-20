@@ -8,7 +8,13 @@ these; they consume the committed, signed `.spkw` artifact.
 
 - **`obfs-xor/`** — the reference module. A minimal byte-transform (XOR `0x5A`, involutive) that mirrors
   the inline `XOR_WAT` fixture in `core/src/transport/wasm/mod.rs`, plus one `host_rand` `env` call to
-  prove a *compiled* module binds a host capability.
+  prove a *compiled* module binds a host capability. `no_std`, no heap.
+- **`bip324/`** — the BIP324 (Bitcoin v2 P2P) transport (ADR 0013 §7 step 4). Wraps the `bip324-core`
+  workspace member (path-dep) in the module ABI — `init` (role + network magic + garbage), an
+  interactive `handshake_step`, and steady-state `transform_out`/`transform_in` — forwarding all crypto
+  to the `env` host fns (secp256k1/ellswift, HKDF, ChaCha20, AEAD). First heap-using module, so it
+  declares a `#[global_allocator]` (`dlmalloc`). Requires the host built with the `bip324` feature (for
+  the secp256k1 host fns).
 
 ## The ABI
 
