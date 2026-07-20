@@ -7,8 +7,9 @@
 //!
 //! ABI (host contract in `core/src/transport/wasm/mod.rs`): the host calls `alloc(len)` for an input
 //! buffer, writes the bytes into the exported `memory` there, then calls `init` / `handshake_step` /
-//! `transform_*` with `(ptr, len)`; each returns the packed `(ptr << 32) | len` region of its output.
-//! `handshake_step`'s output is framed `[status: u8][outbound…]` (0 = continue, 1 = done).
+//! `transform_*` with `(ptr, len)`. `init` returns nothing; `handshake_step` and `transform_*` return
+//! the packed `(ptr << 32) | len` region of their output. `handshake_step`'s output is framed
+//! `[status: u8][outbound…]` (0 = continue, 1 = done).
 #![no_std]
 
 extern crate alloc;
@@ -327,7 +328,9 @@ pub extern "C" fn transform_in(ptr: i32, len: i32) -> i64 {
     let session = unsafe { established() };
     match session.decrypt(&HostCrypto, wire) {
         Ok(messages) => {
-            let mut app = Vec::new();
+            // Concatenate the recovered contents into the app byte stream; allocate once.
+            let total: usize = messages.iter().map(|m| m.len()).sum();
+            let mut app = Vec::with_capacity(total);
             for m in messages {
                 app.extend_from_slice(&m);
             }
