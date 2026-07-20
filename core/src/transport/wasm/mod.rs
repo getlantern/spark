@@ -2164,13 +2164,15 @@ mod tests {
 
         // Native peer: read the opening PING, reply PONG, read the final OK.
         let peer_task = tokio::spawn(async move {
-            let mut buf = [0u8; 16];
-            let n = peer.read(&mut buf).await.expect("read ping");
-            assert_eq!(&buf[..n], b"PING");
+            // read_exact: `read` may return a partial buffer; these messages have known lengths.
+            let mut ping = [0u8; 4];
+            peer.read_exact(&mut ping).await.expect("read ping");
+            assert_eq!(&ping, b"PING");
             peer.write_all(b"PONG").await.expect("write pong");
             peer.flush().await.expect("flush");
-            let n = peer.read(&mut buf).await.expect("read ok");
-            assert_eq!(&buf[..n], b"OK");
+            let mut ok = [0u8; 2];
+            peer.read_exact(&mut ok).await.expect("read ok");
+            assert_eq!(&ok, b"OK");
         });
 
         t.run_handshake(&mut client).await.expect("handshake");
