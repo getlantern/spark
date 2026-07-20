@@ -147,6 +147,15 @@ mod ffi {
     #[no_mangle]
     pub extern "C" fn spark_tunnel_stop() {
         spark_core::fd_tunnel::stop();
+        // Clean-shutdown disarm for the tunnel diagnostics' unclean-exit sentinel.
+        // Here (not only in the run loop's own exit path) because `stopTunnel` is the
+        // one hook that runs on EVERY orderly teardown, and the OS may kill this
+        // process before the (async) run loop finishes unwinding — disarming now
+        // closes that window. Idempotent and a safe no-op when diagnostics never
+        // initialized; the run loop's exit also disarms (belt and suspenders).
+        // Same gate as the init in `run_fd_lantern_api`: macOS NE only for now.
+        #[cfg(all(feature = "config-fetch", target_os = "macos"))]
+        spark_core::diag::tunnel_host::disarm_sentinel();
     }
 
     /// Mark the tunnel **connecting** before the data path is up. The provider calls this
