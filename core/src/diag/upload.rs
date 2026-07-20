@@ -206,8 +206,10 @@ pub fn sampled_in(device_id: &str, rate: f64) -> bool {
 }
 
 /// Build the raw HTTP/1.1 POST bytes for an OTLP upload. Mirrors
-/// `config::fetch::request::build_request_bytes`; every configured header value is
-/// CRLF-stripped (`header_safe`) so a corrupt config can't inject request framing.
+/// `config::fetch::request::build_request_bytes`; every config-derived value — the
+/// `Host` (from the server-delivered `otel.endpoint`) as well as each configured
+/// header — is CRLF-stripped (`header_safe`) so a corrupt config can't inject
+/// request framing. `path` is a compile-time constant at every production call site.
 pub fn build_upload_request(
     host: &str,
     path: &str,
@@ -216,7 +218,7 @@ pub fn build_upload_request(
 ) -> Vec<u8> {
     let mut head = String::new();
     head.push_str(&format!("POST {path} HTTP/1.1\r\n"));
-    head.push_str(&format!("Host: {host}\r\n"));
+    head.push_str(&format!("Host: {}\r\n", header_safe(host)));
     for (k, v) in headers {
         head.push_str(&format!("{}: {}\r\n", header_safe(k), header_safe(v)));
     }
@@ -603,6 +605,24 @@ mod tests {
         let (head, b) = s.split_once("\r\n\r\n").unwrap();
         assert!(head.contains(&format!("Content-Length: {}", b.len())));
         assert!(b.starts_with(r#"{"resourceLogs""#));
+    }
+
+    #[test]
+    fn host_header_strips_crlf() {
+        // `host` derives from the server-delivered `otel.endpoint`; a CRLF smuggled
+        // through a malformed/compromised config must not inject request framing.
+        let s = String::from_utf8(build_upload_request(
+            "evil.test\r\nX-Injected: 1",
+            "/v1/logs",
+            &[],
+            b"{}",
+        ))
+        .unwrap();
+        assert!(s.contains("Host: evil.testX-Injected: 1\r\n"));
+        assert!(
+            !s.contains("\r\nX-Injected:"),
+            "CRLF in the Host value must not inject a header"
+        );
     }
 
     #[test]

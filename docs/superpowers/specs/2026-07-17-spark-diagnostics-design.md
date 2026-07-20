@@ -1,7 +1,7 @@
 # Spark Diagnostics & Telemetry — Design
 
-> **Status: DRAFT v3 — awaiting review.** Privacy-sensitive and outward-facing. Do NOT
-> implement until the author reviews and approves this spec (brainstorming HARD-GATE).
+> **Status: v4 — approved; Phase A implemented (PR #91).** Privacy-sensitive and
+> outward-facing: the §1 constraints are binding on any future change to this design.
 >
 > **v2 (2026-07-17):** destination switched to SigNoz via OTLP/HTTP, per author direction:
 > optimize for continuous automated self-improvement; over-report during testing; version
