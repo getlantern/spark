@@ -66,7 +66,8 @@ pub trait EngineDiscovery {
 /// engine hook — a protocol-specific param knob. Returns a new genome; the input is unchanged.
 pub fn mutate<D: EngineDiscovery>(g: &Genome, rng: &mut SplitMix64, engine: &D) -> Genome {
     let mut m = g.clone();
-    // Two engine-neutral wire arms; everything protocol-specific is delegated to the engine hook.
+    // Four-way draw: arms 0 and 1 are the engine-neutral wire knobs (segment-split, delay); the
+    // remaining ~half of draws delegate to the engine hook, which owns the protocol-specific knobs.
     match rng.below(4) {
         0 => {
             m.wire.segment_split = match rng.below(3) {
@@ -194,22 +195,27 @@ mod realize {
         }
 
         fn crossover_params(&self, a: &[u8], b: &[u8], rng: &mut SplitMix64) -> Vec<u8> {
-            let (ga, gb) = match (
+            match (
                 postcard::from_bytes::<Gambit>(a),
                 postcard::from_bytes::<Gambit>(b),
             ) {
-                (Ok(ga), Ok(gb)) => (ga, gb),
-                _ => return a.to_vec(),
-            };
-            // Each TLS layer (A = ClientHello, B = records) taken independently; default to parent a.
-            let mut child = ga.clone();
-            if rng.coin() {
-                child.clienthello = gb.clienthello;
+                // Both decode: take each TLS layer (A = ClientHello, B = records) independently,
+                // defaulting to parent a.
+                (Ok(ga), Ok(gb)) => {
+                    let mut child = ga.clone();
+                    if rng.coin() {
+                        child.clienthello = gb.clienthello;
+                    }
+                    if rng.coin() {
+                        child.records = gb.records;
+                    }
+                    postcard::to_stdvec(&child).unwrap_or_else(|_| a.to_vec())
+                }
+                // Only one decodes: keep the decodable parent rather than propagating a bad blob.
+                (Ok(_), Err(_)) => a.to_vec(),
+                (Err(_), Ok(_)) => b.to_vec(),
+                (Err(_), Err(_)) => a.to_vec(),
             }
-            if rng.coin() {
-                child.records = gb.records;
-            }
-            postcard::to_stdvec(&child).unwrap_or_else(|_| a.to_vec())
         }
     }
 
@@ -268,9 +274,10 @@ mod realize {
     /// `None` if the genome isn't decodable as a TLS gambit, boring declines it, or no ClientHello is
     /// produced.
     async fn realize_summary(g: &Genome, sni: &str) -> Option<ClientHelloSummary> {
-        // Only score genomes for the TLS engine — don't decode another engine's params as a Gambit
-        // (fail-loud, mirroring the TLS engine's realize path).
-        if g.engine != crate::transport::engine::TLS {
+        // Only score genomes for the TLS engine at a schema version we understand — don't decode
+        // another engine's (or a future envelope's) params as a Gambit. Mirrors the TLS engine's
+        // realize path (fail-loud).
+        if g.engine != crate::transport::engine::TLS || g.genome_version != Genome::SCHEMA_VERSION {
             return None;
         }
         let gambit = postcard::from_bytes::<Gambit>(&g.engine_params).ok()?;
