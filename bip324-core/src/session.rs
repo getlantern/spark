@@ -95,7 +95,10 @@ pub struct FSChaCha20 {
     key: [u8; KEY_LEN],
     block_counter: u32,
     chunk_counter: u64,
+    /// Buffered keystream for the current epoch; `ks_pos` is the consumed offset (advanced, not
+    /// drained, so the hot path never allocates or shifts — the buffer is cleared on each re-key).
     keystream: Vec<u8>,
+    ks_pos: usize,
 }
 
 impl FSChaCha20 {
@@ -105,6 +108,7 @@ impl FSChaCha20 {
             block_counter: 0,
             chunk_counter: 0,
             keystream: Vec::new(),
+            ks_pos: 0,
         }
     }
 
@@ -115,31 +119,32 @@ impl FSChaCha20 {
         n
     }
 
-    /// Draw `n` keystream bytes, generating 64-byte blocks (XOR against zeros) as needed.
-    fn keystream_bytes<C: Bip324Crypto>(&mut self, crypto: &C, n: usize) -> Vec<u8> {
-        while self.keystream.len() < n {
+    /// Ensure at least `n` unconsumed keystream bytes are buffered, generating 64-byte blocks (XOR
+    /// against zeros) as needed.
+    fn fill<C: Bip324Crypto>(&mut self, crypto: &C, n: usize) {
+        while self.keystream.len() - self.ks_pos < n {
             let nonce = self.nonce();
             let mut block = [0u8; 64];
             crypto.chacha20_apply(&self.key, &nonce, self.block_counter, &mut block);
             self.keystream.extend_from_slice(&block);
             self.block_counter += 1;
         }
-        let ret = self.keystream[..n].to_vec();
-        self.keystream.drain(..n);
-        ret
     }
 
     /// XOR `chunk` in place with the next keystream bytes, then advance (re-keying on the boundary).
     pub fn crypt<C: Bip324Crypto>(&mut self, crypto: &C, chunk: &mut [u8]) {
-        let ks = self.keystream_bytes(crypto, chunk.len());
-        for (b, k) in chunk.iter_mut().zip(ks.iter()) {
+        self.fill(crypto, chunk.len());
+        for (b, k) in chunk.iter_mut().zip(&self.keystream[self.ks_pos..]) {
             *b ^= *k;
         }
+        self.ks_pos += chunk.len();
         if (self.chunk_counter + 1) % REKEY_INTERVAL == 0 {
-            let new_key = self.keystream_bytes(crypto, KEY_LEN);
-            self.key.copy_from_slice(&new_key);
+            self.fill(crypto, KEY_LEN);
+            self.key
+                .copy_from_slice(&self.keystream[self.ks_pos..self.ks_pos + KEY_LEN]);
             self.block_counter = 0;
             self.keystream.clear();
+            self.ks_pos = 0;
         }
         self.chunk_counter += 1;
     }

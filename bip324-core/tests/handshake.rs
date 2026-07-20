@@ -1,3 +1,4 @@
+#![cfg(feature = "native-crypto")]
 //! End-to-end validation of the handshake state machine + steady-state framing by running a
 //! `bip324-core` initiator against a `bip324-core` responder over in-memory buffers (both roles), then
 //! exchanging packets. This exercises what the vector KAT does not: message sequencing, the

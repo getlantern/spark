@@ -1,3 +1,4 @@
+#![cfg(feature = "native-crypto")]
 //! Byte-exact validation of the BIP324 crypto core against the official BIP324 packet-encoding test
 //! vectors (bitcoin/bips `bip-0324/packet_encoding_test_vectors.csv`), via a `NativeCrypto` provider.
 //! Each vector fixes the ephemeral keys + role and gives the resulting shared secret, session id,
