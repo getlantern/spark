@@ -176,7 +176,8 @@ pub struct DiagLayer {
 
 impl DiagLayer {
     /// Production constructor: forwards events to the process-global `diag::emit` / `diag::emit_error`.
-    /// A no-op until [`crate::diag::install`] has run.
+    /// A true no-op until [`crate::diag::install`] has run — `on_event` returns before
+    /// visiting fields or building an event while no global sink is installed.
     pub fn new() -> Self {
         DiagLayer {
             sink: SinkRoute::Global,
@@ -219,6 +220,16 @@ impl Default for DiagLayer {
 
 impl<S: Subscriber> Layer<S> for DiagLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        // Zero-cost when diagnostics never initialized (same guard as the NE bridge,
+        // `log_bridge::BridgeSubscriber::event`): on the Global route with no sink
+        // installed, `emit`/`emit_error` would drop the finished event — so skip the
+        // field visit and event construction entirely. This matters for hosts that
+        // stack the layer unconditionally (the service's `init_tracing`) while
+        // diagnostics are disabled. Test sinks (Specific route) always proceed.
+        if matches!(self.sink, SinkRoute::Global) && !diag::sink::installed() {
+            return;
+        }
+
         let meta = event.metadata();
         let target = meta.target();
 
