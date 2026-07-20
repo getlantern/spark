@@ -88,6 +88,13 @@ wat = "1"
 uniffi = { version = "0.31" }
 blake3 = { version = "1", default-features = false }
 aes = "0.8"
+# ChaCha20 raw stream cipher (RustCrypto, pure-Rust) — a generic WASM host primitive (raw keystream, no
+# AEAD tag), pulled ONLY by `wasm-transport`. ring exposes ChaCha20-Poly1305 (AEAD) but no raw stream.
+chacha20 = "0.9"
+# secp256k1 + ElligatorSwift (rust-bitcoin) — a generic WASM host primitive (secp256k1 keygen, ellswift
+# encode, X-only ECDH), pulled ONLY by the off-by-default `bip324` feature. C-backed (secp256k1-sys/cc),
+# so — like BoringSSL — it's kept out of the base build to honor docs/GOAL.md's "no C dependencies" rule.
+secp256k1 = { version = "0.31", features = ["std"] }
 # Pure-Rust LZ4 (block mode) for the DNS-tunnel transport's optional payload compression (ADR 0011).
 # Deliberately NOT the C-backed `zstd` crate — keeps the pure-Rust/no-C rule. Pulled ONLY by the
 # `dns-tunnel` feature (via the `dns-tunnel-core` crate). See docs/dns-tunnel-design.md §6.
