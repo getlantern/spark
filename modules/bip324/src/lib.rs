@@ -78,9 +78,10 @@ extern "C" {
 }
 
 /// A `Bip324Crypto` provider that forwards to the `env` host functions. Zero-sized: all state (keys) is
-/// held host-side (the ephemeral is an opaque key id). On a host fault (`-1`) the host aborts the whole
-/// guest call after this fn returns, so only `aead_open` needs to interpret `-1` (an auth failure that
-/// BIP324 treats as a normal — fatal — outcome).
+/// held host-side (the ephemeral is an opaque key id). A host fault returns `-1` and is only surfaced
+/// after the whole *export* returns (the host records it, then discards the output) — so these
+/// infallible shims trap immediately on a negative return rather than compute on garbage until then.
+/// `aead_open`'s `-1` is instead a normal auth failure → `None`, which BIP324 turns into a teardown.
 struct HostCrypto;
 
 impl Bip324Crypto for HostCrypto {
@@ -89,17 +90,26 @@ impl Bip324Crypto for HostCrypto {
     fn ellswift_generate(&mut self) -> (i32, [u8; 64]) {
         let mut out = [0u8; 64];
         let id = unsafe { host_secp256k1_ellswift_generate(out.as_mut_ptr() as i32) };
+        if id < 0 {
+            abort();
+        }
         (id as i32, out)
     }
 
     fn ellswift_ecdh(&mut self, key: i32, peer: &[u8; 64]) -> [u8; 32] {
         let mut out = [0u8; 32];
-        unsafe { host_secp256k1_ellswift_ecdh(key, peer.as_ptr() as i32, out.as_mut_ptr() as i32) };
+        let n = unsafe {
+            host_secp256k1_ellswift_ecdh(key, peer.as_ptr() as i32, out.as_mut_ptr() as i32)
+        };
+        if n < 0 {
+            abort();
+        }
         out
     }
 
     fn sha256(&self, data: &[u8]) -> [u8; 32] {
         let mut out = [0u8; 32];
+        // Void host fn — a fault (if any) is surfaced by the host after the export returns.
         unsafe {
             host_hash(
                 data.as_ptr() as i32,
@@ -112,7 +122,7 @@ impl Bip324Crypto for HostCrypto {
 
     fn hkdf_extract(&self, salt: &[u8], ikm: &[u8]) -> [u8; 32] {
         let mut out = [0u8; 32];
-        unsafe {
+        let n = unsafe {
             host_hkdf_extract(
                 salt.as_ptr() as i32,
                 salt.len() as i32,
@@ -121,11 +131,14 @@ impl Bip324Crypto for HostCrypto {
                 out.as_mut_ptr() as i32,
             )
         };
+        if n < 0 {
+            abort();
+        }
         out
     }
 
     fn hkdf_expand(&self, prk: &[u8; 32], info: &[u8], out: &mut [u8]) {
-        unsafe {
+        let n = unsafe {
             host_hkdf_expand(
                 prk.as_ptr() as i32,
                 info.as_ptr() as i32,
@@ -134,13 +147,16 @@ impl Bip324Crypto for HostCrypto {
                 out.len() as i32,
             )
         };
+        if n < 0 {
+            abort();
+        }
     }
 
     fn chacha20_apply(&self, key: &[u8; 32], nonce: &[u8; 12], counter: u32, buf: &mut [u8]) {
         // In-place: `in` and `out` are the same region (ChaCha20 XOR is positional, so this is sound).
         let p = buf.as_mut_ptr() as i32;
         let n = buf.len() as i32;
-        unsafe {
+        let ret = unsafe {
             host_chacha20(
                 key.as_ptr() as i32,
                 nonce.as_ptr() as i32,
@@ -150,11 +166,14 @@ impl Bip324Crypto for HostCrypto {
                 p,
             )
         };
+        if ret < 0 {
+            abort();
+        }
     }
 
     fn aead_seal(&self, key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
         let mut out = alloc::vec![0u8; plaintext.len() + 16];
-        unsafe {
+        let n = unsafe {
             host_aead_seal(
                 key.as_ptr() as i32,
                 nonce.as_ptr() as i32,
@@ -165,6 +184,9 @@ impl Bip324Crypto for HostCrypto {
                 out.as_mut_ptr() as i32,
             )
         };
+        if n < 0 {
+            abort();
+        }
         out
     }
 
