@@ -19,9 +19,10 @@ use core::ptr::addr_of_mut;
 /// The transform key. Involutive XOR, so `transform_in` reverses `transform_out`.
 const XOR_KEY: u8 = 0x5A;
 
-/// Scratch arena inside the exported linear memory. `alloc` hands out one buffer at offset 0 per call;
-/// 64 KiB is far above any single tunnel read, and `alloc` traps on a larger request.
-const ARENA: usize = 64 * 1024;
+/// Scratch arena inside the exported linear memory. `alloc` hands out one buffer at offset 0 per call.
+/// Sized to the host's 1 MiB `MAX_TRANSFORM_LEN` — the largest input the host will pass — so no valid
+/// transform is rejected; `alloc` traps on anything larger.
+const ARENA: usize = 1 << 20;
 static mut MEM: [u8; ARENA] = [0; ARENA];
 
 /// A dedicated sink for the `host_rand` binding-proof write, so it never scribbles offset 0 (which a

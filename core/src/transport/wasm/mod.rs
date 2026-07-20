@@ -116,7 +116,7 @@ pub use transport::{WasmServer, WasmTransport};
 /// key is pinned). Compiled only under `#[cfg(test)]` or the off-by-default `module-signer` feature —
 /// which shipped/product builds never enable — so the private key stays out of every shipped binary.
 #[cfg(any(test, feature = "module-signer"))]
-pub const DEV_MODULE_PKCS8: &[u8] = &[
+const DEV_MODULE_PKCS8: &[u8] = &[
     48, 81, 2, 1, 1, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 47, 96, 208, 79, 38, 102, 119, 122,
     12, 75, 231, 119, 191, 58, 165, 37, 216, 16, 180, 152, 96, 30, 105, 41, 180, 223, 163, 204, 55,
     11, 100, 103, 129, 33, 0, 114, 43, 155, 15, 166, 26, 80, 178, 3, 21, 71, 211, 20, 223, 38, 197,
@@ -1792,6 +1792,10 @@ mod tests {
             &plaintext[..],
             "round-trip recovers the input"
         );
+        // Large-input coverage isn't automatable here: a single big transform overflows wasmi's
+        // debug interpreter stack (the release-only `transforms_a_large_payload_in_one_call_release`
+        // artifact), and a release build can't reach `pinned()` without `SPARK_MODULE_PUBKEY_HEX`. The
+        // guest arena is sized to the host's `MAX_TRANSFORM_LEN`, so no valid input is rejected.
     }
 
     #[test]

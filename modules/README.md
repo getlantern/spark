@@ -35,6 +35,11 @@ bash scripts/build-module.sh   # builds every module to wasm32 and signs it into
 
 The script signs with the development key via `sign-module` (`--dev`), which
 `ModuleVerifier::pinned()` accepts in a debug build. A production artifact is signed with a real
-Ed25519 key: `cargo run -p spark-core --features module-signer --bin sign-module -- --key-pkcs8 <key>
---name <name> --version <n> --wasm <in.wasm> --out <out.spkw>`. The private key never lives in the repo
-or a shipped binary.
+Ed25519 key:
+
+```sh
+cargo run -p spark-core --features module-signer --bin sign-module -- \
+    --key-pkcs8 <key> --name <name> --version <n> --wasm <in.wasm> --out <out.spkw>
+```
+
+The private key never lives in the repo or a shipped binary.
