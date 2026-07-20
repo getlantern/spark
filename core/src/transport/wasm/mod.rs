@@ -1958,20 +1958,14 @@ mod tests {
     #[cfg(feature = "bip324")]
     #[test]
     fn host_secp256k1_ellswift_agrees_with_a_native_peer() {
-        use ring::rand::{SecureRandom, SystemRandom};
         use secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftSharedSecret, Party};
         use secp256k1::{Secp256k1, SecretKey};
 
-        // Native peer B: a keypair + its ElligatorSwift encoding (fed to the guest as the input).
+        // Native peer B: a fixed, known-valid scalar + ellswift aux (fed to the guest as the input).
+        // Deterministic — no keygen draw, so no vanishing-probability out-of-range panic in the test.
         let secp = Secp256k1::new();
-        let mut seed = [0u8; 64];
-        SystemRandom::new().fill(&mut seed).expect("rng");
-        let mut sk_bytes = [0u8; 32];
-        sk_bytes.copy_from_slice(&seed[..32]);
-        let mut aux = [0u8; 32];
-        aux.copy_from_slice(&seed[32..]);
-        let sk_b = SecretKey::from_byte_array(sk_bytes).expect("sk B");
-        let ell_b = ElligatorSwift::from_seckey(&secp, sk_b, Some(aux));
+        let sk_b = SecretKey::from_byte_array([7u8; 32]).expect("valid scalar");
+        let ell_b = ElligatorSwift::from_seckey(&secp, sk_b, Some([9u8; 32]));
 
         // The guest generates its own ellswift key (A) and ECDHs against B's ellswift; it returns
         // `ell_A || shared_x`.
