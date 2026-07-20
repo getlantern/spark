@@ -1225,6 +1225,7 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::xor_module;
     use super::*;
+    use crate::transport::engine::Genome;
     use flint_tls::gambit::Gambit;
 
     /// Throughput floor of the transform layer: a trivial XOR transform whose `alloc` resets to a
@@ -1885,11 +1886,19 @@ mod tests {
 
     // --- ADR 0006 P3: a module that *computes* a gambit (the open/shape mode) ---
 
-    /// A module that, on `compute_gambit`, returns the postcard encoding of `g` (held in a data
+    /// A module that, on `compute_gambit`, returns `g` wrapped in a neutral `Genome` (held in a data
     /// segment) — the minimal gambit-compute-mode module: `memory` + `alloc` + `compute_gambit`,
     /// **no** `transform_*` exports.
     fn gambit_module_emitting(g: &Gambit) -> TransformModule {
-        let bytes = postcard::to_stdvec(g).expect("encode gambit");
+        // Emit the neutral Genome the TLS engine expects (engine = `tls`, engine_params = postcard `g`).
+        let bytes = Genome::new(
+            "wasm-computed",
+            crate::transport::engine::TLS,
+            Default::default(),
+            postcard::to_stdvec(g).expect("encode gambit"),
+        )
+        .encode()
+        .expect("encode genome");
         let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
         let wat = format!(
             r#"
@@ -1934,9 +1943,12 @@ mod tests {
         let module = gambit_module_emitting(&expected);
         let mut t = module.instantiate().expect("instantiate");
         // The per-connection context is reserved; an empty ctx is valid. `compute_gambit` returns the
-        // module's raw bytes verbatim (opaque to the core) — here, the postcard encoding of `expected`.
+        // module's raw bytes verbatim (opaque to the core) — here, the neutral Genome wrapping `expected`.
         let got = t.compute_gambit(&[]).expect("compute gambit");
-        assert_eq!(got, postcard::to_stdvec(&expected).expect("encode"));
+        let genome = Genome::decode(&got).expect("decode genome");
+        assert_eq!(genome.engine, crate::transport::engine::TLS);
+        let inner: Gambit = postcard::from_bytes(&genome.engine_params).expect("decode gambit");
+        assert_eq!(inner, expected);
     }
 
     #[test]
@@ -1969,17 +1981,18 @@ mod tests {
         );
     }
 
-    /// End-to-end P3 (needs both features): a module computes a gambit, and it resolves onto the
-    /// boring executor — module → postcard `Gambit` → `Profile::for_boring`.
+    /// End-to-end P3 (needs both features): a module computes a genome, and it resolves onto the
+    /// boring executor — module → Genome → engine_params → `Profile::for_boring`.
     #[cfg(feature = "anytls")]
     #[test]
     fn computed_gambit_resolves_on_the_boring_executor() {
         use flint_tls::Profile;
         let module = gambit_module_emitting(&sample_gambit());
         let mut t = module.instantiate().expect("instantiate");
-        // compute_gambit is opaque now; decode here (as the TLS engine does) before resolving.
+        // compute_gambit is opaque now; decode the Genome + its engine_params (as the TLS engine does).
         let bytes = t.compute_gambit(&[]).expect("compute gambit");
-        let gambit: Gambit = postcard::from_bytes(&bytes).expect("decode gambit");
+        let genome = Genome::decode(&bytes).expect("decode genome");
+        let gambit: Gambit = postcard::from_bytes(&genome.engine_params).expect("decode gambit");
         let resolved = Profile::for_boring(&gambit).expect("within boring capabilities");
         // The gambit set ech=off and pq_kem=off; boring honors both.
         assert!(!resolved.profile.ech_grease);

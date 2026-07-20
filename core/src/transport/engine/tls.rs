@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use flint_tls::gambit::Gambit;
 use flint_tls::Profile;
 
-use super::{EngineId, OpeningEngine, OpeningPlan};
+use super::{EngineId, Genome, OpeningEngine, OpeningPlan};
 use crate::BoxedStream;
 
 /// The TLS engine (ZST). Registered under [`super::TLS`].
@@ -25,20 +25,45 @@ impl TlsEngine {
         flint_tls::gambit::GambitContext { unix_secs }.encode()
     }
 
-    /// Decode opaque params into a boring [`Profile`], gating `requires` via `Profile::for_boring`.
-    /// `None` on empty / undecodable / declined params — the caller then falls back (connectivity
-    /// must never depend on a dynamic plan succeeding). `warn` narrates the attempt (undecodable /
-    /// declined / unrealizable knobs); pass `false` for the static fallback, whose knobs are already
-    /// surfaced once at transport construction, to avoid per-connection log spam.
+    /// Decode opaque params (a neutral [`Genome`]) into a boring [`Profile`]: check the genome targets
+    /// this engine, decode its `engine_params` as a `Gambit`, and gate `requires` via
+    /// `Profile::for_boring`. `None` on empty / undecodable / wrong-engine / declined params — the
+    /// caller then falls back (connectivity must never depend on a dynamic plan succeeding). `warn`
+    /// narrates the attempt; pass `false` for the static fallback, whose knobs are already surfaced
+    /// once at transport construction, to avoid per-connection log spam.
     fn resolve(params: &[u8], warn: bool) -> Option<Profile> {
         if params.is_empty() {
             return None;
         }
-        let gambit = match postcard::from_bytes::<Gambit>(params) {
+        let genome = match Genome::decode(params) {
             Ok(g) => g,
             Err(e) => {
                 if warn {
-                    tracing::warn!(error = %e, "computed gambit undecodable; using fallback");
+                    tracing::warn!(error = %e, "computed genome undecodable; using fallback");
+                }
+                return None;
+            }
+        };
+        if genome.genome_version != Genome::SCHEMA_VERSION {
+            if warn {
+                tracing::warn!(
+                    version = genome.genome_version,
+                    "unsupported genome schema version; using fallback"
+                );
+            }
+            return None;
+        }
+        if genome.engine != super::TLS {
+            if warn {
+                tracing::warn!(engine = %genome.engine, "genome is not for the TLS engine; using fallback");
+            }
+            return None;
+        }
+        let gambit = match postcard::from_bytes::<Gambit>(&genome.engine_params) {
+            Ok(g) => g,
+            Err(e) => {
+                if warn {
+                    tracing::warn!(error = %e, "TLS engine params undecodable; using fallback");
                 }
                 return None;
             }
@@ -96,8 +121,8 @@ mod tests {
     use super::*;
     use flint_tls::gambit::{ClientHello, EchMode, Records};
 
-    fn blob(clienthello: ClientHello, records: Records) -> Vec<u8> {
-        postcard::to_stdvec(&Gambit {
+    fn tls_genome(clienthello: ClientHello, records: Records) -> Vec<u8> {
+        let tls_params = postcard::to_stdvec(&Gambit {
             genome_version: 1,
             version: 1,
             id: "static".into(),
@@ -107,7 +132,10 @@ mod tests {
             wire: Default::default(),
             requires: Vec::new(),
         })
-        .unwrap()
+        .unwrap();
+        Genome::new("static", super::super::TLS, Default::default(), tls_params)
+            .encode()
+            .unwrap()
     }
 
     #[test]
@@ -130,14 +158,34 @@ mod tests {
         ];
         for (ch, rec) in cases {
             let want = Profile::resolve(&ch, &rec).profile;
-            let got = TlsEngine::resolve(&blob(ch, rec), false).expect("static params resolve");
+            let got =
+                TlsEngine::resolve(&tls_genome(ch, rec), false).expect("static params resolve");
             assert_eq!(got, want);
         }
     }
 
     #[test]
-    fn empty_and_undecodable_params_decline() {
-        assert!(TlsEngine::resolve(&[], true).is_none());
-        assert!(TlsEngine::resolve(&[0xFF], true).is_none());
+    fn resolve_declines_unusable_params() {
+        assert!(
+            TlsEngine::resolve(&[], true).is_none(),
+            "empty ⇒ use fallback"
+        );
+        assert!(
+            TlsEngine::resolve(&[0xFF], true).is_none(),
+            "undecodable genome"
+        );
+        // A well-formed genome for a different engine must decline (fail loud, fall back) — never
+        // hand another engine's params to boring.
+        let other = Genome::new("x", "bitcoin", Default::default(), vec![1, 2, 3])
+            .encode()
+            .unwrap();
+        assert!(TlsEngine::resolve(&other, true).is_none(), "wrong engine");
+        // An unknown envelope schema version must decline too (postcard is positional).
+        let mut bad = Genome::new("x", super::super::TLS, Default::default(), Vec::new());
+        bad.genome_version = 99;
+        assert!(
+            TlsEngine::resolve(&bad.encode().unwrap(), true).is_none(),
+            "unknown schema version"
+        );
     }
 }
