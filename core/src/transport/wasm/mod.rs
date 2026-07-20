@@ -55,6 +55,18 @@
 //! - `host_x25519_agree(key_id, peer_pub_ptr, out_ptr) -> i64` — X25519 ECDH between the stored
 //!   private key `key_id` (consumed) and the 32-byte peer public key at `peer_pub_ptr`, writing the
 //!   32-byte shared secret to `out_ptr`. Returns 32, or `-1` on fault.
+//! - `host_chacha20(key_ptr, nonce_ptr, counter, in_ptr, in_len, out_ptr) -> i64` — raw IETF ChaCha20
+//!   keystream (no AEAD tag): 32-byte key, 12-byte nonce, 32-bit initial block `counter`. XORs the
+//!   input with the keystream; returns the length, or `-1` on fault. A general stream cipher.
+//!
+//! Under the `bip324` feature, two more (secp256k1 + ElligatorSwift, a general curve + uniform-point
+//! encoding), mirroring the X25519 key-handle pattern:
+//! - `host_secp256k1_ellswift_generate(out_ellswift_ptr) -> i64` — generate a secp256k1 keypair, write
+//!   the 64-byte ElligatorSwift-encoded public key to `out_ellswift_ptr`, return an opaque key id (the
+//!   secret stays host-side). `-1` on fault.
+//! - `host_secp256k1_ellswift_ecdh(key_id, peer_ellswift_ptr, out_ptr) -> i64` — X-only ECDH between
+//!   the stored key `key_id` (consumed) and the 64-byte peer ElligatorSwift key, writing the raw
+//!   32-byte shared x-coordinate (no protocol-specific hashing). Returns 32, or `-1` on fault.
 //!
 //! Bulk per-byte crypto runs **natively** through these host functions, not in the interpreter — the
 //! module interprets only its control/framing logic. (Measured: bulk work in the interpreter caps a
@@ -73,6 +85,13 @@ use wasmi::{
     Caller, Config, Engine, Extern, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
     TypedFunc,
 };
+
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+use chacha20::{ChaCha20, Key, Nonce};
+#[cfg(feature = "bip324")]
+use secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftSharedSecret, Party};
+#[cfg(feature = "bip324")]
+use secp256k1::SecretKey;
 
 mod signing;
 mod stream;
@@ -103,6 +122,14 @@ const HOST_AES_GCM_OPEN: &str = "host_aes_gcm_open";
 const HOST_X25519_GENERATE: &str = "host_x25519_generate";
 /// Import: X25519 ECDH (`host_x25519_agree(key_id, peer_pub_ptr, out_ptr)`).
 const HOST_X25519_AGREE: &str = "host_x25519_agree";
+/// Import: raw ChaCha20 keystream (`host_chacha20(key_ptr, nonce_ptr, counter, in_ptr, in_len, out_ptr)`).
+const HOST_CHACHA20: &str = "host_chacha20";
+/// Import: secp256k1 ElligatorSwift keygen (`host_secp256k1_ellswift_generate(out_ellswift_ptr) -> key_id`).
+#[cfg(feature = "bip324")]
+const HOST_SECP256K1_ELLSWIFT_GENERATE: &str = "host_secp256k1_ellswift_generate";
+/// Import: secp256k1 ElligatorSwift X-only ECDH (`host_secp256k1_ellswift_ecdh(key_id, peer_ellswift_ptr, out_ptr)`).
+#[cfg(feature = "bip324")]
+const HOST_SECP256K1_ELLSWIFT_ECDH: &str = "host_secp256k1_ellswift_ecdh";
 
 /// Export: the module's linear memory.
 const EXPORT_MEMORY: &str = "memory";
@@ -154,6 +181,19 @@ const X25519_KEY_LEN: usize = 32;
 /// Cap on a session's *live* (un-consumed) X25519 ephemeral keys — a handshake needs one; this
 /// bounds a module that spams keygen without agreeing.
 const MAX_X25519_KEYS: usize = 16;
+/// Raw ChaCha20 key length (IETF variant).
+const CHACHA20_KEY_LEN: usize = 32;
+/// Raw ChaCha20 nonce length (IETF 96-bit).
+const CHACHA20_NONCE_LEN: usize = 12;
+/// secp256k1 ElligatorSwift public-key encoding length.
+#[cfg(feature = "bip324")]
+const SECP256K1_ELLSWIFT_LEN: usize = 64;
+/// secp256k1 X-only ECDH shared-secret (raw x-coordinate) length.
+#[cfg(feature = "bip324")]
+const SECP256K1_SHARED_LEN: usize = 32;
+/// Cap on a session's *live* (un-consumed) secp256k1 keys (see [`MAX_X25519_KEYS`]).
+#[cfg(feature = "bip324")]
+const MAX_SECP256K1_KEYS: usize = 16;
 
 /// Per-call fuel budget = [`FUEL_BASE`] + `input_len` × [`FUEL_PER_BYTE`]. Fuel meters the module's
 /// own interpreted bytecode (host-fn crypto runs natively and costs no fuel), so this bounds a
@@ -264,6 +304,11 @@ struct HostState {
     /// per handshake); freed slots are reused so the vec stays ≤ [`MAX_X25519_KEYS`]. Keeping
     /// private keys host-side means a buggy/hostile module can never read or leak them.
     x25519_keys: Vec<Option<agreement::EphemeralPrivateKey>>,
+    /// Host-held secp256k1 keypairs (secret + its ElligatorSwift encoding), indexed by the id from
+    /// `host_secp256k1_ellswift_generate`; `ecdh` `take`s the entry (one-shot). Same host-side-only
+    /// privacy property as `x25519_keys`; bounded by [`MAX_SECP256K1_KEYS`].
+    #[cfg(feature = "bip324")]
+    secp256k1_keys: Vec<Option<(SecretKey, ElligatorSwift)>>,
     /// Caps the guest's linear-memory + table growth (fuel bounds compute, not allocation). Read by
     /// the store limiter wired up in [`Transform::new`].
     limits: StoreLimits,
@@ -307,6 +352,8 @@ impl Transform {
                 fault: None,
                 rand_bytes: 0,
                 x25519_keys: Vec::new(),
+                #[cfg(feature = "bip324")]
+                secp256k1_keys: Vec::new(),
                 limits: StoreLimitsBuilder::new()
                     .memory_size(MAX_WASM_MEMORY_BYTES)
                     .table_elements(MAX_WASM_TABLE_ELEMENTS)
@@ -354,6 +401,25 @@ impl Transform {
             .map_err(|e| WasmError::Link(e.to_string()))?;
         linker
             .func_wrap(HOST_MODULE, HOST_X25519_AGREE, host_x25519_agree)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        linker
+            .func_wrap(HOST_MODULE, HOST_CHACHA20, host_chacha20)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        #[cfg(feature = "bip324")]
+        linker
+            .func_wrap(
+                HOST_MODULE,
+                HOST_SECP256K1_ELLSWIFT_GENERATE,
+                host_secp256k1_ellswift_generate,
+            )
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        #[cfg(feature = "bip324")]
+        linker
+            .func_wrap(
+                HOST_MODULE,
+                HOST_SECP256K1_ELLSWIFT_ECDH,
+                host_secp256k1_ellswift_ecdh,
+            )
             .map_err(|e| WasmError::Link(e.to_string()))?;
 
         let instance = linker
@@ -1112,6 +1178,205 @@ fn host_x25519_agree(
     }
 }
 
+/// The `host_chacha20(key_ptr, nonce_ptr, counter, in_ptr, in_len, out_ptr) -> i64` import: raw IETF
+/// ChaCha20 keystream (no AEAD tag) — a general stream cipher. 32-byte key, 12-byte nonce, and a
+/// 32-bit initial block `counter` (so a caller can seek / rekey, e.g. FSChaCha20). XORs `in_len` bytes
+/// at `in_ptr` with the keystream into `out_ptr`; returns the byte length, or `-1` with a recorded
+/// fault. Encrypt and decrypt are the same operation.
+fn host_chacha20(
+    mut caller: Caller<HostState>,
+    key_ptr: i32,
+    nonce_ptr: i32,
+    counter: i32,
+    in_ptr: i32,
+    in_len: i32,
+    out_ptr: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let key = match read_guest_array::<CHACHA20_KEY_LEN>(&caller, key_ptr) {
+        Ok(k) => k,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_chacha20: {msg}"));
+            return -1;
+        }
+    };
+    let nonce = match read_guest_array::<CHACHA20_NONCE_LEN>(&caller, nonce_ptr) {
+        Ok(n) => n,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_chacha20: {msg}"));
+            return -1;
+        }
+    };
+    let mut buf = match read_guest(&caller, in_ptr, in_len) {
+        Ok(b) => b,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_chacha20: {msg}"));
+            return -1;
+        }
+    };
+    let mut cipher = ChaCha20::new(&Key::from(key), &Nonce::from(nonce));
+    // Start at block `counter` (64 bytes/block). `counter as u32` reinterprets a negative i32 as a
+    // valid 32-bit block index; `try_*` variants return an error (not panic) if the guest overruns.
+    if cipher.try_seek((counter as u32 as u64) * 64).is_err() {
+        caller.data_mut().fault = Some("host_chacha20: counter out of range".to_string());
+        return -1;
+    }
+    if cipher.try_apply_keystream(&mut buf).is_err() {
+        caller.data_mut().fault = Some("host_chacha20: keystream exhausted".to_string());
+        return -1;
+    }
+    match write_guest(&mut caller, out_ptr, &buf) {
+        Ok(()) => buf.len() as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_chacha20: {msg}"));
+            -1
+        }
+    }
+}
+
+/// The `host_secp256k1_ellswift_generate(out_ellswift_ptr) -> key_id` import: generate a secp256k1
+/// keypair, write the 64-byte ElligatorSwift encoding of the public key to `out_ellswift_ptr`, store
+/// the secret (with its encoding) host-side, and return its id. The secret never enters guest memory.
+/// `-1` with a recorded fault on error (including more than [`MAX_SECP256K1_KEYS`] live keys).
+/// A process-wide secp256k1 context (ecmult-gen tables built once). Needed for ElligatorSwift keygen:
+/// this `secp256k1-sys` build has no static ecmult-gen table, so the no-precomp context can't derive a
+/// public key. Contexts are `Sync` and meant to be long-lived + shared, so one lazy global suffices.
+#[cfg(feature = "bip324")]
+fn secp_context() -> &'static secp256k1::Secp256k1<secp256k1::All> {
+    use std::sync::OnceLock;
+    static CTX: OnceLock<secp256k1::Secp256k1<secp256k1::All>> = OnceLock::new();
+    CTX.get_or_init(secp256k1::Secp256k1::new)
+}
+
+#[cfg(feature = "bip324")]
+fn host_secp256k1_ellswift_generate(mut caller: Caller<HostState>, out_ellswift_ptr: i32) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let live = caller
+        .data()
+        .secp256k1_keys
+        .iter()
+        .filter(|k| k.is_some())
+        .count();
+    if live >= MAX_SECP256K1_KEYS {
+        caller.data_mut().fault = Some(format!(
+            "host_secp256k1_ellswift_generate: too many live keys (max {MAX_SECP256K1_KEYS})"
+        ));
+        return -1;
+    }
+    // Draw the secret key + the ElligatorSwift aux randomness from the OS CSPRNG (no `rand`-trait dep).
+    // A uniform 32-byte scalar is out of range only with ~2^-128 probability; retry the draw a few
+    // times rather than sticky-fault (brick) the module on that near-impossible event.
+    let rng = SystemRandom::new();
+    let mut found = None;
+    for _ in 0..8 {
+        let mut seed = [0u8; 64];
+        if rng.fill(&mut seed).is_err() {
+            caller.data_mut().fault =
+                Some("host_secp256k1_ellswift_generate: CSPRNG failed".to_string());
+            return -1;
+        }
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes.copy_from_slice(&seed[..32]);
+        if let Ok(secret) = SecretKey::from_byte_array(sk_bytes) {
+            let mut aux = [0u8; 32];
+            aux.copy_from_slice(&seed[32..]);
+            found = Some((secret, aux));
+            break;
+        }
+    }
+    let (secret, aux) = match found {
+        Some(pair) => pair,
+        None => {
+            caller.data_mut().fault =
+                Some("host_secp256k1_ellswift_generate: no valid scalar after retries".to_string());
+            return -1;
+        }
+    };
+    let ellswift = ElligatorSwift::from_seckey(secp_context(), secret, Some(aux));
+    if let Err(msg) = write_guest(&mut caller, out_ellswift_ptr, &ellswift.to_array()) {
+        caller.data_mut().fault = Some(format!("host_secp256k1_ellswift_generate: {msg}"));
+        return -1;
+    }
+    // Reuse a freed slot if one exists so the registry stays bounded by the live cap.
+    let keys = &mut caller.data_mut().secp256k1_keys;
+    match keys.iter().position(Option::is_none) {
+        Some(id) => {
+            keys[id] = Some((secret, ellswift));
+            id as i64
+        }
+        None => {
+            let id = keys.len();
+            keys.push(Some((secret, ellswift)));
+            id as i64
+        }
+    }
+}
+
+/// The `host_secp256k1_ellswift_ecdh(key_id, peer_ellswift_ptr, out_ptr) -> i64` import: secp256k1
+/// X-only ECDH between the stored key `key_id` (consumed) and the peer's 64-byte ElligatorSwift key at
+/// `peer_ellswift_ptr`, writing the **raw 32-byte shared x-coordinate** to `out_ptr`. Returns 32, or
+/// `-1` with a recorded fault. The shared x is protocol-neutral (no BIP324 tagged hash) — a transport
+/// composes its own KDF over it in-guest.
+#[cfg(feature = "bip324")]
+fn host_secp256k1_ellswift_ecdh(
+    mut caller: Caller<HostState>,
+    key_id: i32,
+    peer_ellswift_ptr: i32,
+    out_ptr: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    if key_id < 0 {
+        caller.data_mut().fault = Some(format!(
+            "host_secp256k1_ellswift_ecdh: invalid key id {key_id}"
+        ));
+        return -1;
+    }
+    let (secret, own_ell) = match caller
+        .data_mut()
+        .secp256k1_keys
+        .get_mut(key_id as usize)
+        .and_then(Option::take)
+    {
+        Some(k) => k,
+        None => {
+            caller.data_mut().fault = Some(format!(
+                "host_secp256k1_ellswift_ecdh: unknown or already-consumed key id {key_id}"
+            ));
+            return -1;
+        }
+    };
+    let peer = match read_guest_array::<SECP256K1_ELLSWIFT_LEN>(&caller, peer_ellswift_ptr) {
+        Ok(p) => p,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_secp256k1_ellswift_ecdh: {msg}"));
+            return -1;
+        }
+    };
+    // Raw X-only ECDH: the hasher returns the shared point's x-coordinate verbatim (no BIP324 tagged
+    // hash). `Party::Initiator` with (own, peer) ordering yields the symmetric shared x — identical on
+    // both sides regardless of protocol role — so no initiator flag is needed here.
+    let shared = ElligatorSwift::shared_secret_with_hasher(
+        own_ell,
+        ElligatorSwift::from_array(peer),
+        secret,
+        Party::Initiator,
+        |x, _own, _peer| ElligatorSwiftSharedSecret::from_secret_bytes(x),
+    );
+    match write_guest(&mut caller, out_ptr, shared.as_secret_bytes()) {
+        Ok(()) => SECP256K1_SHARED_LEN as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_secp256k1_ellswift_ecdh: {msg}"));
+            -1
+        }
+    }
+}
+
 /// Read `len` bytes at `ptr` from the caller's guest memory, range-checking `len` against
 /// [`MAX_TRANSFORM_LEN`] before allocating (the guest is untrusted; a negative `i32` would become a
 /// huge `usize`).
@@ -1635,6 +1900,131 @@ mod tests {
         // No key was ever generated, so id 7 is unknown → recorded fault.
         assert!(matches!(
             t.transform_out(&[0u8; 32]),
+            Err(WasmError::HostFault(_))
+        ));
+    }
+
+    #[test]
+    fn host_chacha20_matches_native_keystream() {
+        // The guest ChaCha20s its input at a fixed key/nonce and block counter 5; the test recomputes
+        // the same keystream natively and checks equality — verifying the host fn's arg plumbing +
+        // counter seek. Then it re-applies to confirm the stream round-trips (encrypt == decrypt).
+        let key: [u8; 32] = std::array::from_fn(|i| i as u8 + 1);
+        let nonce: [u8; 12] = std::array::from_fn(|i| i as u8);
+        let counter = 5u32;
+        let key_esc: String = key.iter().map(|b| format!("\\{b:02x}")).collect();
+        let nonce_esc: String = nonce.iter().map(|b| format!("\\{b:02x}")).collect();
+        let wat = format!(
+            r#"
+(module
+  (import "env" "host_chacha20" (func $cc (param i32 i32 i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 2)
+  (data (i32.const 8192) "{key_esc}")
+  (data (i32.const 8224) "{nonce_esc}")
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (drop (call $cc (i32.const 8192) (i32.const 8224) (i32.const {counter}) (local.get $ptr) (local.get $len) (i32.const 16384)))
+    (i64.or (i64.shl (i64.const 16384) (i64.const 32)) (i64.extend_i32_u (local.get $len))))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#
+        );
+        let module = TransformModule::load(&wat::parse_str(&wat).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let plaintext: &[u8] = b"raw chacha20 keystream through the wasm host abi";
+        let ct = t.transform_out(plaintext).expect("transform_out");
+
+        let mut cipher = ChaCha20::new(&Key::from(key), &Nonce::from(nonce));
+        cipher.seek(counter as u64 * 64);
+        let mut expected = plaintext.to_vec();
+        cipher.apply_keystream(&mut expected);
+        assert_eq!(
+            ct, expected,
+            "host_chacha20 must match the native ChaCha20 keystream"
+        );
+        assert_ne!(
+            ct.as_slice(),
+            plaintext,
+            "ciphertext must differ from plaintext"
+        );
+
+        let rt = t.transform_out(&ct).expect("re-apply");
+        assert_eq!(
+            rt.as_slice(),
+            plaintext,
+            "re-applying the same keystream recovers the plaintext"
+        );
+    }
+
+    #[cfg(feature = "bip324")]
+    #[test]
+    fn host_secp256k1_ellswift_agrees_with_a_native_peer() {
+        use secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftSharedSecret, Party};
+        use secp256k1::{Secp256k1, SecretKey};
+
+        // Native peer B: a fixed, known-valid scalar + ellswift aux (fed to the guest as the input).
+        // Deterministic — no keygen draw, so no vanishing-probability out-of-range panic in the test.
+        let secp = Secp256k1::new();
+        let sk_b = SecretKey::from_byte_array([7u8; 32]).expect("valid scalar");
+        let ell_b = ElligatorSwift::from_seckey(&secp, sk_b, Some([9u8; 32]));
+
+        // The guest generates its own ellswift key (A) and ECDHs against B's ellswift; it returns
+        // `ell_A || shared_x`.
+        const WAT: &str = r#"
+(module
+  (import "env" "host_secp256k1_ellswift_generate" (func $gen (param i32) (result i64)))
+  (import "env" "host_secp256k1_ellswift_ecdh" (func $ecdh (param i32 i32 i32) (result i64)))
+  (memory (export "memory") 2)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (local $id i32)
+    ;; ell_A at 16384 (64B); shared_x at 16448 (32B) — returned as one 96-byte blob.
+    (local.set $id (i32.wrap_i64 (call $gen (i32.const 16384))))
+    (drop (call $ecdh (local.get $id) (local.get $ptr) (i32.const 16448)))
+    (i64.or (i64.shl (i64.const 16384) (i64.const 32)) (i64.const 96)))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let blob = t.transform_out(&ell_b.to_array()).expect("transform_out");
+        assert_eq!(blob.len(), 96, "ell_A || shared_x");
+        let (ell_a_bytes, shared_module) = blob.split_at(64);
+        let ell_a = ElligatorSwift::from_array(ell_a_bytes.try_into().unwrap());
+
+        // The other side of the same X-only ECDH, natively (identity hasher → raw shared x). By ECDH
+        // symmetry, sk_B·pub_A == sk_A·pub_B, so both must land on the same x.
+        let shared_native = ElligatorSwift::shared_secret_with_hasher(
+            ell_b,
+            ell_a,
+            sk_b,
+            Party::Initiator,
+            |x, _, _| ElligatorSwiftSharedSecret::from_secret_bytes(x),
+        );
+        assert_eq!(
+            shared_module,
+            shared_native.as_secret_bytes(),
+            "raw X-only ECDH shared x must match the native peer's"
+        );
+        assert_ne!(shared_module, &[0u8; 32], "shared x must be non-trivial");
+    }
+
+    #[cfg(feature = "bip324")]
+    #[test]
+    fn host_secp256k1_ellswift_ecdh_rejects_an_unknown_key_id() {
+        const WAT: &str = r#"
+(module
+  (import "env" "host_secp256k1_ellswift_ecdh" (func $ecdh (param i32 i32 i32) (result i64)))
+  (memory (export "memory") 2)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (drop (call $ecdh (i32.const 3) (local.get $ptr) (i32.const 8192)))
+    (i64.const 0))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        // No key was ever generated, so id 3 is unknown → recorded fault.
+        assert!(matches!(
+            t.transform_out(&[0u8; 64]),
             Err(WasmError::HostFault(_))
         ));
     }

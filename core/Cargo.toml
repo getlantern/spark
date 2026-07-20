@@ -75,6 +75,8 @@ flint-fronted = { git = "https://github.com/getlantern/flint", rev = "80e40d0eed
 flint-kindling = { git = "https://github.com/getlantern/flint", rev = "80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949", optional = true, features = ["boring"] }
 blake3 = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
+chacha20 = { workspace = true, optional = true }
+secp256k1 = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 quinn-udp = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
@@ -117,7 +119,12 @@ system-stack = []
 smart-routing = ["dep:flate2"]
 # Path B dynamic transport (ADR 0003): a wasmi-hosted byte-transform module. Off by default so the
 # base build carries no WASM runtime. See docs/dynamic-transports-design.md §8.4.
-wasm-transport = ["dep:wasmi", "dep:flint-verify"]
+wasm-transport = ["dep:wasmi", "dep:flint-verify", "dep:chacha20"]
+# BIP324 host crypto primitives (ADR 0013 §7 step 2): secp256k1 + ElligatorSwift + X-only ECDH, exposed
+# as WASM `env` host fns. Pulls the C-backed rust-bitcoin `secp256k1` crate, so — like `anytls` (boring) —
+# it's off by default and the base build stays C-free (docs/GOAL.md). Implies `wasm-transport` (the
+# primitives are wasm host fns).
+bip324 = ["wasm-transport", "dep:secp256k1"]
 # Un-poisoned control-plane DNS for startup (design: docs/bootstrap-resolver-design.md). Pulls
 # flint-dns/flint-dial with their boring Chrome-mimicry connector, so a proxy `server` can be a
 # hostname resolved before the tunnel exists. Off by default — the base build stays boring/cmake-free.

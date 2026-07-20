@@ -13,8 +13,11 @@ plus Android and iOS via platform tunnel shims over a shared Rust core.
 
 ## Non-negotiables
 
-- **Pure-Rust, small binary.** No C dependencies. Release binary stays within the size
-  budget in PLAN.md. No dependency added without it being in the locked stack or approved.
+- **Pure-Rust, small binary.** No C dependencies in the base build. Release binary stays within the
+  size budget in PLAN.md. No dependency added without it being in the locked stack or approved.
+  Documented exceptions are strictly **off-by-default, feature-gated** C deps so the base build stays
+  C-free: BoringSSL under `anytls` (ADR 0001), and rust-bitcoin `secp256k1`/ellswift under `bip324`
+  (ADR 0013 §7 step 2).
 - **Log hygiene.** Never log destination IPs/hostnames by default. Redact unless `--debug`.
   This is a user-privacy property of the product, not a nicety.
 - **No fake work.** No stub functions returning `Ok(())`, no `todo!()`/`unimplemented!()`
