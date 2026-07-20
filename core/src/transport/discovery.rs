@@ -156,7 +156,9 @@ mod realize {
             let mut g = match postcard::from_bytes::<Gambit>(params) {
                 Ok(g) => g,
                 Err(_) => {
-                    tracing::warn!("TlsDiscovery: undecodable engine_params; left unchanged");
+                    // debug, not warn: the GA can call this per-candidate-per-generation, and it
+                    // already recovers by leaving the params unchanged.
+                    tracing::debug!("TlsDiscovery: undecodable engine_params; left unchanged");
                     return params.to_vec();
                 }
             };
@@ -266,6 +268,11 @@ mod realize {
     /// `None` if the genome isn't decodable as a TLS gambit, boring declines it, or no ClientHello is
     /// produced.
     async fn realize_summary(g: &Genome, sni: &str) -> Option<ClientHelloSummary> {
+        // Only score genomes for the TLS engine — don't decode another engine's params as a Gambit
+        // (fail-loud, mirroring the TLS engine's realize path).
+        if g.engine != crate::transport::engine::TLS {
+            return None;
+        }
         let gambit = postcard::from_bytes::<Gambit>(&g.engine_params).ok()?;
         let resolved = Profile::for_boring(&gambit).ok()?;
         let ch = capture_client_hello(&resolved.profile, sni).await.ok()?;
