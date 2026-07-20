@@ -33,7 +33,8 @@ pub struct ConfigRequest {
 
 /// Map Rust's `std::env::consts::OS` to the Lantern/Go platform convention (`runtime.GOOS`): macOS is
 /// `"darwin"` there, not `"macos"`. The server keys outbound selection on this, so it must match.
-fn lantern_platform(os: &str) -> &str {
+/// `pub(crate)`: `diag::tunnel_host` stamps the same convention on its OTLP resource attrs.
+pub(crate) fn lantern_platform(os: &str) -> &str {
     match os {
         "macos" => "darwin",
         other => other,

@@ -19,7 +19,10 @@ pub struct CacheMeta {
     pub poll_interval_seconds: u64,
 }
 
-fn raw_path(dir: &Path) -> PathBuf {
+/// The cached raw config body's path under `dir`. `pub(crate)` because
+/// `diag::tunnel_host` re-parses this exact file to feed the uploader's config
+/// watch — sharing the constructor means the two can never drift on the name.
+pub(crate) fn raw_path(dir: &Path) -> PathBuf {
     dir.join("config_raw.json")
 }
 fn meta_path(dir: &Path) -> PathBuf {
