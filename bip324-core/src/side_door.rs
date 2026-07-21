@@ -22,18 +22,54 @@ pub const SIDE_DOOR_TAG_LEN: usize = 32;
 const DOMAIN: &[u8] = b"lantern/bip324-side-door/v1";
 const DOMAIN_LEN: usize = DOMAIN.len();
 
-/// The side-door tag `HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)` for a client's ellswift key.
+/// The side-door tag `HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)`, computed with a caller-supplied
+/// `hmac_sha256(key, msg)` primitive. For callers that have HMAC-SHA256 but not a full
+/// [`Bip324Crypto`] — e.g. the egress splitter, which has `ring` — so the canonical MAC input
+/// (the domain separation, the field ordering) stays defined here in exactly one place.
+pub fn side_door_tag_with<F>(
+    hmac_sha256: F,
+    k_srv: &[u8],
+    ellswift: &[u8; ELLSWIFT_LEN],
+) -> [u8; SIDE_DOOR_TAG_LEN]
+where
+    F: FnOnce(&[u8], &[u8]) -> [u8; SIDE_DOOR_TAG_LEN],
+{
+    // DOMAIN ‖ ellswift, assembled on the stack (both fixed-size) — no per-tag heap allocation.
+    let mut ikm = [0u8; DOMAIN_LEN + ELLSWIFT_LEN];
+    ikm[..DOMAIN_LEN].copy_from_slice(DOMAIN);
+    ikm[DOMAIN_LEN..].copy_from_slice(ellswift);
+    hmac_sha256(k_srv, &ikm)
+}
+
+/// The side-door tag `HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)` for a client's ellswift key, using the
+/// provider's HMAC (HKDF-Extract *is* HMAC-SHA256). See [`side_door_tag_with`] for callers without a
+/// full [`Bip324Crypto`].
 pub fn side_door_tag<C: Bip324Crypto>(
     crypto: &C,
     k_srv: &[u8],
     ellswift: &[u8; ELLSWIFT_LEN],
 ) -> [u8; SIDE_DOOR_TAG_LEN] {
-    // DOMAIN ‖ ellswift, assembled on the stack (both fixed-size) — no per-tag heap allocation.
-    let mut ikm = [0u8; DOMAIN_LEN + ELLSWIFT_LEN];
-    ikm[..DOMAIN_LEN].copy_from_slice(DOMAIN);
-    ikm[DOMAIN_LEN..].copy_from_slice(ellswift);
-    // HKDF-Extract(salt, ikm) == HMAC-SHA256(salt, ikm); key the MAC with the server secret.
-    crypto.hkdf_extract(k_srv, &ikm)
+    side_door_tag_with(|salt, ikm| crypto.hkdf_extract(salt, ikm), k_srv, ellswift)
+}
+
+/// Whether `candidate` opens with the expected tag, computed with a caller-supplied `hmac_sha256`
+/// primitive (see [`side_door_tag_with`]). The tag comparison is constant-time.
+pub fn verify_side_door_tag_with<F>(
+    hmac_sha256: F,
+    k_srv: &[u8],
+    ellswift: &[u8; ELLSWIFT_LEN],
+    candidate: &[u8],
+) -> bool
+where
+    F: FnOnce(&[u8], &[u8]) -> [u8; SIDE_DOOR_TAG_LEN],
+{
+    // An empty k_srv makes the tag publicly computable from the (public) ellswift — anyone could forge a
+    // match and unmask the egress. Fail closed on that misconfiguration rather than trust the tag.
+    if k_srv.is_empty() || candidate.len() < SIDE_DOOR_TAG_LEN {
+        return false;
+    }
+    let expected = side_door_tag_with(hmac_sha256, k_srv, ellswift);
+    ct_eq(&expected, &candidate[..SIDE_DOOR_TAG_LEN])
 }
 
 /// Whether `candidate` (a peer's leading garbage bytes) opens with the tag expected for this `k_srv` +
@@ -44,13 +80,12 @@ pub fn verify_side_door_tag<C: Bip324Crypto>(
     ellswift: &[u8; ELLSWIFT_LEN],
     candidate: &[u8],
 ) -> bool {
-    // An empty k_srv makes the tag publicly computable from the (public) ellswift — anyone could forge a
-    // match and unmask the egress. Fail closed on that misconfiguration rather than trust the tag.
-    if k_srv.is_empty() || candidate.len() < SIDE_DOOR_TAG_LEN {
-        return false;
-    }
-    let expected = side_door_tag(crypto, k_srv, ellswift);
-    ct_eq(&expected, &candidate[..SIDE_DOOR_TAG_LEN])
+    verify_side_door_tag_with(
+        |salt, ikm| crypto.hkdf_extract(salt, ikm),
+        k_srv,
+        ellswift,
+        candidate,
+    )
 }
 
 /// Constant-time equality for equal-length byte slices — no timing side channel while matching the tag.

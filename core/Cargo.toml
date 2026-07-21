@@ -77,6 +77,8 @@ blake3 = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
 chacha20 = { workspace = true, optional = true }
 secp256k1 = { workspace = true, optional = true }
+# Sans-io BIP324 core; the egress splitter uses `verify_side_door_tag_with` to classify tunnel clients.
+bip324-core = { path = "../bip324-core", optional = true }
 quinn = { workspace = true, optional = true }
 quinn-udp = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
@@ -124,7 +126,7 @@ wasm-transport = ["dep:wasmi", "dep:flint-verify", "dep:chacha20"]
 # as WASM `env` host fns. Pulls the C-backed rust-bitcoin `secp256k1` crate, so — like `anytls` (boring) —
 # it's off by default and the base build stays C-free (docs/GOAL.md). Implies `wasm-transport` (the
 # primitives are wasm host fns).
-bip324 = ["wasm-transport", "dep:secp256k1"]
+bip324 = ["wasm-transport", "dep:secp256k1", "dep:bip324-core"]
 # Offline module-signing tool (`sign-module` bin, ADR 0013 §7 step 4). Compiles `signing::sign_artifact`
 # + the dev keypair so scripts/build-module.sh can turn a compiled `.wasm` into a signed `.spkw`. Off by
 # default — a build/dev tool, never in a shipped binary; the private key stays out of the release surface.

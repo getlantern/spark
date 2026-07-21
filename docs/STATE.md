@@ -2538,8 +2538,24 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   the three test config builders to the new layout (k_srv_len=0), regenerated `bip324.spkw` (obfs-xor
   deterministically unchanged), and added a module-level test (tag present in the opening; tagged tunnel
   completes + round-trips through the real runtime against a plain responder). 672 `--workspace
-  --all-features` green; clippy + fmt clean. Next: PR4b-2 = the splitting egress (peek → verify → BIP324
-  relay vs proxy-to-upstream); PR4c = live rust-bitcoin interop + real bitcoind.
+  --all-features` green; clippy + fmt clean. **Review note (PR #107, 4 rounds):** all fixed — checked u16
+  for k_srv_len, PR3-doc reconciliation, an opening-layout assertion (not just length), and a crate-wide
+  `input()` bounds-check (validate (ptr,len) against IN_ARENA before `from_raw_parts`, trap otherwise).
+- 2026-07-21 (ADR 0013 §7 step 4 — PR4b-2 = the splitting egress): the collateral-freedom egress. New
+  `SplittingServer` (host, `core/src/transport/wasm/splitter.rs`, gated `bip324`): peeks each connection's
+  opening (`ellswift` + leading garbage, a **timeout-bounded** peek), verifies the side-door tag via
+  `bip324-core::verify_side_door_tag_with` (fed `ring`'s HMAC — **spark-core now takes a `bip324-core`
+  dep**), and routes: tag match → BIP324 responder (`WasmServer`) + relay the client's announced target;
+  no match → proxy the raw bytes to `upstream` (the real Bitcoin node). A `PrefixedStream` replays the
+  peeked bytes so the chosen branch sees byte 0; the timeout means a real peer with < tag-length garbage
+  is proxied instead of stalling the peek. **Design choice (chosen earlier): closure-based
+  `verify_side_door_tag_with`** so the host verifies with HMAC only — no full `Bip324Crypto` impl (and it
+  keeps the canonical MAC construction in bip324-core; this also let the host use the exported
+  `ELLSWIFT_LEN`/`SIDE_DOOR_TAG_LEN`). Loopback test: tagged client tunnels to its echo target; untagged
+  peer proxied to a stub upstream + echoed (a wrong tunnel-branch route would fail the BIP324 handshake).
+  673 `--workspace --all-features` green; default (no-bip324) build + clippy (workspace, all-features) +
+  fmt clean. Next: PR4c = swap the stub upstream for a real `bitcoind` + live rust-bitcoin `bip324`
+  interop, the full end-to-end proof.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
