@@ -39,18 +39,27 @@ pub struct TransformStream<S> {
     read_buf: Bytes,
     /// Reused scratch for raw reads from `inner`; allocated once so reads don't allocate per call.
     scratch: Box<[u8]>,
+    /// A handshake-driving module can over-read the peer's first steady-state bytes off the wire (when
+    /// they coalesce with the handshake tail) and buffer them internally. Those bytes are no longer on
+    /// the wire, so `poll_read` must drain them with an empty-input `transform_in` before blocking on a
+    /// wire read that would never return. Set once for handshake modules, then kept set until a drain
+    /// yields nothing — so multiple buffered frames all surface regardless of the module's per-call
+    /// drain granularity — after which wire reads take over.
+    handshake_drain_pending: bool,
 }
 
 impl<S> TransformStream<S> {
     /// Wrap `inner`, running every write through `transform`'s outbound transform and every read
     /// through its inbound transform.
     pub fn new(inner: S, transform: Transform) -> Self {
+        let handshake_drain_pending = transform.drives_handshake();
         Self {
             inner,
             transform,
             write_buf: BytesMut::new(),
             read_buf: Bytes::new(),
             scratch: vec![0u8; READ_SCRATCH].into_boxed_slice(),
+            handshake_drain_pending,
         }
     }
 }
@@ -143,6 +152,22 @@ impl<S: AsyncRead + Unpin> AsyncRead for TransformStream<S> {
                 buf.put_slice(&this.read_buf[..n]);
                 this.read_buf.advance(n);
                 return Poll::Ready(Ok(()));
+            }
+            // Before the first wire read: drain any complete frames the handshake driver over-read
+            // into the module (see `handshake_drain_pending`). A no-op unless the module buffered
+            // bytes — but it must precede the wire read, which would otherwise block forever on bytes
+            // that are already inside the module rather than on the wire. Keep draining until the
+            // module yields nothing, so every buffered frame surfaces even if the module releases them
+            // one `transform_in` call at a time; only then fall through to wire reads.
+            if this.handshake_drain_pending {
+                match this.transform.transform_in(&[]) {
+                    Ok(recovered) if !recovered.is_empty() => {
+                        this.read_buf = Bytes::from(recovered);
+                        continue;
+                    }
+                    Ok(_) => this.handshake_drain_pending = false,
+                    Err(e) => return Poll::Ready(Err(io::Error::other(e.to_string()))),
+                }
             }
             // Otherwise pull more wire bytes and deobfuscate.
             let mut scratch = ReadBuf::new(&mut this.scratch);

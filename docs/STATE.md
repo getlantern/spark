@@ -2478,6 +2478,36 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   module + config — the north star in miniature.** Next: PR3 wires `run_handshake` into a dial path
   (today wired nowhere) + the transport/config surface; PR4 = bitcoind + side-door MAC; the live
   rust-bitcoin `bip324` interop lands with that real end-to-end.
+- 2026-07-20 (ADR 0013 §7 step 4 — BIP324 dial-path wiring, PR3): the last framework gap closed —
+  `Transform::run_handshake` (implemented since step 3) was **wired into no dial path**, so a
+  handshake-based transport couldn't connect. Now `WasmTransport::dial_target` (client/initiator) and
+  `WasmServer::accept` (server/responder) each run `run_handshake` on the raw connection before the
+  steady-state `TransformStream`, gated on a new protocol-blind `Transform::drives_handshake()` (run iff
+  the module exports `handshake_step`; obfs-xor and other transform-only modules are unaffected —
+  backward-compat confirmed). `WasmServer` gained a `config` field (it called `instantiate()`); NO config
+  schema change (`init_config` = `role ++ magic ++ garbage` reuses `ServerSpec::Wasm`/`WasmConfig`).
+  Validated by `transport::wasm::transport::tests::bip324_tunnel_round_trips_over_real_tcp` (`#[cfg
+  bip324]`): a real-TCP loopback where client + server both run the handshake and a byte round-trips
+  through the BIP324 tunnel to an echo. **A latent `bip324-core` bug surfaced + fixed:** over a real
+  stream the initiator's final handshake message coalesces with its first steady-state packet, so the
+  responder's `run_handshake` reads past the handshake; those leftover bytes were being *dropped* when
+  the `Handshake` became a `Session` (PR1/PR2 tests shuttled exact outputs, never over-reading). Fix:
+  `Session::new` seeds `recv_buf` with the handshake leftover (`core::mem::take(&mut self.buf)`); guarded
+  by `bip324-core`'s `handshake_carries_coalesced_steady_state_bytes` test. Fixture regenerated.
+  **Follow-up (same PR, e266f16): the coalescing had a *second* home — the host.** The core seed buffers
+  the leftover, but `TransformStream::poll_read` only fed *newly-read wire bytes* to `transform_in`, so a
+  fully-buffered frame with no trailing wire bytes was stranded and the reader blocked forever on a wire
+  read. Timing-dependent, so the tunnel test **passed in isolation but hung 120s** as the last test under
+  the full `--workspace --all-features` suite (CI-deterministic across all 3 OSes; single-feature local
+  runs missed it). **Boundary contract, now explicit:** after a handshake the host must drain the module
+  before its first wire read — a one-shot `handshake_drain_pending` in `poll_read` (armed only when
+  `drives_handshake()`) calls `transform_in(&[])` first. Guarded by the deterministic
+  `poll_read_drains_steady_state_bytes_the_handshake_over_read` (forces the over-read; fails `UnexpectedEof`
+  without the drain). Also ran `run_handshake` on the **UDP dial path** (`dial_udp_addr`): the server runs
+  the responder handshake in `accept` for every connection (the TCP-tunnel/UDP-associate split comes later,
+  from the header), so a handshake module would desync if the UDP client skipped it. 665 `--workspace
+  --all-features` tests green. Next: PR4 = bitcoind on :8333 + the keyed-garbage side-door MAC + live
+  rust-bitcoin interop.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

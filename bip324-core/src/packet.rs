@@ -89,7 +89,10 @@ pub struct Session {
 
 impl Session {
     /// Construct from the post-handshake [`Keys`] (ciphers already advanced past the version exchange).
-    pub(crate) fn new(role: Role, keys: Keys) -> Self {
+    /// `initial_recv` is any wire the handshake read *past* its last message — the peer's first
+    /// steady-state bytes, which arrive coalesced with the handshake over a real stream. They seed the
+    /// receive buffer so the first packet isn't lost (dropping them corrupts the stream).
+    pub(crate) fn new(role: Role, keys: Keys, initial_recv: Vec<u8>) -> Self {
         Self {
             role,
             session_id: keys.session_id,
@@ -97,7 +100,7 @@ impl Session {
             send_p: keys.send_p,
             recv_l: keys.recv_l,
             recv_p: keys.recv_p,
-            recv_buf: Vec::new(),
+            recv_buf: initial_recv,
             pending_len: None,
         }
     }
