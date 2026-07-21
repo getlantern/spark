@@ -122,6 +122,12 @@ impl SplittingServer {
         // arrive together); the timeout keeps a real peer with < tag-length garbage from stalling us.
         let mut peek = [0u8; PEEK_LEN];
         let n = peek_up_to(&mut conn, &mut peek, self.peek_timeout).await?;
+        if n == 0 {
+            // The peer sent nothing (idle until the peek timeout, or half-closed at once). Drop it
+            // rather than dial `upstream` for a silent probe — that would amplify connections against
+            // the real node, and a real node wouldn't dial out for a silent peer either.
+            return Ok(());
+        }
 
         let is_tunnel = n == PEEK_LEN && {
             let mut ellswift = [0u8; ELLSWIFT_LEN];
@@ -305,5 +311,21 @@ mod tests {
             echoed, opening,
             "real peer's bytes are proxied to the upstream and echoed back"
         );
+    }
+
+    #[tokio::test]
+    async fn a_silent_peer_is_dropped_without_dialing_upstream() {
+        let module = load_module();
+        // upstream points at a refused port: if `handle` dialed it, the proxy branch would error.
+        let refused = "127.0.0.1:1".parse().expect("addr");
+        let server = WasmServer::new(module).with_config(server_cfg());
+        let splitter = SplittingServer::new(server, K_SRV.to_vec(), refused)
+            .with_peek_timeout(Duration::from_millis(200));
+
+        // A peer that sends nothing and is at EOF at once: peek reads 0 → drop early, no upstream dial.
+        splitter
+            .handle(tokio::io::empty())
+            .await
+            .expect("silent peer dropped without dialing the refused upstream");
     }
 }
