@@ -80,6 +80,10 @@ flint-fronted = { git = "https://github.com/getlantern/flint", rev = "80e40d0eed
 flint-kindling = { git = "https://github.com/getlantern/flint", rev = "80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949", optional = true, features = ["boring"] }
 blake3 = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
+chacha20 = { workspace = true, optional = true }
+secp256k1 = { workspace = true, optional = true }
+# Sans-io BIP324 core; the egress splitter uses `verify_side_door_tag_with` to classify tunnel clients.
+bip324-core = { path = "../bip324-core", optional = true }
 quinn = { workspace = true, optional = true }
 quinn-udp = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
@@ -122,7 +126,16 @@ system-stack = []
 smart-routing = ["dep:flate2"]
 # Path B dynamic transport (ADR 0003): a wasmi-hosted byte-transform module. Off by default so the
 # base build carries no WASM runtime. See docs/dynamic-transports-design.md §8.4.
-wasm-transport = ["dep:wasmi", "dep:flint-verify"]
+wasm-transport = ["dep:wasmi", "dep:flint-verify", "dep:chacha20"]
+# BIP324 host crypto primitives (ADR 0013 §7 step 2): secp256k1 + ElligatorSwift + X-only ECDH, exposed
+# as WASM `env` host fns. Pulls the C-backed rust-bitcoin `secp256k1` crate, so — like `anytls` (boring) —
+# it's off by default and the base build stays C-free (docs/GOAL.md). Implies `wasm-transport` (the
+# primitives are wasm host fns).
+bip324 = ["wasm-transport", "dep:secp256k1", "dep:bip324-core"]
+# Offline module-signing tool (`sign-module` bin, ADR 0013 §7 step 4). Compiles `signing::sign_artifact`
+# + the dev keypair so scripts/build-module.sh can turn a compiled `.wasm` into a signed `.spkw`. Off by
+# default — a build/dev tool, never in a shipped binary; the private key stays out of the release surface.
+module-signer = ["wasm-transport"]
 # Un-poisoned control-plane DNS for startup (design: docs/bootstrap-resolver-design.md). Pulls
 # flint-dns/flint-dial with their boring Chrome-mimicry connector, so a proxy `server` can be a
 # hostname resolved before the tunnel exists. Off by default — the base build stays boring/cmake-free.
@@ -174,3 +187,10 @@ hysteria2 = ["dep:quinn", "dep:quinn-udp", "dep:blake2", "dep:webpki-roots"]
 # recursive resolvers. Pulls the shared `dns-tunnel-core` crate (+ its pure-Rust lz4_flex). Off by
 # default so the base build stays free of DNS-tunnel code. See docs/dns-tunnel-design.md.
 dns-tunnel = ["dep:dns-tunnel-core"]
+
+# Offline tool that signs a compiled `.wasm` into a `.spkw` artifact (scripts/build-module.sh). Not a
+# product binary — `required-features` keeps it out of every normal/release build.
+[[bin]]
+name = "sign-module"
+path = "src/bin/sign-module.rs"
+required-features = ["module-signer"]

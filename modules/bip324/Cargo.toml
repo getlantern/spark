@@ -1,0 +1,25 @@
+# The BIP324 dynamic-transport guest module (ADR 0013 §7 step 4, PR2). A wasm32-unknown-unknown cdylib
+# that wraps `bip324-core` in the module ABI and forwards every crypto primitive to the `env` host
+# functions. Workspace-excluded (see the root Cargo.toml `exclude` comment): wasm32-only shape, its own
+# target/profile. Built + signed by scripts/build-module.sh into core/tests/fixtures/wasm/bip324.spkw.
+[package]
+name = "bip324"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The sans-io BIP324 protocol core (workspace member). It is `no_std` + zero-dep and generic over a
+# crypto provider; this module supplies a provider backed by the `env` host fns.
+bip324-core = { path = "../../bip324-core" }
+# Heap allocator for the guest — `bip324-core` uses `alloc::Vec`, and a `no_std` wasm32 cdylib has no
+# default allocator. `dlmalloc` is a small pure-Rust allocator with free (unlike obfs-xor's fixed arena,
+# which never frees — unsuitable for the per-packet Vec churn here).
+dlmalloc = { version = "0.2", features = ["global"] }
+
+[profile.release]
+opt-level = "z"
+lto = true

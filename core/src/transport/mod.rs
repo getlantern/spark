@@ -62,9 +62,9 @@ pub fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
 /// paths working; the former `WirePlan::from_config` is now [`wire_plan_from_config`].
 pub use flint_shaping as shaping;
 
-/// Back-compat shim: the gambit ClientHello genome and JA4 fingerprinting now live in the `flint-tls`
-/// crate. Keeps the `crate::transport::{gambit, ja4}::…` import paths working.
-pub use flint_tls::{gambit, ja4};
+/// Opening-move engine seam (ADR 0013 §7 step 1): the engine trait + registry. The TLS/boring
+/// realization lives behind it in [`engine::tls`]; the core no longer surfaces TLS types directly.
+pub mod engine;
 
 pub mod anytls;
 /// The discovery harness inner loop (ADR 0006 P5, design §5.2): GA mutation/crossover over the
@@ -522,14 +522,38 @@ fn anytls_transport(
     // `records.split_offsets` won't reach this static WirePlan (a per-connection WirePlan refactor is
     // deferred), so dynamic per-connection record-split is a known limitation.
     let wire = with_record_split(wire, &cfg.records);
-    // Resolve the inline gambit genome (Layers A/B) onto the boring executor (ADR 0006 P2). Knobs
-    // boring2 can't realize are surfaced once here, never silently dropped. This is also the fallback
-    // profile when a dynamic gambit module (P3, below) faults or over-reaches.
+    // Resolve the inline gambit once here only to surface (log) knobs boring can't realize — the
+    // resulting Profile is discarded, since the TLS engine re-resolves the opaque params itself.
     let resolved = flint_tls::Profile::resolve(&cfg.clienthello, &cfg.records);
     for note in &resolved.unrealizable {
         tracing::warn!(knob = note, "anytls gambit knob not realizable on boring");
     }
-    let profile = resolved.profile;
+    // The static-config fallback plan the TLS engine realizes, opaque to the core: a neutral `Genome`
+    // for the `tls` engine whose `engine_params` is a postcard `Gambit` carrying the config
+    // ClientHello/records with no capability requirements (always realizable). Two `wire` fields, both
+    // deliberate: the inner `Gambit.wire` is ignored (`for_boring` never reads it — shaping is the
+    // transport's static WirePlan via `with_record_split`, above), and `Genome.wire` is carried for the
+    // future generic-shaping path but not yet applied per-connection. Config-TOML neutralization
+    // (replacing the typed clienthello/records with an opaque blob) is deferred.
+    let tls_params = postcard::to_stdvec(&flint_tls::gambit::Gambit {
+        genome_version: 1,
+        version: 1,
+        id: "static".to_owned(),
+        anchor: Default::default(),
+        clienthello: cfg.clienthello.clone(),
+        records: cfg.records.clone(),
+        wire: Default::default(),
+        requires: Vec::new(),
+    })
+    .map_err(|e| io::Error::other(format!("encode static gambit: {e}")))?;
+    let static_params = crate::transport::engine::Genome::new(
+        "static",
+        crate::transport::engine::TLS,
+        Default::default(),
+        tls_params,
+    )
+    .encode()
+    .map_err(|e| io::Error::other(format!("encode static genome: {e}")))?;
 
     // P3: an optional signed Path-B module that computes a fresh gambit per connection.
     #[cfg(feature = "wasm-transport")]
@@ -541,7 +565,7 @@ fn anytls_transport(
             sni,
             protector,
             wire,
-            profile,
+            static_params,
             gambit,
         ));
         return Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>));
@@ -560,7 +584,7 @@ fn anytls_transport(
         sni,
         protector,
         wire,
-        profile,
+        static_params,
     ));
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
 }
@@ -1586,8 +1610,8 @@ mod anytls_gambit_config_tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use wasm::testutil::dev_keypair;
 
-    /// A signed gambit-compute module: `memory` + `alloc` + a `compute_gambit` that returns the
-    /// postcard encoding of a minimal constrained gambit held in a data segment.
+    /// A signed gambit-compute module: `memory` + `alloc` + a `compute_gambit` that returns a neutral
+    /// `Genome` (for the `tls` engine) wrapping a minimal constrained gambit held in a data segment.
     fn gambit_artifact(kp: &Ed25519KeyPair, name: &str, version: u32) -> Vec<u8> {
         let g = Gambit {
             genome_version: 1,
@@ -1599,7 +1623,14 @@ mod anytls_gambit_config_tests {
             wire: Default::default(),
             requires: vec![],
         };
-        let bytes = postcard::to_stdvec(&g).expect("encode gambit");
+        let bytes = crate::transport::engine::Genome::new(
+            "g",
+            crate::transport::engine::TLS,
+            Default::default(),
+            postcard::to_stdvec(&g).expect("encode gambit"),
+        )
+        .encode()
+        .expect("encode genome");
         let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
         let wat = format!(
             r#"(module

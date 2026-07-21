@@ -2469,6 +2469,143 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   tears down clean. Fixed a shipped split-tunnel toggle clip (border-box, PR #51). **`platforms/android/demo`
   RETIRED** (Kotlin migrated into the plugin). PR #51 (Figma UI + Routing Mode) merged to `main` first.
   Spec/plan/goal: `docs/superpowers/{specs,plans}/2026-07-06-tauri-android*.md`.
+- 2026-07-20 (ADR 0013 §7 step 4 — Rust→wasm32 build-and-sign pipeline): the missing half of the
+  dynamic-transport goal (every module was inline `wat!` — no wasm32 build, no signer, no on-disk
+  artifact) now exists. `modules/obfs-xor` is a workspace-**excluded** `no_std` cdylib reference guest
+  (mirrors `XOR_WAT`); `scripts/build-module.sh` compiles it to `wasm32-unknown-unknown` and signs it
+  via the `sign-module` tool (`core/src/bin/sign-module.rs`, off-by-default `module-signer` feature,
+  reusing `signing::sign_artifact` + the dev key) into the committed
+  `core/tests/fixtures/wasm/obfs-xor.spkw`. A toolchain-free `cargo test`
+  (`transport::wasm::tests::signed_module_fixture_verifies_and_round_trips`) loads it through the
+  production `ModuleVerifier::pinned().verify` → `instantiate` path and round-trips — so `cargo test`
+  and CI stay wasm32-free; only the fixture-regen script needs the target. Base build stays C-free (the
+  feature + bin never build in release). Next: the BIP324 WASM module itself (step 4 proper).
+- 2026-07-20 (ADR 0013 §7 step 4 — BIP324 protocol core `bip324-core`, PR1 of several): the intricate
+  BIP324 crypto now lives in a new sans-io workspace crate `bip324-core` (`#![no_std]`, zero runtime
+  deps) generic over a `Bip324Crypto` provider trait whose method set mirrors the wasm `env` host fns
+  1:1. Implements the ellswift tagged-hash ECDH (`ecdh.rs`), the HKDF key schedule + FSChaCha20 length
+  cipher + FSChaCha20Poly1305 rekeying packet cipher (`session.rs`), packet framing + a streaming
+  steady-state `Session` (`packet.rs`), and the both-roles handshake state machine (`handshake.rs`,
+  emit-at-connect, garbage/terminator scan, version packet, v1/wrong-network detection). Validated
+  byte-exact against the official BIP324 packet-encoding vectors (`tests/vectors.rs` — shared secret,
+  session id, terminators, and full packet ciphertext incl. the high-index vectors that cross the
+  224-message rekey; mainnet magic) and a core-vs-core handshake round-trip (`tests/handshake.rs` —
+  both roles derive a matching session id, app messages round-trip, decoys drop, 500 messages survive
+  a rekey boundary fed in 7-byte fragments), via a `NativeCrypto` test provider (secp256k1/ring/chacha20
+  dev-deps — the base crate is C-free). **Deviation from the plan:** the live rust-bitcoin `bip324`
+  interop round-trip moved from PR1 to PR2 (the wasm module's end-to-end test is its natural home, and
+  the official vectors — which that crate is itself validated against — are the canonical oracle), so
+  PR1 stays hermetic + deterministic (no threads/TCP). Next: PR2 = the `modules/bip324` wasm guest
+  (host-fn provider + ABI + signed `.spkw`) driven against the rust-bitcoin crate end-to-end.
+- 2026-07-20 (ADR 0013 §7 step 4 — BIP324 WASM module `modules/bip324`, PR2): the sans-io `bip324-core`
+  is now wrapped as an actual signed WASM dynamic transport. `modules/bip324` is a workspace-excluded
+  wasm32 cdylib (path-deps `bip324-core`; first heap-using guest → `dlmalloc` `#[global_allocator]`)
+  whose `HostCrypto` provider is a 1:1 shim of the `env` host fns and whose exports are the module ABI:
+  `init` (config `[role][magic:4][garbage]`), `handshake_step` (`[status][outbound]` framing), and
+  `transform_out`/`transform_in` (steady-state packets; buffering `transform_in` is fine — `TransformStream`
+  loops on empty output). `scripts/build-module.sh` now builds + signs BOTH modules; the committed
+  `core/tests/fixtures/wasm/bip324.spkw` (~22 KB) is validated end-to-end by
+  `transport::wasm::tests::bip324_module_handshakes_and_round_trips` (`#[cfg(feature = "bip324")]`):
+  two module instances (initiator + responder) complete the handshake through the real `TransformModule`
+  runtime + host-fn provider and round-trip app bytes both ways, incl. a 300-message burst past the 224
+  rekey fed in 5-byte fragments. No host changes needed. **First transport expressed purely as a signed
+  module + config — the north star in miniature.** Next: PR3 wires `run_handshake` into a dial path
+  (today wired nowhere) + the transport/config surface; PR4 = bitcoind + side-door MAC; the live
+  rust-bitcoin `bip324` interop lands with that real end-to-end.
+- 2026-07-20 (ADR 0013 §7 step 4 — BIP324 dial-path wiring, PR3): the last framework gap closed —
+  `Transform::run_handshake` (implemented since step 3) was **wired into no dial path**, so a
+  handshake-based transport couldn't connect. Now `WasmTransport::dial_target` (client/initiator) and
+  `WasmServer::accept` (server/responder) each run `run_handshake` on the raw connection before the
+  steady-state `TransformStream`, gated on a new protocol-blind `Transform::drives_handshake()` (run iff
+  the module exports `handshake_step`; obfs-xor and other transform-only modules are unaffected —
+  backward-compat confirmed). `WasmServer` gained a `config` field (it called `instantiate()`); NO config
+  schema change (`init_config` = `role ++ magic ++ garbage` reuses `ServerSpec::Wasm`/`WasmConfig`).
+  Validated by `transport::wasm::transport::tests::bip324_tunnel_round_trips_over_real_tcp` (`#[cfg
+  bip324]`): a real-TCP loopback where client + server both run the handshake and a byte round-trips
+  through the BIP324 tunnel to an echo. **A latent `bip324-core` bug surfaced + fixed:** over a real
+  stream the initiator's final handshake message coalesces with its first steady-state packet, so the
+  responder's `run_handshake` reads past the handshake; those leftover bytes were being *dropped* when
+  the `Handshake` became a `Session` (PR1/PR2 tests shuttled exact outputs, never over-reading). Fix:
+  `Session::new` seeds `recv_buf` with the handshake leftover (`core::mem::take(&mut self.buf)`); guarded
+  by `bip324-core`'s `handshake_carries_coalesced_steady_state_bytes` test. Fixture regenerated.
+  **Follow-up (same PR, e266f16): the coalescing had a *second* home — the host.** The core seed buffers
+  the leftover, but `TransformStream::poll_read` only fed *newly-read wire bytes* to `transform_in`, so a
+  fully-buffered frame with no trailing wire bytes was stranded and the reader blocked forever on a wire
+  read. Timing-dependent, so the tunnel test **passed in isolation but hung 120s** as the last test under
+  the full `--workspace --all-features` suite (CI-deterministic across all 3 OSes; single-feature local
+  runs missed it). **Boundary contract, now explicit:** after a handshake the host must drain the module
+  before its first wire read — a one-shot `handshake_drain_pending` in `poll_read` (armed only when
+  `drives_handshake()`) calls `transform_in(&[])` first. Guarded by the deterministic
+  `poll_read_drains_steady_state_bytes_the_handshake_over_read` (forces the over-read; fails `UnexpectedEof`
+  without the drain). Also ran `run_handshake` on the **UDP dial path** (`dial_udp_addr`): the server runs
+  the responder handshake in `accept` for every connection (the TCP-tunnel/UDP-associate split comes later,
+  from the header), so a handshake module would desync if the UDP client skipped it. 665 `--workspace
+  --all-features` tests green. Next: PR4 = bitcoind on :8333 + the keyed-garbage side-door MAC + live
+  rust-bitcoin interop.
+- 2026-07-20 (ADR 0013 §7 step 4 — keyed-garbage side-door MAC, PR4a): the finale (PR4) decomposed like
+  BIP324 itself (PR4a core logic → PR4b splitting egress + guest/config wiring → PR4c live rust-bitcoin
+  interop). PR4a lands the side-door in `bip324-core`: a new `side_door` module + `Handshake::with_side_door`.
+  A tunnel client (initiator) prepends `tag = HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)` (domain-separated) to its opening garbage; a
+  Lantern egress sharing the per-server secret `k_srv` recomputes the tag from the client's ellswift and
+  matches it (constant-time) — match → BIP324 tunnel, mismatch (real Bitcoin peer, random garbage, no
+  `k_srv`) → proxy to the real node. **Design decision (chosen): no epoch — key the tag on the *ephemeral*
+  ellswift alone.** Freshness is per-connection with no clock, so no `host_time` primitive is needed → the
+  side-door stays release-free; a captured `(ellswift, tag)` can't complete the handshake (attacker lacks
+  the client's ephemeral secret), so replay confirms nothing to a prober. HMAC reuses the provider's
+  existing `hkdf_extract` (HKDF-Extract *is* HMAC) → **no new host primitive**. The tag becomes part of the
+  initiator's sent garbage, hence of the version-packet AAD, so the peer authenticates the same bytes it
+  scans past; a plain BIP324 responder (no key) still completes — the tag is transparent garbage to it.
+  4 new `bip324-core` tests (gen/verify determinism, wrong-key/tamper/short rejection, initiator opening
+  carries a verifiable tag, full side-door handshake round-trips); 669 `--workspace --all-features` green;
+  `no_std` default build + clippy (both feature configs) + fmt clean. Guest/fixture untouched (ABI
+  unchanged) — the guest wires `with_side_door` in PR4b. **Review note (PR #106, 4 rounds):** all Copilot
+  findings were legitimate and fixed — responder/empty-key `with_side_door` no-ops, stack-buffer for the
+  HMAC input, doc-formula accuracy, and **fail-closed on an empty `k_srv` on BOTH sides** (verify rejects
+  it; the initiator emits plain garbage — a tag under an empty key is publicly recomputable from the
+  ellswift, i.e. a client fingerprint, the opposite of the goal).
+- 2026-07-21 (ADR 0013 §7 step 4 — PR4b split; PR4b-1 = guest side-door wiring): PR4b decomposed into
+  PR4b-1 (guest wiring) + PR4b-2 (splitting egress), on the user's call (smaller PRs after PR4a's 4 review
+  rounds). PR4b-1: the `modules/bip324` guest `init` config grew a `k_srv` field —
+  `[role][magic(4)][k_srv_len: u16 BE][k_srv][garbage]` (was `[role][magic][garbage]`) — and the guest
+  passes `k_srv` to `Handshake::with_side_door`. A non-empty `k_srv` makes the client emit the side-door
+  tag entirely inside the signed WASM module; the host knows nothing of Bitcoin or the side-door. Updated
+  the three test config builders to the new layout (k_srv_len=0), regenerated `bip324.spkw` (obfs-xor
+  deterministically unchanged), and added a module-level test (tag present in the opening; tagged tunnel
+  completes + round-trips through the real runtime against a plain responder). 672 `--workspace
+  --all-features` green; clippy + fmt clean. **Review note (PR #107, 4 rounds):** all fixed — checked u16
+  for k_srv_len, PR3-doc reconciliation, an opening-layout assertion (not just length), and a crate-wide
+  `input()` bounds-check (validate (ptr,len) against IN_ARENA before `from_raw_parts`, trap otherwise).
+- 2026-07-21 (ADR 0013 §7 step 4 — PR4b-2 = the splitting egress): the collateral-freedom egress. New
+  `SplittingServer` (host, `core/src/transport/wasm/splitter.rs`, gated `bip324`): peeks each connection's
+  opening (`ellswift` + leading garbage, a **timeout-bounded** peek), verifies the side-door tag via
+  `bip324-core::verify_side_door_tag_with` (fed `ring`'s HMAC — **spark-core now takes a `bip324-core`
+  dep**), and routes: tag match → BIP324 responder (`WasmServer`) + relay the client's announced target;
+  no match → proxy the raw bytes to `upstream` (the real Bitcoin node). A `PrefixedStream` replays the
+  peeked bytes so the chosen branch sees byte 0; the timeout means a real peer with < tag-length garbage
+  is proxied instead of stalling the peek. **Design choice (chosen earlier): closure-based
+  `verify_side_door_tag_with`** so the host verifies with HMAC only — no full `Bip324Crypto` impl (and it
+  keeps the canonical MAC construction in bip324-core; this also let the host use the exported
+  `ELLSWIFT_LEN`/`SIDE_DOOR_TAG_LEN`). Loopback test: tagged client tunnels to its echo target; untagged
+  peer proxied to a stub upstream + echoed (a wrong tunnel-branch route would fail the BIP324 handshake).
+  673 `--workspace --all-features` green; default (no-bip324) build + clippy (workspace, all-features) +
+  fmt clean. Next: PR4c = swap the stub upstream for a real `bitcoind` + live rust-bitcoin `bip324`
+  interop, the full end-to-end proof.
+- 2026-07-21 (ADR 0013 §7 step 4 — PR4c = live interop; **step 4 COMPLETE**): two proofs. (1) **Hermetic
+  wire-compat against the rust-bitcoin `bip324` reference crate** (`bip324-core/tests/interop.rs`, gated
+  `native-crypto`; `bip324 = "0.11"` added as an optional dep under that feature — a dev-dep can't be
+  optional, and this keeps the base C-free test path clean). Our sans-io core drives a real handshake +
+  packet round-trip over a TCP loopback against their blocking `io::Protocol` (on a spawned thread), in
+  **both** roles — the reference decrypts our packets and vice versa, so our BIP324 is byte-identical to
+  the canonical impl. Runs in CI. (2) **Live `bitcoind` proof** (`#[ignore]`d, `BIP324_BITCOIND=host:port`,
+  default `127.0.0.1:8333`): a non-Lantern opening reaches a real bitcoind through the splitter's proxy
+  branch and gets a genuine BIP324 response — dependency-free (a BIP324 responder replies to any 64-byte
+  ellswift, so reading its key back proves the path; no rust-bitcoin crate needed in spark-core). Also
+  corrected bip324-core's Cargo.toml comment that had claimed the interop was "exercised in PR2" (it
+  wasn't — it is now). 676 `--workspace --all-features` green; fmt + clippy clean. **§7 step 4 is done:**
+  a custom-curve, interactive-handshake, custom-framing protocol + a Lantern anti-probing side-door,
+  shipped as a signed WASM module + config, wire-compatible with the reference, deployable to an unchanged
+  client — the north star demonstrated. Remaining framework work = §7 step 5 (non-Chrome anchors + STARTTLS
+  proof), independent of BIP324.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

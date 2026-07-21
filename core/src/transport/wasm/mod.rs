@@ -10,7 +10,7 @@
 //! # ABI
 //!
 //! The module **exports** (`memory` + `alloc` always; then at least one *mode* — the byte-transform
-//! pair and/or the gambit-compute export):
+//! pair, the gambit-compute export, and/or the interactive-handshake export):
 //! - `memory` — its linear memory.
 //! - `alloc(len: i32) -> i32` — return a pointer to `len` writable bytes (the host writes input here).
 //! - `transform_out(ptr: i32, len: i32) -> i64` — *byte-transform mode*; transform `len` bytes at
@@ -18,11 +18,17 @@
 //!   `(out_ptr << 32) | out_len`.
 //! - `transform_in(ptr: i32, len: i32) -> i64` — the inverse (wire → application), same packing.
 //! - `compute_gambit(ctx_ptr: i32, ctx_len: i32) -> i64` — *gambit-compute mode* (ADR 0006 P3);
-//!   invoked once per connection with a (reserved) per-connection context, returns a
-//!   **postcard-encoded [`flint_tls::gambit::Gambit`]** packed the same way — the opening
-//!   *plan* (CH knobs + record/segment framing), not stream bytes. The host decodes it and runs it
-//!   through the boring executor (`Profile::for_boring`), which stays the TLS engine. Lets a gambit
-//!   be **computed per connection** (adaptive/stateful) rather than shipped as static signed config.
+//!   invoked once per connection with a (reserved) per-connection context, returns **opaque engine
+//!   params** packed the same way — the opening *plan*, not stream bytes. The core does not parse
+//!   them; the engine that consumes them (the TLS engine, `engine::tls`) decodes + realizes them
+//!   (ADR 0013 §7 step 1). Lets a plan be **computed per connection** (adaptive/stateful) rather than
+//!   shipped as static signed config.
+//! - `handshake_step(in_ptr: i32, in_len: i32) -> i64` — *interactive-handshake mode* (ADR 0013 §7
+//!   step 3); drive one step of an opening handshake. Output is packed the same way but **framed** as
+//!   `[status: u8][outbound_wire …]` (status 0 = continue, 1 = done). Called with empty input at
+//!   connect (emit-at-connect), then per inbound chunk until done — the one mode where an inbound read
+//!   drives an outbound write. The module keeps handshake state + derived keys for the steady-state
+//!   `transform_*` to use.
 //! - `init(config_ptr: i32, config_len: i32)` — *optional*; called once after instantiation to
 //!   deliver per-deployment configuration (e.g. a key or seed). See [`TransformModule::instantiate_with_config`].
 //! - `reset()` — *optional*; called by the host after each transform (and after `init`) so a module
@@ -55,6 +61,18 @@
 //! - `host_x25519_agree(key_id, peer_pub_ptr, out_ptr) -> i64` — X25519 ECDH between the stored
 //!   private key `key_id` (consumed) and the 32-byte peer public key at `peer_pub_ptr`, writing the
 //!   32-byte shared secret to `out_ptr`. Returns 32, or `-1` on fault.
+//! - `host_chacha20(key_ptr, nonce_ptr, counter, in_ptr, in_len, out_ptr) -> i64` — raw IETF ChaCha20
+//!   keystream (no AEAD tag): 32-byte key, 12-byte nonce, 32-bit initial block `counter`. XORs the
+//!   input with the keystream; returns the length, or `-1` on fault. A general stream cipher.
+//!
+//! Under the `bip324` feature, two more (secp256k1 + ElligatorSwift, a general curve + uniform-point
+//! encoding), mirroring the X25519 key-handle pattern:
+//! - `host_secp256k1_ellswift_generate(out_ellswift_ptr) -> i64` — generate a secp256k1 keypair, write
+//!   the 64-byte ElligatorSwift-encoded public key to `out_ellswift_ptr`, return an opaque key id (the
+//!   secret stays host-side). `-1` on fault.
+//! - `host_secp256k1_ellswift_ecdh(key_id, peer_ellswift_ptr, out_ptr) -> i64` — X-only ECDH between
+//!   the stored key `key_id` (consumed) and the 64-byte peer ElligatorSwift key, writing the raw
+//!   32-byte shared x-coordinate (no protocol-specific hashing). Returns 32, or `-1` on fault.
 //!
 //! Bulk per-byte crypto runs **natively** through these host functions, not in the interpreter — the
 //! module interprets only its control/framing logic. (Measured: bulk work in the interpreter caps a
@@ -65,6 +83,7 @@
 //! `reset` can allocate per-call scratch freely; one that does not must avoid unbounded memory growth
 //! across calls itself (e.g. reuse a fixed scratch region).
 
+use std::io;
 use std::sync::Arc;
 
 use ring::rand::{SecureRandom, SystemRandom};
@@ -74,14 +93,45 @@ use wasmi::{
     TypedFunc,
 };
 
-use flint_tls::gambit::Gambit;
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+use chacha20::{ChaCha20, Key, Nonce};
+#[cfg(feature = "bip324")]
+use secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftSharedSecret, Party};
+#[cfg(feature = "bip324")]
+use secp256k1::SecretKey;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 mod signing;
+#[cfg(feature = "bip324")]
+mod splitter;
 mod stream;
 mod transport;
+/// The offline artifact-signing helper — only compiled for the `sign-module` tool.
+#[cfg(feature = "module-signer")]
+pub use signing::sign_artifact;
 pub use signing::{build_artifact, signing_payload, ModuleError, ModuleVerifier, SignedModule};
+#[cfg(feature = "bip324")]
+pub use splitter::SplittingServer;
 pub use stream::TransformStream;
 pub use transport::{WasmServer, WasmTransport};
+
+/// PKCS#8 of the **development** module-signing keypair — the private half of
+/// `signing::DEV_MODULE_PUBKEY` (the dev fallback `ModuleVerifier::pinned()` trusts when no production
+/// key is pinned). Compiled only under `#[cfg(test)]` or the off-by-default `module-signer` feature —
+/// which shipped/product builds never enable — so the private key stays out of every shipped binary.
+#[cfg(any(test, feature = "module-signer"))]
+const DEV_MODULE_PKCS8: &[u8] = &[
+    48, 81, 2, 1, 1, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 47, 96, 208, 79, 38, 102, 119, 122,
+    12, 75, 231, 119, 191, 58, 165, 37, 216, 16, 180, 152, 96, 30, 105, 41, 180, 223, 163, 204, 55,
+    11, 100, 103, 129, 33, 0, 114, 43, 155, 15, 166, 26, 80, 178, 3, 21, 71, 211, 20, 223, 38, 197,
+    127, 114, 13, 201, 119, 147, 135, 224, 208, 160, 39, 52, 129, 224, 249, 213,
+];
+
+/// The development signing keypair (see [`DEV_MODULE_PKCS8`]).
+#[cfg(any(test, feature = "module-signer"))]
+pub fn dev_keypair() -> ring::signature::Ed25519KeyPair {
+    ring::signature::Ed25519KeyPair::from_pkcs8(DEV_MODULE_PKCS8).expect("dev pkcs8")
+}
 
 /// Import module name the host functions are defined under.
 const HOST_MODULE: &str = "env";
@@ -105,6 +155,14 @@ const HOST_AES_GCM_OPEN: &str = "host_aes_gcm_open";
 const HOST_X25519_GENERATE: &str = "host_x25519_generate";
 /// Import: X25519 ECDH (`host_x25519_agree(key_id, peer_pub_ptr, out_ptr)`).
 const HOST_X25519_AGREE: &str = "host_x25519_agree";
+/// Import: raw ChaCha20 keystream (`host_chacha20(key_ptr, nonce_ptr, counter, in_ptr, in_len, out_ptr)`).
+const HOST_CHACHA20: &str = "host_chacha20";
+/// Import: secp256k1 ElligatorSwift keygen (`host_secp256k1_ellswift_generate(out_ellswift_ptr) -> key_id`).
+#[cfg(feature = "bip324")]
+const HOST_SECP256K1_ELLSWIFT_GENERATE: &str = "host_secp256k1_ellswift_generate";
+/// Import: secp256k1 ElligatorSwift X-only ECDH (`host_secp256k1_ellswift_ecdh(key_id, peer_ellswift_ptr, out_ptr)`).
+#[cfg(feature = "bip324")]
+const HOST_SECP256K1_ELLSWIFT_ECDH: &str = "host_secp256k1_ellswift_ecdh";
 
 /// Export: the module's linear memory.
 const EXPORT_MEMORY: &str = "memory";
@@ -121,9 +179,15 @@ const EXPORT_ALLOC: &str = "alloc";
 const EXPORT_TRANSFORM_OUT: &str = "transform_out";
 /// Export: `transform_in(ptr, len) -> packed`.
 const EXPORT_TRANSFORM_IN: &str = "transform_in";
-/// Export (optional): `compute_gambit(ctx_ptr, ctx_len) -> packed` — emits a postcard-encoded
-/// [`Gambit`] genome (the per-connection opening plan), not stream bytes (ADR 0006 P3).
+/// Export (optional): `compute_gambit(ctx_ptr, ctx_len) -> packed` — emits opaque per-connection
+/// engine params (the opening plan), not stream bytes; the consuming engine decodes them (ADR 0006 P3).
 const EXPORT_COMPUTE_GAMBIT: &str = "compute_gambit";
+/// Export (optional): `handshake_step(in_ptr, in_len) -> packed` — one step of an interactive opening
+/// handshake (ADR 0013 §7 step 3). The output region is framed `[status: u8][outbound_wire …]`: status
+/// 0 = continue, 1 = done. Called with empty input at connect (emit-at-connect), then per inbound chunk.
+const EXPORT_HANDSHAKE_STEP: &str = "handshake_step";
+/// Chunk size for reading inbound handshake bytes; the module buffers partial reads internally.
+const HANDSHAKE_READ_CHUNK: usize = 4096;
 
 /// Upper bound on a single transform's input or output length. Caps how much guest memory one call
 /// can drive the host to touch or allocate — the module is untrusted, so every length crossing the
@@ -156,6 +220,19 @@ const X25519_KEY_LEN: usize = 32;
 /// Cap on a session's *live* (un-consumed) X25519 ephemeral keys — a handshake needs one; this
 /// bounds a module that spams keygen without agreeing.
 const MAX_X25519_KEYS: usize = 16;
+/// Raw ChaCha20 key length (IETF variant).
+const CHACHA20_KEY_LEN: usize = 32;
+/// Raw ChaCha20 nonce length (IETF 96-bit).
+const CHACHA20_NONCE_LEN: usize = 12;
+/// secp256k1 ElligatorSwift public-key encoding length.
+#[cfg(feature = "bip324")]
+const SECP256K1_ELLSWIFT_LEN: usize = 64;
+/// secp256k1 X-only ECDH shared-secret (raw x-coordinate) length.
+#[cfg(feature = "bip324")]
+const SECP256K1_SHARED_LEN: usize = 32;
+/// Cap on a session's *live* (un-consumed) secp256k1 keys (see [`MAX_X25519_KEYS`]).
+#[cfg(feature = "bip324")]
+const MAX_SECP256K1_KEYS: usize = 16;
 
 /// Per-call fuel budget = [`FUEL_BASE`] + `input_len` × [`FUEL_PER_BYTE`]. Fuel meters the module's
 /// own interpreted bytecode (host-fn crypto runs natively and costs no fuel), so this bounds a
@@ -194,9 +271,15 @@ pub enum WasmError {
     /// A host function recorded a fault during the guest call (CSPRNG failure, bad length, …).
     #[error("host function fault: {0}")]
     HostFault(String),
-    /// `compute_gambit` returned bytes that did not decode as a [`Gambit`] genome (ADR 0006 P3).
-    #[error("compute_gambit returned an undecodable gambit genome: {0}")]
-    GambitDecode(String),
+    /// `handshake_step` returned a malformed frame (empty, or a status byte that isn't 0/1).
+    #[error("handshake_step returned a malformed frame: {0}")]
+    HandshakeFrame(String),
+    /// The module exports no *mode* entrypoint (needs at least one of `transform_out`,
+    /// `transform_in`, `compute_gambit`, or `handshake_step`).
+    #[error(
+        "transform module exports no mode entrypoint (transform_out / transform_in / compute_gambit / handshake_step)"
+    )]
+    NoMode,
     /// The module exhausted its per-call execution fuel — a runaway or pathologically slow module.
     #[error("fuel: {0}")]
     Fuel(String),
@@ -269,6 +352,11 @@ struct HostState {
     /// per handshake); freed slots are reused so the vec stays ≤ [`MAX_X25519_KEYS`]. Keeping
     /// private keys host-side means a buggy/hostile module can never read or leak them.
     x25519_keys: Vec<Option<agreement::EphemeralPrivateKey>>,
+    /// Host-held secp256k1 keypairs (secret + its ElligatorSwift encoding), indexed by the id from
+    /// `host_secp256k1_ellswift_generate`; `ecdh` `take`s the entry (one-shot). Same host-side-only
+    /// privacy property as `x25519_keys`; bounded by [`MAX_SECP256K1_KEYS`].
+    #[cfg(feature = "bip324")]
+    secp256k1_keys: Vec<Option<(SecretKey, ElligatorSwift)>>,
     /// Caps the guest's linear-memory + table growth (fuel bounds compute, not allocation). Read by
     /// the store limiter wired up in [`Transform::new`].
     limits: StoreLimits,
@@ -287,6 +375,8 @@ pub struct Transform {
     transform_in: Option<TypedFunc<(i32, i32), i64>>,
     /// Gambit-compute mode (ADR 0006 P3); absent for a byte-transform-only module.
     compute_gambit: Option<TypedFunc<(i32, i32), i64>>,
+    /// Interactive-handshake mode (ADR 0013 §7 step 3); absent unless the module drives a handshake.
+    handshake_step: Option<TypedFunc<(i32, i32), i64>>,
     /// Optional `reset()` — rewinds the module's scratch arena after each transform.
     reset: Option<TypedFunc<(), ()>>,
 }
@@ -312,6 +402,8 @@ impl Transform {
                 fault: None,
                 rand_bytes: 0,
                 x25519_keys: Vec::new(),
+                #[cfg(feature = "bip324")]
+                secp256k1_keys: Vec::new(),
                 limits: StoreLimitsBuilder::new()
                     .memory_size(MAX_WASM_MEMORY_BYTES)
                     .table_elements(MAX_WASM_TABLE_ELEMENTS)
@@ -360,6 +452,25 @@ impl Transform {
         linker
             .func_wrap(HOST_MODULE, HOST_X25519_AGREE, host_x25519_agree)
             .map_err(|e| WasmError::Link(e.to_string()))?;
+        linker
+            .func_wrap(HOST_MODULE, HOST_CHACHA20, host_chacha20)
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        #[cfg(feature = "bip324")]
+        linker
+            .func_wrap(
+                HOST_MODULE,
+                HOST_SECP256K1_ELLSWIFT_GENERATE,
+                host_secp256k1_ellswift_generate,
+            )
+            .map_err(|e| WasmError::Link(e.to_string()))?;
+        #[cfg(feature = "bip324")]
+        linker
+            .func_wrap(
+                HOST_MODULE,
+                HOST_SECP256K1_ELLSWIFT_ECDH,
+                host_secp256k1_ellswift_ecdh,
+            )
+            .map_err(|e| WasmError::Link(e.to_string()))?;
 
         let instance = linker
             .instantiate_and_start(&mut store, &module.module)
@@ -383,8 +494,15 @@ impl Transform {
         let compute_gambit = instance
             .get_typed_func::<(i32, i32), i64>(&store, EXPORT_COMPUTE_GAMBIT)
             .ok();
-        if transform_out.is_none() && transform_in.is_none() && compute_gambit.is_none() {
-            return Err(WasmError::MissingExport(EXPORT_TRANSFORM_OUT));
+        let handshake_step = instance
+            .get_typed_func::<(i32, i32), i64>(&store, EXPORT_HANDSHAKE_STEP)
+            .ok();
+        if transform_out.is_none()
+            && transform_in.is_none()
+            && compute_gambit.is_none()
+            && handshake_step.is_none()
+        {
+            return Err(WasmError::NoMode);
         }
         // Optional `reset()` — arena management; absent for modules that manage memory themselves.
         let reset = instance.get_typed_func::<(), ()>(&store, EXPORT_RESET).ok();
@@ -431,6 +549,7 @@ impl Transform {
             transform_out,
             transform_in,
             compute_gambit,
+            handshake_step,
             reset,
         })
     }
@@ -445,17 +564,86 @@ impl Transform {
         self.run(Direction::In, input)
     }
 
-    /// Invoke the module's `compute_gambit` export (ADR 0006 P3): pass the per-connection context
-    /// and decode the returned bytes as a [`Gambit`] genome — the opening *plan*, not stream bytes.
-    /// The trust root is the module's own signature (the genome is *not* separately signed); the
-    /// caller still gates it via `Profile::for_boring` so boring only runs gambits it can realize.
+    /// Invoke the module's `compute_gambit` export (ADR 0006 P3): pass the per-connection context and
+    /// return the raw computed-gambit bytes — **opaque** here. The core no longer parses them; the
+    /// engine that consumes them (the TLS engine) decodes + gates them (ADR 0013 §7 step 1). The trust
+    /// root is the module's own signature (the bytes are not separately signed).
     /// Errors with [`WasmError::MissingExport`] if the module is byte-transform-only.
-    pub fn compute_gambit(&mut self, ctx: &[u8]) -> Result<Gambit, WasmError> {
+    pub fn compute_gambit(&mut self, ctx: &[u8]) -> Result<Vec<u8>, WasmError> {
         let func = self
             .compute_gambit
             .ok_or(WasmError::MissingExport(EXPORT_COMPUTE_GAMBIT))?;
-        let bytes = self.call_io(func, EXPORT_COMPUTE_GAMBIT, ctx)?;
-        postcard::from_bytes::<Gambit>(&bytes).map_err(|e| WasmError::GambitDecode(e.to_string()))
+        self.call_io(func, EXPORT_COMPUTE_GAMBIT, ctx)
+    }
+
+    /// Whether the module drives an interactive opening handshake (exports `handshake_step`). The dial
+    /// path runs [`run_handshake`](Self::run_handshake) before steady-state iff this is true — so the
+    /// wiring stays protocol-blind (a transform-only module like obfs-xor returns false and is dialed
+    /// straight through).
+    pub fn drives_handshake(&self) -> bool {
+        self.handshake_step.is_some()
+    }
+
+    /// Drive one step of an interactive opening handshake (ADR 0013 §7 step 3): feed the module the
+    /// `inbound` wire bytes (empty at connect — emit-at-connect) and return `(outbound_wire, done)`.
+    /// The module frames its output as `[status: u8][outbound …]`; `done` is `status == 1`. Keys the
+    /// handshake derives stay in the module and are used by the steady-state `transform_*` afterward.
+    /// Errors with [`WasmError::MissingExport`] if the module has no `handshake_step`, or
+    /// [`WasmError::HandshakeFrame`] on a malformed frame.
+    pub fn handshake_step(&mut self, inbound: &[u8]) -> Result<(Vec<u8>, bool), WasmError> {
+        let func = self
+            .handshake_step
+            .ok_or(WasmError::MissingExport(EXPORT_HANDSHAKE_STEP))?;
+        let mut out = self.call_io(func, EXPORT_HANDSHAKE_STEP, inbound)?;
+        if out.is_empty() {
+            return Err(WasmError::HandshakeFrame(
+                "empty frame (no status byte)".into(),
+            ));
+        }
+        let done = match out.remove(0) {
+            0 => false,
+            1 => true,
+            other => {
+                return Err(WasmError::HandshakeFrame(format!(
+                    "status byte {other} is not 0 (continue) or 1 (done)"
+                )))
+            }
+        };
+        Ok((out, done))
+    }
+
+    /// Drive an interactive opening handshake to completion over `stream` (ADR 0013 §7 step 3): emit
+    /// the module's opening message (emit-at-connect), then loop — write each outbound message, read
+    /// the peer's reply, step again — until the module signals done. The module owns all protocol
+    /// state + derived keys; the caller then runs the steady-state byte transforms (e.g. via
+    /// [`TransformStream`]) on the same `stream`. Returns `UnexpectedEof` if the peer closes mid-handshake.
+    pub async fn run_handshake<S>(&mut self, stream: &mut S) -> io::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // One reusable stack buffer across steps (no per-iteration alloc). `n == 0` on the first
+        // iteration is emit-at-connect: the module produces its opening message from empty input.
+        let mut buf = [0u8; HANDSHAKE_READ_CHUNK];
+        let mut n = 0usize;
+        loop {
+            let (outbound, done) = self.handshake_step(&buf[..n]).map_err(io::Error::other)?;
+            if !outbound.is_empty() {
+                stream.write_all(&outbound).await?;
+                stream.flush().await?;
+            }
+            if done {
+                return Ok(());
+            }
+            n = stream.read(&mut buf).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "peer closed during handshake",
+                ));
+            }
+        }
     }
 
     /// Total bytes this session has drawn from the `host_rand` capability — observability for how
@@ -474,7 +662,7 @@ impl Transform {
     }
 
     /// The shared guest-call sequence for any `(ptr, len) -> packed(out_ptr, out_len)` export
-    /// (`transform_out`/`transform_in`/`compute_gambit`): refill fuel, `alloc` + write the input,
+    /// (`transform_out`/`transform_in`/`compute_gambit`/`handshake_step`): refill fuel, `alloc` + write the input,
     /// call `func`, read the packed output region, then `reset` the scratch arena (if any).
     fn call_io(
         &mut self,
@@ -1118,6 +1306,205 @@ fn host_x25519_agree(
     }
 }
 
+/// The `host_chacha20(key_ptr, nonce_ptr, counter, in_ptr, in_len, out_ptr) -> i64` import: raw IETF
+/// ChaCha20 keystream (no AEAD tag) — a general stream cipher. 32-byte key, 12-byte nonce, and a
+/// 32-bit initial block `counter` (so a caller can seek / rekey, e.g. FSChaCha20). XORs `in_len` bytes
+/// at `in_ptr` with the keystream into `out_ptr`; returns the byte length, or `-1` with a recorded
+/// fault. Encrypt and decrypt are the same operation.
+fn host_chacha20(
+    mut caller: Caller<HostState>,
+    key_ptr: i32,
+    nonce_ptr: i32,
+    counter: i32,
+    in_ptr: i32,
+    in_len: i32,
+    out_ptr: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let key = match read_guest_array::<CHACHA20_KEY_LEN>(&caller, key_ptr) {
+        Ok(k) => k,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_chacha20: {msg}"));
+            return -1;
+        }
+    };
+    let nonce = match read_guest_array::<CHACHA20_NONCE_LEN>(&caller, nonce_ptr) {
+        Ok(n) => n,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_chacha20: {msg}"));
+            return -1;
+        }
+    };
+    let mut buf = match read_guest(&caller, in_ptr, in_len) {
+        Ok(b) => b,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_chacha20: {msg}"));
+            return -1;
+        }
+    };
+    let mut cipher = ChaCha20::new(&Key::from(key), &Nonce::from(nonce));
+    // Start at block `counter` (64 bytes/block). `counter as u32` reinterprets a negative i32 as a
+    // valid 32-bit block index; `try_*` variants return an error (not panic) if the guest overruns.
+    if cipher.try_seek((counter as u32 as u64) * 64).is_err() {
+        caller.data_mut().fault = Some("host_chacha20: counter out of range".to_string());
+        return -1;
+    }
+    if cipher.try_apply_keystream(&mut buf).is_err() {
+        caller.data_mut().fault = Some("host_chacha20: keystream exhausted".to_string());
+        return -1;
+    }
+    match write_guest(&mut caller, out_ptr, &buf) {
+        Ok(()) => buf.len() as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_chacha20: {msg}"));
+            -1
+        }
+    }
+}
+
+/// The `host_secp256k1_ellswift_generate(out_ellswift_ptr) -> key_id` import: generate a secp256k1
+/// keypair, write the 64-byte ElligatorSwift encoding of the public key to `out_ellswift_ptr`, store
+/// the secret (with its encoding) host-side, and return its id. The secret never enters guest memory.
+/// `-1` with a recorded fault on error (including more than [`MAX_SECP256K1_KEYS`] live keys).
+/// A process-wide secp256k1 context (ecmult-gen tables built once). Needed for ElligatorSwift keygen:
+/// this `secp256k1-sys` build has no static ecmult-gen table, so the no-precomp context can't derive a
+/// public key. Contexts are `Sync` and meant to be long-lived + shared, so one lazy global suffices.
+#[cfg(feature = "bip324")]
+fn secp_context() -> &'static secp256k1::Secp256k1<secp256k1::All> {
+    use std::sync::OnceLock;
+    static CTX: OnceLock<secp256k1::Secp256k1<secp256k1::All>> = OnceLock::new();
+    CTX.get_or_init(secp256k1::Secp256k1::new)
+}
+
+#[cfg(feature = "bip324")]
+fn host_secp256k1_ellswift_generate(mut caller: Caller<HostState>, out_ellswift_ptr: i32) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    let live = caller
+        .data()
+        .secp256k1_keys
+        .iter()
+        .filter(|k| k.is_some())
+        .count();
+    if live >= MAX_SECP256K1_KEYS {
+        caller.data_mut().fault = Some(format!(
+            "host_secp256k1_ellswift_generate: too many live keys (max {MAX_SECP256K1_KEYS})"
+        ));
+        return -1;
+    }
+    // Draw the secret key + the ElligatorSwift aux randomness from the OS CSPRNG (no `rand`-trait dep).
+    // A uniform 32-byte scalar is out of range only with ~2^-128 probability; retry the draw a few
+    // times rather than sticky-fault (brick) the module on that near-impossible event.
+    let rng = SystemRandom::new();
+    let mut found = None;
+    for _ in 0..8 {
+        let mut seed = [0u8; 64];
+        if rng.fill(&mut seed).is_err() {
+            caller.data_mut().fault =
+                Some("host_secp256k1_ellswift_generate: CSPRNG failed".to_string());
+            return -1;
+        }
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes.copy_from_slice(&seed[..32]);
+        if let Ok(secret) = SecretKey::from_byte_array(sk_bytes) {
+            let mut aux = [0u8; 32];
+            aux.copy_from_slice(&seed[32..]);
+            found = Some((secret, aux));
+            break;
+        }
+    }
+    let (secret, aux) = match found {
+        Some(pair) => pair,
+        None => {
+            caller.data_mut().fault =
+                Some("host_secp256k1_ellswift_generate: no valid scalar after retries".to_string());
+            return -1;
+        }
+    };
+    let ellswift = ElligatorSwift::from_seckey(secp_context(), secret, Some(aux));
+    if let Err(msg) = write_guest(&mut caller, out_ellswift_ptr, &ellswift.to_array()) {
+        caller.data_mut().fault = Some(format!("host_secp256k1_ellswift_generate: {msg}"));
+        return -1;
+    }
+    // Reuse a freed slot if one exists so the registry stays bounded by the live cap.
+    let keys = &mut caller.data_mut().secp256k1_keys;
+    match keys.iter().position(Option::is_none) {
+        Some(id) => {
+            keys[id] = Some((secret, ellswift));
+            id as i64
+        }
+        None => {
+            let id = keys.len();
+            keys.push(Some((secret, ellswift)));
+            id as i64
+        }
+    }
+}
+
+/// The `host_secp256k1_ellswift_ecdh(key_id, peer_ellswift_ptr, out_ptr) -> i64` import: secp256k1
+/// X-only ECDH between the stored key `key_id` (consumed) and the peer's 64-byte ElligatorSwift key at
+/// `peer_ellswift_ptr`, writing the **raw 32-byte shared x-coordinate** to `out_ptr`. Returns 32, or
+/// `-1` with a recorded fault. The shared x is protocol-neutral (no BIP324 tagged hash) — a transport
+/// composes its own KDF over it in-guest.
+#[cfg(feature = "bip324")]
+fn host_secp256k1_ellswift_ecdh(
+    mut caller: Caller<HostState>,
+    key_id: i32,
+    peer_ellswift_ptr: i32,
+    out_ptr: i32,
+) -> i64 {
+    if caller.data().fault.is_some() {
+        return -1;
+    }
+    if key_id < 0 {
+        caller.data_mut().fault = Some(format!(
+            "host_secp256k1_ellswift_ecdh: invalid key id {key_id}"
+        ));
+        return -1;
+    }
+    let (secret, own_ell) = match caller
+        .data_mut()
+        .secp256k1_keys
+        .get_mut(key_id as usize)
+        .and_then(Option::take)
+    {
+        Some(k) => k,
+        None => {
+            caller.data_mut().fault = Some(format!(
+                "host_secp256k1_ellswift_ecdh: unknown or already-consumed key id {key_id}"
+            ));
+            return -1;
+        }
+    };
+    let peer = match read_guest_array::<SECP256K1_ELLSWIFT_LEN>(&caller, peer_ellswift_ptr) {
+        Ok(p) => p,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_secp256k1_ellswift_ecdh: {msg}"));
+            return -1;
+        }
+    };
+    // Raw X-only ECDH: the hasher returns the shared point's x-coordinate verbatim (no BIP324 tagged
+    // hash). `Party::Initiator` with (own, peer) ordering yields the symmetric shared x — identical on
+    // both sides regardless of protocol role — so no initiator flag is needed here.
+    let shared = ElligatorSwift::shared_secret_with_hasher(
+        own_ell,
+        ElligatorSwift::from_array(peer),
+        secret,
+        Party::Initiator,
+        |x, _own, _peer| ElligatorSwiftSharedSecret::from_secret_bytes(x),
+    );
+    match write_guest(&mut caller, out_ptr, shared.as_secret_bytes()) {
+        Ok(()) => SECP256K1_SHARED_LEN as i64,
+        Err(msg) => {
+            caller.data_mut().fault = Some(format!("host_secp256k1_ellswift_ecdh: {msg}"));
+            -1
+        }
+    }
+}
+
 /// Read `len` bytes at `ptr` from the caller's guest memory, range-checking `len` against
 /// [`MAX_TRANSFORM_LEN`] before allocating (the guest is untrusted; a negative `i32` would become a
 /// huge `usize`).
@@ -1211,26 +1598,18 @@ pub(crate) mod testutil {
         TransformModule::load(&wasm).expect("load module")
     }
 
-    /// PKCS#8 of the **development** module-signing keypair — the private half of
-    /// `signing::DEV_MODULE_PUBKEY`. Test-only (this never compiles into a shipped binary), so tests
-    /// can produce artifacts that `ModuleVerifier::pinned()` accepts when no production key is pinned.
-    pub const DEV_MODULE_PKCS8: &[u8] = &[
-        48, 81, 2, 1, 1, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 47, 96, 208, 79, 38, 102, 119,
-        122, 12, 75, 231, 119, 191, 58, 165, 37, 216, 16, 180, 152, 96, 30, 105, 41, 180, 223, 163,
-        204, 55, 11, 100, 103, 129, 33, 0, 114, 43, 155, 15, 166, 26, 80, 178, 3, 21, 71, 211, 20,
-        223, 38, 197, 127, 114, 13, 201, 119, 147, 135, 224, 208, 160, 39, 52, 129, 224, 249, 213,
-    ];
-
-    /// The development signing keypair (see [`DEV_MODULE_PKCS8`]).
-    pub fn dev_keypair() -> ring::signature::Ed25519KeyPair {
-        ring::signature::Ed25519KeyPair::from_pkcs8(DEV_MODULE_PKCS8).expect("dev pkcs8")
-    }
+    // The dev signing key + keypair moved to the module level (`super`), gated
+    // `#[cfg(any(test, feature = "module-signer"))]` so the `sign-module` tool can reuse them. Kept
+    // reachable here as `testutil::dev_keypair` for the existing tests.
+    pub(crate) use super::dev_keypair;
 }
 
 #[cfg(test)]
 mod tests {
     use super::testutil::xor_module;
     use super::*;
+    use crate::transport::engine::Genome;
+    use flint_tls::gambit::Gambit;
 
     /// Throughput floor of the transform layer: a trivial XOR transform whose `alloc` resets to a
     /// fixed scratch base each call (no arena growth), so it isolates wasmi dispatch + host
@@ -1388,6 +1767,45 @@ mod tests {
             &plaintext[..],
             "round-trip must recover the input"
         );
+    }
+
+    /// End-to-end proof of the Rust→wasm32 build-and-sign pipeline (ADR 0013 §7 step 4): load the
+    /// committed, dev-key-signed `obfs-xor.spkw` — compiled by `scripts/build-module.sh` from the
+    /// Rust guest in `modules/obfs-xor`, which mirrors [`testutil::XOR_WAT`] — through the exact
+    /// production path (`ModuleVerifier::pinned().verify` → `instantiate`) and round-trip bytes
+    /// through it. Needs no wasm32 toolchain: it consumes the committed artifact.
+    #[test]
+    fn signed_module_fixture_verifies_and_round_trips() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/obfs-xor.spkw");
+        let artifact = std::fs::read(&path).expect("read the committed obfs-xor.spkw fixture");
+
+        // The pinned key is the dev key in a debug/test build (signing::SPARK_MODULE_PUBKEY); a zero
+        // anti-rollback floor accepts the fixture's version.
+        let signed = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify + compile the signed fixture");
+        assert_eq!(signed.name(), "obfs-xor");
+        assert_eq!(signed.version(), 1);
+
+        let mut t = signed.into_module().instantiate().expect("instantiate");
+        let plaintext = b"hello pipeline";
+        let wire = t.transform_out(plaintext).expect("transform_out");
+        assert_ne!(
+            wire.as_slice(),
+            &plaintext[..],
+            "compiled module transformed the bytes"
+        );
+        let recovered = t.transform_in(&wire).expect("transform_in");
+        assert_eq!(
+            recovered.as_slice(),
+            &plaintext[..],
+            "round-trip recovers the input"
+        );
+        // Large-input coverage isn't automatable here: a single big transform overflows wasmi's
+        // debug interpreter stack (the release-only `transforms_a_large_payload_in_one_call_release`
+        // artifact), and a release build can't reach `pinned()` without `SPARK_MODULE_PUBKEY_HEX`. The
+        // guest arena is sized to the host's `MAX_TRANSFORM_LEN`, so no valid input is rejected.
     }
 
     #[test]
@@ -1644,6 +2062,389 @@ mod tests {
     }
 
     #[test]
+    fn host_chacha20_matches_native_keystream() {
+        // The guest ChaCha20s its input at a fixed key/nonce and block counter 5; the test recomputes
+        // the same keystream natively and checks equality — verifying the host fn's arg plumbing +
+        // counter seek. Then it re-applies to confirm the stream round-trips (encrypt == decrypt).
+        let key: [u8; 32] = std::array::from_fn(|i| i as u8 + 1);
+        let nonce: [u8; 12] = std::array::from_fn(|i| i as u8);
+        let counter = 5u32;
+        let key_esc: String = key.iter().map(|b| format!("\\{b:02x}")).collect();
+        let nonce_esc: String = nonce.iter().map(|b| format!("\\{b:02x}")).collect();
+        let wat = format!(
+            r#"
+(module
+  (import "env" "host_chacha20" (func $cc (param i32 i32 i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 2)
+  (data (i32.const 8192) "{key_esc}")
+  (data (i32.const 8224) "{nonce_esc}")
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (drop (call $cc (i32.const 8192) (i32.const 8224) (i32.const {counter}) (local.get $ptr) (local.get $len) (i32.const 16384)))
+    (i64.or (i64.shl (i64.const 16384) (i64.const 32)) (i64.extend_i32_u (local.get $len))))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#
+        );
+        let module = TransformModule::load(&wat::parse_str(&wat).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let plaintext: &[u8] = b"raw chacha20 keystream through the wasm host abi";
+        let ct = t.transform_out(plaintext).expect("transform_out");
+
+        let mut cipher = ChaCha20::new(&Key::from(key), &Nonce::from(nonce));
+        cipher.seek(counter as u64 * 64);
+        let mut expected = plaintext.to_vec();
+        cipher.apply_keystream(&mut expected);
+        assert_eq!(
+            ct, expected,
+            "host_chacha20 must match the native ChaCha20 keystream"
+        );
+        assert_ne!(
+            ct.as_slice(),
+            plaintext,
+            "ciphertext must differ from plaintext"
+        );
+
+        let rt = t.transform_out(&ct).expect("re-apply");
+        assert_eq!(
+            rt.as_slice(),
+            plaintext,
+            "re-applying the same keystream recovers the plaintext"
+        );
+    }
+
+    #[cfg(feature = "bip324")]
+    #[test]
+    fn host_secp256k1_ellswift_agrees_with_a_native_peer() {
+        use secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftSharedSecret, Party};
+        use secp256k1::{Secp256k1, SecretKey};
+
+        // Native peer B: a fixed, known-valid scalar + ellswift aux (fed to the guest as the input).
+        // Deterministic — no keygen draw, so no vanishing-probability out-of-range panic in the test.
+        let secp = Secp256k1::new();
+        let sk_b = SecretKey::from_byte_array([7u8; 32]).expect("valid scalar");
+        let ell_b = ElligatorSwift::from_seckey(&secp, sk_b, Some([9u8; 32]));
+
+        // The guest generates its own ellswift key (A) and ECDHs against B's ellswift; it returns
+        // `ell_A || shared_x`.
+        const WAT: &str = r#"
+(module
+  (import "env" "host_secp256k1_ellswift_generate" (func $gen (param i32) (result i64)))
+  (import "env" "host_secp256k1_ellswift_ecdh" (func $ecdh (param i32 i32 i32) (result i64)))
+  (memory (export "memory") 2)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (local $id i32)
+    ;; ell_A at 16384 (64B); shared_x at 16448 (32B) — returned as one 96-byte blob.
+    (local.set $id (i32.wrap_i64 (call $gen (i32.const 16384))))
+    (drop (call $ecdh (local.get $id) (local.get $ptr) (i32.const 16448)))
+    (i64.or (i64.shl (i64.const 16384) (i64.const 32)) (i64.const 96)))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let blob = t.transform_out(&ell_b.to_array()).expect("transform_out");
+        assert_eq!(blob.len(), 96, "ell_A || shared_x");
+        let (ell_a_bytes, shared_module) = blob.split_at(64);
+        let ell_a = ElligatorSwift::from_array(ell_a_bytes.try_into().unwrap());
+
+        // The other side of the same X-only ECDH, natively (identity hasher → raw shared x). By ECDH
+        // symmetry, sk_B·pub_A == sk_A·pub_B, so both must land on the same x.
+        let shared_native = ElligatorSwift::shared_secret_with_hasher(
+            ell_b,
+            ell_a,
+            sk_b,
+            Party::Initiator,
+            |x, _, _| ElligatorSwiftSharedSecret::from_secret_bytes(x),
+        );
+        assert_eq!(
+            shared_module,
+            shared_native.as_secret_bytes(),
+            "raw X-only ECDH shared x must match the native peer's"
+        );
+        assert_ne!(shared_module, &[0u8; 32], "shared x must be non-trivial");
+    }
+
+    /// End-to-end proof of the BIP324 WASM module (ADR 0013 §7 step 4, PR2): load the committed, signed
+    /// `bip324.spkw` through the production verify path, instantiate an initiator + a responder from it,
+    /// drive the handshake through the real runtime + host-fn provider, and round-trip application bytes
+    /// both ways (incl. a fragmented, past-the-rekey burst). Gated on `bip324` so the module's
+    /// secp256k1 host imports resolve.
+    #[cfg(feature = "bip324")]
+    #[test]
+    fn bip324_module_handshakes_and_round_trips() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/bip324.spkw");
+        let artifact = std::fs::read(&path).expect("read the committed bip324.spkw fixture");
+        let module = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify + compile the signed bip324 module")
+            .into_module();
+
+        // Config blob: [role][network_magic(4)][k_srv_len(2)=0][garbage…]. Mainnet magic, no side-door.
+        const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+        let cfg = |role: u8, garbage: &[u8]| {
+            let mut c = vec![role];
+            c.extend_from_slice(&MAGIC);
+            c.extend_from_slice(&[0, 0]); // k_srv_len = 0
+            c.extend_from_slice(garbage);
+            c
+        };
+        let mut initiator = module
+            .instantiate_with_config(&cfg(0, b"initiator garbage"))
+            .expect("instantiate initiator");
+        let mut responder = module
+            .instantiate_with_config(&cfg(1, b"resp garbage"))
+            .expect("instantiate responder");
+
+        // Two independent wasm instances (each has its own memory + state). Drive the 1.5-RTT handshake
+        // by shuttling handshake_step outputs, emit-at-connect first.
+        let (mut to_r, mut init_done) = initiator.handshake_step(&[]).expect("init open");
+        let (mut to_i, mut resp_done) = responder.handshake_step(&[]).expect("resp open");
+        for _ in 0..8 {
+            if !init_done && !to_i.is_empty() {
+                let (out, done) = initiator
+                    .handshake_step(&std::mem::take(&mut to_i))
+                    .expect("init step");
+                to_r.extend_from_slice(&out);
+                init_done = done;
+            }
+            if !resp_done && !to_r.is_empty() {
+                let (out, done) = responder
+                    .handshake_step(&std::mem::take(&mut to_r))
+                    .expect("resp step");
+                to_i.extend_from_slice(&out);
+                resp_done = done;
+            }
+            if init_done && resp_done {
+                break;
+            }
+        }
+        assert!(init_done && resp_done, "both sides complete the handshake");
+
+        // App bytes round-trip both directions through the steady-state transforms.
+        let wire = initiator
+            .transform_out(b"hello via wasm bip324")
+            .expect("out");
+        assert_eq!(
+            responder.transform_in(&wire).expect("in"),
+            b"hello via wasm bip324"
+        );
+        let wire = responder.transform_out(b"pong").expect("out");
+        assert_eq!(initiator.transform_in(&wire).expect("in"), b"pong");
+
+        // A burst past the 224-message rekey, fed to transform_in in 5-byte fragments (buffering path).
+        let mut stream = Vec::new();
+        let mut expected = Vec::new();
+        for i in 0..300u32 {
+            let msg = format!("msg {i}");
+            stream.extend_from_slice(&initiator.transform_out(msg.as_bytes()).expect("out"));
+            expected.extend_from_slice(msg.as_bytes());
+        }
+        let mut recovered = Vec::new();
+        for chunk in stream.chunks(5) {
+            recovered.extend_from_slice(&responder.transform_in(chunk).expect("in"));
+        }
+        assert_eq!(
+            recovered, expected,
+            "all messages recovered across the rekey"
+        );
+    }
+
+    /// The guest reads a non-empty `k_srv` from its init config and prepends the side-door tag to the
+    /// initiator's opening garbage, without breaking the handshake. The tag's *value* is validated in
+    /// `bip324-core`; here we prove the guest wiring end-to-end through the real runtime — the tag is
+    /// present in the opening and a tagged tunnel still completes + round-trips against a plain responder.
+    #[cfg(feature = "bip324")]
+    #[test]
+    fn bip324_module_side_door_tags_the_opening_and_still_round_trips() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/bip324.spkw");
+        let artifact = std::fs::read(&path).expect("read the committed bip324.spkw fixture");
+        let module = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify + compile the signed bip324 module")
+            .into_module();
+
+        // Config: [role][network_magic(4)][k_srv_len: u16 BE][k_srv][garbage]. A non-empty k_srv on the
+        // initiator enables the side-door; k_srv_len == 0 disables it.
+        const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+        const ELLSWIFT_LEN: usize = 64;
+        const SIDE_DOOR_TAG_LEN: usize = 32; // bip324_core::SIDE_DOOR_TAG_LEN
+        let cfg = |role: u8, k_srv: &[u8], garbage: &[u8]| {
+            let k_srv_len = u16::try_from(k_srv.len()).expect("k_srv length fits in u16");
+            let mut c = vec![role];
+            c.extend_from_slice(&MAGIC);
+            c.extend_from_slice(&k_srv_len.to_be_bytes());
+            c.extend_from_slice(k_srv);
+            c.extend_from_slice(garbage);
+            c
+        };
+        let garbage = b"tail";
+        let mut initiator = module
+            .instantiate_with_config(&cfg(0, b"per-server side-door secret", garbage))
+            .expect("instantiate initiator");
+        let mut responder = module
+            .instantiate_with_config(&cfg(1, b"", b"resp garbage"))
+            .expect("instantiate responder (no side-door key)");
+
+        // The initiator opens with ellswift ‖ the 32-byte side-door tag ‖ its configured garbage.
+        let (mut to_r, mut init_done) = initiator.handshake_step(&[]).expect("init open");
+        assert!(!init_done);
+        assert_eq!(
+            to_r.len(),
+            ELLSWIFT_LEN + SIDE_DOOR_TAG_LEN + garbage.len(),
+            "opening carries the side-door tag ahead of the configured garbage"
+        );
+        // Pin the layout PR4b-2 classifies on: ellswift(64) ‖ tag(32) ‖ garbage — the tag sits
+        // immediately after the ellswift, and the configured garbage stays at the end (not the tag
+        // appended after it, which the length check alone wouldn't catch).
+        assert_eq!(
+            &to_r[ELLSWIFT_LEN + SIDE_DOOR_TAG_LEN..],
+            garbage,
+            "the configured garbage remains at the end, so the tag is the 32 bytes right after ellswift"
+        );
+
+        // The tagged handshake still completes against a plain responder, and app bytes round-trip.
+        let (mut to_i, mut resp_done) = responder.handshake_step(&[]).expect("resp open");
+        for _ in 0..8 {
+            if !init_done && !to_i.is_empty() {
+                let (out, done) = initiator
+                    .handshake_step(&std::mem::take(&mut to_i))
+                    .expect("init step");
+                to_r.extend_from_slice(&out);
+                init_done = done;
+            }
+            if !resp_done && !to_r.is_empty() {
+                let (out, done) = responder
+                    .handshake_step(&std::mem::take(&mut to_r))
+                    .expect("resp step");
+                to_i.extend_from_slice(&out);
+                resp_done = done;
+            }
+            if init_done && resp_done {
+                break;
+            }
+        }
+        assert!(
+            init_done && resp_done,
+            "both sides complete despite the tagged garbage"
+        );
+
+        let wire = initiator
+            .transform_out(b"through a side-door tunnel")
+            .expect("out");
+        assert_eq!(
+            responder.transform_in(&wire).expect("in"),
+            b"through a side-door tunnel"
+        );
+    }
+
+    #[cfg(feature = "bip324")]
+    #[test]
+    fn host_secp256k1_ellswift_ecdh_rejects_an_unknown_key_id() {
+        const WAT: &str = r#"
+(module
+  (import "env" "host_secp256k1_ellswift_ecdh" (func $ecdh (param i32 i32 i32) (result i64)))
+  (memory (export "memory") 2)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "transform_out") (param $ptr i32) (param $len i32) (result i64)
+    (drop (call $ecdh (i32.const 3) (local.get $ptr) (i32.const 8192)))
+    (i64.const 0))
+  (func (export "transform_in") (param i32 i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        // No key was ever generated, so id 3 is unknown → recorded fault.
+        assert!(matches!(
+            t.transform_out(&[0u8; 64]),
+            Err(WasmError::HostFault(_))
+        ));
+    }
+
+    /// A toy 2-step handshake module: emit-at-connect → `(continue, "PING")`; any inbound →
+    /// `(done, "OK")`. The output is the `[status: u8][outbound]` frame the ABI defines.
+    const HANDSHAKE_WAT: &str = r#"
+(module
+  (memory (export "memory") 2)
+  (data (i32.const 8192) "\00PING")
+  (data (i32.const 8200) "\01OK")
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "handshake_step") (param $ptr i32) (param $len i32) (result i64)
+    (if (result i64) (i32.eqz (local.get $len))
+      (then (i64.or (i64.shl (i64.const 8192) (i64.const 32)) (i64.const 5)))
+      (else (i64.or (i64.shl (i64.const 8200) (i64.const 32)) (i64.const 3))))))
+"#;
+
+    #[test]
+    fn handshake_step_frames_status_and_outbound() {
+        let module =
+            TransformModule::load(&wat::parse_str(HANDSHAKE_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        // Emit-at-connect: empty inbound → the opening message, not done.
+        let (out, done) = t.handshake_step(&[]).expect("step 1");
+        assert_eq!(out, b"PING");
+        assert!(!done);
+        // Any inbound → the final message + done.
+        let (out, done) = t.handshake_step(b"PONG").expect("step 2");
+        assert_eq!(out, b"OK");
+        assert!(done);
+    }
+
+    #[tokio::test]
+    async fn run_handshake_drives_to_completion() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let module =
+            TransformModule::load(&wat::parse_str(HANDSHAKE_WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        let (mut client, mut peer) = tokio::io::duplex(1024);
+
+        // Native peer: read the opening PING, reply PONG, read the final OK.
+        let peer_task = tokio::spawn(async move {
+            // read_exact: `read` may return a partial buffer; these messages have known lengths.
+            let mut ping = [0u8; 4];
+            peer.read_exact(&mut ping).await.expect("read ping");
+            assert_eq!(&ping, b"PING");
+            peer.write_all(b"PONG").await.expect("write pong");
+            peer.flush().await.expect("flush");
+            let mut ok = [0u8; 2];
+            peer.read_exact(&mut ok).await.expect("read ok");
+            assert_eq!(&ok, b"OK");
+        });
+
+        t.run_handshake(&mut client).await.expect("handshake");
+        peer_task.await.expect("peer task");
+    }
+
+    #[test]
+    fn handshake_step_absent_on_a_transform_only_module() {
+        // The XOR fixture exports transforms but not handshake_step.
+        let mut t = xor_module().instantiate().expect("instantiate");
+        assert!(matches!(
+            t.handshake_step(&[]),
+            Err(WasmError::MissingExport(EXPORT_HANDSHAKE_STEP))
+        ));
+    }
+
+    #[test]
+    fn handshake_step_rejects_an_empty_frame() {
+        // A module whose handshake_step returns a zero-length region — no status byte → malformed.
+        const WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "handshake_step") (param $ptr i32) (param $len i32) (result i64)
+    (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        let mut t = module.instantiate().expect("instantiate");
+        assert!(matches!(
+            t.handshake_step(&[]),
+            Err(WasmError::HandshakeFrame(_))
+        ));
+    }
+
+    #[test]
     fn host_hash_matches_ring() {
         const WAT: &str = r#"
 (module
@@ -1825,14 +2626,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_export_is_rejected() {
-        // A module with no `transform_out` export must fail to instantiate as a transform.
-        let wasm = wat::parse_str(r#"(module (memory (export "memory") 1))"#).expect("assemble");
+    fn a_module_with_no_mode_export_is_rejected() {
+        // `memory` + `alloc` present but no mode entrypoint (transform_out/in, compute_gambit,
+        // handshake_step) → `NoMode` (not a misleading single-export error).
+        let wasm = wat::parse_str(
+            r#"(module (memory (export "memory") 1) (func (export "alloc") (param i32) (result i32) (i32.const 0)))"#,
+        )
+        .expect("assemble");
         let module = TransformModule::load(&wasm).expect("load");
-        assert!(
-            matches!(module.instantiate(), Err(WasmError::MissingExport(_))),
-            "a module without transform exports must be rejected"
-        );
+        assert!(matches!(module.instantiate(), Err(WasmError::NoMode)));
     }
 
     #[test]
@@ -1890,11 +2692,19 @@ mod tests {
 
     // --- ADR 0006 P3: a module that *computes* a gambit (the open/shape mode) ---
 
-    /// A module that, on `compute_gambit`, returns the postcard encoding of `g` (held in a data
+    /// A module that, on `compute_gambit`, returns `g` wrapped in a neutral `Genome` (held in a data
     /// segment) — the minimal gambit-compute-mode module: `memory` + `alloc` + `compute_gambit`,
     /// **no** `transform_*` exports.
     fn gambit_module_emitting(g: &Gambit) -> TransformModule {
-        let bytes = postcard::to_stdvec(g).expect("encode gambit");
+        // Emit the neutral Genome the TLS engine expects (engine = `tls`, engine_params = postcard `g`).
+        let bytes = Genome::new(
+            "wasm-computed",
+            crate::transport::engine::TLS,
+            Default::default(),
+            postcard::to_stdvec(g).expect("encode gambit"),
+        )
+        .encode()
+        .expect("encode genome");
         let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
         let wat = format!(
             r#"
@@ -1938,9 +2748,13 @@ mod tests {
         let expected = sample_gambit();
         let module = gambit_module_emitting(&expected);
         let mut t = module.instantiate().expect("instantiate");
-        // The per-connection context is reserved; an empty ctx is valid.
+        // The per-connection context is reserved; an empty ctx is valid. `compute_gambit` returns the
+        // module's raw bytes verbatim (opaque to the core) — here, the neutral Genome wrapping `expected`.
         let got = t.compute_gambit(&[]).expect("compute gambit");
-        assert_eq!(got, expected);
+        let genome = Genome::decode(&got).expect("decode genome");
+        assert_eq!(genome.engine, crate::transport::engine::TLS);
+        let inner: Gambit = postcard::from_bytes(&genome.engine_params).expect("decode gambit");
+        assert_eq!(inner, expected);
     }
 
     #[test]
@@ -1954,9 +2768,9 @@ mod tests {
     }
 
     #[test]
-    fn compute_gambit_rejects_undecodable_bytes() {
-        // A module whose compute_gambit returns a single 0xFF byte (a truncated varint) — not a
-        // decodable genome.
+    fn compute_gambit_returns_bytes_opaquely() {
+        // A module whose compute_gambit returns a single 0xFF byte. The core no longer validates it
+        // (decoding is the consuming engine's job); compute_gambit hands the bytes back verbatim.
         const WAT: &str = r#"
 (module
   (memory (export "memory") 1)
@@ -1967,21 +2781,24 @@ mod tests {
 "#;
         let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
         let mut t = module.instantiate().expect("instantiate");
-        assert!(matches!(
-            t.compute_gambit(&[]),
-            Err(WasmError::GambitDecode(_))
-        ));
+        assert_eq!(
+            t.compute_gambit(&[]).expect("returns raw bytes"),
+            vec![0xFF]
+        );
     }
 
-    /// End-to-end P3 (needs both features): a module computes a gambit, and it resolves onto the
-    /// boring executor — module → postcard `Gambit` → `Profile::for_boring`.
+    /// End-to-end P3 (needs both features): a module computes a genome, and it resolves onto the
+    /// boring executor — module → Genome → engine_params → `Profile::for_boring`.
     #[cfg(feature = "anytls")]
     #[test]
     fn computed_gambit_resolves_on_the_boring_executor() {
         use flint_tls::Profile;
         let module = gambit_module_emitting(&sample_gambit());
         let mut t = module.instantiate().expect("instantiate");
-        let gambit = t.compute_gambit(&[]).expect("compute gambit");
+        // compute_gambit is opaque now; decode the Genome + its engine_params (as the TLS engine does).
+        let bytes = t.compute_gambit(&[]).expect("compute gambit");
+        let genome = Genome::decode(&bytes).expect("decode genome");
+        let gambit: Gambit = postcard::from_bytes(&genome.engine_params).expect("decode gambit");
         let resolved = Profile::for_boring(&gambit).expect("within boring capabilities");
         // The gambit set ech=off and pq_kem=off; boring honors both.
         assert!(!resolved.profile.ech_grease);

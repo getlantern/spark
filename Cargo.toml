@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "spark-bridge", "dns-tunnel-core", "dns-tunnel-server"]
+members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "spark-bridge", "dns-tunnel-core", "dns-tunnel-server", "bip324-core"]
 # Kept out of the workspace on purpose:
 #  - vendor/netstack-smoltcp: depended on by `path`, but its examples/tests/dev-deps
 #    (tun2, structopt, socket2-ext, …) should not be built as part of our workspace.
@@ -10,7 +10,11 @@ members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/appl
 #    it builds standalone via its own `npm run tauri build` / `cargo build`.
 #  - spark-sharing: the optional unprivileged WebRTC sharing subsystem. It has its own
 #    workspace and CI gate so its crypto features cannot inflate core/service binaries.
-exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing"]
+#  - modules/obfs-xor, modules/bip324: dynamic-transport guest modules (ADR 0013 §7).
+#    wasm32-unknown-unknown cdylibs — a different target + ABI + profile than the host
+#    workspace; built + signed on demand by scripts/build-module.sh, never by `cargo build`.
+#    (bip324 path-depends on the `bip324-core` workspace member but is itself excluded.)
+exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing", "modules/obfs-xor", "modules/bip324"]
 
 [workspace.package]
 version = "0.1.0"
@@ -88,6 +92,13 @@ wat = "1"
 uniffi = { version = "0.31" }
 blake3 = { version = "1", default-features = false }
 aes = "0.8"
+# ChaCha20 raw stream cipher (RustCrypto, pure-Rust) — a generic WASM host primitive (raw keystream, no
+# AEAD tag), pulled ONLY by `wasm-transport`. ring exposes ChaCha20-Poly1305 (AEAD) but no raw stream.
+chacha20 = "0.9"
+# secp256k1 + ElligatorSwift (rust-bitcoin) — a generic WASM host primitive (secp256k1 keygen, ellswift
+# encode, X-only ECDH), pulled ONLY by the off-by-default `bip324` feature. C-backed (secp256k1-sys/cc),
+# so — like BoringSSL — it's kept out of the base build to honor docs/GOAL.md's "no C dependencies" rule.
+secp256k1 = { version = "0.31", features = ["std"] }
 # Pure-Rust LZ4 (block mode) for the DNS-tunnel transport's optional payload compression (ADR 0011).
 # Deliberately NOT the C-backed `zstd` crate — keeps the pure-Rust/no-C rule. Pulled ONLY by the
 # `dns-tunnel` feature (via the `dns-tunnel-core` crate). See docs/dns-tunnel-design.md §6.

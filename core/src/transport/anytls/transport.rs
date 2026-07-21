@@ -25,7 +25,6 @@ use crate::BoxedStream;
 use flint_shaping::{SegmentShapingStream, WirePlan};
 
 use super::{udp, PaddingScheme, Session};
-use flint_tls::Profile;
 
 /// Open a new session once a session is carrying this many streams (spreads load / bounds HOL).
 const MAX_STREAMS_PER_SESSION: usize = 64;
@@ -47,9 +46,10 @@ struct Inner {
     protector: Option<SocketProtector>,
     /// Opening-handshake shaping for each new TLS connection (ADR 0006 Phase 1).
     wire: WirePlan,
-    /// Static gambit-resolved ClientHello/record knobs (ADR 0006 P2); also the fallback when a
-    /// dynamic [`Inner::gambit_source`] faults or yields a gambit boring can't realize.
-    profile: Profile,
+    /// The static-config opening plan (an opaque postcard neutral `Genome` for the `tls` engine) the
+    /// TLS engine falls back to when a dynamic [`Inner::gambit_source`] faults or yields a gambit
+    /// boring can't realize (ADR 0006 P2).
+    static_params: Vec<u8>,
     /// Optional Path-B module that **computes** a fresh gambit per connection (ADR 0006 P3). When
     /// present, each new TLS session resolves its [`Profile`] from this module instead of `profile`.
     /// `Mutex` because the `wasmi` `Transform` is `!Sync` and stateful (a gambit may be
@@ -70,7 +70,7 @@ impl AnytlsTransport {
         sni: String,
         protector: Option<SocketProtector>,
         wire: WirePlan,
-        profile: Profile,
+        static_params: Vec<u8>,
     ) -> Self {
         Self::spawn(Inner {
             server,
@@ -78,7 +78,7 @@ impl AnytlsTransport {
             sni,
             protector,
             wire,
-            profile,
+            static_params,
             #[cfg(feature = "wasm-transport")]
             gambit_source: None,
             pool: Mutex::new(Vec::new()),
@@ -86,8 +86,8 @@ impl AnytlsTransport {
     }
 
     /// Like [`new`](Self::new) but with a Path-B `gambit` module that computes a fresh gambit per
-    /// connection (ADR 0006 P3). `profile` is the fallback used when the module faults or its gambit
-    /// exceeds boring's capabilities, so connectivity never depends on the dynamic gambit succeeding.
+    /// connection (ADR 0006 P3). `static_params` is the fallback plan used when the module faults or
+    /// its gambit exceeds boring's capabilities, so connectivity never depends on the dynamic gambit.
     #[cfg(feature = "wasm-transport")]
     pub fn with_dynamic_gambit(
         server: SocketAddr,
@@ -95,7 +95,7 @@ impl AnytlsTransport {
         sni: String,
         protector: Option<SocketProtector>,
         wire: WirePlan,
-        profile: Profile,
+        static_params: Vec<u8>,
         gambit: crate::transport::wasm::Transform,
     ) -> Self {
         Self::spawn(Inner {
@@ -104,7 +104,7 @@ impl AnytlsTransport {
             sni,
             protector,
             wire,
-            profile,
+            static_params,
             gambit_source: Some(Mutex::new(gambit)),
             pool: Mutex::new(Vec::new()),
         })
@@ -149,8 +149,16 @@ impl Inner {
         // Shape the opening write (the ClientHello) — e.g. fragment it across the SNI boundary —
         // by sitting between boring and the socket (ADR 0006 Phase 1).
         let shaped = SegmentShapingStream::new(tcp, self.wire.clone());
-        let profile = self.resolve_profile();
-        let tls = flint_tls::connect(shaped, &self.sni, &profile).await?;
+        // Realize the TLS opening move through the engine seam (ADR 0013 §7 step 1): routed by the
+        // plan's engine id via `upgrade_to`, the engine decodes the opaque dynamic params (or the
+        // static fallback) and drives the boring handshake.
+        let plan = crate::transport::engine::OpeningPlan {
+            engine: crate::transport::engine::TLS,
+            sni: self.sni.clone(),
+            params: self.compute_params(),
+            fallback: self.static_params.clone(),
+        };
+        let tls = crate::transport::engine::upgrade_to(Box::new(shaped), &plan).await?;
         let session = Arc::new(Session::client(
             tls,
             &self.password,
@@ -161,15 +169,15 @@ impl Inner {
         Ok(session)
     }
 
-    /// The boring [`Profile`] for a new TLS session. With a dynamic [`gambit_source`](Self::
-    /// gambit_source) (ADR 0006 P3), compute a fresh gambit and resolve it onto boring; **fall back
-    /// to the static `profile`** if the module faults, returns an undecodable gambit, or yields one
-    /// boring can't realize — a dynamic gambit must never break connectivity (boring always
-    /// completes the handshake; a declined gambit degrades to the portable default).
+    /// The dynamic opening params for a new TLS session: with a [`gambit_source`](Self::
+    /// gambit_source) (ADR 0006 P3), invoke the module and return its opaque computed bytes (a neutral
+    /// `Genome`) for the TLS engine to decode + gate. Returns empty — so the engine uses the static
+    /// fallback — when there's no source or the module faults; a dynamic gambit must never break
+    /// connectivity.
     #[cfg(feature = "wasm-transport")]
-    fn resolve_profile(&self) -> Profile {
+    fn compute_params(&self) -> Vec<u8> {
         let Some(source) = &self.gambit_source else {
-            return self.profile.clone();
+            return Vec::new();
         };
         let mut transform = source.lock().unwrap_or_else(|e| e.into_inner());
         // Per-connection context (ADR 0006 P3): the host-controlled wall clock — the one fact a
@@ -178,34 +186,21 @@ impl Inner {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let ctx = flint_tls::gambit::GambitContext { unix_secs }.encode();
+        let ctx = crate::transport::engine::tls::TlsEngine::context_bytes(unix_secs);
         match transform.compute_gambit(&ctx) {
-            Ok(gambit) => match Profile::for_boring(&gambit) {
-                Ok(resolved) => {
-                    for note in &resolved.unrealizable {
-                        tracing::warn!(
-                            knob = note,
-                            "computed gambit knob not realizable on boring"
-                        );
-                    }
-                    resolved.profile
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "computed gambit declined by boring; using static profile");
-                    self.profile.clone()
-                }
-            },
+            Ok(bytes) => bytes,
             Err(e) => {
-                tracing::warn!(error = %e, "compute_gambit failed; using static profile");
-                self.profile.clone()
+                tracing::warn!(error = %e, "compute_gambit failed; using static fallback");
+                Vec::new()
             }
         }
     }
 
-    /// Without the `wasm-transport` feature there is no dynamic source — the static profile is used.
+    /// Without the `wasm-transport` feature there is no dynamic source — the engine uses the static
+    /// fallback params.
     #[cfg(not(feature = "wasm-transport"))]
-    fn resolve_profile(&self) -> Profile {
-        self.profile.clone()
+    fn compute_params(&self) -> Vec<u8> {
+        Vec::new()
     }
 }
 
@@ -287,12 +282,21 @@ impl UdpTransport for AnytlsTransport {
 #[cfg(all(test, feature = "wasm-transport"))]
 mod tests {
     use super::*;
+    use crate::transport::engine::Genome;
     use crate::transport::wasm::{Transform, TransformModule};
     use flint_tls::gambit::{Capability, ClientHello, EchMode, Gambit, Records};
 
-    /// A Path-B module that, on `compute_gambit`, returns the postcard encoding of `g`.
+    /// A Path-B module that, on `compute_gambit`, returns `g` wrapped in the neutral `Genome` the TLS
+    /// engine expects (engine = `tls`, `engine_params` = postcard `Gambit`).
     fn gambit_transform(g: &Gambit) -> Transform {
-        let bytes = postcard::to_stdvec(g).expect("encode gambit");
+        let bytes = Genome::new(
+            "dyn",
+            crate::transport::engine::TLS,
+            Default::default(),
+            postcard::to_stdvec(g).expect("encode gambit"),
+        )
+        .encode()
+        .expect("encode genome");
         let escaped: String = bytes.iter().map(|b| format!("\\{b:02x}")).collect();
         let wat = format!(
             r#"
@@ -320,7 +324,7 @@ mod tests {
             "example.com".into(),
             None,
             WirePlan::default(),
-            Profile::default(),
+            Vec::new(),
             gambit_transform(gambit),
         )
     }
@@ -339,7 +343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_connection_compute_drives_the_profile() {
+    async fn compute_params_returns_the_dynamic_modules_gambit() {
         let g = gambit(
             ClientHello {
                 ech: Some(EchMode::Off),
@@ -349,26 +353,27 @@ mod tests {
             vec![Capability::Ech],
         );
         let t = transport_with(&g);
-        let profile = t.inner.resolve_profile();
-        // The computed gambit (not the static Profile::default) shaped the handshake.
-        assert!(!profile.ech_grease);
-        assert!(!profile.pq_kem);
+        // The dynamic module's computed genome is threaded through verbatim; the TLS engine (tested
+        // in `engine::tls`) decodes the Genome + resolves its engine_params onto boring.
+        let params = t.inner.compute_params();
+        let genome = Genome::decode(&params).expect("decode computed genome");
+        assert_eq!(genome.engine, crate::transport::engine::TLS);
+        let got: Gambit = postcard::from_bytes(&genome.engine_params).expect("decode gambit");
+        assert_eq!(got, g);
     }
 
     #[tokio::test]
-    async fn a_gambit_beyond_boring_falls_back_to_the_static_profile() {
-        // requires raw_clienthello → for_boring declines → resolve_profile must return the static
-        // fallback (the default Chrome-137 profile), never break the connection.
-        let g = gambit(
-            ClientHello {
-                ech: Some(EchMode::Off),
-                ..Default::default()
-            },
-            vec![Capability::RawClienthello],
+    async fn compute_params_is_empty_without_a_dynamic_source() {
+        // A static-only transport contributes no dynamic params, so the engine falls back to the
+        // static plan — connectivity never depends on a dynamic gambit.
+        let t = AnytlsTransport::new(
+            "127.0.0.1:1".parse().unwrap(),
+            "pw".into(),
+            "example.com".into(),
+            None,
+            WirePlan::default(),
+            Vec::new(),
         );
-        let t = transport_with(&g);
-        let profile = t.inner.resolve_profile();
-        assert_eq!(profile, Profile::default());
-        assert!(profile.ech_grease); // the declined gambit's ech=off did NOT take effect
+        assert!(t.inner.compute_params().is_empty());
     }
 }

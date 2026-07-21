@@ -353,6 +353,15 @@ machine (control path); AEAD/hash/rand are native host fns; spark's `Transport::
 protected upstream + the netstack flow and pumps both through the module. Next: a richer ABI
 (handshake phase, host-fn crypto), Ed25519 module signing + delivery, and wiring into `Transport`.
 
+**Realized (2026-07-20, ADR 0013 §7):** most of that "Next" has since landed — the richer ABI
+(`compute_gambit`, `handshake_step`, and the crypto host-fn menu) and Ed25519 signing
+(`wasm/signing.rs` `ModuleVerifier`). The build-and-sign half is now a real, reproducible pipeline
+rather than the throwaway PoC: `modules/obfs-xor` is the reference Rust→wasm32 guest (a `no_std` cdylib
+mirroring the inline `XOR_WAT`), and `scripts/build-module.sh` compiles it and signs it with the
+`sign-module` tool (`core/src/bin/sign-module.rs`, `--features module-signer`) into
+`core/tests/fixtures/wasm/obfs-xor.spkw` — which a toolchain-free `cargo test` loads through the
+production `ModuleVerifier::pinned().verify` → `instantiate` path and round-trips.
+
 ## 9. Platform matrix
 
 | platform | tier 1 (config) | tier 2 (`wasmi`, interpreted WASM) |
