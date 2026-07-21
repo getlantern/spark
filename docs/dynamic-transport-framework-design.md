@@ -177,8 +177,14 @@ Critical path (each builds on the last):
    primitive stays deferred.
 6. **Discovery generalization** — GA over the generic shaping knobs + per-engine param hooks.
 
-**Status (2026-07-20):** steps 1–3 and 6 have landed (engine seam + neutral genome + generalized
-discovery, the crypto primitives, and `handshake_step` + `upgrade_to`). Step 4 is underway: its
+**Status (2026-07-21):** steps 1–4 and 6 are **complete** — the engine seam + neutral genome + generalized
+discovery, the crypto primitives, `handshake_step` + `upgrade_to`, and **BIP324 shipped end to end as a
+signed WASM module + config** (PR1 `bip324-core` → PR2 the guest → PR3 dial-path wiring → PR4a/b/c the
+side-door egress + rust-bitcoin interop; see the step-4 detail below). Only step 5 (non-Chrome anchors +
+a STARTTLS proof) remains, independent of BIP324. The historical narrative below is kept as written.
+
+Step 4's original prerequisite — the **Rust→wasm32 build-and-sign pipeline** that was missing (every
+module was inline
 prerequisite — the **Rust→wasm32 build-and-sign pipeline** that was missing (every module was inline
 `wat!`) — now exists. `modules/obfs-xor` is a reference guest module compiled and signed by
 `scripts/build-module.sh` (via the `sign-module` tool, `--features module-signer`) into a committed
@@ -240,8 +246,22 @@ whose garbage is shorter than the tag is proxied rather than stalling the peek. 
 HMAC only (`verify_side_door_tag_with` — no full `Bip324Crypto` on the host). Validated by a loopback
 test: a tagged Lantern client tunnels to its announced echo target, and an untagged peer is proxied to a
 stub upstream and echoed back (if it had wrongly taken the tunnel branch the BIP324 handshake would
-reject its bytes). Next: **PR4c** = the live rust-bitcoin `bip324` interop against a real `bitcoind`,
-replacing the stub upstream — the full end-to-end proof.
+reject its bytes).
+
+**PR4c landed (2026-07-21): live interop — step 4 COMPLETE.** Two proofs. (1) **Hermetic wire-compat
+against the rust-bitcoin `bip324` reference crate** (`bip324-core/tests/interop.rs`, gated `native-crypto`):
+our sans-io core drives a real BIP324 handshake + packet exchange over a TCP loopback against the
+canonical implementation's `io::Protocol`, in **both** role assignments — if the reference can't tell our
+core apart from a Bitcoin node, neither can a censor's DPI. This runs in CI (`--all-features`). (2) **A live
+`bitcoind` proof** (`#[ignore]`d, run manually with `BIP324_BITCOIND=host:port`): a non-Lantern opening
+reaches a real `bitcoind` through the splitter's proxy branch and gets a genuine BIP324 response, closing
+the loop that the egress is a real Bitcoin node to everyone without `k_srv`.
+
+**§7 step 4 (BIP324 as a WASM engine + signed config) is complete**: a protocol with a custom curve, an
+interactive handshake, custom framing, and a Lantern-specific anti-probing side-door — shipped end to end
+as a signed WASM module + config, crypto entirely via host primitives, wire-compatible with the reference,
+deployable to an unchanged client. The north star, demonstrated. Remaining framework work is §7 step 5
+(non-Chrome anchors + a STARTTLS proof), independent of BIP324.
 
 ## 8. Tradeoffs (stated plainly)
 

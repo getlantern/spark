@@ -313,6 +313,44 @@ mod tests {
         );
     }
 
+    /// Live end-to-end proof of the proxy branch against a real Bitcoin node: a non-Lantern opening
+    /// reaches `bitcoind` through the splitter and gets a genuine BIP324 response. `#[ignore]`d — it
+    /// needs a BIP324-capable `bitcoind`. Run it with:
+    ///   `BIP324_BITCOIND=127.0.0.1:8333 cargo test -p spark-core --features bip324 -- --ignored real_bitcoin`
+    #[tokio::test]
+    #[ignore = "requires a BIP324-capable bitcoind (set BIP324_BITCOIND=host:port, default 127.0.0.1:8333)"]
+    async fn real_bitcoin_peer_reaches_bitcoind_through_the_proxy_branch() {
+        let bitcoind: SocketAddr = std::env::var("BIP324_BITCOIND")
+            .unwrap_or_else(|_| "127.0.0.1:8333".to_string())
+            .parse()
+            .expect("BIP324_BITCOIND must be host:port");
+
+        let module = load_module();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind egress");
+        let egress_addr = listener.local_addr().expect("egress addr");
+        let server = WasmServer::new(module).with_config(server_cfg());
+        let splitter = Arc::new(SplittingServer::new(server, K_SRV.to_vec(), bitcoind));
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                let s = Arc::clone(&splitter);
+                tokio::spawn(async move {
+                    let _ = s.handle(conn).await;
+                });
+            }
+        });
+
+        // A non-Lantern opening (no valid tag) so the splitter takes the proxy branch. A BIP324
+        // responder replies to any 64-byte ellswift with its own key + garbage, so reading 64 bytes
+        // back proves the proxy delivered us to the real node and it answered.
+        let mut peer = TcpStream::connect(egress_addr).await.expect("peer connect");
+        let opening: Vec<u8> = (0..PEEK_LEN as u8).collect();
+        peer.write_all(&opening).await.expect("peer write");
+        let mut ellswift = [0u8; ELLSWIFT_LEN];
+        peer.read_exact(&mut ellswift)
+            .await
+            .expect("bitcoind replied through the proxy branch with its ellswift key");
+    }
+
     #[tokio::test]
     async fn a_silent_peer_is_dropped_without_dialing_upstream() {
         let module = load_module();

@@ -2556,6 +2556,22 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   673 `--workspace --all-features` green; default (no-bip324) build + clippy (workspace, all-features) +
   fmt clean. Next: PR4c = swap the stub upstream for a real `bitcoind` + live rust-bitcoin `bip324`
   interop, the full end-to-end proof.
+- 2026-07-21 (ADR 0013 §7 step 4 — PR4c = live interop; **step 4 COMPLETE**): two proofs. (1) **Hermetic
+  wire-compat against the rust-bitcoin `bip324` reference crate** (`bip324-core/tests/interop.rs`, gated
+  `native-crypto`; `bip324 = "0.11"` added as an optional dep under that feature — a dev-dep can't be
+  optional, and this keeps the base C-free test path clean). Our sans-io core drives a real handshake +
+  packet round-trip over a TCP loopback against their blocking `io::Protocol` (on a spawned thread), in
+  **both** roles — the reference decrypts our packets and vice versa, so our BIP324 is byte-identical to
+  the canonical impl. Runs in CI. (2) **Live `bitcoind` proof** (`#[ignore]`d, `BIP324_BITCOIND=host:port`,
+  default `127.0.0.1:8333`): a non-Lantern opening reaches a real bitcoind through the splitter's proxy
+  branch and gets a genuine BIP324 response — dependency-free (a BIP324 responder replies to any 64-byte
+  ellswift, so reading its key back proves the path; no rust-bitcoin crate needed in spark-core). Also
+  corrected bip324-core's Cargo.toml comment that had claimed the interop was "exercised in PR2" (it
+  wasn't — it is now). 676 `--workspace --all-features` green; fmt + clippy clean. **§7 step 4 is done:**
+  a custom-curve, interactive-handshake, custom-framing protocol + a Lantern anti-probing side-door,
+  shipped as a signed WASM module + config, wire-compatible with the reference, deployable to an unchanged
+  client — the north star demonstrated. Remaining framework work = §7 step 5 (non-Chrome anchors + STARTTLS
+  proof), independent of BIP324.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
