@@ -199,7 +199,9 @@ host primitives. The interactive handshake is now **wired into the dial path** (
 (client/initiator) and `WasmServer` (server/responder) each run `run_handshake` on the raw connection
 before the steady-state transform, gated on a protocol-blind `Transform::drives_handshake()` (run it iff
 the module exports `handshake_step`; transform-only modules like obfs-xor are unaffected) — reusing
-`ServerSpec::Wasm` / `WasmConfig` with no schema change (`init_config` = `role ++ magic ++ garbage`).
+`ServerSpec::Wasm` / `WasmConfig` with no schema change (`init_config` was `role ++ magic ++ garbage`
+at PR3 — later extended with a `k_srv_len ++ k_srv` field for the side-door in PR4b-1, see below; the
+outer `WasmConfig` still carries the opaque `init_config` blob unchanged).
 Validated by a real-TCP loopback tunnel (client ↔ server, both handshaking, byte round-trip through the
 BIP324 tunnel to an echo). PR3 also fixed the coalescing bug the streaming path surfaced, in two places:
 the handshake's leftover bytes (the peer's first steady-state packet, coalesced with the handshake over
@@ -217,8 +219,17 @@ handshake, so replay confirms nothing) — and HMAC reuses the provider's existi
 (HKDF-Extract *is* HMAC), so the whole side-door adds **no new host primitive** and stays release-free.
 `Handshake::with_side_door(k_srv)` weaves the tag into the initiator's opening (it counts toward the
 garbage AAD, so the peer authenticates the same bytes it scans past); `verify_side_door_tag` is the
-egress's constant-time check. Next: PR4b = the splitting egress (peek + verify → tunnel vs `bitcoind`
-proxy) + guest/config wiring; PR4c = the live rust-bitcoin `bip324` interop, end-to-end.
+egress's constant-time check.
+
+**PR4b split into two slices; PR4b-1 landed (2026-07-21): the guest wiring.** The `modules/bip324` guest
+`init` config grew a `k_srv` field — `[role][network_magic(4)][k_srv_len: u16 BE][k_srv][garbage]` — and
+the guest passes `k_srv` to `Handshake::with_side_door` (a no-op for an empty key or the responder). So a
+client instantiated with a non-empty `k_srv` now emits the side-door tag ahead of its garbage, entirely
+via the signed WASM module — no host code knows about Bitcoin or the side-door. The `bip324.spkw` fixture
+was regenerated; a module-level test drives a `k_srv`-configured initiator against a plain responder
+through the real runtime (tag present in the opening, tagged tunnel still completes + round-trips). Next:
+**PR4b-2** = the splitting egress (peek ellswift+garbage → `verify_side_door_tag` → BIP324 relay vs
+proxy-to-upstream); **PR4c** = the live rust-bitcoin `bip324` interop against a real `bitcoind`, end-to-end.
 
 ## 8. Tradeoffs (stated plainly)
 

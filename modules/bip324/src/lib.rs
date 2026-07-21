@@ -258,8 +258,20 @@ fn packed(ptr: i32, len: i32) -> i64 {
 }
 
 /// The input the host wrote at `(ptr, len)` (borrows the 'static input arena; valid for this call).
+///
+/// The sole caller is the trusted host runtime, which passes `(ptr, len)` from [`alloc`] — so `ptr` is
+/// the arena base and `len ≤ ARENA`. Validate the range against `IN_ARENA` anyway: a stray `(ptr, len)`
+/// (negative `len`, or a range past the arena) would be immediate Rust UB in `from_raw_parts`, even if
+/// the resulting wasm loads would trap. Trap loud (as `alloc` does) rather than fabricate a slice.
 unsafe fn input<'a>(ptr: i32, len: i32) -> &'a [u8] {
-    core::slice::from_raw_parts(ptr as usize as *const u8, len as usize)
+    let base = addr_of_mut!(IN_ARENA) as usize;
+    let p = ptr as usize;
+    let within =
+        len >= 0 && p >= base && p.checked_add(len as usize).is_some_and(|pe| pe <= base + ARENA);
+    if !within {
+        core::arch::wasm32::unreachable()
+    }
+    core::slice::from_raw_parts(p as *const u8, len as usize)
 }
 
 /// Store `bytes` as the current output and return its packed pointer/length.
@@ -275,12 +287,15 @@ fn abort() -> ! {
     core::arch::wasm32::unreachable()
 }
 
-/// `init(config)`: `[role: u8 (0=initiator, 1=responder)][network_magic: 4][garbage…]`. Starts the
-/// handshake.
+/// `init(config)`: `[role: u8 (0=initiator, 1=responder)][network_magic: 4][k_srv_len: u16 BE]
+/// [k_srv: k_srv_len bytes][garbage: rest]`. A non-empty `k_srv` enables the Lantern side-door on the
+/// initiator (the tag is prepended to the opening garbage — see bip324-core `with_side_door`);
+/// `k_srv_len == 0` disables it. Starts the handshake.
 #[no_mangle]
 pub extern "C" fn init(ptr: i32, len: i32) {
     let cfg = unsafe { input(ptr, len) };
-    if cfg.len() < 5 {
+    // role(1) + magic(4) + k_srv_len(2) = 7-byte minimum (k_srv_len may be 0, garbage may be empty).
+    if cfg.len() < 7 {
         abort();
     }
     let role = match cfg[0] {
@@ -290,8 +305,16 @@ pub extern "C" fn init(ptr: i32, len: i32) {
     };
     let mut magic = [0u8; 4];
     magic.copy_from_slice(&cfg[1..5]);
-    let hs = match Handshake::<HostCrypto>::new(role, magic, &cfg[5..]) {
-        Ok(h) => h,
+    let k_srv_len = u16::from_be_bytes([cfg[5], cfg[6]]) as usize;
+    let ks_end = 7 + k_srv_len;
+    if cfg.len() < ks_end {
+        abort();
+    }
+    let k_srv = &cfg[7..ks_end];
+    let garbage = &cfg[ks_end..];
+    // with_side_door is a no-op for an empty key or the responder, so call it unconditionally.
+    let hs = match Handshake::<HostCrypto>::new(role, magic, garbage) {
+        Ok(h) => h.with_side_door(k_srv),
         Err(_) => abort(),
     };
     unsafe { *addr_of_mut!(STATE) = Some(ModuleState::Handshaking(hs)) };

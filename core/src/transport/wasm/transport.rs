@@ -387,11 +387,12 @@ mod tests {
             .expect("verify bip324 module")
             .into_module();
 
-        // init_config: [role][network_magic(4)][garbage…]. Mainnet magic; matching on both ends.
+        // init_config: [role][network_magic(4)][k_srv_len(2)=0][garbage…]. Mainnet magic, no side-door.
         const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
         let cfg = |role: u8| {
             let mut c = vec![role];
             c.extend_from_slice(&MAGIC);
+            c.extend_from_slice(&[0, 0]); // k_srv_len = 0
             c
         };
 
@@ -470,6 +471,7 @@ mod tests {
         let cfg = |role: u8| {
             let mut c = vec![role];
             c.extend_from_slice(&MAGIC);
+            c.extend_from_slice(&[0, 0]); // k_srv_len = 0 (side-door disabled)
             c
         };
         let mut initiator = module
