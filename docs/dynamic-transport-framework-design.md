@@ -227,9 +227,21 @@ the guest passes `k_srv` to `Handshake::with_side_door` (a no-op for an empty ke
 client instantiated with a non-empty `k_srv` now emits the side-door tag ahead of its garbage, entirely
 via the signed WASM module — no host code knows about Bitcoin or the side-door. The `bip324.spkw` fixture
 was regenerated; a module-level test drives a `k_srv`-configured initiator against a plain responder
-through the real runtime (tag present in the opening, tagged tunnel still completes + round-trips). Next:
-**PR4b-2** = the splitting egress (peek ellswift+garbage → `verify_side_door_tag` → BIP324 relay vs
-proxy-to-upstream); **PR4c** = the live rust-bitcoin `bip324` interop against a real `bitcoind`, end-to-end.
+through the real runtime (tag present in the opening, tagged tunnel still completes + round-trips).
+
+**PR4b-2 landed (2026-07-21): the splitting egress.** `SplittingServer` (host, `wasm/splitter.rs`, gated
+`bip324`) is a Bitcoin-v2 egress indistinguishable from a real node: it peeks each connection's opening
+(`ellswift` + the leading garbage, a bounded peek), checks the side-door tag via
+`bip324-core::verify_side_door_tag_with` (fed `ring`'s HMAC — spark-core now takes a `bip324-core` dep),
+and routes — **tag matches** → run the BIP324 responder (`WasmServer`) and relay the client's announced
+target; **no match** → proxy the bytes untouched to the real node. A `PrefixedStream` replays the peeked
+bytes so the chosen branch sees the connection from byte 0; the peek is timeout-bounded so a real peer
+whose garbage is shorter than the tag is proxied rather than stalling the peek. The classification uses
+HMAC only (`verify_side_door_tag_with` — no full `Bip324Crypto` on the host). Validated by a loopback
+test: a tagged Lantern client tunnels to its announced echo target, and an untagged peer is proxied to a
+stub upstream and echoed back (if it had wrongly taken the tunnel branch the BIP324 handshake would
+reject its bytes). Next: **PR4c** = the live rust-bitcoin `bip324` interop against a real `bitcoind`,
+replacing the stub upstream — the full end-to-end proof.
 
 ## 8. Tradeoffs (stated plainly)
 

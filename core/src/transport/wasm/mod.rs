@@ -102,12 +102,16 @@ use secp256k1::SecretKey;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 mod signing;
+#[cfg(feature = "bip324")]
+mod splitter;
 mod stream;
 mod transport;
 /// The offline artifact-signing helper — only compiled for the `sign-module` tool.
 #[cfg(feature = "module-signer")]
 pub use signing::sign_artifact;
 pub use signing::{build_artifact, signing_payload, ModuleError, ModuleVerifier, SignedModule};
+#[cfg(feature = "bip324")]
+pub use splitter::SplittingServer;
 pub use stream::TransformStream;
 pub use transport::{WasmServer, WasmTransport};
 
