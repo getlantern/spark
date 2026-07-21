@@ -44,7 +44,9 @@ pub fn verify_side_door_tag<C: Bip324Crypto>(
     ellswift: &[u8; ELLSWIFT_LEN],
     candidate: &[u8],
 ) -> bool {
-    if candidate.len() < SIDE_DOOR_TAG_LEN {
+    // An empty k_srv makes the tag publicly computable from the (public) ellswift — anyone could forge a
+    // match and unmask the egress. Fail closed on that misconfiguration rather than trust the tag.
+    if k_srv.is_empty() || candidate.len() < SIDE_DOOR_TAG_LEN {
         return false;
     }
     let expected = side_door_tag(crypto, k_srv, ellswift);

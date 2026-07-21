@@ -2511,7 +2511,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
 - 2026-07-20 (ADR 0013 §7 step 4 — keyed-garbage side-door MAC, PR4a): the finale (PR4) decomposed like
   BIP324 itself (PR4a core logic → PR4b splitting egress + guest/config wiring → PR4c live rust-bitcoin
   interop). PR4a lands the side-door in `bip324-core`: a new `side_door` module + `Handshake::with_side_door`.
-  A tunnel client (initiator) prepends `tag = HMAC-SHA256(k_srv, ellswift)` to its opening garbage; a
+  A tunnel client (initiator) prepends `tag = HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)` (domain-separated) to its opening garbage; a
   Lantern egress sharing the per-server secret `k_srv` recomputes the tag from the client's ellswift and
   matches it (constant-time) — match → BIP324 tunnel, mismatch (real Bitcoin peer, random garbage, no
   `k_srv`) → proxy to the real node. **Design decision (chosen): no epoch — key the tag on the *ephemeral*

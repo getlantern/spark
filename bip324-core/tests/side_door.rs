@@ -61,6 +61,17 @@ fn verify_rejects_wrong_key_tampered_tag_and_short_input() {
 }
 
 #[test]
+fn verify_fails_closed_on_empty_key() {
+    let mut c = NativeCrypto::new();
+    let (_k, ellswift) = c.ellswift_generate();
+    // A tag under an empty key is publicly computable from the (public) ellswift, so verification must
+    // reject an empty key regardless — a misconfigured egress then fails closed (everyone looks like a
+    // real Bitcoin peer) instead of trusting a forgeable tag.
+    let forgeable = side_door_tag(&c, b"", &ellswift);
+    assert!(!verify_side_door_tag(&c, b"", &ellswift, &forgeable));
+}
+
+#[test]
 fn initiator_opening_carries_a_verifiable_tag() {
     let k_srv = b"per-server side-door secret";
     let mut ci = NativeCrypto::new();

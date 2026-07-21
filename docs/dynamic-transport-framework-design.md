@@ -208,7 +208,7 @@ must drain those buffered bytes before its first wire read (otherwise it blocks 
 the module — this is the boundary contract: after a handshake the host drains the module first).
 
 **PR4a landed (2026-07-20): the keyed-garbage side-door MAC in `bip324-core`.** A tunnel client
-(initiator) prepends `tag = HMAC-SHA256(k_srv, ellswift)` to its opening garbage; a Lantern egress
+(initiator) prepends `tag = HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)` (domain-separated) to its opening garbage; a Lantern egress
 sharing the per-server secret `k_srv` recomputes the tag from the client's ellswift and matches it
 against the leading garbage — a match routes to the BIP324 tunnel, a mismatch (a real Bitcoin peer, whose
 garbage is random and who lacks `k_srv`) proxies to the real node. The tag keys on the *ephemeral*

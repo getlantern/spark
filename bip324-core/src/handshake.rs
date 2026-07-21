@@ -57,9 +57,10 @@ pub struct Handshake<C: Bip324Crypto> {
     role: Role,
     magic: [u8; 4],
     garbage: Vec<u8>,
-    /// Per-server side-door secret. When set, the initiator prepends `HMAC(k_srv, ellswift)` to its
-    /// opening garbage so a Lantern egress can distinguish it from a real Bitcoin peer (see
-    /// [`side_door`](crate::side_door)). Ignored for the responder.
+    /// Per-server side-door secret. When set, the initiator prepends the side-door tag (the
+    /// domain-separated HMAC computed by [`side_door_tag`](crate::side_door::side_door_tag)) to its
+    /// opening garbage so a Lantern egress can distinguish it from a real Bitcoin peer. Ignored for the
+    /// responder.
     side_door_key: Option<Vec<u8>>,
     buf: Vec<u8>,
     state: State<C>,
@@ -82,9 +83,10 @@ impl<C: Bip324Crypto> Handshake<C> {
         })
     }
 
-    /// Enable the Lantern side-door: the initiator prepends `HMAC(k_srv, ellswift)`
-    /// ([`SIDE_DOOR_TAG_LEN`](crate::side_door::SIDE_DOOR_TAG_LEN) bytes) to its opening garbage, keyed
-    /// by the per-server secret `k_srv`. A no-op for the responder. The tag counts toward
+    /// Enable the Lantern side-door: the initiator prepends the side-door tag
+    /// ([`SIDE_DOOR_TAG_LEN`](crate::side_door::SIDE_DOOR_TAG_LEN) bytes — see
+    /// [`side_door_tag`](crate::side_door::side_door_tag) for the exact MAC input) to its opening
+    /// garbage, keyed by the per-server secret `k_srv`. A no-op for the responder. The tag counts toward
     /// [`MAX_GARBAGE_LEN`]; if `garbage.len() + tag` would exceed it the first `step` errors
     /// [`Error::GarbageTooLong`].
     pub fn with_side_door(mut self, k_srv: &[u8]) -> Self {
@@ -109,7 +111,7 @@ impl<C: Bip324Crypto> Handshake<C> {
                     let mut sent_garbage = self.garbage.clone();
                     // The initiator opens with its key + garbage; the responder waits for the peer first.
                     if self.role.is_initiator() {
-                        // With a side-door key, prepend HMAC(k_srv, ellswift) so a Lantern egress can
+                        // With a side-door key, prepend the side-door tag so a Lantern egress can
                         // classify this as a tunnel client (a real Bitcoin peer's garbage won't match).
                         // It becomes part of the sent garbage — hence of the version-packet AAD — so the
                         // peer authenticates the same bytes it scans past.
