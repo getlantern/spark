@@ -54,6 +54,15 @@ for t in "${TARGETS[@]}"; do
     # is a *plain* boring connector (not yet Chrome-mimicked); Chrome-mimicry for the fetch is the
     # deferred fronting milestone. See docs/config-fetch-cross-platform-design.md.
     feat=(--features anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2,fronted-meek,smart-routing)
+    # `bip324` (ADR 0013 §7) adds the dynamic-transport wasmi host + secp256k1 primitives + splitting
+    # egress, so a signed bip324/obfs-xor module can be delivered by config with no app release. It's
+    # opt-in: a *release* build with `wasm-transport` refuses the dev module-signing key (fail-closed),
+    # so it's enabled only when a production module-signing pubkey is pinned via SPARK_MODULE_PUBKEY_HEX.
+    # secp256k1 cross-compiles for every Apple slice (verified 2026-07-21, aarch64-apple-ios).
+    if [[ -n "${SPARK_MODULE_PUBKEY_HEX:-}" ]]; then
+      feat[0]="${feat[0]},bip324"
+      echo "  (bip324 enabled — pinning SPARK_MODULE_PUBKEY_HEX)" >&2
+    fi
     cargo build --release -p spark-apple --target "$t" "${feat[@]}" >&2
 done
 
