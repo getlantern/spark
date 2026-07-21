@@ -2267,9 +2267,10 @@ mod tests {
         const ELLSWIFT_LEN: usize = 64;
         const SIDE_DOOR_TAG_LEN: usize = 32; // bip324_core::SIDE_DOOR_TAG_LEN
         let cfg = |role: u8, k_srv: &[u8], garbage: &[u8]| {
+            let k_srv_len = u16::try_from(k_srv.len()).expect("k_srv length fits in u16");
             let mut c = vec![role];
             c.extend_from_slice(&MAGIC);
-            c.extend_from_slice(&(k_srv.len() as u16).to_be_bytes());
+            c.extend_from_slice(&k_srv_len.to_be_bytes());
             c.extend_from_slice(k_srv);
             c.extend_from_slice(garbage);
             c
