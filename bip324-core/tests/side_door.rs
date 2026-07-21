@@ -100,6 +100,20 @@ fn initiator_opening_carries_a_verifiable_tag() {
 }
 
 #[test]
+fn empty_key_disables_the_initiator_side_door() {
+    let mut ci = NativeCrypto::new();
+    let mut hi = Handshake::<NativeCrypto>::new(Role::Initiator, MAGIC, b"plain")
+        .unwrap()
+        .with_side_door(b"");
+
+    // With an empty key the opening is ellswift(64) ‖ the configured garbage only — no recomputable tag
+    // that an observer could use to fingerprint the client.
+    let opening = hi.step(&mut ci, &[]).unwrap().outbound;
+    assert_eq!(opening.len(), ELLSWIFT_LEN + b"plain".len());
+    assert_eq!(&opening[ELLSWIFT_LEN..], b"plain");
+}
+
+#[test]
 fn side_door_handshake_completes_and_round_trips() {
     let k_srv = b"secret";
     let mut ci = NativeCrypto::new();

@@ -86,13 +86,17 @@ impl<C: Bip324Crypto> Handshake<C> {
     /// Enable the Lantern side-door: the initiator prepends the side-door tag
     /// ([`SIDE_DOOR_TAG_LEN`](crate::side_door::SIDE_DOOR_TAG_LEN) bytes — see
     /// [`side_door_tag`](crate::side_door::side_door_tag) for the exact MAC input) to its opening
-    /// garbage, keyed by the per-server secret `k_srv`. A no-op for the responder. The tag counts toward
+    /// garbage, keyed by the per-server secret `k_srv`. A no-op for the responder, and a no-op for an
+    /// empty `k_srv` (a tag under an empty key is publicly recomputable from the ellswift — a client
+    /// fingerprint — so the empty case emits plain random garbage instead). The tag counts toward
     /// [`MAX_GARBAGE_LEN`]; if `garbage.len() + tag` would exceed it the first `step` errors
     /// [`Error::GarbageTooLong`].
     pub fn with_side_door(mut self, k_srv: &[u8]) -> Self {
-        // Only the initiator emits the tag; storing the secret on a responder would retain it for
-        // nothing, so a responder call is a genuine no-op.
-        if self.role.is_initiator() {
+        // Only the initiator emits the tag, and only under a non-empty key: a tag under an empty key is
+        // publicly recomputable from the (public) ellswift — a positive fingerprint identifying Lantern
+        // clients — so an empty key is treated as side-door disabled (plain random garbage). Storing the
+        // secret on a responder would also retain it for nothing. Both cases are a genuine no-op.
+        if self.role.is_initiator() && !k_srv.is_empty() {
             self.side_door_key = Some(k_srv.to_vec());
         }
         self
