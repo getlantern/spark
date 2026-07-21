@@ -12,8 +12,6 @@
 //! `crypto.hkdf_extract` (HKDF-Extract *is* HMAC-SHA256), so the side-door needs no primitive the BIP324
 //! crypto provider doesn't already expose.
 
-use alloc::vec::Vec;
-
 use crate::crypto::Bip324Crypto;
 use crate::ELLSWIFT_LEN;
 
@@ -22,6 +20,7 @@ pub const SIDE_DOOR_TAG_LEN: usize = 32;
 
 /// Domain separation for the side-door HMAC, so `k_srv` can't collide with any other keyed use.
 const DOMAIN: &[u8] = b"lantern/bip324-side-door/v1";
+const DOMAIN_LEN: usize = DOMAIN.len();
 
 /// The side-door tag `HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)` for a client's ellswift key.
 pub fn side_door_tag<C: Bip324Crypto>(
@@ -29,9 +28,10 @@ pub fn side_door_tag<C: Bip324Crypto>(
     k_srv: &[u8],
     ellswift: &[u8; ELLSWIFT_LEN],
 ) -> [u8; SIDE_DOOR_TAG_LEN] {
-    let mut ikm = Vec::with_capacity(DOMAIN.len() + ELLSWIFT_LEN);
-    ikm.extend_from_slice(DOMAIN);
-    ikm.extend_from_slice(ellswift);
+    // DOMAIN ‖ ellswift, assembled on the stack (both fixed-size) — no per-tag heap allocation.
+    let mut ikm = [0u8; DOMAIN_LEN + ELLSWIFT_LEN];
+    ikm[..DOMAIN_LEN].copy_from_slice(DOMAIN);
+    ikm[DOMAIN_LEN..].copy_from_slice(ellswift);
     // HKDF-Extract(salt, ikm) == HMAC-SHA256(salt, ikm); key the MAC with the server secret.
     crypto.hkdf_extract(k_srv, &ikm)
 }
