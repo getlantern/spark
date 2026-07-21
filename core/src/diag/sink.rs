@@ -435,6 +435,12 @@ pub fn install(sink: Arc<DiagSink>) -> bool {
     SINK.set(sink).is_ok()
 }
 
+/// Whether a global sink has been [`install`]ed — lets perf-critical callers skip
+/// building an event that [`emit`]/[`emit_error`] would drop.
+pub fn installed() -> bool {
+    SINK.get().is_some()
+}
+
 /// [`DiagSink::push`] on the global sink; a no-op until [`install`] has run, so core
 /// code can emit unconditionally (startup, tests, non-diag processes).
 pub fn emit(ev: DiagEvent) {

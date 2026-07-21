@@ -6,7 +6,9 @@
 //! blocked. Free-tier, disk-cached, fed into [`crate::config::Config::from_config_str`]. Trust is
 //! TLS — no signature, matching radiance.
 
-mod cache;
+// cache is pub(crate): `diag::tunnel_host` re-parses the cached `config_raw.json`
+// (via `cache::raw_path`) to feed its uploader's config watch channel.
+pub(crate) mod cache;
 // http + request are pub(crate): the diag uploader (`diag::upload`) reuses the same
 // hand-rolled HTTP/1.1 POST + header hygiene for its OTLP uploads.
 pub(crate) mod http;

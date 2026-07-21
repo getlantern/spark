@@ -13,8 +13,14 @@ pub mod events;
 pub mod layer;
 pub mod otlp;
 pub mod panic_hook;
+pub mod sentinel;
 pub mod sink;
 pub mod span;
+// The tunnel host wires the uploader + the fetch-cache re-parse, both of which only
+// exist under `config-fetch` (and the tunnel process it serves is the self-fetching
+// NE, which always builds with that feature).
+#[cfg(feature = "config-fetch")]
+pub mod tunnel_host;
 // The uploader reuses config-fetch's HTTP/TLS plumbing, and its `tls_wrap` is a no-op
 // passthrough without the `anytls` feature (which `config-fetch` implies) — gating the
 // whole module on `config-fetch` makes a plaintext upload build impossible.

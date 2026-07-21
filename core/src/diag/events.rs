@@ -185,6 +185,22 @@ pub fn error_task_failed(task: &str, error: &str) -> DiagEvent {
     ev
 }
 
+/// The previous session ended without its clean-exit path (crash class unknown —
+/// covers what the panic hook can't: segfaults, OOM/watchdog kills, kill -9).
+pub fn error_unclean_exit(
+    prev_started_ms: u64,
+    prev_last_alive_ms: u64,
+    prev_version: &str,
+) -> DiagEvent {
+    let mut ev = DiagEvent::new(DiagLevel::Error, "app", "error.unclean_exit");
+    ev.fields
+        .insert("prev_started_ms".into(), prev_started_ms.into());
+    ev.fields
+        .insert("prev_last_alive_ms".into(), prev_last_alive_ms.into());
+    ev.insert_str("prev_version", prev_version);
+    ev
+}
+
 /// A webview error (JS exception, load failure, or similar).
 ///
 /// Webview strings routinely embed full URLs (the reporting script's URL, a failed
@@ -245,6 +261,7 @@ mod tests {
             unbounded_peer_disconnected("s", 1, 2, "reset by 8.8.8.8"),
             unbounded_signaling("connect", Some(5), Some("timeout at 9.9.9.9")),
             error_webview("fetch to 172.16.0.1 failed", "app.js"),
+            error_unclean_exit(1, 2, "version 10.0.0.1"),
             unbounded_ice_gathering(&["host", "srflx via 1.2.3.4"], 2),
             unbounded_peer_connected("peer-10.0.0.9", 1, "srflx", Some("region 10.0.0.1")),
             unbounded_geo_failed("geoip 192.168.1.1 not found"),
@@ -323,6 +340,7 @@ mod tests {
             error_panic("m", "l"),
             error_task_failed("t", "e"),
             error_webview("m", "s"),
+            error_unclean_exit(0, 0, "unknown"),
         ] {
             assert_eq!(ev.level, DiagLevel::Error, "kind {}", ev.kind);
         }

@@ -95,6 +95,22 @@ pub async fn serve_daemon(args: Args, shutdown: impl Future<Output = ()>) -> any
         config.transport.protect_interface = args.protect_interface.clone();
     }
 
+    // Capture-only diagnostics (design §5 Phase B-lite): spool + backup log + panic
+    // hook + unclean-exit sentinel under the service state dir — the profiles file's
+    // parent (/var/lib/spark, C:\ProgramData\spark), the same dir the profile store
+    // already creates + writes, so the writability assumption is shared. Placed
+    // AFTER config load: an early config error returns before this point without
+    // arming the sentinel, so a bad --config can't flag a false unclean exit. No
+    // uploader here — see diag_wire's module doc (upload is a later IPC plumb).
+    match args.profiles.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            crate::diag_wire::init(dir, env!("CARGO_PKG_VERSION"));
+        }
+        // A bare/rootless --profiles path has no usable parent; run without
+        // diagnostics rather than spooling into an arbitrary cwd.
+        _ => {}
+    }
+
     // The event loop owns the engine + tunnel state; connections talk to it over `cmd_tx`.
     let fail_closed = config.kill_switch.fail_closed;
     // Capabilities + the launch/base config + the profile-store path for the v2 requests.
@@ -112,7 +128,7 @@ pub async fn serve_daemon(args: Args, shutdown: impl Future<Output = ()>) -> any
     ));
 
     tokio::pin!(shutdown);
-    tokio::select! {
+    let result = tokio::select! {
         result = listen(&args, cmd_tx) => result,
         _ = &mut shutdown => {
             // Dropping the `listen` future (and its `cmd_tx`) ends the event loop, which tears
@@ -120,7 +136,12 @@ pub async fn serve_daemon(args: Args, shutdown: impl Future<Output = ()>) -> any
             info!("shutdown requested; stopping control listener");
             Ok(())
         }
-    }
+    };
+    // Controlled exit — signalled shutdown or a listener error, either way this exit
+    // path ran (and a listener error was already reported through `result`): disarm
+    // the unclean-exit sentinel so the next launch isn't flagged as a crash.
+    crate::diag_wire::disarm_sentinel();
+    result
 }
 
 /// Bind the unix control socket (root + `spark` group, mode 0660) and serve it. Peer-cred auth
@@ -195,9 +216,17 @@ fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     // Registry + layers so the LogForwarder (the control-plane log stream, ADR 0004 slice 4) runs
     // alongside the console formatter. The forwarder is a no-op until `logbus::init` runs.
+    //
+    // DiagLayer: capture-only diagnostics (design §5 Phase B-lite) — events reach the
+    // service's local spool/diag.log (wired by `diag_wire::init`) for hand-collection;
+    // upload needs an IPC-plumbed otel config (follow-up, see diag_wire's module doc).
+    // A no-op until diag_wire installs the sink. Note the global EnvFilter above sits
+    // in front of every layer: at the default `info`, spark DEBUG events don't reach
+    // this layer (a deliberate scope-down vs the NE — RUST_LOG=debug widens capture).
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
         .with(crate::logbus::LogForwarder)
+        .with(spark_core::diag::layer::DiagLayer::new())
         .init();
 }

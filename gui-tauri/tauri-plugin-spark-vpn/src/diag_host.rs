@@ -21,8 +21,9 @@ use tauri::{AppHandle, Manager, Runtime};
 use spark_core::config::lantern::{otel_from_config_raw_json, OtelConfig};
 use spark_core::diag::layer::DiagLayer;
 use spark_core::diag::otlp::ResourceAttrs;
+use spark_core::diag::sentinel::SessionSentinel;
 use spark_core::diag::upload::{self, SpanQueue, UploaderHandle};
-use spark_core::diag::{self, events, panic_hook, DiagSink};
+use spark_core::diag::{self, events, panic_hook, DiagEvent, DiagSink};
 use tracing_subscriber::prelude::*;
 
 /// How often the uploader's config feed re-reads the cached `config_raw.json`. The app
@@ -33,7 +34,8 @@ const CONFIG_REPARSE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Live handles the rest of the plugin needs after init: the span queue (Task 11's
 /// Unbounded session spans push here) and the uploader handle (kept alive for the
-/// process lifetime — dropping it would abort the upload loop).
+/// process lifetime — dropping it would abort the upload loop). The unclean-exit
+/// sentinel deliberately does NOT live here — see [`SENTINEL`].
 struct DiagState {
     queue: Arc<SpanQueue>,
     _uploader: UploaderHandle,
@@ -42,12 +44,48 @@ struct DiagState {
 /// Set once by [`init`] when diagnostics are enabled; never set when they're off.
 static STATE: OnceLock<DiagState> = OnceLock::new();
 
+/// The armed unclean-exit sentinel, set by [`arm_and_register`] the instant
+/// `SessionSentinel::arm` returns. Deliberately separate from [`STATE`], which is
+/// only set at the END of `init_inner` (after uploader construction): the
+/// `RunEvent::Exit` disarm hook races the rest of init, so a clean fast-quit in that
+/// window would find a `STATE`-backed accessor `None`, leave the marker armed, and
+/// flag a false `error.unclean_exit` on the next launch. Armed-to-reachable must be
+/// one atomic step.
+static SENTINEL: OnceLock<Arc<SessionSentinel>> = OnceLock::new();
+
 /// The live [`SpanQueue`], for pushing finished session spans (spec §C3a). `None`
 /// until [`init`] has completed its async body — or forever, when diagnostics are
 /// disabled — so instrumentation callers (`unbounded_diag::apply_actions`) must treat
 /// `None` as "spans off".
 pub fn span_queue() -> Option<Arc<SpanQueue>> {
     STATE.get().map(|s| s.queue.clone())
+}
+
+/// The live unclean-exit [`SessionSentinel`] (spec §C2a), for the clean-shutdown
+/// disarm in `lib.rs`'s `RunEvent::Exit` hook. Reads the dedicated [`SENTINEL`] lock
+/// — populated the moment the marker is armed — NOT [`STATE`], so an Exit racing the
+/// tail of init still finds the sentinel. `None` until [`arm_and_register`] runs, or
+/// forever when diagnostics are off.
+pub(crate) fn sentinel() -> Option<Arc<SessionSentinel>> {
+    SENTINEL.get().cloned()
+}
+
+/// Arm the unclean-exit sentinel in `dir` and make it reachable via [`sentinel`] in
+/// the same step, returning the previous session's leftover `error.unclean_exit`
+/// event (if any) for the caller to emit.
+///
+/// Armed-to-reachable must be one atomic step: the moment `SessionSentinel::arm` has
+/// written the marker, the `RunEvent::Exit` hook must be able to disarm it — the Exit
+/// hook races everything `init_inner` does after this call. Registering here closes
+/// the fast-quit race down to the window inside `arm` itself (milliseconds, the same
+/// accepted window as a crash before arm).
+pub(crate) fn arm_and_register(dir: &Path, version: &str) -> Option<DiagEvent> {
+    let (sentinel, prev) = SessionSentinel::arm(dir, version);
+    // First-set-wins. A second call can't happen in production (diag::install gates
+    // duplicate host init before this point); if one ever did, the registered
+    // sentinel owns the same marker path, so its beats/disarm still cover it.
+    let _ = SENTINEL.set(Arc::new(sentinel));
+    prev
 }
 
 /// One-time diagnostics init for the APP process (spec §C4/§5). Gated entirely on the
@@ -101,6 +139,17 @@ fn init_inner<R: Runtime>(app: &AppHandle<R>, base: &Path) {
     //    the process dies, uploading on next launch.
     panic_hook::install();
 
+    // 2a. Unclean-exit sentinel (§C2a): catches the crash classes the panic hook
+    //     can't see (segfault, OOM kill, watchdog, kill -9). Armed AFTER the sink is
+    //     created + installed so the previous session's `error.unclean_exit` lands in
+    //     the live sink via the error fast path; a crash before this point goes
+    //     undetected (accepted — the window is milliseconds of init). Armed and
+    //     registered as ONE step (arm_and_register) so the Exit-hook disarm — which
+    //     races everything below — can already reach it.
+    if let Some(ev) = arm_and_register(base, &app.package_info().version.to_string()) {
+        diag::emit_error(ev);
+    }
+
     // 3. The tracing capture layer. `try_init` so an existing global subscriber is
     //    never clobbered. Neither this plugin nor the app crate installs one today
     //    (verified: no tracing_subscriber init anywhere under gui-tauri), so this
@@ -127,9 +176,18 @@ fn init_inner<R: Runtime>(app: &AppHandle<R>, base: &Path) {
     //    tunnel's poll loop rewriting the cache) without coupling to the fetch path;
     //    a fetch-completion hook can replace the polling later.
     let (cfg_tx, cfg_rx) = tokio::sync::watch::channel(otel_from_cache(&cache_path));
+    // Cloned from the SENTINEL lock (the single source of truth since
+    // arm_and_register) rather than a local binding.
+    let beat_sentinel = sentinel();
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(CONFIG_REPARSE_INTERVAL).await;
+            // The sentinel heartbeat rides this existing 60s tick rather than owning
+            // a timer task: one process-lifetime loop instead of two, and ~1 min
+            // last_alive resolution is all an unclean-exit timestamp needs.
+            if let Some(s) = &beat_sentinel {
+                s.beat();
+            }
             let next = otel_from_cache(&cache_path);
             // send_if_modified + PartialEq: wake the uploader's receiver only on a
             // real change, not on every re-parse.
@@ -365,5 +423,44 @@ mod tests {
     fn span_queue_none_before_init() {
         // STATE is only set by init_inner, which no test runs.
         assert!(span_queue().is_none());
+    }
+
+    #[test]
+    fn sentinel_reachable_the_instant_it_is_armed() {
+        // SENTINEL is a process-global OnceLock, so this is the ONLY test allowed to
+        // set it (tests share one process; a separate "none before init" test would
+        // race this one's set). It therefore owns BOTH halves of the contract: None
+        // before arm_and_register, Some immediately after.
+        assert!(
+            sentinel().is_none(),
+            "no sentinel before arm_and_register — Exit-hook disarm must be a safe \
+             no-op when diagnostics never initialized"
+        );
+
+        let dir = tmp("sentinel_reachable_the_instant_it_is_armed");
+        let prev = arm_and_register(&dir, "9.9.9");
+        assert!(prev.is_none(), "fresh dir must not flag an unclean exit");
+
+        // The load-bearing ordering (the fast-quit race): the sentinel is reachable
+        // via the accessor BEFORE any DiagState/STATE exists — init_inner's remaining
+        // work (uploader construction, STATE.set) hasn't happened and never does in
+        // this test, exactly like an Exit event firing mid-init.
+        assert!(
+            sentinel().is_some(),
+            "sentinel must be reachable the instant arm_and_register returns"
+        );
+        assert!(
+            span_queue().is_none(),
+            "STATE must still be unset — registration must not wait for it"
+        );
+
+        // And the Exit-hook path works through the accessor: disarm removes the
+        // marker, so the next launch is clean.
+        sentinel().expect("just registered").disarm();
+        assert!(
+            !dir.join("diag.session").exists(),
+            "disarm through the accessor must remove the marker"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

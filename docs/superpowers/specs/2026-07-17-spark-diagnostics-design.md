@@ -208,6 +208,12 @@ stream:
   `error.panic {message, location}` straight to the spool before the process dies —
   uploaded on next launch. The hook chains to the previous hook and must never panic
   itself.
+- **Unclean exits.** A session marker (`diag.session`, armed at diagnostics init,
+  heartbeat-refreshed ~every minute, removed on clean exit) catches the crash classes
+  the panic hook can't see — segfault, OOM kill, watchdog, `kill -9`. A leftover
+  marker at the next launch emits
+  `error.unclean_exit {prev_started_ms, prev_last_alive_ms, prev_version}` through
+  the error fast path.
 - **Task failures.** Supervision points that `await` a `JoinHandle` emit
   `error.task_failed {task, error}` on join errors instead of silently dropping them.
 - **Stray stderr.** Remaining `eprintln!` sites (e.g. the unbounded `total_helped`
@@ -347,6 +353,7 @@ aggregation loop (`gui-tauri/tauri-plugin-spark-vpn/src/unbounded.rs`) and `spar
 | `diag.buffer_dropped` | `count` | **dropped diag events** |
 | `diag.lock_poisoned` | `site` | **lock poisoning** (the `lock_recover` sites) |
 | `error.panic` / `error.task_failed` / `error.webview` | `message` + `location`/`task`/`source` | **crashes & silent failures** (§C2a) |
+| `error.unclean_exit` | `prev_started_ms`, `prev_last_alive_ms`, `prev_version` | **non-panic crash classes** (segfault/OOM/watchdog/kill — §C2a sentinel) |
 | `diag.config_applied` | `knob`, `value` | confirms remediation landed (§C7) |
 
 With SigNoz these become directly chartable: NAT-traversal p50/p95 by version, error-kind

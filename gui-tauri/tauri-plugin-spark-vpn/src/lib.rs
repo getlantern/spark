@@ -244,5 +244,19 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             tray::init(app)?;
             Ok(())
         })
+        .on_event(|_app, event| {
+            // Clean-shutdown disarm for the unclean-exit sentinel (diag §C2a). Exit
+            // only — NOT ExitRequested, which can be cancelled (a cancelled exit that
+            // disarmed would leave the rest of the session crash-blind). Known false
+            // positive: OS logout/shutdown may SIGKILL the process before Exit fires,
+            // slightly inflating `error.unclean_exit` during real OS shutdowns; a
+            // SIGTERM disarm hook is a possible future refinement.
+            if let tauri::RunEvent::Exit = event {
+                #[cfg(not(target_os = "android"))]
+                if let Some(s) = diag_host::sentinel() {
+                    s.disarm();
+                }
+            }
+        })
         .build()
 }
