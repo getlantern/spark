@@ -88,7 +88,11 @@ impl<C: Bip324Crypto> Handshake<C> {
     /// [`MAX_GARBAGE_LEN`]; if `garbage.len() + tag` would exceed it the first `step` errors
     /// [`Error::GarbageTooLong`].
     pub fn with_side_door(mut self, k_srv: &[u8]) -> Self {
-        self.side_door_key = Some(k_srv.to_vec());
+        // Only the initiator emits the tag; storing the secret on a responder would retain it for
+        // nothing, so a responder call is a genuine no-op.
+        if self.role.is_initiator() {
+            self.side_door_key = Some(k_srv.to_vec());
+        }
         self
     }
 

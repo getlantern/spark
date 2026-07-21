@@ -48,7 +48,7 @@ fn verify_rejects_wrong_key_tampered_tag_and_short_input() {
     let mut bad = tag;
     bad[0] ^= 0x01;
     assert!(!verify_side_door_tag(&c, k_srv, &ellswift, &bad));
-    // The tag binds to the ellswift: a different key → reject.
+    // The tag binds to the ellswift: verifying the same tag against a different ellswift → reject.
     let (_k2, other) = c.ellswift_generate();
     assert!(!verify_side_door_tag(&c, k_srv, &other, &tag));
     // Too few bytes to hold a tag → reject, no panic.
