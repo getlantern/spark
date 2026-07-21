@@ -396,8 +396,11 @@ mod tests {
                     loop {
                         match s.read(&mut buf).await {
                             Ok(0) | Err(_) => break,
-                            Ok(n) if s.write_all(&buf[..n]).await.is_err() => break,
-                            Ok(_) => {}
+                            Ok(n) => {
+                                if s.write_all(&buf[..n]).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                 });

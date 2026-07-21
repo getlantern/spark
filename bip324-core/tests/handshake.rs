@@ -136,7 +136,7 @@ fn handshake_carries_coalesced_steady_state_bytes() {
     let mut hr = Handshake::<NativeCrypto>::new(Role::Responder, MAGIC, b"").unwrap();
 
     let init_open = hi.step(&mut ci, &[]).unwrap().outbound; // key + garbage
-    let _ = hr.step(&mut cr, &[]); // responder emits nothing at connect
+    hr.step(&mut cr, &[]).expect("responder connect"); // responder emits nothing at connect
     let resp_reply = hr.step(&mut cr, &init_open).unwrap().outbound; // key + garbage + term + version
     let init_final = hi.step(&mut ci, &resp_reply).unwrap();
     let mut si = init_final.session.expect("initiator completes");
