@@ -2493,8 +2493,21 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   responder's `run_handshake` reads past the handshake; those leftover bytes were being *dropped* when
   the `Handshake` became a `Session` (PR1/PR2 tests shuttled exact outputs, never over-reading). Fix:
   `Session::new` seeds `recv_buf` with the handshake leftover (`core::mem::take(&mut self.buf)`); guarded
-  by `bip324-core`'s `handshake_carries_coalesced_steady_state_bytes` test. Fixture regenerated. Next:
-  PR4 = bitcoind on :8333 + the keyed-garbage side-door MAC + live rust-bitcoin interop.
+  by `bip324-core`'s `handshake_carries_coalesced_steady_state_bytes` test. Fixture regenerated.
+  **Follow-up (same PR, e266f16): the coalescing had a *second* home — the host.** The core seed buffers
+  the leftover, but `TransformStream::poll_read` only fed *newly-read wire bytes* to `transform_in`, so a
+  fully-buffered frame with no trailing wire bytes was stranded and the reader blocked forever on a wire
+  read. Timing-dependent, so the tunnel test **passed in isolation but hung 120s** as the last test under
+  the full `--workspace --all-features` suite (CI-deterministic across all 3 OSes; single-feature local
+  runs missed it). **Boundary contract, now explicit:** after a handshake the host must drain the module
+  before its first wire read — a one-shot `handshake_drain_pending` in `poll_read` (armed only when
+  `drives_handshake()`) calls `transform_in(&[])` first. Guarded by the deterministic
+  `poll_read_drains_steady_state_bytes_the_handshake_over_read` (forces the over-read; fails `UnexpectedEof`
+  without the drain). Also ran `run_handshake` on the **UDP dial path** (`dial_udp_addr`): the server runs
+  the responder handshake in `accept` for every connection (the TCP-tunnel/UDP-associate split comes later,
+  from the header), so a handshake module would desync if the UDP client skipped it. 665 `--workspace
+  --all-features` tests green. Next: PR4 = bitcoind on :8333 + the keyed-garbage side-door MAC + live
+  rust-bitcoin interop.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
