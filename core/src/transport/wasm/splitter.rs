@@ -301,7 +301,7 @@ mod tests {
         //    96 bytes of non-tag opening: the splitter peeks, the tag check fails, and it proxies —
         //    if it had wrongly taken the tunnel branch the BIP324 handshake would reject these bytes.
         let mut peer = TcpStream::connect(egress_addr).await.expect("peer connect");
-        let opening: Vec<u8> = (0..PEEK_LEN as u8).collect();
+        let opening: Vec<u8> = (0..PEEK_LEN).map(|i| i as u8).collect();
         peer.write_all(&opening).await.expect("peer write");
         let mut echoed = vec![0u8; opening.len()];
         peer.read_exact(&mut echoed)
@@ -311,6 +311,57 @@ mod tests {
             echoed, opening,
             "real peer's bytes are proxied to the upstream and echoed back"
         );
+    }
+
+    /// Live end-to-end proof of the proxy branch against a real Bitcoin node: a non-Lantern opening
+    /// reaches `bitcoind` through the splitter and gets a genuine BIP324 response. `#[ignore]`d — it
+    /// needs a BIP324-capable `bitcoind`. Run it with:
+    ///   `BIP324_BITCOIND=127.0.0.1:8333 cargo test -p spark-core --features bip324 -- --ignored real_bitcoin`
+    #[tokio::test]
+    #[ignore = "requires a BIP324-capable bitcoind (set BIP324_BITCOIND=host:port, default 127.0.0.1:8333)"]
+    async fn real_bitcoin_peer_reaches_bitcoind_through_the_proxy_branch() {
+        // Resolve via lookup_host so a hostname (e.g. localhost:8333) works, not just an IP literal.
+        let target =
+            std::env::var("BIP324_BITCOIND").unwrap_or_else(|_| "127.0.0.1:8333".to_string());
+        let resolved: Vec<SocketAddr> = tokio::net::lookup_host(&target)
+            .await
+            .expect("resolve BIP324_BITCOIND (host:port)")
+            .collect();
+        // Prefer IPv4: `localhost` often resolves to `::1` first, but bitcoind may bind v4 only.
+        let bitcoind = resolved
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| resolved.first())
+            .copied()
+            .expect("BIP324_BITCOIND resolved to no address");
+
+        let module = load_module();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind egress");
+        let egress_addr = listener.local_addr().expect("egress addr");
+        let server = WasmServer::new(module).with_config(server_cfg());
+        let splitter = Arc::new(SplittingServer::new(server, K_SRV.to_vec(), bitcoind));
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                let s = Arc::clone(&splitter);
+                tokio::spawn(async move {
+                    let _ = s.handle(conn).await;
+                });
+            }
+        });
+
+        // A non-Lantern opening (no valid tag) so the splitter takes the proxy branch. A BIP324
+        // responder replies to any 64-byte ellswift with its own key + garbage, so reading 64 bytes
+        // back proves the proxy delivered us to the real node and it answered.
+        let mut peer = TcpStream::connect(egress_addr).await.expect("peer connect");
+        let opening: Vec<u8> = (0..PEEK_LEN).map(|i| i as u8).collect();
+        peer.write_all(&opening).await.expect("peer write");
+        let mut ellswift = [0u8; ELLSWIFT_LEN];
+        // Bound the read so a manual run against an unreachable/non-v2 node fails fast with a clear
+        // message instead of hanging (peek_timeout + bitcoind's reply should be well under this).
+        tokio::time::timeout(Duration::from_secs(10), peer.read_exact(&mut ellswift))
+            .await
+            .expect("timed out waiting for bitcoind — is BIP324_BITCOIND reachable and v2-capable?")
+            .expect("bitcoind replied through the proxy branch with its ellswift key");
     }
 
     #[tokio::test]
