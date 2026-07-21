@@ -12,6 +12,7 @@
   import { listen } from "@tauri-apps/api/event";
   import Globe from "$lib/Globe.svelte";
   import BottomTabs from "$lib/BottomTabs.svelte";
+  import { vpnState } from "$lib/vpn_state.svelte";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -19,9 +20,6 @@
   let autoEnable = $state(false);
   let showWelcome = $state(false);
   let busy = $state(false);
-  // The VPN tab's status dot must reflect the real tunnel state on THIS screen too —
-  // switching tabs doesn't disconnect the VPN, so the dot mustn't go grey here.
-  let vpnConnected = $state(false);
   let poll: ReturnType<typeof setInterval>;
   let unlistenUnbounded: Promise<() => void> | undefined; // spark://unbounded subscription (Tauri only)
 
@@ -30,7 +28,9 @@
 
   async function refresh() {
     try { status = await backend.unboundedStatus(); } catch { /* keep last-known */ }
-    try { vpnConnected = (await backend.status()).state === "connected"; } catch { /* keep last-known */ }
+    // Switching tabs doesn't disconnect the VPN — keep the shared dot state live so the
+    // tab bar's VPN dot stays green here while the tunnel is connected.
+    try { vpnState.connected = (await backend.status()).state === "connected"; } catch { /* keep last-known */ }
   }
 
   async function toggle() {
@@ -144,7 +144,7 @@
     </div>
   </div>
 
-  <BottomTabs current="unbounded" vpnOn={vpnConnected} unboundedOn={status.enabled} />
+  <BottomTabs current="unbounded" vpnOn={vpnState.connected} unboundedOn={status.enabled} />
 </main>
 
 {#snippet globeIcon()}
@@ -195,10 +195,11 @@
   .banner p { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text-secondary); }
 
   /* The globe is the hero of the screen — it floats directly on the page background (no card),
-     tall and centered, matching the design. */
+     centered, matching the design. Sized so the whole screen (banner → globe → both cards →
+     tab bar) fits the 760px window without scrolling. */
   .globe-mount {
-    margin-top: 4px;
-    height: 330px;
+    margin-top: 2px;
+    height: 268px;
     overflow: hidden;
   }
 

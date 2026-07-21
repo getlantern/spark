@@ -7,6 +7,7 @@
   import { flagEmoji, serverLabel } from "$lib/format";
   import { unboundedVisible } from "$lib/unbounded";
   import BottomTabs from "$lib/BottomTabs.svelte";
+  import { vpnState } from "$lib/vpn_state.svelte";
   import { _ } from "$lib/i18n";
   import { listen } from "@tauri-apps/api/event";
   // Fonts + global design tokens live in +layout.svelte (shared across home ↔ server selection).
@@ -27,6 +28,11 @@
 
   const connected = $derived(status.state === "connected");
   const connecting = $derived(status.state === "connecting");
+  // Mirror the live connected state into the shared cache so the Unbounded screen's tab bar
+  // shows the right VPN dot the instant it mounts (no default-false flicker on tab switch).
+  $effect(() => {
+    vpnState.connected = connected;
+  });
   // The server shown in the Smart-location tile: the user's pick if any, else the live current
   // (the auto-ranked best, marked by the snapshot).
   const current = $derived(
@@ -246,7 +252,9 @@
   </div>
 
   {#if showUnboundedTab}
-    <BottomTabs current="vpn" vpnOn={connected} unboundedOn={unboundedEnabled} />
+    <!-- Read the shared cache (kept in sync via the $effect above) so the dot is correct on
+         first frame after an Unbounded→home switch, before this screen's own status poll lands. -->
+    <BottomTabs current="vpn" vpnOn={vpnState.connected} unboundedOn={unboundedEnabled} />
   {/if}
 </main>
 
