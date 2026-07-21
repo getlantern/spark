@@ -258,8 +258,20 @@ fn packed(ptr: i32, len: i32) -> i64 {
 }
 
 /// The input the host wrote at `(ptr, len)` (borrows the 'static input arena; valid for this call).
+///
+/// The sole caller is the trusted host runtime, which passes `(ptr, len)` from [`alloc`] — so `ptr` is
+/// the arena base and `len ≤ ARENA`. Validate the range against `IN_ARENA` anyway: a stray `(ptr, len)`
+/// (negative `len`, or a range past the arena) would be immediate Rust UB in `from_raw_parts`, even if
+/// the resulting wasm loads would trap. Trap loud (as `alloc` does) rather than fabricate a slice.
 unsafe fn input<'a>(ptr: i32, len: i32) -> &'a [u8] {
-    core::slice::from_raw_parts(ptr as usize as *const u8, len as usize)
+    let base = addr_of_mut!(IN_ARENA) as usize;
+    let p = ptr as usize;
+    let within =
+        len >= 0 && p >= base && p.checked_add(len as usize).is_some_and(|pe| pe <= base + ARENA);
+    if !within {
+        core::arch::wasm32::unreachable()
+    }
+    core::slice::from_raw_parts(p as *const u8, len as usize)
 }
 
 /// Store `bytes` as the current output and return its packed pointer/length.
