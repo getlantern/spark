@@ -261,6 +261,31 @@ as a signed WASM module + config, crypto entirely via host primitives, wire-comp
 deployable to an unchanged client. The north star, demonstrated. Remaining framework work is §7 step 5
 (non-Chrome anchors + a STARTTLS proof), independent of BIP324.
 
+**PR4d landed (2026-07-21): productionize — wire `bip324` into the shippable product builds.** Step 4's
+code was merged but no product build could *enable* it: `cli`/`service`/`platforms/apple`/`platforms/android`
+had no `bip324`/`wasm-transport` passthrough, and none of the build feature-lists carried it. PR4d adds the
+`wasm-transport` + `bip324` passthrough features to all four, so a client can be built with the dynamic
+transport runtime + secp256k1 primitives + splitting egress. **It's opt-in**, because the module-signing
+guard (`signing.rs`) makes it a key-custody step, not just a flag: a *release* build with `wasm-transport`
+refuses to fall back to the repo's dev module-signing key and requires the production pubkey pinned via
+`SPARK_MODULE_PUBKEY_HEX` (a 64-hex-char Ed25519 key; a `None` in release is a compile error — fail-closed,
+so a leaked dev key can't become a module-injection vector). `build-xcframework.sh` therefore enables
+`bip324` *only when* `SPARK_MODULE_PUBKEY_HEX` is set, leaving the default product build byte-identical.
+
+**Shipping a BIP324 (or any dynamic-transport) module — the runbook:**
+1. **Generate a production module-signing keypair** (Ed25519). Keep the private half in secret storage; it
+   never enters the repo or a shipped binary. (The committed `.spkw` fixtures use the *dev* key, for tests
+   only.)
+2. **Bake the public half into the client at build time:** `SPARK_MODULE_PUBKEY_HEX=<64 hex>`. With it set,
+   `build-xcframework.sh` auto-adds `bip324` to every Apple slice; for the CLI/service/Android pass
+   `--features bip324` (the Android `cargoNdkBuild` features config) alongside the env var.
+3. **Sign the module** (`.spkw`) with the production *private* key (the `sign-module` tool / `build-module.sh`
+   flow, pointed at the production key rather than the dev key).
+4. **Distribute** the signed module + its config over the existing signed config/fronting channel; an
+   already-shipped client that pinned the matching pubkey loads it — **no client release**.
+
+Standing up the production keypair + its custody/CI wiring is the remaining ops step (outside this PR).
+
 ## 8. Tradeoffs (stated plainly)
 
 - **Opaque engine params** → the core can't validate or GA-optimize protocol-specific fields; the

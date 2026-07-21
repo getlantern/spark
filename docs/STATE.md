@@ -2572,6 +2572,20 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   shipped as a signed WASM module + config, wire-compatible with the reference, deployable to an unchanged
   client — the north star demonstrated. Remaining framework work = §7 step 5 (non-Chrome anchors + STARTTLS
   proof), independent of BIP324.
+- 2026-07-21 (ADR 0013 §7 — PR4d = productionize the bip324 build wiring): step 4's code was merged but no
+  product build could *enable* it — `cli`/`service`/`platforms/apple`/`platforms/android` had no
+  `bip324`/`wasm-transport` passthrough, and no build feature-list carried it (found while answering "how do
+  I build with all the new features"). PR4d adds `wasm-transport` + `bip324` passthrough features to all four.
+  **Enablement is opt-in by necessity:** the module-signing guard (`signing.rs`) makes a *release* build with
+  `wasm-transport` a **compile error** unless a production pubkey is pinned via `SPARK_MODULE_PUBKEY_HEX` — it
+  fail-closes rather than trust the repo's dev key. So `build-xcframework.sh` enables `bip324` **only when
+  `SPARK_MODULE_PUBKEY_HEX` is set**, leaving the default product build unchanged; Android/CLI/service take
+  `--features bip324` + the env var. Verified: release+bip324 fails without the key (guard fires) and compiles
+  with it; secp256k1 cross-compiles for `aarch64-apple-ios`; default builds + clippy/fmt unaffected. Design
+  doc §7 carries the **ship runbook** (generate prod keypair → `SPARK_MODULE_PUBKEY_HEX` → sign module with
+  the private half → distribute). **Chosen scope (user):** enablement + runbook only — standing up the
+  production module-signing keypair + its custody/CI wiring is a separate ops step, not this PR. The dev
+  pubkey hex (test builds only) is `722b9b0fa61a50b2031547d314df26c57f720dc9779387e0d0a0273481e0f9d5`.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

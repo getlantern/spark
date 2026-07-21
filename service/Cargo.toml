@@ -19,6 +19,11 @@ path = "src/main.rs"
 anytls = ["spark-core/anytls"]
 bootstrap-dns = ["spark-core/bootstrap-dns"]
 multi-server = ["spark-core/multi-server"]
+# Dynamic-transport runtime (ADR 0013 §7): the wasmi host for signed byte-transform modules, and
+# `bip324` (which implies it) adding the secp256k1 host primitives + splitting egress. Off by default
+# (bip324 pulls the C-backed secp256k1); enable to run a signed bip324/obfs-xor module or the egress.
+wasm-transport = ["spark-core/wasm-transport"]
+bip324 = ["spark-core/bip324"]
 
 [dependencies]
 spark-ipc = { path = "../ipc", features = ["stream"] }
