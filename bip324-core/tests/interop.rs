@@ -13,7 +13,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use bip324_core::crypto::Bip324Crypto;
 use bip324_core::{Handshake, Role, Session};
 
 mod native;

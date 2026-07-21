@@ -184,9 +184,7 @@ side-door egress + rust-bitcoin interop; see the step-4 detail below). Only step
 a STARTTLS proof) remains, independent of BIP324. The historical narrative below is kept as written.
 
 Step 4's original prerequisite — the **Rust→wasm32 build-and-sign pipeline** that was missing (every
-module was inline
-prerequisite — the **Rust→wasm32 build-and-sign pipeline** that was missing (every module was inline
-`wat!`) — now exists. `modules/obfs-xor` is a reference guest module compiled and signed by
+module was inline `wat!`) — now exists. `modules/obfs-xor` is a reference guest module compiled and signed by
 `scripts/build-module.sh` (via the `sign-module` tool, `--features module-signer`) into a committed
 `.spkw` fixture that a toolchain-free `cargo test` loads through the production
 `ModuleVerifier::pinned().verify` path and round-trips.

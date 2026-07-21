@@ -301,7 +301,7 @@ mod tests {
         //    96 bytes of non-tag opening: the splitter peeks, the tag check fails, and it proxies —
         //    if it had wrongly taken the tunnel branch the BIP324 handshake would reject these bytes.
         let mut peer = TcpStream::connect(egress_addr).await.expect("peer connect");
-        let opening: Vec<u8> = (0..PEEK_LEN as u8).collect();
+        let opening: Vec<u8> = (0..PEEK_LEN).map(|i| i as u8).collect();
         peer.write_all(&opening).await.expect("peer write");
         let mut echoed = vec![0u8; opening.len()];
         peer.read_exact(&mut echoed)
@@ -343,11 +343,14 @@ mod tests {
         // responder replies to any 64-byte ellswift with its own key + garbage, so reading 64 bytes
         // back proves the proxy delivered us to the real node and it answered.
         let mut peer = TcpStream::connect(egress_addr).await.expect("peer connect");
-        let opening: Vec<u8> = (0..PEEK_LEN as u8).collect();
+        let opening: Vec<u8> = (0..PEEK_LEN).map(|i| i as u8).collect();
         peer.write_all(&opening).await.expect("peer write");
         let mut ellswift = [0u8; ELLSWIFT_LEN];
-        peer.read_exact(&mut ellswift)
+        // Bound the read so a manual run against an unreachable/non-v2 node fails fast with a clear
+        // message instead of hanging (peek_timeout + bitcoind's reply should be well under this).
+        tokio::time::timeout(Duration::from_secs(10), peer.read_exact(&mut ellswift))
             .await
+            .expect("timed out waiting for bitcoind — is BIP324_BITCOIND reachable and v2-capable?")
             .expect("bitcoind replied through the proxy branch with its ellswift key");
     }
 
