@@ -201,10 +201,24 @@ before the steady-state transform, gated on a protocol-blind `Transform::drives_
 the module exports `handshake_step`; transform-only modules like obfs-xor are unaffected) — reusing
 `ServerSpec::Wasm` / `WasmConfig` with no schema change (`init_config` = `role ++ magic ++ garbage`).
 Validated by a real-TCP loopback tunnel (client ↔ server, both handshaking, byte round-trip through the
-BIP324 tunnel to an echo). PR3 also fixed a latent `bip324-core` bug the streaming path surfaced: the
-handshake's leftover bytes (the peer's first steady-state packet, coalesced with the handshake over TCP)
-must seed the session's receive buffer, not be dropped. Next: the bitcoind server + keyed-garbage
-side-door MAC (PR4); the live rust-bitcoin `bip324` interop lands with that real end-to-end.
+BIP324 tunnel to an echo). PR3 also fixed the coalescing bug the streaming path surfaced, in two places:
+the handshake's leftover bytes (the peer's first steady-state packet, coalesced with the handshake over
+TCP) must seed the session's receive buffer in `bip324-core`, **and** the host `TransformStream::poll_read`
+must drain those buffered bytes before its first wire read (otherwise it blocks on bytes already inside
+the module — this is the boundary contract: after a handshake the host drains the module first).
+
+**PR4a landed (2026-07-20): the keyed-garbage side-door MAC in `bip324-core`.** A tunnel client
+(initiator) prepends `tag = HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)` (domain-separated) to its opening garbage; a Lantern egress
+sharing the per-server secret `k_srv` recomputes the tag from the client's ellswift and matches it
+against the leading garbage — a match routes to the BIP324 tunnel, a mismatch (a real Bitcoin peer, whose
+garbage is random and who lacks `k_srv`) proxies to the real node. The tag keys on the *ephemeral*
+ellswift, so it is unique per connection with **no clock** (a captured `(ellswift, tag)` can't complete a
+handshake, so replay confirms nothing) — and HMAC reuses the provider's existing `hkdf_extract`
+(HKDF-Extract *is* HMAC), so the whole side-door adds **no new host primitive** and stays release-free.
+`Handshake::with_side_door(k_srv)` weaves the tag into the initiator's opening (it counts toward the
+garbage AAD, so the peer authenticates the same bytes it scans past); `verify_side_door_tag` is the
+egress's constant-time check. Next: PR4b = the splitting egress (peek + verify → tunnel vs `bitcoind`
+proxy) + guest/config wiring; PR4c = the live rust-bitcoin `bip324` interop, end-to-end.
 
 ## 8. Tradeoffs (stated plainly)
 

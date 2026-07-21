@@ -2508,6 +2508,23 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   from the header), so a handshake module would desync if the UDP client skipped it. 665 `--workspace
   --all-features` tests green. Next: PR4 = bitcoind on :8333 + the keyed-garbage side-door MAC + live
   rust-bitcoin interop.
+- 2026-07-20 (ADR 0013 §7 step 4 — keyed-garbage side-door MAC, PR4a): the finale (PR4) decomposed like
+  BIP324 itself (PR4a core logic → PR4b splitting egress + guest/config wiring → PR4c live rust-bitcoin
+  interop). PR4a lands the side-door in `bip324-core`: a new `side_door` module + `Handshake::with_side_door`.
+  A tunnel client (initiator) prepends `tag = HMAC-SHA256(k_srv, DOMAIN ‖ ellswift)` (domain-separated) to its opening garbage; a
+  Lantern egress sharing the per-server secret `k_srv` recomputes the tag from the client's ellswift and
+  matches it (constant-time) — match → BIP324 tunnel, mismatch (real Bitcoin peer, random garbage, no
+  `k_srv`) → proxy to the real node. **Design decision (chosen): no epoch — key the tag on the *ephemeral*
+  ellswift alone.** Freshness is per-connection with no clock, so no `host_time` primitive is needed → the
+  side-door stays release-free; a captured `(ellswift, tag)` can't complete the handshake (attacker lacks
+  the client's ephemeral secret), so replay confirms nothing to a prober. HMAC reuses the provider's
+  existing `hkdf_extract` (HKDF-Extract *is* HMAC) → **no new host primitive**. The tag becomes part of the
+  initiator's sent garbage, hence of the version-packet AAD, so the peer authenticates the same bytes it
+  scans past; a plain BIP324 responder (no key) still completes — the tag is transparent garbage to it.
+  4 new `bip324-core` tests (gen/verify determinism, wrong-key/tamper/short rejection, initiator opening
+  carries a verifiable tag, full side-door handshake round-trips); 669 `--workspace --all-features` green;
+  `no_std` default build + clippy (both feature configs) + fmt clean. Guest/fixture untouched (ABI
+  unchanged) — the guest wires `with_side_door` in PR4b.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
