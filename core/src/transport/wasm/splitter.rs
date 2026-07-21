@@ -323,10 +323,16 @@ mod tests {
         // Resolve via lookup_host so a hostname (e.g. localhost:8333) works, not just an IP literal.
         let target =
             std::env::var("BIP324_BITCOIND").unwrap_or_else(|_| "127.0.0.1:8333".to_string());
-        let bitcoind = tokio::net::lookup_host(&target)
+        let resolved: Vec<SocketAddr> = tokio::net::lookup_host(&target)
             .await
             .expect("resolve BIP324_BITCOIND (host:port)")
-            .next()
+            .collect();
+        // Prefer IPv4: `localhost` often resolves to `::1` first, but bitcoind may bind v4 only.
+        let bitcoind = resolved
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| resolved.first())
+            .copied()
             .expect("BIP324_BITCOIND resolved to no address");
 
         let module = load_module();
