@@ -2291,6 +2291,14 @@ mod tests {
             ELLSWIFT_LEN + SIDE_DOOR_TAG_LEN + garbage.len(),
             "opening carries the side-door tag ahead of the configured garbage"
         );
+        // Pin the layout PR4b-2 classifies on: ellswift(64) ‖ tag(32) ‖ garbage — the tag sits
+        // immediately after the ellswift, and the configured garbage stays at the end (not the tag
+        // appended after it, which the length check alone wouldn't catch).
+        assert_eq!(
+            &to_r[ELLSWIFT_LEN + SIDE_DOOR_TAG_LEN..],
+            garbage,
+            "the configured garbage remains at the end, so the tag is the 32 bytes right after ellswift"
+        );
 
         // The tagged handshake still completes against a plain responder, and app bytes round-trip.
         let (mut to_i, mut resp_done) = responder.handshake_step(&[]).expect("resp open");
