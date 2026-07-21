@@ -2524,7 +2524,22 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   4 new `bip324-core` tests (gen/verify determinism, wrong-key/tamper/short rejection, initiator opening
   carries a verifiable tag, full side-door handshake round-trips); 669 `--workspace --all-features` green;
   `no_std` default build + clippy (both feature configs) + fmt clean. Guest/fixture untouched (ABI
-  unchanged) — the guest wires `with_side_door` in PR4b.
+  unchanged) — the guest wires `with_side_door` in PR4b. **Review note (PR #106, 4 rounds):** all Copilot
+  findings were legitimate and fixed — responder/empty-key `with_side_door` no-ops, stack-buffer for the
+  HMAC input, doc-formula accuracy, and **fail-closed on an empty `k_srv` on BOTH sides** (verify rejects
+  it; the initiator emits plain garbage — a tag under an empty key is publicly recomputable from the
+  ellswift, i.e. a client fingerprint, the opposite of the goal).
+- 2026-07-21 (ADR 0013 §7 step 4 — PR4b split; PR4b-1 = guest side-door wiring): PR4b decomposed into
+  PR4b-1 (guest wiring) + PR4b-2 (splitting egress), on the user's call (smaller PRs after PR4a's 4 review
+  rounds). PR4b-1: the `modules/bip324` guest `init` config grew a `k_srv` field —
+  `[role][magic(4)][k_srv_len: u16 BE][k_srv][garbage]` (was `[role][magic][garbage]`) — and the guest
+  passes `k_srv` to `Handshake::with_side_door`. A non-empty `k_srv` makes the client emit the side-door
+  tag entirely inside the signed WASM module; the host knows nothing of Bitcoin or the side-door. Updated
+  the three test config builders to the new layout (k_srv_len=0), regenerated `bip324.spkw` (obfs-xor
+  deterministically unchanged), and added a module-level test (tag present in the opening; tagged tunnel
+  completes + round-trips through the real runtime against a plain responder). 672 `--workspace
+  --all-features` green; clippy + fmt clean. Next: PR4b-2 = the splitting egress (peek → verify → BIP324
+  relay vs proxy-to-upstream); PR4c = live rust-bitcoin interop + real bitcoind.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

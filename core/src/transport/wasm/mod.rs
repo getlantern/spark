@@ -2176,11 +2176,12 @@ mod tests {
             .expect("verify + compile the signed bip324 module")
             .into_module();
 
-        // Config blob: [role][network_magic(4)][garbage…]. Mainnet magic; a little garbage each side.
+        // Config blob: [role][network_magic(4)][k_srv_len(2)=0][garbage…]. Mainnet magic, no side-door.
         const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
         let cfg = |role: u8, garbage: &[u8]| {
             let mut c = vec![role];
             c.extend_from_slice(&MAGIC);
+            c.extend_from_slice(&[0, 0]); // k_srv_len = 0
             c.extend_from_slice(garbage);
             c
         };
@@ -2242,6 +2243,86 @@ mod tests {
         assert_eq!(
             recovered, expected,
             "all messages recovered across the rekey"
+        );
+    }
+
+    /// The guest reads a non-empty `k_srv` from its init config and prepends the side-door tag to the
+    /// initiator's opening garbage, without breaking the handshake. The tag's *value* is validated in
+    /// `bip324-core`; here we prove the guest wiring end-to-end through the real runtime — the tag is
+    /// present in the opening and a tagged tunnel still completes + round-trips against a plain responder.
+    #[cfg(feature = "bip324")]
+    #[test]
+    fn bip324_module_side_door_tags_the_opening_and_still_round_trips() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/bip324.spkw");
+        let artifact = std::fs::read(&path).expect("read the committed bip324.spkw fixture");
+        let module = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify + compile the signed bip324 module")
+            .into_module();
+
+        // Config: [role][network_magic(4)][k_srv_len: u16 BE][k_srv][garbage]. A non-empty k_srv on the
+        // initiator enables the side-door; k_srv_len == 0 disables it.
+        const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+        const ELLSWIFT_LEN: usize = 64;
+        const SIDE_DOOR_TAG_LEN: usize = 32; // bip324_core::SIDE_DOOR_TAG_LEN
+        let cfg = |role: u8, k_srv: &[u8], garbage: &[u8]| {
+            let mut c = vec![role];
+            c.extend_from_slice(&MAGIC);
+            c.extend_from_slice(&(k_srv.len() as u16).to_be_bytes());
+            c.extend_from_slice(k_srv);
+            c.extend_from_slice(garbage);
+            c
+        };
+        let garbage = b"tail";
+        let mut initiator = module
+            .instantiate_with_config(&cfg(0, b"per-server side-door secret", garbage))
+            .expect("instantiate initiator");
+        let mut responder = module
+            .instantiate_with_config(&cfg(1, b"", b"resp garbage"))
+            .expect("instantiate responder (no side-door key)");
+
+        // The initiator opens with ellswift ‖ the 32-byte side-door tag ‖ its configured garbage.
+        let (mut to_r, mut init_done) = initiator.handshake_step(&[]).expect("init open");
+        assert!(!init_done);
+        assert_eq!(
+            to_r.len(),
+            ELLSWIFT_LEN + SIDE_DOOR_TAG_LEN + garbage.len(),
+            "opening carries the side-door tag ahead of the configured garbage"
+        );
+
+        // The tagged handshake still completes against a plain responder, and app bytes round-trip.
+        let (mut to_i, mut resp_done) = responder.handshake_step(&[]).expect("resp open");
+        for _ in 0..8 {
+            if !init_done && !to_i.is_empty() {
+                let (out, done) = initiator
+                    .handshake_step(&std::mem::take(&mut to_i))
+                    .expect("init step");
+                to_r.extend_from_slice(&out);
+                init_done = done;
+            }
+            if !resp_done && !to_r.is_empty() {
+                let (out, done) = responder
+                    .handshake_step(&std::mem::take(&mut to_r))
+                    .expect("resp step");
+                to_i.extend_from_slice(&out);
+                resp_done = done;
+            }
+            if init_done && resp_done {
+                break;
+            }
+        }
+        assert!(
+            init_done && resp_done,
+            "both sides complete despite the tagged garbage"
+        );
+
+        let wire = initiator
+            .transform_out(b"through a side-door tunnel")
+            .expect("out");
+        assert_eq!(
+            responder.transform_in(&wire).expect("in"),
+            b"through a side-door tunnel"
         );
     }
 
