@@ -39,18 +39,25 @@ pub struct TransformStream<S> {
     read_buf: Bytes,
     /// Reused scratch for raw reads from `inner`; allocated once so reads don't allocate per call.
     scratch: Box<[u8]>,
+    /// One-shot flag for the first read: a handshake-driving module can over-read the peer's first
+    /// steady-state bytes off the wire (when they coalesce with the handshake tail) and buffer them
+    /// internally. Those bytes are no longer on the wire, so the first `poll_read` must drain them
+    /// with an empty-input `transform_in` before blocking on a wire read that would never return.
+    handshake_drain_pending: bool,
 }
 
 impl<S> TransformStream<S> {
     /// Wrap `inner`, running every write through `transform`'s outbound transform and every read
     /// through its inbound transform.
     pub fn new(inner: S, transform: Transform) -> Self {
+        let handshake_drain_pending = transform.drives_handshake();
         Self {
             inner,
             transform,
             write_buf: BytesMut::new(),
             read_buf: Bytes::new(),
             scratch: vec![0u8; READ_SCRATCH].into_boxed_slice(),
+            handshake_drain_pending,
         }
     }
 }
@@ -143,6 +150,21 @@ impl<S: AsyncRead + Unpin> AsyncRead for TransformStream<S> {
                 buf.put_slice(&this.read_buf[..n]);
                 this.read_buf.advance(n);
                 return Poll::Ready(Ok(()));
+            }
+            // Once, before the first wire read: drain any complete frame the handshake driver
+            // over-read into the module (see `handshake_drain_pending`). A no-op unless the module
+            // buffered bytes — but it must precede the wire read, which would otherwise block forever
+            // on bytes that are already inside the module rather than on the wire.
+            if this.handshake_drain_pending {
+                this.handshake_drain_pending = false;
+                match this.transform.transform_in(&[]) {
+                    Ok(recovered) if !recovered.is_empty() => {
+                        this.read_buf = Bytes::from(recovered);
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Poll::Ready(Err(io::Error::other(e.to_string()))),
+                }
             }
             // Otherwise pull more wire bytes and deobfuscate.
             let mut scratch = ReadBuf::new(&mut this.scratch);

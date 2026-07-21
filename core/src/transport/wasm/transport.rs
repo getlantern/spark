@@ -179,14 +179,22 @@ impl UdpTransport for WasmTransport {
         target: Address,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        let mut transform = self
+            .module
+            .instantiate_with_config(&self.config)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        // Run the interactive opening (as initiator) before steady state, mirroring the TCP dial path.
+        // The server runs the responder handshake in `WasmServer::accept` for every connection — the
+        // TCP-tunnel vs UDP-associate split happens later, from the address header — so a handshake
+        // module would desync if the UDP client skipped it. (BIP324 is stream-shaped; whether it suits
+        // the per-datagram UDP framing is a separate question — see `WasmUdpSink`.)
+        if transform.drives_handshake() {
+            transform.run_handshake(&mut conn).await?;
+        }
         // One transform instance serves both directions; the split halves (which live in different
         // tasks — the netstack send loop and the reply pump) share it behind a Mutex. The transform
         // call is synchronous and the guard is never held across an `.await`.
-        let transform = Arc::new(Mutex::new(
-            self.module
-                .instantiate_with_config(&self.config)
-                .map_err(|e| io::Error::other(e.to_string()))?,
-        ));
+        let transform = Arc::new(Mutex::new(transform));
 
         // UDP-associate handshake (obfuscated): the sentinel switches the server to UDP relay mode,
         // then the real target follows (connect-mode — an IP or a **domain** the exit resolves; no
@@ -436,6 +444,75 @@ mod tests {
         let mut got = vec![0u8; message.len()];
         stream.read_exact(&mut got).await.expect("read");
         assert_eq!(got.as_slice(), &message[..]);
+    }
+
+    /// Regression for the coalesced handshake→steady-state boundary. Over a real stream the initiator's
+    /// final handshake message and its first steady-state packet can arrive in one read, so the
+    /// responder's handshake driver over-reads the steady-state bytes into the module. Those bytes are
+    /// no longer on the wire, so the reader must drain them from the module (via the empty-input path in
+    /// `TransformStream::poll_read`) rather than block on a wire read that never returns. This forces
+    /// the coalescing deterministically (the loopback test only hit it under load) and reads through a
+    /// wire with no further bytes: without the drain it fails `UnexpectedEof` instead of hanging.
+    #[cfg(feature = "bip324")]
+    #[tokio::test]
+    async fn poll_read_drains_steady_state_bytes_the_handshake_over_read() {
+        use crate::transport::wasm::ModuleVerifier;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/bip324.spkw");
+        let artifact = std::fs::read(&path).expect("read bip324.spkw");
+        let module = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify bip324 module")
+            .into_module();
+
+        const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+        let cfg = |role: u8| {
+            let mut c = vec![role];
+            c.extend_from_slice(&MAGIC);
+            c
+        };
+        let mut initiator = module
+            .instantiate_with_config(&cfg(0))
+            .expect("instantiate initiator");
+        let mut responder = module
+            .instantiate_with_config(&cfg(1))
+            .expect("instantiate responder");
+
+        // Drive the 1.5-RTT handshake up to (but not through) the responder's final step.
+        let (client_hello, done) = initiator.handshake_step(&[]).expect("init open");
+        assert!(!done);
+        let (empty, done) = responder.handshake_step(&[]).expect("resp open");
+        assert!(
+            empty.is_empty() && !done,
+            "responder emits nothing at connect"
+        );
+        let (resp_reply, done) = responder
+            .handshake_step(&client_hello)
+            .expect("responder reply");
+        assert!(!done, "responder still needs the initiator's final");
+        let (init_final, done) = initiator.handshake_step(&resp_reply).expect("init final");
+        assert!(done, "initiator completes after the responder's reply");
+
+        // The initiator immediately sends its first steady-state packet; on the wire it coalesces with
+        // the handshake tail. Hand the responder BOTH in one step — it completes and buffers the payload.
+        let payload = b"first steady-state packet, coalesced with the handshake tail";
+        let steady = initiator.transform_out(payload).expect("steady out");
+        let mut coalesced = init_final;
+        coalesced.extend_from_slice(&steady);
+        let (out, done) = responder
+            .handshake_step(&coalesced)
+            .expect("responder final");
+        assert!(done && out.is_empty(), "responder completes, emits nothing");
+
+        // Read through a wire with no further bytes: the payload must come from the module's buffer.
+        let mut wrapped = TransformStream::new(tokio::io::empty(), responder);
+        let mut got = vec![0u8; payload.len()];
+        wrapped
+            .read_exact(&mut got)
+            .await
+            .expect("drain the over-read steady-state bytes");
+        assert_eq!(got.as_slice(), &payload[..]);
     }
 
     /// `dial_addr` with a **domain** target: the client announces the name, and the server recovers it
