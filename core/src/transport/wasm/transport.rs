@@ -494,25 +494,36 @@ mod tests {
         let (init_final, done) = initiator.handshake_step(&resp_reply).expect("init final");
         assert!(done, "initiator completes after the responder's reply");
 
-        // The initiator immediately sends its first steady-state packet; on the wire it coalesces with
-        // the handshake tail. Hand the responder BOTH in one step — it completes and buffers the payload.
-        let payload = b"first steady-state packet, coalesced with the handshake tail";
-        let steady = initiator.transform_out(payload).expect("steady out");
+        // The initiator immediately sends its first two steady-state packets; on the wire they coalesce
+        // with the handshake tail. Hand the responder ALL of it in one step — it completes the handshake
+        // and buffers both packets (two complete frames), exercising the multi-frame drain.
+        let payload1 = b"first steady-state packet, coalesced with the handshake tail";
+        let payload2 = b"and a second packet right behind it";
         let mut coalesced = init_final;
-        coalesced.extend_from_slice(&steady);
+        coalesced.extend_from_slice(&initiator.transform_out(payload1).expect("steady out 1"));
+        coalesced.extend_from_slice(&initiator.transform_out(payload2).expect("steady out 2"));
         let (out, done) = responder
             .handshake_step(&coalesced)
             .expect("responder final");
         assert!(done && out.is_empty(), "responder completes, emits nothing");
 
-        // Read through a wire with no further bytes: the payload must come from the module's buffer.
+        // Read through a wire with no further bytes, in sub-frame 7-byte chunks: every payload byte must
+        // come from the module's buffer, served across many reads and never reporting a premature EOF
+        // while buffered bytes remain. Without the drain the first read fails `UnexpectedEof`.
         let mut wrapped = TransformStream::new(tokio::io::empty(), responder);
-        let mut got = vec![0u8; payload.len()];
-        wrapped
-            .read_exact(&mut got)
-            .await
-            .expect("drain the over-read steady-state bytes");
-        assert_eq!(got.as_slice(), &payload[..]);
+        let mut expected = payload1.to_vec();
+        expected.extend_from_slice(payload2);
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 7];
+        while got.len() < expected.len() {
+            let n = wrapped
+                .read(&mut chunk)
+                .await
+                .expect("drain the over-read steady-state bytes");
+            assert_ne!(n, 0, "premature EOF with buffered bytes still pending");
+            got.extend_from_slice(&chunk[..n]);
+        }
+        assert_eq!(got, expected);
     }
 
     /// `dial_addr` with a **domain** target: the client announces the name, and the server recovers it
