@@ -12,6 +12,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
+use std::time::Duration;
 
 use bip324_core::{Handshake, Role, Session};
 
@@ -20,9 +21,16 @@ use native::NativeCrypto;
 
 const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 
+/// Read timeout on every socket so a handshake/packet regression fails the test deterministically
+/// instead of hanging CI on a blocking read.
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Drive our sans-io handshake to completion over a blocking TCP stream: emit-at-connect, then
 /// write-outbound / read-inbound / step until the session materializes.
 fn drive_ours(stream: &mut TcpStream, role: Role) -> (NativeCrypto, Session) {
+    stream
+        .set_read_timeout(Some(READ_TIMEOUT))
+        .expect("set read timeout");
     let mut crypto = NativeCrypto::new();
     let mut hs = Handshake::<NativeCrypto>::new(role, MAGIC, b"").expect("handshake");
     let mut buf = [0u8; 4096];
@@ -54,6 +62,8 @@ fn spawn_theirs(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let (sock, _) = listener.accept().expect("accept");
+        sock.set_read_timeout(Some(READ_TIMEOUT))
+            .expect("set read timeout");
         let reader = std::io::BufReader::new(sock.try_clone().expect("clone"));
         let mut proto = bip324::io::Protocol::new(MAGIC, their_role, None, None, reader, sock)
             .expect("their handshake completes against ours");
@@ -76,15 +86,22 @@ fn round_trip(
     stream
         .write_all(&session.encrypt(crypto, send).expect("encrypt"))
         .expect("send");
+    // TCP may fragment the reply; `Session::decrypt` buffers partial frames, so read until it yields a
+    // complete message rather than assuming the packet arrives in one read.
     let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).expect("recv");
-    assert!(n > 0, "peer closed before replying");
-    let msgs = session.decrypt(crypto, &buf[..n]).expect("decrypt");
-    assert_eq!(
-        msgs,
-        vec![expect.to_vec()],
-        "we decrypt the reference's packet"
-    );
+    loop {
+        let n = stream.read(&mut buf).expect("recv");
+        assert!(n > 0, "peer closed before a full reply");
+        let msgs = session.decrypt(crypto, &buf[..n]).expect("decrypt");
+        if !msgs.is_empty() {
+            assert_eq!(
+                msgs,
+                vec![expect.to_vec()],
+                "we decrypt the reference's packet"
+            );
+            return;
+        }
+    }
 }
 
 #[test]

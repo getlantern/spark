@@ -320,10 +320,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a BIP324-capable bitcoind (set BIP324_BITCOIND=host:port, default 127.0.0.1:8333)"]
     async fn real_bitcoin_peer_reaches_bitcoind_through_the_proxy_branch() {
-        let bitcoind: SocketAddr = std::env::var("BIP324_BITCOIND")
-            .unwrap_or_else(|_| "127.0.0.1:8333".to_string())
-            .parse()
-            .expect("BIP324_BITCOIND must be host:port");
+        // Resolve via lookup_host so a hostname (e.g. localhost:8333) works, not just an IP literal.
+        let target =
+            std::env::var("BIP324_BITCOIND").unwrap_or_else(|_| "127.0.0.1:8333".to_string());
+        let bitcoind = tokio::net::lookup_host(&target)
+            .await
+            .expect("resolve BIP324_BITCOIND (host:port)")
+            .next()
+            .expect("BIP324_BITCOIND resolved to no address");
 
         let module = load_module();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind egress");
