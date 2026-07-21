@@ -199,7 +199,9 @@ host primitives. The interactive handshake is now **wired into the dial path** (
 (client/initiator) and `WasmServer` (server/responder) each run `run_handshake` on the raw connection
 before the steady-state transform, gated on a protocol-blind `Transform::drives_handshake()` (run it iff
 the module exports `handshake_step`; transform-only modules like obfs-xor are unaffected) — reusing
-`ServerSpec::Wasm` / `WasmConfig` with no schema change (`init_config` = `role ++ magic ++ garbage`).
+`ServerSpec::Wasm` / `WasmConfig` with no schema change (`init_config` was `role ++ magic ++ garbage`
+at PR3 — later extended with a `k_srv_len ++ k_srv` field for the side-door in PR4b-1, see below; the
+outer `WasmConfig` still carries the opaque `init_config` blob unchanged).
 Validated by a real-TCP loopback tunnel (client ↔ server, both handshaking, byte round-trip through the
 BIP324 tunnel to an echo). PR3 also fixed the coalescing bug the streaming path surfaced, in two places:
 the handshake's leftover bytes (the peer's first steady-state packet, coalesced with the handshake over
