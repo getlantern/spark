@@ -10,6 +10,7 @@ use crate::crypto::Bip324Crypto;
 use crate::ecdh::v2_ecdh;
 use crate::packet::{decrypt_length, decrypt_packet, encrypt_packet, Session};
 use crate::session::{derive, Keys};
+use crate::side_door::side_door_tag;
 use crate::{
     Error, Result, Role, AEAD_TAG_LEN, ELLSWIFT_LEN, GARBAGE_TERMINATOR_LEN, HEADER_LEN,
     LENGTH_FIELD_LEN, MAX_GARBAGE_LEN,
@@ -56,6 +57,10 @@ pub struct Handshake<C: Bip324Crypto> {
     role: Role,
     magic: [u8; 4],
     garbage: Vec<u8>,
+    /// Per-server side-door secret. When set, the initiator prepends `HMAC(k_srv, ellswift)` to its
+    /// opening garbage so a Lantern egress can distinguish it from a real Bitcoin peer (see
+    /// [`side_door`](crate::side_door)). Ignored for the responder.
+    side_door_key: Option<Vec<u8>>,
     buf: Vec<u8>,
     state: State<C>,
 }
@@ -71,9 +76,20 @@ impl<C: Bip324Crypto> Handshake<C> {
             role,
             magic: network_magic,
             garbage: garbage.to_vec(),
+            side_door_key: None,
             buf: Vec::new(),
             state: State::New,
         })
+    }
+
+    /// Enable the Lantern side-door: the initiator prepends `HMAC(k_srv, ellswift)`
+    /// ([`SIDE_DOOR_TAG_LEN`](crate::side_door::SIDE_DOOR_TAG_LEN) bytes) to its opening garbage, keyed
+    /// by the per-server secret `k_srv`. A no-op for the responder. The tag counts toward
+    /// [`MAX_GARBAGE_LEN`]; if `garbage.len() + tag` would exceed it the first `step` errors
+    /// [`Error::GarbageTooLong`].
+    pub fn with_side_door(mut self, k_srv: &[u8]) -> Self {
+        self.side_door_key = Some(k_srv.to_vec());
+        self
     }
 
     /// Advance the handshake: buffer `inbound`, and return bytes to send + the [`Session`] once the
@@ -86,12 +102,26 @@ impl<C: Bip324Crypto> Handshake<C> {
             match mem::replace(&mut self.state, State::Poisoned) {
                 State::New => {
                     let (key, ellswift_ours) = crypto.ellswift_generate();
+                    let mut sent_garbage = self.garbage.clone();
                     // The initiator opens with its key + garbage; the responder waits for the peer first.
                     if self.role.is_initiator() {
+                        // With a side-door key, prepend HMAC(k_srv, ellswift) so a Lantern egress can
+                        // classify this as a tunnel client (a real Bitcoin peer's garbage won't match).
+                        // It becomes part of the sent garbage — hence of the version-packet AAD — so the
+                        // peer authenticates the same bytes it scans past.
+                        if let Some(k) = &self.side_door_key {
+                            let tag = side_door_tag(crypto, k, &ellswift_ours);
+                            if sent_garbage.len() + tag.len() > MAX_GARBAGE_LEN {
+                                return Err(Error::GarbageTooLong);
+                            }
+                            let mut g = Vec::with_capacity(tag.len() + sent_garbage.len());
+                            g.extend_from_slice(&tag);
+                            g.extend_from_slice(&sent_garbage);
+                            sent_garbage = g;
+                        }
                         outbound.extend_from_slice(&ellswift_ours);
-                        outbound.extend_from_slice(&self.garbage);
+                        outbound.extend_from_slice(&sent_garbage);
                     }
-                    let sent_garbage = self.garbage.clone();
                     self.state = State::AwaitPeerKey {
                         key,
                         ellswift_ours,

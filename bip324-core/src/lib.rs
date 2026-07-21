@@ -24,10 +24,12 @@ pub mod ecdh;
 pub mod handshake;
 pub mod packet;
 pub mod session;
+pub mod side_door;
 
 pub use crypto::Bip324Crypto;
 pub use handshake::{Handshake, HandshakeStep};
 pub use packet::Session;
+pub use side_door::{side_door_tag, verify_side_door_tag, SIDE_DOOR_TAG_LEN};
 
 /// Which side of the connection we are. The initiator dials; the responder accepts. The role fixes the
 /// ellswift ordering in the ECDH tagged hash and the send/recv assignment of the derived key pairs.
