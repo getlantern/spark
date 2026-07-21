@@ -19,6 +19,9 @@
   let autoEnable = $state(false);
   let showWelcome = $state(false);
   let busy = $state(false);
+  // The VPN tab's status dot must reflect the real tunnel state on THIS screen too —
+  // switching tabs doesn't disconnect the VPN, so the dot mustn't go grey here.
+  let vpnConnected = $state(false);
   let poll: ReturnType<typeof setInterval>;
   let unlistenUnbounded: Promise<() => void> | undefined; // spark://unbounded subscription (Tauri only)
 
@@ -27,6 +30,7 @@
 
   async function refresh() {
     try { status = await backend.unboundedStatus(); } catch { /* keep last-known */ }
+    try { vpnConnected = (await backend.status()).state === "connected"; } catch { /* keep last-known */ }
   }
 
   async function toggle() {
@@ -140,7 +144,7 @@
     </div>
   </div>
 
-  <BottomTabs current="unbounded" unboundedOn={status.enabled} />
+  <BottomTabs current="unbounded" vpnOn={vpnConnected} unboundedOn={status.enabled} />
 </main>
 
 {#snippet globeIcon()}

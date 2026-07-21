@@ -121,13 +121,15 @@
         .pointAltitude(0.012)
         .pointRadius(0.34);
       // Design palette: a GREY ocean sphere with WHITE continents drawn on top (no texture — keeps
-      // the lazy chunk lean). The emissive lifts the unlit hemisphere so the sphere reads as a soft
-      // mid-grey with gentle 3D shading rather than a hard-lit dark ball.
+      // the lazy chunk lean). Rendered effectively UNLIT: the scene lights ADD to the material's
+      // color AND its emissive, so any lit nonzero color washes the sphere toward white (the
+      // previous grey-color + grey-emissive combo clamped to near-white). Black color + emissive
+      // carrying the design grey gives a flat, light-independent ocean tone.
       globe.globeImageUrl(null as unknown as string);
       const mat = globe.globeMaterial();
-      mat?.color?.set?.("#c6ced5");
-      mat?.emissive?.set?.("#aeb8c1");
-      if (mat && "shininess" in mat) mat.shininess = 2;
+      mat?.color?.set?.("#000000");
+      mat?.emissive?.set?.("#c3ccd4");
+      if (mat && "shininess" in mat) mat.shininess = 0;
 
       // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
       globe.controls().autoRotate = false;
