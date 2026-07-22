@@ -25,7 +25,10 @@ matching pubkey loads it with no app-store release.
 
 ### A. Materialize the key from Vault (ephemeral, never logged)
 ```bash
-umask 077; tmp="$(mktemp -d)"; trap 'rm -Pf "$tmp"/* 2>/dev/null; rmdir "$tmp"' EXIT
+# Best assurance: run on an ephemeral host or point $TMPDIR at a tmpfs/ramdisk so the key never hits
+# persistent disk. `rm -rf` is portable (GNU rm has no `-P`; BSD/macOS secure-overwrite isn't reliable
+# across filesystems anyway — don't count on it).
+umask 077; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 # from lantern-cloud/, prod env:
 mise -E prod x -- bin/vault kv get -mount=secret -field=SPARK_MODULE_SIGNING_KEY lantern_cloud/spark \
   | base64 -d > "$tmp/prod-module.pkcs8"
@@ -59,7 +62,7 @@ consume (lantern-cloud config distribution). Client pins `SPARK_MODULE_PUBKEY_HE
 client release**. *(This step is the unbuilt part — see the gap issue below.)*
 
 ### E. Custody hygiene
-- The `trap` in step A shreds the temp key on exit. Never `git add` a prod `.spkw` next to the dev fixtures.
+- The `trap` in step A removes the temp key on exit (best-effort — secure erase isn't guaranteed on all filesystems, so prefer a tmpfs/ramdisk or an ephemeral host for the signing run). Never `git add` a prod `.spkw` next to the dev fixtures.
 - Never place the key, or `MODULE_SIGNING_KEY`, into any GitHub Actions workflow. CI stays pubkey-only.
 
 ## What CI does (and must keep doing)
