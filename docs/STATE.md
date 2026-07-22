@@ -2596,8 +2596,9 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   gated, exported), with a round-trip test: keygen → pubkey hex → sign a module → a verifier built from
   that hex accepts it, a different key rejects it. 677 `--workspace --all-features` green; clippy/fmt clean.
   Design doc §7 runbook now carries the concrete commands. **Only real custody remains** (theirs): generate
-  the actual keypair on a trusted host, vault the private half, expose it to the release/signing job as a
-  secret. `sign-module`/helpers stay behind `module-signer`, never in a shipped binary.
+  the actual keypair on a trusted host, vault the private half, and set the **public** key as the
+  `SPARK_MODULE_PUBKEY_HEX` CI variable (see PR4f below — the private key stays offline, never in CI).
+  `sign-module`/helpers stay behind `module-signer`, never in a shipped binary.
 - 2026-07-22 (ADR 0013 §7 — PR4f = CI wiring for the module-signing PUBLIC key): wired `release.yml` to
   ship bip324. **Design (user's steer): only the PUBLIC key goes to GitHub — as a repo *variable*
   (`vars.SPARK_MODULE_PUBKEY_HEX`), since it's public; the PRIVATE key + module signing stay OFFLINE and

@@ -60,6 +60,9 @@ jobs:
           status=0
           for b in spark spark-service; do
             f="target/${{ matrix.target }}/release/$b"
+            # Fail loudly if the build didn't produce the binary we mean to gate (don't let an empty
+            # `sz` fall through to a spurious "ok").
+            if [ ! -f "$f" ]; then echo "$b: MISSING ($f) — build did not produce it"; status=1; continue; fi
             sz=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f")
             pct=$((sz * 100 / budget))
             if [ "$sz" -gt "$budget" ]; then
