@@ -64,7 +64,7 @@ ModuleDescriptor {
   a *downgrade* to a known-bad older version. A kill-switch is "descriptor absent → module not loaded."
 
 ### Client flow
-receive descriptor → obtain the `.spkw` (inline or fetch+hash-check) → `ModuleVerifier.verify` against the
+receive descriptor → obtain the `.spkw` (inline or fetch+hash-check) → `ModuleVerifier::pinned().verify(…)` against the
 pinned key with the config's `min_version` → instantiate. No release.
 
 ### Producer flow
@@ -91,7 +91,7 @@ or ship a client release that bakes in their key (defeats "no release", and is t
 ### Design: root-delegated, config-distributed key registry (TUF-style delegation)
 Analogy: Apple notarization — one Apple root vouches for many developer certs; the OS pins only the root.
 
-1. **Pin one root key** in the client (rarely used, airgapped/HSM; *separate* from operational signing
+1. **Pin one root key** in the client (rarely used, air-gapped/HSM; *separate* from operational signing
    keys). This becomes the sole hardcoded anchor (rename `SPARK_MODULE_PUBKEY_HEX` → a root pubkey, or add
    `SPARK_MODULE_ROOT_PUBKEY_HEX`).
 2. **Root signs a key registry** — a versioned, root-signed document distributed over the config channel:
@@ -124,7 +124,7 @@ Analogy: Apple notarization — one Apple root vouches for many developer certs;
    an attacker from replaying an older registry that still trusted it.
 
 ### Root vs operational key split
-Mint a **fresh airgapped root** whose only job is signing the registry (rare, high-ceremony). The key we
+Mint a **fresh air-gapped root** whose only job is signing the registry (rare, high-ceremony). The key we
 just put in Vault becomes the **first operational Lantern signer entry** — the one that signs `bip324` /
 `obfs-xor` day to day. Root compromise is catastrophic, so it's used seldom and could later be M-of-N
 threshold.
