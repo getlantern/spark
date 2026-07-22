@@ -119,14 +119,19 @@ fn keygen(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let out_path = out_path.ok_or("--out is required")?;
 
     let pkcs8 = generate_keypair_pkcs8();
-    std::fs::write(&out_path, &pkcs8).map_err(|e| format!("writing {out_path}: {e}"))?;
-    // Lock the private key down to the owner (best-effort; unix only).
+    // Create the private key `0600` from the start (no create-then-chmod window where umask could leave
+    // it group/world-readable) and refuse to clobber an existing key (`create_new`).
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod {out_path}: {e}"))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
+    let mut file = opts
+        .open(&out_path)
+        .map_err(|e| format!("creating {out_path} (exists? refusing to overwrite a key): {e}"))?;
+    std::io::Write::write_all(&mut file, &pkcs8).map_err(|e| format!("writing {out_path}: {e}"))?;
     let keypair =
         Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("parsing generated key: {e}"))?;
     let hex = public_key_hex(&keypair);
