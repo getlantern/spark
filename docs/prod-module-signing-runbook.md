@@ -45,16 +45,17 @@ Signing prod there would overwrite the committed **dev** fixtures. Add an output
 below.)
 
 ### C. Verify before shipping
-Confirm the freshly-signed artifact verifies under the pinned pubkey (the production
-`ModuleVerifier::pinned()` path). The full pinned key (no ellipsis) is:
+First, **confirm the key you pulled is the one clients pin** — `sign-module pubkey` re-derives a key's
+pubkey hex, which must equal the pinned `SPARK_MODULE_PUBKEY_HEX`:
+```bash
+cargo run -q -p spark-core --features module-signer --bin sign-module -- pubkey --key-pkcs8 "$tmp/prod-module.pkcs8"
+# → must print: 1f090afa1b640732f5d1e8536ee49fe7a9bf73581f313101c7543d5ff13a85ce
 ```
-1f090afa1b640732f5d1e8536ee49fe7a9bf73581f313101c7543d5ff13a85ce
-```
-There is **no per-artifact verify CLI yet** — `sign-module` exposes only `sign` / `keygen`. A
-`sign-module verify <spkw> --pubkey-hex <hex>` helper is tracked in #114 and is the intended one-liner for
-this step. Until it lands, verify by exercising the existing `ModuleVerifier` tests in
-`core/src/transport/wasm/` (they load a `.spkw` through `pinned().verify`). **Do not distribute an artifact
-that doesn't verify against the hex above.**
+That guards against signing with the wrong key. **Verifying that a given `.spkw` artifact validates** is a
+separate check, and there's no CLI for it yet — `sign-module` exposes `sign` / `keygen` / `pubkey`, not a
+`verify`. A `sign-module verify <spkw> --pubkey-hex <hex>` helper is tracked in #114 and is the intended
+one-liner. Until it lands, exercise the existing `ModuleVerifier` tests in `core/src/transport/wasm/` (they
+load a `.spkw` through `pinned().verify`). **Do not distribute an artifact that doesn't verify.**
 
 ### D. Distribute over the signed config/fronting channel
 Push the prod-signed `.spkw` + its `TransportConfig` through the same signed-config channel clients already
