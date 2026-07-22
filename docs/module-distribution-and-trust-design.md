@@ -63,7 +63,11 @@ ModuleDescriptor {
   fails a corrupted/wrong download fast, before verification.
 - **Rollout / rollback.** Targeting reuses the existing config machinery (region, bandit track, staged
   %). Rollback = revert the config (stop offering the descriptor) and/or the anti-rollback floor prevents
-  a *downgrade* to a known-bad older version. A kill-switch is "descriptor absent → module not loaded."
+  a *downgrade* to a known-bad older version. A kill-switch is "descriptor absent → module not loaded" —
+  which only holds if **loading is gated on the *current* config carrying a matching, targeted descriptor**.
+  The referenced-fetch cache is a performance optimization for the artifact *bytes only*, **never an
+  authorization signal**: a cached `.spkw` is not loaded unless the live config still offers it. (This also
+  means a true kill depends on config freshness — see the freshness/TTL open question.)
 
 ### Client flow
 receive descriptor → obtain the `.spkw` (inline or fetch+hash-check) → `ModuleVerifier::pinned().verify(…)` against the
@@ -139,8 +143,12 @@ threshold.
 
 ## Format changes
 - **`.spkw` v2** — add a `key_id` (32-byte fingerprint) to the manifest so the verifier selects the signer
-  without trial-verifying every key. Bump the flint framing version; keep v1 accepted during migration
-  (v1 ⇒ implicitly the root/first-operational key).
+  without trial-verifying every key. Note the current framing (`MAGIC "SPKW" || version || name || wasm`)
+  has **no format-version field** — its `version` is the *module* version (anti-rollback), a different
+  axis. So v2 needs a real format discriminator: a **new magic** (e.g. `SPK2`) or a leading format-version
+  byte. During migration, legacy `SPKW` (v1) artifacts carry no `key_id` and are verified against the
+  **single migrating operational key** — *not* the root (root ≠ operational signer in this design; the root
+  only ever signs the registry).
 - **New `SPKR` registry artifact** — root-signed, its own magic, its own anti-rollback (`registry_version`).
 - **`ModuleVerifier`** grows from one key to `{ pinned_root, current_registry }` and the multi-step check
   above. `sign-module` grows `registry` subcommands (build/sign a registry) alongside `sign`/`keygen`/`pubkey`.
