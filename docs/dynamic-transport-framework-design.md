@@ -280,18 +280,23 @@ subcommands, behind the `module-signer` feature; PR4e):
    cargo run -p spark-core --features module-signer --bin sign-module -- keygen --out prod-module.pkcs8
    # → prints SPARK_MODULE_PUBKEY_HEX=<64 hex>   (stdout is the bare hex, for scripting)
    ```
-2. **Bake the public half into the client at build time:** `export SPARK_MODULE_PUBKEY_HEX=<64 hex>`. With
-   it set, `build-xcframework.sh` auto-adds `bip324` to every Apple slice; for the CLI/service/Android pass
-   `--features bip324` (the Android `cargoNdkBuild` features config) alongside the env var. (`sign-module
-   pubkey --key-pkcs8 prod-module.pkcs8` re-derives the hex from an existing key.)
-3. **Sign the module** with the production *private* key — `MODULE_SIGNING_KEY=prod-module.pkcs8 bash
-   scripts/build-module.sh` (or `sign-module sign --key-pkcs8 prod-module.pkcs8 …` directly).
+2. **Bake the public half into the client at build time** by pinning `SPARK_MODULE_PUBKEY_HEX=<64 hex>`.
+   In **CI**, set it as a **repo variable** (it's a *public* key — a variable, not a secret):
+   `gh variable set SPARK_MODULE_PUBKEY_HEX --repo getlantern/spark --body <hex>`. `release.yml` then builds
+   the CLI/service with `--features bip324` on every release (and `build-xcframework.sh` auto-adds it to the
+   Apple slices); until the variable is set, releases build the smaller default (no wasm runtime). Locally,
+   `export SPARK_MODULE_PUBKEY_HEX=<hex>`. (`sign-module pubkey --key-pkcs8 prod-module.pkcs8` re-derives it.)
+3. **Sign the module OFFLINE** with the production *private* key — `MODULE_SIGNING_KEY=prod-module.pkcs8 bash
+   scripts/build-module.sh` (or `sign-module sign --key-pkcs8 …`). **The private key never goes to GitHub**:
+   signing is a rare, high-stakes act done on the trusted host that holds the key (or an HSM), so CI carries
+   only the public key. This "sign offline, verify everywhere" split keeps the private key off CI's attack
+   surface entirely.
 4. **Distribute** the signed module + its config over the existing signed config/fronting channel; an
    already-shipped client that pinned the matching pubkey loads it — **no client release**.
 
 The remaining ops step is purely custody: generate the real keypair on a trusted host, store the private
-half in a vault, and expose it to the release build/signing job as a secret (`SPARK_MODULE_PUBKEY_HEX` for
-the build, `MODULE_SIGNING_KEY` for the signing step).
+half in a vault, set the **public** key as the `SPARK_MODULE_PUBKEY_HEX` CI variable, and sign modules
+offline with the private half — it is never uploaded anywhere.
 
 ## 8. Tradeoffs (stated plainly)
 

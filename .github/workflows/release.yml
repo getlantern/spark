@@ -34,21 +34,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }} --bin spark --bin spark-service
+        # bip324 (ADR 0013 §7) is baked in when the module-signing PUBLIC key is configured
+        # (vars.SPARK_MODULE_PUBKEY_HEX). Only the public key lives in CI — a release build with
+        # wasm-transport pins it (and refuses the dev key); the private key + module signing stay
+        # offline. Unset → the previous default (no wasm runtime, smaller binaries).
+        shell: bash
+        env:
+          SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
+        run: |
+          if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then
+            cargo build --release --target ${{ matrix.target }} -p spark-cli -p spark-service --features bip324
+          else
+            cargo build --release --target ${{ matrix.target }} --bin spark --bin spark-service
+          fi
 
       # Untrusted-input hygiene: the tag name reaches shells only via $REF_NAME, never inlined.
-      - name: Size budget (< 3 MB stripped per binary)
+      - name: Size budget
         if: matrix.os != 'windows'
+        env:
+          SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
         run: |
+          # Default binaries stay < 3 MiB. A bip324 build embeds wasmi + secp256k1 (~+2 MiB), so it gets
+          # a 6 MiB budget (measured ~4.85 MiB on macOS + headroom); still catches gross bloat.
+          if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then budget=$((6 * 1024 * 1024)); else budget=$((3 * 1024 * 1024)); fi
           status=0
           for b in spark spark-service; do
             f="target/${{ matrix.target }}/release/$b"
+            # Fail loudly if the build didn't produce the binary we mean to gate (don't let an empty
+            # `sz` fall through to a spurious "ok").
+            if [ ! -f "$f" ]; then echo "$b: MISSING ($f) — build did not produce it"; status=1; continue; fi
             sz=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f")
-            pct=$((sz * 100 / (3 * 1024 * 1024)))
-            if [ "$sz" -gt $((3 * 1024 * 1024)) ]; then
-              echo "$b: $sz bytes (${pct}%) OVER BUDGET"; status=1
+            pct=$((sz * 100 / budget))
+            if [ "$sz" -gt "$budget" ]; then
+              echo "$b: $sz bytes (${pct}% of budget) OVER BUDGET"; status=1
             else
-              echo "$b: $sz bytes (${pct}%) ok"
+              echo "$b: $sz bytes (${pct}% of budget) ok"
             fi
           done
           exit $status

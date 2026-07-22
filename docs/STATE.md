@@ -2596,8 +2596,21 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   gated, exported), with a round-trip test: keygen → pubkey hex → sign a module → a verifier built from
   that hex accepts it, a different key rejects it. 677 `--workspace --all-features` green; clippy/fmt clean.
   Design doc §7 runbook now carries the concrete commands. **Only real custody remains** (theirs): generate
-  the actual keypair on a trusted host, vault the private half, expose it to the release/signing job as a
-  secret. `sign-module`/helpers stay behind `module-signer`, never in a shipped binary.
+  the actual keypair on a trusted host, vault the private half, and set the **public** key as the
+  `SPARK_MODULE_PUBKEY_HEX` CI variable (see PR4f below — the private key stays offline, never in CI).
+  `sign-module`/helpers stay behind `module-signer`, never in a shipped binary.
+- 2026-07-22 (ADR 0013 §7 — PR4f = CI wiring for the module-signing PUBLIC key): wired `release.yml` to
+  ship bip324. **Design (user's steer): only the PUBLIC key goes to GitHub — as a repo *variable*
+  (`vars.SPARK_MODULE_PUBKEY_HEX`), since it's public; the PRIVATE key + module signing stay OFFLINE and
+  never touch CI** ("sign offline, verify everywhere"). When the variable is set, the release build compiles
+  the CLI/service with `--features bip324` (`-p spark-cli -p spark-service --features bip324`, the form that
+  resolves cleanly — `--bin … --features bip324` errors on bip324-core) and pins the pubkey; unset → the
+  previous smaller default. **Size finding:** bip324 adds ~2 MiB/binary (wasmi + secp256k1) — spark 2.2→4.2,
+  spark-service 2.9→4.85 MiB (macOS) — so the release size gate is now conditional: 3 MiB default, 6 MiB
+  when bip324 is on. User chose "every release ships bip324 when the pubkey var is set." Docs §7 runbook
+  updated: `gh variable set SPARK_MODULE_PUBKEY_HEX`, offline signing with `MODULE_SIGNING_KEY`. The single
+  remaining human step is generating the real keypair + setting that variable (I don't mint/hold the prod
+  key). The `size-budget.sh` gate is unchanged (it guards the default no-bip324 build).
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
