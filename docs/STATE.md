@@ -2586,6 +2586,18 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   the private half → distribute). **Chosen scope (user):** enablement + runbook only — standing up the
   production module-signing keypair + its custody/CI wiring is a separate ops step, not this PR. The dev
   pubkey hex (test builds only) is `722b9b0fa61a50b2031547d314df26c57f720dc9779387e0d0a0273481e0f9d5`.
+- 2026-07-21 (ADR 0013 §7 — PR4e = module-signing keygen + signing tooling): scaffolded the production
+  key path PR4d flagged. `sign-module` grew from a flat signer into `sign | keygen | pubkey` subcommands:
+  `keygen --out k.pkcs8` mints an Ed25519 PKCS#8 key (0600 on unix; warns to lock down elsewhere) and prints its pubkey hex on stdout;
+  `pubkey (--dev | --key-pkcs8)` re-derives the `SPARK_MODULE_PUBKEY_HEX` for any key; `sign` is the old
+  flow (the committed `--dev` fixtures still regenerate byte-identically — Ed25519 is deterministic).
+  `build-module.sh` now signs with a production key when `MODULE_SIGNING_KEY=<pkcs8>` is set, else `--dev`.
+  Lib helpers `generate_keypair_pkcs8()` + `public_key_hex(&keypair)` added to signing.rs (module-signer
+  gated, exported), with a round-trip test: keygen → pubkey hex → sign a module → a verifier built from
+  that hex accepts it, a different key rejects it. 677 `--workspace --all-features` green; clippy/fmt clean.
+  Design doc §7 runbook now carries the concrete commands. **Only real custody remains** (theirs): generate
+  the actual keypair on a trusted host, vault the private half, expose it to the release/signing job as a
+  secret. `sign-module`/helpers stay behind `module-signer`, never in a shipped binary.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
