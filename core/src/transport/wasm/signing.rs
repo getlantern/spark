@@ -241,12 +241,11 @@ pub fn sign_artifact(
 /// ([`public_key_hex`]) into the client build with `SPARK_MODULE_PUBKEY_HEX`. Compiled only under the
 /// off-by-default `module-signer` feature, so no shipped binary can mint a signing key.
 #[cfg(feature = "module-signer")]
-pub fn generate_keypair_pkcs8() -> Vec<u8> {
+pub fn generate_keypair_pkcs8() -> Result<Vec<u8>, ring::error::Unspecified> {
     let rng = ring::rand::SystemRandom::new();
-    ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
-        .expect("ring Ed25519 PKCS#8 generation")
+    Ok(ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)?
         .as_ref()
-        .to_vec()
+        .to_vec())
 }
 
 /// The 64-hex-char Ed25519 public key of `keypair` — the value to set as `SPARK_MODULE_PUBKEY_HEX` so a
@@ -314,7 +313,7 @@ mod tests {
     #[cfg(feature = "module-signer")]
     #[test]
     fn generated_keypair_signs_a_module_and_its_pubkey_hex_verifies() {
-        let pkcs8 = generate_keypair_pkcs8();
+        let pkcs8 = generate_keypair_pkcs8().expect("generate key");
         let kp = Ed25519KeyPair::from_pkcs8(&pkcs8).expect("parse generated key");
         let hex = public_key_hex(&kp);
         assert_eq!(hex.len(), 64, "pubkey hex is 32 bytes");
@@ -327,7 +326,8 @@ mod tests {
             .expect("the keygen'd pubkey accepts its own signature");
         // A verifier for a different key rejects the artifact. (`SignedModule` isn't `Debug`, so map
         // the Ok away before `expect_err`.)
-        let other = Ed25519KeyPair::from_pkcs8(&generate_keypair_pkcs8()).expect("parse other key");
+        let other = Ed25519KeyPair::from_pkcs8(&generate_keypair_pkcs8().expect("generate key"))
+            .expect("parse other key");
         ModuleVerifier::new(public_key(&other))
             .verify(&artifact, 0)
             .map(|_| ())

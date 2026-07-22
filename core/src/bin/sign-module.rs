@@ -118,7 +118,7 @@ fn keygen(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     }
     let out_path = out_path.ok_or("--out is required")?;
 
-    let pkcs8 = generate_keypair_pkcs8();
+    let pkcs8 = generate_keypair_pkcs8().map_err(|e| format!("generating keypair: {e}"))?;
     // Create the private key `0600` from the start (no create-then-chmod window where umask could leave
     // it group/world-readable) and refuse to clobber an existing key (`create_new`).
     let mut opts = std::fs::OpenOptions::new();
