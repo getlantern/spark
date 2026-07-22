@@ -6,9 +6,9 @@ trusted operator host for the duration of a signing run. This is the deliberate 
 [`dynamic-transport-framework-design.md` §7](./dynamic-transport-framework-design.md) — do not "automate"
 it by putting the key in GitHub Actions; that would defeat the whole point.
 
-A new transport is a **distribution artifact, not a code release**: sign a WASM module offline, push it +
-its config over the signed config/fronting channel, and an already-shipped client that pinned the matching
-pubkey loads it with no app-store release.
+A new transport is a **distribution artifact, not a code release**: sign a WASM module offline, push it
+and its config over the signed config/fronting channel, and an already-shipped client that pinned the
+matching pubkey loads it with no app-store release.
 
 ## Current state (2026-06-29)
 
@@ -42,11 +42,16 @@ Signing prod there would overwrite the committed **dev** fixtures. Add an output
 below.)
 
 ### C. Verify before shipping
-Confirm each artifact verifies against the pinned pubkey (the production `ModuleVerifier::pinned()` path):
-```bash
-SPARK_MODULE_PUBKEY_HEX=1f090afa…85ce cargo test -p spark-core --features wasm-transport <verify test>
-# or a sign-module verify subcommand if present
+Confirm the freshly-signed artifact verifies under the pinned pubkey (the production
+`ModuleVerifier::pinned()` path). The full pinned key (no ellipsis) is:
 ```
+1f090afa1b640732f5d1e8536ee49fe7a9bf73581f313101c7543d5ff13a85ce
+```
+There is **no per-artifact verify CLI yet** — `sign-module` exposes only `sign` / `keygen`. A
+`sign-module verify <spkw> --pubkey-hex <hex>` helper is tracked in #114 and is the intended one-liner for
+this step. Until it lands, verify by exercising the existing `ModuleVerifier` tests in
+`core/src/transport/wasm/` (they load a `.spkw` through `pinned().verify`). **Do not distribute an artifact
+that doesn't verify against the hex above.**
 
 ### D. Distribute over the signed config/fronting channel
 Push the prod-signed `.spkw` + its `TransportConfig` through the same signed-config channel clients already
