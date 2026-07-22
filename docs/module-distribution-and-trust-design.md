@@ -50,15 +50,17 @@ The client already consumes a **signed config** over the fronting channel. Exten
 ```
 ModuleDescriptor {
   name, version,                     // must match the .spkw manifest
-  artifact: Inline(bytes) | Ref { url, sha256 },   // small modules inline (b64); large ones referenced
+  artifact: Inline(b64) | Ref { url, sha256 },     // small modules inline (base64); large ones referenced
   targeting: <reuse config targeting> // region / bandit track / % rollout
 }
 ```
 
 - **Inline vs referenced.** `obfs-xor.spkw` ≈ 722 B (inline is free); `bip324.spkw` ≈ 23 KB (inlining it
   into every config fetch is wasteful — reference it by URL + `sha256` so the client fetches once and
-  caches). The `.spkw` is self-verifying (sig + anti-rollback), so a referenced fetch needs only the hash
-  for integrity; trust still comes from the Ed25519 signature, not from the transport.
+  caches). Trust/integrity/authenticity come entirely from the `.spkw`'s own Ed25519 signature + anti-
+  rollback — verified after fetch, exactly as for an inline module. The `sha256` in `Ref` is **not** the
+  security boundary; it's a fetch-consistency check that binds the descriptor to a specific artifact and
+  fails a corrupted/wrong download fast, before verification.
 - **Rollout / rollback.** Targeting reuses the existing config machinery (region, bandit track, staged
   %). Rollback = revert the config (stop offering the descriptor) and/or the anti-rollback floor prevents
   a *downgrade* to a known-bad older version. A kill-switch is "descriptor absent → module not loaded."
