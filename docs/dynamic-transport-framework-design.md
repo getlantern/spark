@@ -272,19 +272,26 @@ refuses to fall back to the repo's dev module-signing key and requires the produ
 so a leaked dev key can't become a module-injection vector). `build-xcframework.sh` therefore enables
 `bip324` *only when* `SPARK_MODULE_PUBKEY_HEX` is set, leaving the default product build byte-identical.
 
-**Shipping a BIP324 (or any dynamic-transport) module — the runbook:**
-1. **Generate a production module-signing keypair** (Ed25519). Keep the private half in secret storage; it
-   never enters the repo or a shipped binary. (The committed `.spkw` fixtures use the *dev* key, for tests
-   only.)
-2. **Bake the public half into the client at build time:** `SPARK_MODULE_PUBKEY_HEX=<64 hex>`. With it set,
-   `build-xcframework.sh` auto-adds `bip324` to every Apple slice; for the CLI/service/Android pass
-   `--features bip324` (the Android `cargoNdkBuild` features config) alongside the env var.
-3. **Sign the module** (`.spkw`) with the production *private* key (the `sign-module` tool / `build-module.sh`
-   flow, pointed at the production key rather than the dev key).
+**Shipping a BIP324 (or any dynamic-transport) module — the runbook** (tooling is the `sign-module`
+subcommands, behind the `module-signer` feature; PR4e):
+1. **Mint a production module-signing keypair** — the private half goes to secret storage, never the repo
+   (the committed `.spkw` fixtures use the *dev* key, for tests only). The command prints the pubkey hex:
+   ```
+   cargo run -p spark-core --features module-signer --bin sign-module -- keygen --out prod-module.pkcs8
+   # → prints SPARK_MODULE_PUBKEY_HEX=<64 hex>   (stdout is the bare hex, for scripting)
+   ```
+2. **Bake the public half into the client at build time:** `export SPARK_MODULE_PUBKEY_HEX=<64 hex>`. With
+   it set, `build-xcframework.sh` auto-adds `bip324` to every Apple slice; for the CLI/service/Android pass
+   `--features bip324` (the Android `cargoNdkBuild` features config) alongside the env var. (`sign-module
+   pubkey --key-pkcs8 prod-module.pkcs8` re-derives the hex from an existing key.)
+3. **Sign the module** with the production *private* key — `MODULE_SIGNING_KEY=prod-module.pkcs8 bash
+   scripts/build-module.sh` (or `sign-module sign --key-pkcs8 prod-module.pkcs8 …` directly).
 4. **Distribute** the signed module + its config over the existing signed config/fronting channel; an
    already-shipped client that pinned the matching pubkey loads it — **no client release**.
 
-Standing up the production keypair + its custody/CI wiring is the remaining ops step (outside this PR).
+The remaining ops step is purely custody: generate the real keypair on a trusted host, store the private
+half in a vault, and expose it to the release build/signing job as a secret (`SPARK_MODULE_PUBKEY_HEX` for
+the build, `MODULE_SIGNING_KEY` for the signing step).
 
 ## 8. Tradeoffs (stated plainly)
 

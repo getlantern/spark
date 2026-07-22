@@ -21,13 +21,21 @@ build_and_sign() {
     cargo build --release --locked --target "$TARGET" --manifest-path "modules/$module/Cargo.toml"
     local wasm="modules/$module/target/$TARGET/release/${lib}.wasm"
 
-    echo "==> signing $wasm with the dev key -> $out" >&2
     mkdir -p "$(dirname "$out")"
-    # `sign-module` lives behind the `module-signer` feature (never in a shipped build). `--dev` uses the
-    # development key that `ModuleVerifier::pinned()` accepts in a debug build; a release artifact would
-    # pass `--key-pkcs8 <real-key>` instead.
+    # `sign-module` lives behind the `module-signer` feature (never in a shipped build). By default we
+    # sign with the development key that `ModuleVerifier::pinned()` accepts in a debug build (this is how
+    # the committed test fixtures are produced). To sign a PRODUCTION artifact, set MODULE_SIGNING_KEY to
+    # a PKCS#8 key path (mint one with `sign-module keygen`); the matching pubkey must be pinned into the
+    # client build via SPARK_MODULE_PUBKEY_HEX. See docs/dynamic-transport-framework-design.md §7.
+    local key_args=(--dev)
+    if [[ -n "${MODULE_SIGNING_KEY:-}" ]]; then
+        key_args=(--key-pkcs8 "$MODULE_SIGNING_KEY")
+        echo "==> signing $wasm with $MODULE_SIGNING_KEY -> $out" >&2
+    else
+        echo "==> signing $wasm with the dev key -> $out" >&2
+    fi
     cargo run --quiet --locked -p spark-core --features module-signer --bin sign-module -- \
-        --dev --name "$module" --version "$version" --wasm "$wasm" --out "$out"
+        sign "${key_args[@]}" --name "$module" --version "$version" --wasm "$wasm" --out "$out"
     echo "==> done: $out" >&2
 }
 

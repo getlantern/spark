@@ -1,24 +1,30 @@
-//! `sign-module` — offline signer for dynamic-transport modules (ADR 0013 §7 step 4).
+//! `sign-module` — offline signing tool for dynamic-transport modules (ADR 0013 §7 step 4).
 //!
-//! Turns a compiled guest `.wasm` into a signed `.spkw` artifact that [`ModuleVerifier`] accepts. It
-//! is the one place a private module-signing key is used. Invoked by `scripts/build-module.sh`;
-//! compiled only under the off-by-default `module-signer` feature, so it never enters a shipped binary.
+//! The one place a private module-signing key is used. Compiled only under the off-by-default
+//! `module-signer` feature, so it never enters a shipped binary. Three subcommands:
 //!
 //! ```text
-//! sign-module --name <NAME> --version <U32> --wasm <IN.wasm> --out <OUT.spkw> (--dev | --key-pkcs8 <KEY>)
+//! sign-module sign   --name <NAME> --version <U32> --wasm <IN.wasm> --out <OUT.spkw> (--dev | --key-pkcs8 <KEY.pkcs8>)
+//! sign-module keygen --out <KEY.pkcs8>                  # mint a production signing key; prints its pubkey hex
+//! sign-module pubkey (--dev | --key-pkcs8 <KEY.pkcs8>)  # print a key's pubkey hex (for SPARK_MODULE_PUBKEY_HEX)
 //! ```
-//! `--dev` signs with the repo's development keypair (which `ModuleVerifier::pinned()` accepts in a
-//! debug build); `--key-pkcs8 <path>` signs with a real Ed25519 PKCS#8 key for a production artifact.
 //!
-//! [`ModuleVerifier`]: spark_core::transport::wasm::ModuleVerifier
+//! `--dev` uses the repo's development keypair (which `ModuleVerifier::pinned()` accepts in a debug
+//! build); `--key-pkcs8 <path>` uses a real Ed25519 PKCS#8 key for a production artifact. The typical
+//! production flow: `keygen` a key into secret storage, pin its `SPARK_MODULE_PUBKEY_HEX` into the
+//! client build, and `sign --key-pkcs8` each module with it.
 
 use std::process::ExitCode;
 
 use ring::signature::Ed25519KeyPair;
-use spark_core::transport::wasm::{dev_keypair, sign_artifact};
+use spark_core::transport::wasm::{
+    dev_keypair, generate_keypair_pkcs8, public_key_hex, sign_artifact,
+};
 
-const USAGE: &str = "usage: sign-module --name <NAME> --version <U32> --wasm <IN.wasm> \
---out <OUT.spkw> (--dev | --key-pkcs8 <KEY.pkcs8>)";
+const USAGE: &str = "usage:\n  \
+sign-module sign   --name <NAME> --version <U32> --wasm <IN.wasm> --out <OUT.spkw> (--dev | --key-pkcs8 <KEY.pkcs8>)\n  \
+sign-module keygen --out <KEY.pkcs8>\n  \
+sign-module pubkey (--dev | --key-pkcs8 <KEY.pkcs8>)";
 
 fn main() -> ExitCode {
     match run() {
@@ -30,21 +36,39 @@ fn main() -> ExitCode {
     }
 }
 
+fn run() -> Result<(), String> {
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("sign") => sign(args),
+        Some("keygen") => keygen(args),
+        Some("pubkey") => pubkey(args),
+        Some(other) => Err(format!("unknown subcommand: {other}")),
+        None => Err("missing subcommand (sign | keygen | pubkey)".into()),
+    }
+}
+
 /// Consume the next argument as `flag`'s value, or report it missing.
 fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
     args.next()
         .ok_or_else(|| format!("missing value for {flag}"))
 }
 
-fn run() -> Result<(), String> {
-    let mut name = None;
-    let mut version = None;
-    let mut wasm_path = None;
-    let mut out_path = None;
-    let mut dev = false;
-    let mut key_path = None;
+/// Resolve the signing keypair from `--dev` / `--key-pkcs8`, rejecting neither-or-both.
+fn load_keypair(dev: bool, key_path: Option<String>) -> Result<Ed25519KeyPair, String> {
+    match (dev, key_path) {
+        (true, None) => Ok(dev_keypair()),
+        (false, Some(path)) => {
+            let pkcs8 = std::fs::read(&path).map_err(|e| format!("reading {path}: {e}"))?;
+            Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("parsing key {path}: {e}"))
+        }
+        (true, Some(_)) => Err("pass either --dev or --key-pkcs8, not both".into()),
+        (false, None) => Err("one of --dev or --key-pkcs8 is required".into()),
+    }
+}
 
-    let mut args = std::env::args().skip(1);
+fn sign(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let (mut name, mut version, mut wasm_path, mut out_path) = (None, None, None, None);
+    let (mut dev, mut key_path) = (false, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--name" => name = Some(next_value(&mut args, &arg)?),
@@ -59,21 +83,11 @@ fn run() -> Result<(), String> {
             other => return Err(format!("unknown argument: {other}")),
         }
     }
-
     let name = name.ok_or("--name is required")?;
     let version = version.ok_or("--version is required")?;
     let wasm_path = wasm_path.ok_or("--wasm is required")?;
     let out_path = out_path.ok_or("--out is required")?;
-
-    let keypair = match (dev, key_path) {
-        (true, None) => dev_keypair(),
-        (false, Some(path)) => {
-            let pkcs8 = std::fs::read(&path).map_err(|e| format!("reading {path}: {e}"))?;
-            Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("parsing key {path}: {e}"))?
-        }
-        (true, Some(_)) => return Err("pass either --dev or --key-pkcs8, not both".into()),
-        (false, None) => return Err("one of --dev or --key-pkcs8 is required".into()),
-    };
+    let keypair = load_keypair(dev, key_path)?;
 
     let wasm = std::fs::read(&wasm_path).map_err(|e| format!("reading {wasm_path}: {e}"))?;
     let artifact = sign_artifact(&keypair, &name, version, &wasm);
@@ -86,11 +100,53 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     std::fs::write(&out_path, &artifact).map_err(|e| format!("writing {out_path}: {e}"))?;
-
     eprintln!(
         "signed '{name}' v{version}: {} bytes wasm -> {} bytes artifact -> {out_path}",
         wasm.len(),
         artifact.len()
     );
+    Ok(())
+}
+
+fn keygen(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut out_path = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => out_path = Some(next_value(&mut args, &arg)?),
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    let out_path = out_path.ok_or("--out is required")?;
+
+    let pkcs8 = generate_keypair_pkcs8();
+    std::fs::write(&out_path, &pkcs8).map_err(|e| format!("writing {out_path}: {e}"))?;
+    // Lock the private key down to the owner (best-effort; unix only).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod {out_path}: {e}"))?;
+    }
+    let keypair =
+        Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("parsing generated key: {e}"))?;
+    let hex = public_key_hex(&keypair);
+    eprintln!("wrote PRIVATE module-signing key -> {out_path} (keep secret; never commit; store in a vault)");
+    eprintln!("pin this into the client build:  SPARK_MODULE_PUBKEY_HEX={hex}");
+    // The pubkey hex on stdout, so it's scriptable: `KEY_HEX=$(sign-module keygen --out k.pkcs8)`.
+    println!("{hex}");
+    Ok(())
+}
+
+fn pubkey(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let (mut dev, mut key_path) = (false, None);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--key-pkcs8" => key_path = Some(next_value(&mut args, &arg)?),
+            "--dev" => dev = true,
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    let keypair = load_keypair(dev, key_path)?;
+    println!("{}", public_key_hex(&keypair));
     Ok(())
 }
