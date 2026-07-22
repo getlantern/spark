@@ -118,6 +118,15 @@ fn keygen(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     }
     let out_path = out_path.ok_or("--out is required")?;
 
+    // Create the output directory so `--out some/dir/key.pkcs8` works (mirrors `sign`).
+    if let Some(parent) = std::path::Path::new(&out_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+
     let pkcs8 = generate_keypair_pkcs8().map_err(|e| format!("generating keypair: {e}"))?;
     // Create the private key `0600` from the start (no create-then-chmod window where umask could leave
     // it group/world-readable) and refuse to clobber an existing key (`create_new`).
@@ -128,9 +137,13 @@ fn keygen(mut args: impl Iterator<Item = String>) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut file = opts
-        .open(&out_path)
-        .map_err(|e| format!("creating {out_path} (exists? refusing to overwrite a key): {e}"))?;
+    let mut file = opts.open(&out_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("{out_path} already exists — refusing to overwrite a signing key")
+        } else {
+            format!("creating {out_path}: {e}")
+        }
+    })?;
     std::io::Write::write_all(&mut file, &pkcs8).map_err(|e| format!("writing {out_path}: {e}"))?;
     #[cfg(not(unix))]
     eprintln!(

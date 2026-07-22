@@ -317,7 +317,7 @@ mod tests {
         let pkcs8 = generate_keypair_pkcs8().expect("generate key");
         let kp = Ed25519KeyPair::from_pkcs8(&pkcs8).expect("parse generated key");
         let hex = public_key_hex(&kp);
-        assert_eq!(hex.len(), 64, "pubkey hex is 32 bytes");
+        assert_eq!(hex.len(), 64, "pubkey hex is 64 chars (32 bytes)");
         // The hex round-trips to the raw pubkey the verifier pins.
         assert_eq!(parse_pubkey_hex(&hex), public_key(&kp));
 
