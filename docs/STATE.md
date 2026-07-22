@@ -2588,7 +2588,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   pubkey hex (test builds only) is `722b9b0fa61a50b2031547d314df26c57f720dc9779387e0d0a0273481e0f9d5`.
 - 2026-07-21 (ADR 0013 §7 — PR4e = module-signing keygen + signing tooling): scaffolded the production
   key path PR4d flagged. `sign-module` grew from a flat signer into `sign | keygen | pubkey` subcommands:
-  `keygen --out k.pkcs8` mints an Ed25519 PKCS#8 key (0600) and prints its pubkey hex on stdout;
+  `keygen --out k.pkcs8` mints an Ed25519 PKCS#8 key (0600 on unix; warns to lock down elsewhere) and prints its pubkey hex on stdout;
   `pubkey (--dev | --key-pkcs8)` re-derives the `SPARK_MODULE_PUBKEY_HEX` for any key; `sign` is the old
   flow (the committed `--dev` fixtures still regenerate byte-identically — Ed25519 is deterministic).
   `build-module.sh` now signs with a production key when `MODULE_SIGNING_KEY=<pkcs8>` is set, else `--dev`.

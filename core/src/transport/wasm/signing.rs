@@ -253,10 +253,11 @@ pub fn generate_keypair_pkcs8() -> Result<Vec<u8>, ring::error::Unspecified> {
 #[cfg(feature = "module-signer")]
 pub fn public_key_hex(keypair: &ring::signature::Ed25519KeyPair) -> String {
     use ring::signature::KeyPair;
+    const HEX: [u8; 16] = *b"0123456789abcdef";
     let mut s = String::with_capacity(PUBKEY_LEN * 2);
     for byte in keypair.public_key().as_ref() {
-        s.push(char::from_digit((byte >> 4) as u32, 16).expect("nibble"));
-        s.push(char::from_digit((byte & 0x0f) as u32, 16).expect("nibble"));
+        s.push(HEX[(byte >> 4) as usize] as char);
+        s.push(HEX[(byte & 0x0f) as usize] as char);
     }
     s
 }

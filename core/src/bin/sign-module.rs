@@ -132,6 +132,10 @@ fn keygen(mut args: impl Iterator<Item = String>) -> Result<(), String> {
         .open(&out_path)
         .map_err(|e| format!("creating {out_path} (exists? refusing to overwrite a key): {e}"))?;
     std::io::Write::write_all(&mut file, &pkcs8).map_err(|e| format!("writing {out_path}: {e}"))?;
+    #[cfg(not(unix))]
+    eprintln!(
+        "warning: {out_path} was NOT created with 0600 perms (non-unix); lock it down manually"
+    );
     let keypair =
         Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("parsing generated key: {e}"))?;
     let hex = public_key_hex(&keypair);
