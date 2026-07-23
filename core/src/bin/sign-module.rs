@@ -188,7 +188,7 @@ fn pubkey_from_hex(s: &str) -> Result<[u8; 32], String> {
     let bytes = s.trim().as_bytes();
     if bytes.len() != 64 {
         return Err(format!(
-            "--pubkey-hex must be 64 hex chars, got {}",
+            "--pubkey-hex must be 64 ASCII hex characters (32 bytes), got {}",
             bytes.len()
         ));
     }
