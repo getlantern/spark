@@ -2612,7 +2612,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   remaining human step is generating the real keypair + setting that variable (I don't mint/hold the prod
   key). The `size-budget.sh` gate is unchanged (it guards the default no-bip324 build).
 - 2026-07-23 (ADR 0013 §7 — `build-module.sh` OUT_DIR + `sign-module verify`, #116): the module-distribution
-  tooling the runbook (#113) + trust design (#115) listed as pending. Two accordance fixes: (1)
+  tooling the runbook (#113) + trust design (#115) listed as pending. Two changes: (1)
   `build-module.sh` now routes PRODUCTION signing (`MODULE_SIGNING_KEY` set) to `OUT_DIR` (default
   `dist/modules/`, gitignored) instead of the committed dev fixtures — closes the footgun where the runbook's
   prod step would have overwritten `core/tests/fixtures/wasm/*.spkw` (the dev-key fixtures the debug tests
