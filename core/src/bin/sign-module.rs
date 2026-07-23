@@ -7,7 +7,7 @@
 //! sign-module sign   --name <NAME> --version <U32> --wasm <IN.wasm> --out <OUT.spkw> (--dev | --key-pkcs8 <KEY.pkcs8>)
 //! sign-module keygen --out <KEY.pkcs8>                  # mint a production signing key; prints its pubkey hex
 //! sign-module pubkey (--dev | --key-pkcs8 <KEY.pkcs8>)  # print a key's pubkey hex (for SPARK_MODULE_PUBKEY_HEX)
-//! sign-module verify <OUT.spkw> --pubkey-hex <HEX>      # verify a signed artifact against a pinned pubkey
+//! sign-module verify <IN.spkw> --pubkey-hex <HEX>      # verify a signed artifact against a pinned pubkey
 //! ```
 //!
 //! `verify` is the only subcommand that needs no private key — it re-runs the exact client-side check
@@ -30,7 +30,7 @@ const USAGE: &str = "usage:\n  \
 sign-module sign   --name <NAME> --version <U32> --wasm <IN.wasm> --out <OUT.spkw> (--dev | --key-pkcs8 <KEY.pkcs8>)\n  \
 sign-module keygen --out <KEY.pkcs8>\n  \
 sign-module pubkey (--dev | --key-pkcs8 <KEY.pkcs8>)\n  \
-sign-module verify <OUT.spkw> --pubkey-hex <HEX>";
+sign-module verify <IN.spkw> --pubkey-hex <HEX>";
 
 fn main() -> ExitCode {
     match run() {
