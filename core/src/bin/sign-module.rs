@@ -183,17 +183,20 @@ fn pubkey(mut args: impl Iterator<Item = String>) -> Result<(), String> {
 /// Decode a 64-char hex pubkey (as printed by `pubkey`/`keygen`) into the 32-byte array
 /// `ModuleVerifier::new` expects.
 fn pubkey_from_hex(s: &str) -> Result<[u8; 32], String> {
-    let s = s.trim();
-    if s.len() != 64 {
+    // Decode over bytes, not chars: a multi-byte UTF-8 char could otherwise pass the length check and
+    // then panic when `&s[2*i..2*i+2]` slices mid-codepoint. `chunks_exact(2)` never indexes past the end.
+    let bytes = s.trim().as_bytes();
+    if bytes.len() != 64 {
         return Err(format!(
             "--pubkey-hex must be 64 hex chars, got {}",
-            s.len()
+            bytes.len()
         ));
     }
     let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16)
-            .map_err(|e| format!("--pubkey-hex: invalid hex: {e}"))?;
+    for (byte, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let hex = std::str::from_utf8(pair).map_err(|_| "--pubkey-hex: invalid hex".to_string())?;
+        *byte =
+            u8::from_str_radix(hex, 16).map_err(|e| format!("--pubkey-hex: invalid hex: {e}"))?;
     }
     Ok(out)
 }
