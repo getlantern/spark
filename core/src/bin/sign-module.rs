@@ -1,13 +1,18 @@
 //! `sign-module` — offline signing tool for dynamic-transport modules (ADR 0013 §7 step 4).
 //!
 //! The one place a private module-signing key is used. Compiled only under the off-by-default
-//! `module-signer` feature, so it never enters a shipped binary. Three subcommands:
+//! `module-signer` feature, so it never enters a shipped binary. Four subcommands:
 //!
 //! ```text
 //! sign-module sign   --name <NAME> --version <U32> --wasm <IN.wasm> --out <OUT.spkw> (--dev | --key-pkcs8 <KEY.pkcs8>)
 //! sign-module keygen --out <KEY.pkcs8>                  # mint a production signing key; prints its pubkey hex
 //! sign-module pubkey (--dev | --key-pkcs8 <KEY.pkcs8>)  # print a key's pubkey hex (for SPARK_MODULE_PUBKEY_HEX)
+//! sign-module verify <IN.spkw> --pubkey-hex <HEX>      # verify a signed artifact against a pinned pubkey
 //! ```
+//!
+//! `verify` is the only subcommand that needs no private key — it re-runs the exact client-side check
+//! (`ModuleVerifier::verify`) against a given pubkey hex, so an operator can confirm a `.spkw` validates
+//! under the key clients pin before distributing it (runbook step C).
 //!
 //! `--dev` uses the repo's development keypair (which `ModuleVerifier::pinned()` accepts in a debug
 //! build); `--key-pkcs8 <path>` uses a real Ed25519 PKCS#8 key for a production artifact. The typical
@@ -18,13 +23,14 @@ use std::process::ExitCode;
 
 use ring::signature::Ed25519KeyPair;
 use spark_core::transport::wasm::{
-    dev_keypair, generate_keypair_pkcs8, public_key_hex, sign_artifact,
+    dev_keypair, generate_keypair_pkcs8, public_key_hex, sign_artifact, ModuleVerifier,
 };
 
 const USAGE: &str = "usage:\n  \
 sign-module sign   --name <NAME> --version <U32> --wasm <IN.wasm> --out <OUT.spkw> (--dev | --key-pkcs8 <KEY.pkcs8>)\n  \
 sign-module keygen --out <KEY.pkcs8>\n  \
-sign-module pubkey (--dev | --key-pkcs8 <KEY.pkcs8>)";
+sign-module pubkey (--dev | --key-pkcs8 <KEY.pkcs8>)\n  \
+sign-module verify <IN.spkw> --pubkey-hex <HEX>";
 
 fn main() -> ExitCode {
     match run() {
@@ -42,8 +48,9 @@ fn run() -> Result<(), String> {
         Some("sign") => sign(args),
         Some("keygen") => keygen(args),
         Some("pubkey") => pubkey(args),
+        Some("verify") => verify(args),
         Some(other) => Err(format!("unknown subcommand: {other}")),
-        None => Err("missing subcommand (sign | keygen | pubkey)".into()),
+        None => Err("missing subcommand (sign | keygen | pubkey | verify)".into()),
     }
 }
 
@@ -170,5 +177,53 @@ fn pubkey(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     }
     let keypair = load_keypair(dev, key_path)?;
     println!("{}", public_key_hex(&keypair));
+    Ok(())
+}
+
+/// Decode a 64-char hex pubkey (as printed by `pubkey`/`keygen`) into the 32-byte array
+/// `ModuleVerifier::new` expects.
+fn pubkey_from_hex(s: &str) -> Result<[u8; 32], String> {
+    // Decode over bytes, not chars: a multi-byte UTF-8 char could otherwise pass the length check and
+    // then panic when `&s[2*i..2*i+2]` slices mid-codepoint. `chunks_exact(2)` never indexes past the end.
+    let bytes = s.trim().as_bytes();
+    if bytes.len() != 64 {
+        return Err(format!(
+            "--pubkey-hex must be 64 ASCII hex characters (32 bytes), got {}",
+            bytes.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    for (byte, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let hex = std::str::from_utf8(pair).map_err(|_| "--pubkey-hex: invalid hex".to_string())?;
+        *byte =
+            u8::from_str_radix(hex, 16).map_err(|e| format!("--pubkey-hex: invalid hex: {e}"))?;
+    }
+    Ok(out)
+}
+
+fn verify(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let (mut spkw_path, mut pubkey_hex) = (None, None);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--pubkey-hex" => pubkey_hex = Some(next_value(&mut args, &arg)?),
+            s if !s.starts_with("--") && spkw_path.is_none() => spkw_path = Some(s.to_string()),
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    let spkw_path = spkw_path.ok_or("a <spkw> path is required")?;
+    let pubkey = pubkey_from_hex(&pubkey_hex.ok_or("--pubkey-hex is required")?)?;
+
+    let artifact = std::fs::read(&spkw_path).map_err(|e| format!("reading {spkw_path}: {e}"))?;
+    // Re-run the exact client-side check. min_version 0 = accept any module version: this proves the
+    // signature validates under the given key, not that it clears a rollout floor (a separate axis).
+    let signed = ModuleVerifier::new(pubkey)
+        .verify(&artifact, 0)
+        .map_err(|e| format!("verification FAILED for {spkw_path}: {e}"))?;
+    eprintln!(
+        "OK: '{}' v{} verifies under the given pubkey ({} bytes)",
+        signed.name(),
+        signed.version(),
+        artifact.len()
+    );
     Ok(())
 }

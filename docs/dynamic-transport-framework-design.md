@@ -287,12 +287,18 @@ subcommands, behind the `module-signer` feature; PR4e):
    Apple slices); until the variable is set, releases build the smaller default (no wasm runtime). Locally,
    `export SPARK_MODULE_PUBKEY_HEX=<hex>`. (`sign-module pubkey --key-pkcs8 prod-module.pkcs8` re-derives it.)
 3. **Sign the module OFFLINE** with the production *private* key — `MODULE_SIGNING_KEY=prod-module.pkcs8 bash
-   scripts/build-module.sh` (or `sign-module sign --key-pkcs8 …`). **The private key never goes to GitHub**:
-   signing is a rare, high-stakes act done on the trusted host that holds the key (or an HSM), so CI carries
-   only the public key. This "sign offline, verify everywhere" split keeps the private key off CI's attack
-   surface entirely.
+   scripts/build-module.sh` (or `sign-module sign --key-pkcs8 …`). With `MODULE_SIGNING_KEY` set, the script
+   writes to `OUT_DIR` (default `dist/modules/`, gitignored) — **never** the committed dev fixtures. **The
+   private key never goes to GitHub**: signing is a rare, high-stakes act done on the trusted host that holds
+   the key (or an HSM), so CI carries only the public key. This "sign offline, verify everywhere" split keeps
+   the private key off CI's attack surface entirely. Before shipping, confirm the artifact validates under
+   the pinned pubkey: `sign-module verify dist/modules/<mod>.spkw --pubkey-hex $SPARK_MODULE_PUBKEY_HEX`.
 4. **Distribute** the signed module + its config over the existing signed config/fronting channel; an
    already-shipped client that pinned the matching pubkey loads it — **no client release**.
+
+The step-by-step operator procedure (Vault key retrieval, custody hygiene) lives in
+[`prod-module-signing-runbook.md`](./prod-module-signing-runbook.md); the config-channel *distribution*
+design and the multi-signer trust roadmap are in [`module-distribution-and-trust-design.md`](./module-distribution-and-trust-design.md).
 
 The remaining ops step is purely custody: generate the real keypair on a trusted host, store the private
 half in a vault, set the **public** key as the `SPARK_MODULE_PUBKEY_HEX` CI variable, and sign modules

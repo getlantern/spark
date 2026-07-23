@@ -74,9 +74,10 @@ receive descriptor → obtain the `.spkw` (inline or fetch+hash-check) → `Modu
 pinned key with the config's `min_version` → instantiate. No release.
 
 ### Producer flow
-Offline per the runbook: pull key from Vault → sign → **publish the descriptor** to the lantern-cloud
-config service. (New: the "publish to config" step + the `build-module.sh` out-dir fix and `sign-module
-verify` helper from #114.)
+Offline per the runbook: pull key from Vault → sign (→ `dist/modules/`) → `sign-module verify` →
+**publish the descriptor** to the lantern-cloud config service. (The `build-module.sh` out-dir override and
+the `sign-module verify` helper have landed; the still-unbuilt piece is the "publish to config" delivery
+step.)
 
 ---
 
@@ -183,7 +184,7 @@ threshold.
 ## Work breakdown (feeds #114 and follow-ups)
 - [ ] Phase 1: `ModuleDescriptor` schema + config-channel plumbing (inline + ref/hash), client fetch/verify/
       load path, rollout/rollback controls, E2E test. *(#114 core.)*
-- [ ] Tooling: `build-module.sh` out-dir, `sign-module verify`. *(#114.)*
+- [x] Tooling: `build-module.sh` out-dir, `sign-module verify`.
 - [ ] Phase 2: `.spkw` v2 (`key_id`), `SPKR` registry artifact + `sign-module registry`, root keygen +
       custody, `ModuleVerifier` multi-key + registry verification, migration/fallback.
 - [ ] Phase 3: contributor onboarding doc + policy; scoped/expiring delegation; revocation flow + test.

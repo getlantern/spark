@@ -2611,6 +2611,21 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   updated: `gh variable set SPARK_MODULE_PUBKEY_HEX`, offline signing with `MODULE_SIGNING_KEY`. The single
   remaining human step is generating the real keypair + setting that variable (I don't mint/hold the prod
   key). The `size-budget.sh` gate is unchanged (it guards the default no-bip324 build).
+- 2026-07-23 (ADR 0013 §7 — `build-module.sh` OUT_DIR + `sign-module verify`, #116): the module-distribution
+  tooling the runbook (#113) + trust design (#115) listed as pending. Two changes: (1)
+  `build-module.sh` now routes PRODUCTION signing (`MODULE_SIGNING_KEY` set) to `OUT_DIR` (default
+  `dist/modules/`, gitignored) instead of the committed dev fixtures — closes the footgun where the runbook's
+  prod step would have overwritten `core/tests/fixtures/wasm/*.spkw` (the dev-key fixtures the debug tests
+  verify) and dirtied the tree; dev-mode (no key) still regenerates the fixtures byte-identically. (2)
+  `sign-module` grew a fourth subcommand `verify <spkw> --pubkey-hex <hex>` — runs the exact client check
+  (`ModuleVerifier::verify`, `min_version` 0) so an operator can confirm a `.spkw` validates under the pinned
+  pubkey before distributing (runbook step C). Validated: prod-mode run with a throwaway key wrote
+  `dist/modules/{obfs-xor,bip324}.spkw`, fixtures stayed git-clean, `verify` OK under the throwaway pubkey and
+  FAIL (exit 1) under a wrong one. Docs squared: runbook step B/C + open-work, trust-doc producer-flow +
+  work-breakdown checkbox, and §7 step 3 all now say the tooling exists. CI-exact `clippy --workspace
+  --all-targets --all-features` green. (Branch cut clean from merged `main` — a cross-session tangle had
+  duplicated #115's trust-doc commit onto the earlier branch; abandoned it.) Remaining: the config-channel
+  *distribution* step itself (unbuilt — the real next piece).
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
