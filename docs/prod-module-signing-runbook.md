@@ -39,10 +39,9 @@ mise -E prod x -- bin/vault kv get -mount=secret -field=SPARK_MODULE_SIGNING_KEY
 cd spark
 MODULE_SIGNING_KEY="$tmp/prod-module.pkcs8" bash scripts/build-module.sh
 ```
-⚠️ **Needs a small fix first:** `build-module.sh` hard-codes `--out core/tests/fixtures/wasm/<mod>.spkw`.
-Signing prod there would overwrite the committed **dev** fixtures. Add an output-dir override (e.g.
-`OUT_DIR=dist/modules`) so prod artifacts land in a dist dir and the dev fixtures stay untouched. (Tracked
-below.)
+With `MODULE_SIGNING_KEY` set, the script writes each `.spkw` to `OUT_DIR` (default `dist/modules/`,
+gitignored) instead of the committed dev fixtures — so a prod signing run never clobbers
+`core/tests/fixtures/wasm/`. Set `OUT_DIR` to land the artifacts elsewhere.
 
 ### C. Verify before shipping
 First, **confirm the key you pulled is the one clients pin** — `sign-module pubkey` re-derives a key's
@@ -51,11 +50,14 @@ pubkey hex, which must equal the pinned `SPARK_MODULE_PUBKEY_HEX`:
 cargo run -q -p spark-core --features module-signer --bin sign-module -- pubkey --key-pkcs8 "$tmp/prod-module.pkcs8"
 # → must print: 1f090afa1b640732f5d1e8536ee49fe7a9bf73581f313101c7543d5ff13a85ce
 ```
-That guards against signing with the wrong key. **Verifying that a given `.spkw` artifact validates** is a
-separate check, and there's no CLI for it yet — `sign-module` exposes `sign` / `keygen` / `pubkey`, not a
-`verify`. A `sign-module verify <spkw> --pubkey-hex <hex>` helper is tracked in #114 and is the intended
-one-liner. Until it lands, exercise the existing `ModuleVerifier` tests in `core/src/transport/wasm/` (they
-load a `.spkw` through `pinned().verify`). **Do not distribute an artifact that doesn't verify.**
+That guards against signing with the wrong key. Then **confirm the signed artifact itself validates** under
+that pinned pubkey — this runs the exact check the client runs (`ModuleVerifier::verify`):
+```bash
+cargo run -q -p spark-core --features module-signer --bin sign-module -- \
+  verify dist/modules/bip324.spkw --pubkey-hex 1f090afa1b640732f5d1e8536ee49fe7a9bf73581f313101c7543d5ff13a85ce
+# → OK: 'bip324' v1 verifies under the given pubkey (…)   [exit 0; non-zero + "verification FAILED" on mismatch]
+```
+**Do not distribute an artifact that doesn't verify.**
 
 ### D. Distribute over the signed config/fronting channel
 Push the prod-signed `.spkw` + its `TransportConfig` through the same signed-config channel clients already
@@ -73,7 +75,7 @@ bip324`. That's the entire CI role. No secret, no signing.
 ## Open work (needs design + build)
 1. **Module distribution over the config channel** — where the `.spkw` lives (inline in config vs a fetched
    URL; `bip324.spkw` is ~23 KB), versioning, per-region/bandit rollout, rollback. This is the real
-   remaining pipeline and the highest-value piece.
-2. **`build-module.sh` output-dir override** — so prod signing doesn't clobber the committed dev fixtures.
-3. **A `verify` convenience** in `sign-module` (if not already) to check a `.spkw` against a given pubkey
-   hex, for step C.
+   remaining pipeline and the highest-value piece. Design in
+   [`module-distribution-and-trust-design.md`](./module-distribution-and-trust-design.md).
+
+*(Done: the `build-module.sh` `OUT_DIR` override and the `sign-module verify` helper — steps B and C above.)*
