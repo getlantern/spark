@@ -20,7 +20,7 @@ What's DONE (this and prior sessions; all on `main`, pushed):
   **TCP + UDP/UoT**; egress = the relay.
 - **⚠️ SUPERSEDED 2026-07-23 — the Flutter `gui/` app was REMOVED. Tauri (`gui-tauri/`) is the single
   cross-platform UI (desktop Win/macOS/Linux + Android + iOS-on-TestFlight); the macOS product DMG is
-  `build-tauri-dmg.sh`. The Flutter bullets below are 2026-06-19 history — see the dated removal entry
+  `packaging/macos/build-tauri-dmg.sh`. The Flutter bullets below are 2026-06-19 history — see the dated removal entry
   in the decisions log.**
 - **macOS NE-AnyTLS PRODUCT (Model A)** — the headline: the DMG-installed Flutter app bundles the
   `SparkTunnel.systemextension`; **one-click Connect → full-tunnel over gambit-shaped AnyTLS → IP
@@ -2641,7 +2641,7 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   `Cargo.toml`. **Kept:** `spark-backend` (binding-agnostic; used by `spark-ffi` → the Tauri plugin +
   Apple/Android), `platforms/apple` (the release DMG via `build-dmg.sh` wraps it — Flutter was never in
   the release path), all of Tauri. Verified `cargo check --workspace` clean, `Cargo.lock` has zero Flutter
-  entries. macOS product DMG is now unambiguously `build-tauri-dmg.sh`.
+  entries. macOS product DMG is now unambiguously `packaging/macos/build-tauri-dmg.sh`.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
