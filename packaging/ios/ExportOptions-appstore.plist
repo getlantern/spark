@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Manual-signing export options for the Spark iOS App Store / TestFlight build.
+
+  Why this exists: `tauri ios build --export-method app-store-connect` builds the archive fine, but its
+  own generated ExportOptions uses AUTOMATIC signing, which on a headless/CI machine (no Apple ID signed
+  into Xcode) fails `xcodebuild -exportArchive` with "No Accounts / No profiles for '...' were found" —
+  even when the profiles are installed. Exporting with MANUAL signing + an explicit bundle-id -> profile
+  map uses the local profiles and needs no account. `packaging/ios/build-testflight.sh` uses this file.
+
+  Profiles must be installed on the signing host (portal Distribution profiles for team ACZRKC3LQ9):
+  "Spark iOS App Store" (org.getlantern.spark) + "Spark Tunnel iOS App Store" (org.getlantern.spark.tunnel).
+-->
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store-connect</string>
+    <key>teamID</key>
+    <string>ACZRKC3LQ9</string>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>signingCertificate</key>
+    <string>Apple Distribution</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>org.getlantern.spark</key>
+        <string>Spark iOS App Store</string>
+        <key>org.getlantern.spark.tunnel</key>
+        <string>Spark Tunnel iOS App Store</string>
+    </dict>
+    <key>uploadSymbols</key>
+    <true/>
+    <key>destination</key>
+    <string>export</string>
+</dict>
+</plist>
