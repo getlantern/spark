@@ -89,3 +89,25 @@ Re-verified on the iPhone 16: `npm run tauri ios build --debug` builds clean, th
 bundle contains **no `.a`**, and the app installs, launches, **connects, and routes traffic** on
 device — confirming the Resources copy was dead weight (the tunnel data path is unaffected; the NE
 never used `libapp.a`).
+
+## TestFlight release build (App Store Connect) — 2026-07-24
+
+The `--debug` build above is for on-device validation. For a **TestFlight** upload, one command:
+
+```bash
+ASC_API_KEY_ID=<KEYID> ASC_ISSUER_ID=<issuer-uuid> packaging/ios/build-testflight.sh
+```
+
+(`<KEYID>` is the `AuthKey_<KEYID>.p8` in `~/.appstoreconnect/private_keys/`; `<issuer-uuid>` is App
+Store Connect → Users and Access → Integrations. The private `.p8` never enters the repo.)
+
+**Gotcha the script works around:** `tauri ios build --export-method app-store-connect` archives fine,
+but its own `exportArchive` uses **automatic** signing → on a headless machine (no Apple ID in Xcode) it
+fails with `No Accounts` / `No profiles for 'org.getlantern.spark' were found`, *even with the profiles
+installed*. The script keeps the archive Tauri built and re-exports it with a **manual**-signing
+`ExportOptions` (`packaging/ios/ExportOptions-appstore.plist`, mapping each bundle id → its App Store
+profile), which uses the local profiles and needs no account, then uploads with `altool`. Each run
+defaults `BUILD_NUMBER` to a timestamp so TestFlight never sees a duplicate.
+
+Verified 2026-07-24: **v0.1.0 build `2607241019`** built + exported + uploaded from a headless Mac
+(no Apple ID signed into Xcode) — `UPLOAD SUCCEEDED`.
