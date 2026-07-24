@@ -294,6 +294,11 @@ report" at every checkpoint.
 
 ### UI Migration Track (Flutter → Tauri v2): U0–U4
 
+> **✅ COMPLETE 2026-07-23 — this migration is DONE. Tauri is the only client; the Flutter `gui/` app,
+> its `spark-bridge`/`flutter_rust_bridge` binding, and `packaging/macos/build-gui-dmg.sh` were removed
+> (PR #117). The U0–U4 steps below are historical: "do not delete `gui/` until U4" and the
+> `build-gui-dmg.sh` references no longer apply — the macOS product DMG is `build-tauri-dmg.sh`.**
+
 > Per **ADR 0008**. Replaces the `gui/` Flutter app + its two core bindings (`flutter_rust_bridge`
 > desktop + platform-channels mobile) with one **Tauri v2** app: web frontend → Rust backend via
 > `invoke()` + events. Everything below the shell (core, netstack, transports, `ipc/`,
