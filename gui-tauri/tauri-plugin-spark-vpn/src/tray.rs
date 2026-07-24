@@ -66,6 +66,18 @@ pub(crate) fn unbounded_tray_label(enabled: bool, helping_now: usize) -> String 
     }
 }
 
+/// Status line gated on server availability: "Unbounded: unavailable" when the server gate
+/// (`features.unbounded`) is off — otherwise the normal enabled/off/helping label. The tray toggle is
+/// also disabled when unavailable, so a user can't interact with Unbounded that the server hasn't
+/// enabled for this client.
+pub(crate) fn unbounded_status_text(available: bool, enabled: bool, helping_now: usize) -> String {
+    if !available {
+        "Unbounded: unavailable".to_string()
+    } else {
+        unbounded_tray_label(enabled, helping_now)
+    }
+}
+
 /// The disabled top-of-menu header: connection status plus the selected location. A manual pin
 /// (`Some(index)`) shows that server's label; `None` is "Smart Location" — Spark auto-choosing —
 /// which is never shown for a manually picked location.
@@ -181,6 +193,22 @@ pub(crate) fn refresh<R: Runtime>(app: &AppHandle<R>) {
     let _ = handles.routing_smart.set_checked(routing == "smart");
     let _ = handles.routing_full.set_checked(routing == "full");
     let _ = handles.adblock.set_checked(adblock);
+
+    // Re-gate Unbounded on server availability + persisted enabled (Copilot #90). Only touch the
+    // deterministic states — a live "helping N" count is pushed by refresh_unbounded_label from the pool
+    // snapshot, so we must not overwrite it here (hence the `!enabled` guard on the status set).
+    let (ub_enabled, _) = read_unbounded_state(app);
+    let ub_available = crate::unbounded::unbounded_available_sync(app);
+    let _ = handles.unbounded_toggle.set_enabled(ub_available);
+    let _ = handles
+        .unbounded_toggle
+        .set_text(unbounded_toggle_label(ub_enabled));
+    if !ub_available || !ub_enabled {
+        let _ =
+            handles
+                .unbounded_status
+                .set_text(unbounded_status_text(ub_available, ub_enabled, 0));
+    }
 
     // Location check-marks: patch in place if the pool is unchanged, else rebuild the submenu's
     // children. Hold `pool_sig` across the whole rebuild so two concurrent refreshes (poll thread +
@@ -331,14 +359,18 @@ fn build_menu<R: Runtime>(
     // Unbounded (volunteer proxy): a disabled status line + an enable/disable toggle. The toggle's
     // action is decided from the live persisted state in the handler, not this id.
     let (ub_enabled, ub_helping) = read_unbounded_state(app);
+    let ub_available = crate::unbounded::unbounded_available_sync(app);
     let unbounded_status = MenuItemBuilder::with_id(
         "unbounded_status",
-        unbounded_tray_label(ub_enabled, ub_helping),
+        unbounded_status_text(ub_available, ub_enabled, ub_helping),
     )
     .enabled(false)
     .build(app)?;
+    // Disabled when the server hasn't gated Unbounded on for this client (Copilot #90): the toggle
+    // must not be interactive for a feature that isn't available to this client.
     let unbounded_toggle =
         MenuItemBuilder::with_id(MENU_UNBOUNDED_TOGGLE, unbounded_toggle_label(ub_enabled))
+            .enabled(ub_available)
             .build(app)?;
 
     let show = MenuItemBuilder::with_id("show", "Show Spark").build(app)?;
@@ -426,12 +458,15 @@ pub(crate) fn refresh_unbounded_label<R: Runtime>(
         Some(h) => h,
         None => return, // tray not built yet
     };
-    let _ = handles
-        .unbounded_status
-        .set_text(unbounded_tray_label(enabled, helping_now));
+    let available = crate::unbounded::unbounded_available_sync(app);
+    let _ =
+        handles
+            .unbounded_status
+            .set_text(unbounded_status_text(available, enabled, helping_now));
     let _ = handles
         .unbounded_toggle
         .set_text(unbounded_toggle_label(enabled));
+    let _ = handles.unbounded_toggle.set_enabled(available);
 }
 
 /// Tray menu-event handler: run the corresponding control action, then refresh + notify the window.

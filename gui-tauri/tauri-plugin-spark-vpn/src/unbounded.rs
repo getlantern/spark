@@ -359,6 +359,15 @@ pub(crate) async fn unbounded_available<R: Runtime>(app: AppHandle<R>) -> crate:
     Ok(read_unbounded_config(&app)?.is_available())
 }
 
+/// Synchronous availability check for the tray, which builds/refreshes on the main thread and can't
+/// await the `unbounded_available` command. Same source (the cached config's `is_available()`); a
+/// missing/unreadable config — e.g. before the first fetch — reports `false`.
+pub(crate) fn unbounded_available_sync<R: Runtime>(app: &AppHandle<R>) -> bool {
+    read_unbounded_config(app)
+        .map(|c| c.is_available())
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 pub(crate) async fn unbounded_get_settings<R: Runtime>(
     app: AppHandle<R>,

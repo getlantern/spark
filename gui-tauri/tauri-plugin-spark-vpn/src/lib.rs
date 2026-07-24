@@ -213,20 +213,22 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     }
                 });
 
-                // Gated startup auto-enable for Unbounded (volunteer proxy). Two gates, both must
-                // pass: (1) the user opted in (`auto_enable`, default false — see persist.rs), and
+                // Gated startup for Unbounded (volunteer proxy). Two gates, both must pass:
+                // (1) the user's persisted on/off state (`unbounded_enabled`, default false — written when
+                // the user toggles Unbounded; this is the state the UI + tray read, so resuming it here is
+                // what keeps a restart from showing "enabled" while nothing runs — Copilot #90), and
                 // (2) the server allows it AND the config carries the endpoints to dial
-                // (`unbounded_available`, backed by `features.unbounded` + the `unbounded` block —
-                // Task 7.1). `unbounded_start` self-gates on the same availability check, but check
-                // it explicitly here so we don't even spawn the task when the feature is off, and so
-                // the "skipped" log distinguishes not-available from a real start failure. Detached
-                // so it can't block startup or the window.
+                // (`unbounded_available`, backed by `features.unbounded` + the `unbounded` block). The
+                // separate `unbounded_auto_enable` preference does NOT gate this resume path. `unbounded_start`
+                // self-gates on the same availability check, but check it explicitly here so we don't even
+                // spawn the task when the feature is off, and so the "skipped" log distinguishes
+                // not-available from a real start failure. Detached so it can't block startup or the window.
                 let handle = app.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let Ok(base) = handle.path().app_config_dir() else {
                         return;
                     };
-                    if !crate::persist::load_unbounded_auto_enable(&base) {
+                    if !crate::persist::load_unbounded_enabled(&base) {
                         return;
                     }
                     match unbounded::unbounded_available(handle.clone()).await {
