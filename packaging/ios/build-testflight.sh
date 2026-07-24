@@ -22,8 +22,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+# Fail fast on missing prereqs — clearer than a mid-run `set -e` abort deep inside the Xcode build.
+for tool in xcodebuild xcrun npx; do
+    command -v "$tool" >/dev/null 2>&1 \
+        || { echo "required tool not on PATH: $tool (need Xcode Command Line Tools + Node/npm)" >&2; exit 1; }
+done
+
 : "${ASC_API_KEY_ID:?set ASC_API_KEY_ID (the KEYID in ~/.appstoreconnect/private_keys/AuthKey_KEYID.p8)}"
 : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect issuer UUID)}"
+# CFBundleVersion. Default: a yymmddHHMM timestamp — monotonic and a single integer that stays under
+# the App Store 32-bit-per-component limit (a finer yymmddHHMMSS would overflow it). It's minute-granular,
+# so to upload twice within the same minute, set BUILD_NUMBER explicitly to a higher value (App Store
+# Connect rejects a duplicate or lower build number for a given marketing version).
 BUILD_NUMBER="${BUILD_NUMBER:-$(date +%y%m%d%H%M)}"
 
 BUILD_DIR="gui-tauri/src-tauri/gen/apple/build"
