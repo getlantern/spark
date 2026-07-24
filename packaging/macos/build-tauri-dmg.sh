@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a signed + notarized Spark.app / DMG from the Tauri UI (gui-tauri), embedding the
-# org.getlantern.spark.tunnel system extension — the NE Model A product (ADR 0008). The Tauri
-# analogue of build-gui-dmg.sh (which does the same for the retired Flutter GUI).
+# org.getlantern.spark.tunnel system extension — the NE Model A product (ADR 0008). This is the macOS
+# product DMG (the former Flutter build-gui-dmg.sh was removed; Tauri is the single cross-platform UI).
 #
 # Env knobs:
 #   SIGN_IDENTITY   Developer ID Application identity (auto-detected from the keychain otherwise)

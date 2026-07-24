@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "spark-bridge", "dns-tunnel-core", "dns-tunnel-server", "bip324-core"]
+members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "dns-tunnel-core", "dns-tunnel-server", "bip324-core"]
 # Kept out of the workspace on purpose:
 #  - vendor/netstack-smoltcp: depended on by `path`, but its examples/tests/dev-deps
 #    (tun2, structopt, socket2-ext, …) should not be built as part of our workspace.
@@ -118,11 +118,6 @@ webpki-roots = "1"
 # BoringSSL's default verify paths don't resolve the OS trust store (verified: a direct fetch fails
 # CERTIFICATE_VERIFY_FAILED on the Android emulator without it). Same release line as webpki-roots.
 webpki-root-certs = "1"
-# flutter_rust_bridge: generates the Dart<->Rust bridge for the desktop Flutter GUI (`gui/`). Used
-# ONLY by `spark-bridge`; never linked into core/cli/service. Pinned to EXACTLY match the codegen CLI
-# (`flutter_rust_bridge_codegen`) and the Dart `flutter_rust_bridge` package — all three must be the
-# same version or the generated glue mismatches the runtime at load time (not a compile error).
-flutter_rust_bridge = "=2.12.0"
 # Release profile. Profiles only take effect from the workspace root, so they live here, not in
 # member manifests. opt-level=3 (not "z"): the netns throughput benchmark (bench/, 2026-06-17) showed
 # "z" roughly HALVES data-path throughput — "z" disables the inlining/vectorization the smoltcp

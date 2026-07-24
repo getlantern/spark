@@ -18,6 +18,10 @@ What's DONE (this and prior sessions; all on `main`, pushed):
   (`.github/workflows/anchor-drift.yml`) — **full JA4 parity with live Chrome, CI-verified**.
 - **Live gates PASSED on macOS:** AnyTLS over both anytls-go (reference) *and* **sing-box** (production),
   **TCP + UDP/UoT**; egress = the relay.
+- **⚠️ SUPERSEDED 2026-07-23 — the Flutter `gui/` app was REMOVED. Tauri (`gui-tauri/`) is the single
+  cross-platform UI (desktop Win/macOS/Linux + Android + iOS-on-TestFlight); the macOS product DMG is
+  `packaging/macos/build-tauri-dmg.sh`. The Flutter bullets below are 2026-06-19 history — see the dated removal entry
+  in the decisions log.**
 - **macOS NE-AnyTLS PRODUCT (Model A)** — the headline: the DMG-installed Flutter app bundles the
   `SparkTunnel.systemextension`; **one-click Connect → full-tunnel over gambit-shaped AnyTLS → IP
   changes to the relay** (verified 2026-06-19 at whatismyipaddress.com), no service/sudo/manual routes.
@@ -2626,6 +2630,18 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   --all-targets --all-features` green. (Branch cut clean from merged `main` — a cross-session tangle had
   duplicated #115's trust-doc commit onto the earlier branch; abandoned it.) Remaining: the config-channel
   *distribution* step itself (unbuilt — the real next piece).
+- 2026-07-23 (UI: removed the dead Flutter `gui/` app — Tauri is the single UI): the June `gui/` Flutter
+  spike (Model A, macOS-only, last touched 2026-06-19) had gone dormant while ALL cross-platform product
+  work continued on **Tauri** (`gui-tauri/`): Windows MSI + macOS DMG + Android + **iOS on TestFlight**,
+  plus every July feature (desktop tray, Windows routing, split-tunnel, settings, i18n, the unbounded
+  `spark-sharing`/"Unbounded tab" work). Two live UIs in the tree caused real confusion (a session built
+  the wrong DMG via `build-gui-dmg.sh`). Removed: `gui/`, the Flutter-only `spark-bridge` crate (a
+  `flutter_rust_bridge` wrapper with **zero** consumers), `packaging/macos/build-gui-dmg.sh`,
+  `flutter_rust_bridge.yaml`, and the `spark-bridge` member + `flutter_rust_bridge` dep from the root
+  `Cargo.toml`. **Kept:** `spark-backend` (binding-agnostic; used by `spark-ffi` → the Tauri plugin +
+  Apple/Android), `platforms/apple` (the release DMG via `build-dmg.sh` wraps it — Flutter was never in
+  the release path), all of Tauri. Verified `cargo check --workspace` clean, `Cargo.lock` has zero Flutter
+  entries. macOS product DMG is now unambiguously `packaging/macos/build-tauri-dmg.sh`.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
