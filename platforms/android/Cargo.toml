@@ -14,6 +14,15 @@ name = "spark_android"
 crate-type = ["cdylib"]
 path = "src/lib.rs"
 
+[features]
+# Dynamic-transport runtime (ADR 0013 §7). Opt-in, NOT in the baked Android feature set below: a
+# *release* build with `wasm-transport` refuses the dev module-signing key (fail-closed), so build with
+# these only when a production module-signing pubkey is pinned via SPARK_MODULE_PUBKEY_HEX. Pass
+# `--features bip324` from the cargoNdkBuild features config to ship a signed bip324/obfs-xor module
+# (secp256k1 cross-compiles for Android via cargo-ndk).
+wasm-transport = ["spark-core/wasm-transport"]
+bip324 = ["spark-core/bip324"]
+
 [dependencies]
 spark-core = { path = "../../core" }
 

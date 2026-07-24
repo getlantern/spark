@@ -7,6 +7,11 @@ metadata:
   originSessionId: b2538e8f-ad8a-4bf8-9b44-09f600c6d2c8
 ---
 
+> **⚠️ SUPERSEDED 2026-07-23.** The Flutter direction below was NOT taken. Per **ADR 0008**, the product
+> GUI is **Tauri** (`gui-tauri/`) — one cross-platform shell (desktop Win/macOS/Linux + Android + iOS on
+> TestFlight). The Flutter `gui/` spike and its `spark-bridge` binding were removed (see `docs/STATE.md`).
+> Still accurate below: **`spark-backend`** is the UI-agnostic control crate every frontend wraps (kept).
+
 Spark needs a product GUI (no real one exists yet — only the macOS NE harness `platforms/apple/Sources/SparkApp` and the Android M9 demo `platforms/android/demo`). Direction as of 2026-06-18:
 
 - **Mobile support is a firm requirement** — this is the deciding constraint. It rules out Dioxus (mobile is experimental/not production-grade) and favors Flutter (mature desktop + iOS/Android, one codebase).

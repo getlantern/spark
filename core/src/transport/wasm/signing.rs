@@ -235,6 +235,33 @@ pub fn sign_artifact(
     build_artifact(name, version, wasm, &sig)
 }
 
+/// Generate a fresh Ed25519 **module-signing keypair**, PKCS#8-encoded — the `sign-module keygen`
+/// operation. The returned bytes are the *private* key: write them to secret storage (never the repo),
+/// sign modules with them via [`sign_artifact`], and pin the matching public key
+/// ([`public_key_hex`]) into the client build with `SPARK_MODULE_PUBKEY_HEX`. Compiled only under the
+/// off-by-default `module-signer` feature, so no shipped binary can mint a signing key.
+#[cfg(feature = "module-signer")]
+pub fn generate_keypair_pkcs8() -> Result<Vec<u8>, ring::error::Unspecified> {
+    let rng = ring::rand::SystemRandom::new();
+    Ok(ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)?
+        .as_ref()
+        .to_vec())
+}
+
+/// The 64-hex-char Ed25519 public key of `keypair` — the value to set as `SPARK_MODULE_PUBKEY_HEX` so a
+/// release build trusts modules signed by this key (see [`SPARK_MODULE_PUBKEY`]). Only the public half.
+#[cfg(feature = "module-signer")]
+pub fn public_key_hex(keypair: &ring::signature::Ed25519KeyPair) -> String {
+    use ring::signature::KeyPair;
+    const HEX: [u8; 16] = *b"0123456789abcdef";
+    let mut s = String::with_capacity(PUBKEY_LEN * 2);
+    for byte in keypair.public_key().as_ref() {
+        s.push(HEX[(byte >> 4) as usize] as char);
+        s.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::testutil::XOR_WAT;
@@ -279,6 +306,33 @@ mod tests {
         let mut t = signed.module().instantiate().expect("instantiate");
         let wire = t.transform_out(b"hi there").expect("out");
         assert_eq!(t.transform_in(&wire).expect("in"), b"hi there");
+    }
+
+    /// The production-key flow end to end: `keygen` mints a keypair, `public_key_hex` yields the value
+    /// that would be pinned via `SPARK_MODULE_PUBKEY_HEX`, a module signed by that key verifies under a
+    /// verifier built from the hex, and a different key's verifier rejects it.
+    #[cfg(feature = "module-signer")]
+    #[test]
+    fn generated_keypair_signs_a_module_and_its_pubkey_hex_verifies() {
+        let pkcs8 = generate_keypair_pkcs8().expect("generate key");
+        let kp = Ed25519KeyPair::from_pkcs8(&pkcs8).expect("parse generated key");
+        let hex = public_key_hex(&kp);
+        assert_eq!(hex.len(), 64, "pubkey hex is 64 chars (32 bytes)");
+        // The hex round-trips to the raw pubkey the verifier pins.
+        assert_eq!(parse_pubkey_hex(&hex), public_key(&kp));
+
+        let artifact = sign_artifact(&kp, "obfs-xor", 1, &xor_wasm());
+        ModuleVerifier::new(parse_pubkey_hex(&hex))
+            .verify(&artifact, 0)
+            .expect("the keygen'd pubkey accepts its own signature");
+        // A verifier for a different key rejects the artifact. (`SignedModule` isn't `Debug`, so map
+        // the Ok away before `expect_err`.)
+        let other = Ed25519KeyPair::from_pkcs8(&generate_keypair_pkcs8().expect("generate key"))
+            .expect("parse other key");
+        ModuleVerifier::new(public_key(&other))
+            .verify(&artifact, 0)
+            .map(|_| ())
+            .expect_err("a different pubkey must reject the signature");
     }
 
     #[test]

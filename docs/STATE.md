@@ -18,6 +18,10 @@ What's DONE (this and prior sessions; all on `main`, pushed):
   (`.github/workflows/anchor-drift.yml`) — **full JA4 parity with live Chrome, CI-verified**.
 - **Live gates PASSED on macOS:** AnyTLS over both anytls-go (reference) *and* **sing-box** (production),
   **TCP + UDP/UoT**; egress = the relay.
+- **⚠️ SUPERSEDED 2026-07-23 — the Flutter `gui/` app was REMOVED. Tauri (`gui-tauri/`) is the single
+  cross-platform UI (desktop Win/macOS/Linux + Android + iOS-on-TestFlight); the macOS product DMG is
+  `packaging/macos/build-tauri-dmg.sh`. The Flutter bullets below are 2026-06-19 history — see the dated removal entry
+  in the decisions log.**
 - **macOS NE-AnyTLS PRODUCT (Model A)** — the headline: the DMG-installed Flutter app bundles the
   `SparkTunnel.systemextension`; **one-click Connect → full-tunnel over gambit-shaped AnyTLS → IP
   changes to the relay** (verified 2026-06-19 at whatismyipaddress.com), no service/sudo/manual routes.
@@ -2606,6 +2610,72 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   shipped as a signed WASM module + config, wire-compatible with the reference, deployable to an unchanged
   client — the north star demonstrated. Remaining framework work = §7 step 5 (non-Chrome anchors + STARTTLS
   proof), independent of BIP324.
+- 2026-07-21 (ADR 0013 §7 — PR4d = productionize the bip324 build wiring): step 4's code was merged but no
+  product build could *enable* it — `cli`/`service`/`platforms/apple`/`platforms/android` had no
+  `bip324`/`wasm-transport` passthrough, and no build feature-list carried it (found while answering "how do
+  I build with all the new features"). PR4d adds `wasm-transport` + `bip324` passthrough features to all four.
+  **Enablement is opt-in by necessity:** the module-signing guard (`signing.rs`) makes a *release* build with
+  `wasm-transport` a **compile error** unless a production pubkey is pinned via `SPARK_MODULE_PUBKEY_HEX` — it
+  fail-closes rather than trust the repo's dev key. So `build-xcframework.sh` enables `bip324` **only when
+  `SPARK_MODULE_PUBKEY_HEX` is set**, leaving the default product build unchanged; Android/CLI/service take
+  `--features bip324` + the env var. Verified: release+bip324 fails without the key (guard fires) and compiles
+  with it; secp256k1 cross-compiles for `aarch64-apple-ios`; default builds + clippy/fmt unaffected. Design
+  doc §7 carries the **ship runbook** (generate prod keypair → `SPARK_MODULE_PUBKEY_HEX` → sign module with
+  the private half → distribute). **Chosen scope (user):** enablement + runbook only — standing up the
+  production module-signing keypair + its custody/CI wiring is a separate ops step, not this PR. The dev
+  pubkey hex (test builds only) is `722b9b0fa61a50b2031547d314df26c57f720dc9779387e0d0a0273481e0f9d5`.
+- 2026-07-21 (ADR 0013 §7 — PR4e = module-signing keygen + signing tooling): scaffolded the production
+  key path PR4d flagged. `sign-module` grew from a flat signer into `sign | keygen | pubkey` subcommands:
+  `keygen --out k.pkcs8` mints an Ed25519 PKCS#8 key (0600 on unix; warns to lock down elsewhere) and prints its pubkey hex on stdout;
+  `pubkey (--dev | --key-pkcs8)` re-derives the `SPARK_MODULE_PUBKEY_HEX` for any key; `sign` is the old
+  flow (the committed `--dev` fixtures still regenerate byte-identically — Ed25519 is deterministic).
+  `build-module.sh` now signs with a production key when `MODULE_SIGNING_KEY=<pkcs8>` is set, else `--dev`.
+  Lib helpers `generate_keypair_pkcs8()` + `public_key_hex(&keypair)` added to signing.rs (module-signer
+  gated, exported), with a round-trip test: keygen → pubkey hex → sign a module → a verifier built from
+  that hex accepts it, a different key rejects it. 677 `--workspace --all-features` green; clippy/fmt clean.
+  Design doc §7 runbook now carries the concrete commands. **Only real custody remains** (theirs): generate
+  the actual keypair on a trusted host, vault the private half, and set the **public** key as the
+  `SPARK_MODULE_PUBKEY_HEX` CI variable (see PR4f below — the private key stays offline, never in CI).
+  `sign-module`/helpers stay behind `module-signer`, never in a shipped binary.
+- 2026-07-22 (ADR 0013 §7 — PR4f = CI wiring for the module-signing PUBLIC key): wired `release.yml` to
+  ship bip324. **Design (user's steer): only the PUBLIC key goes to GitHub — as a repo *variable*
+  (`vars.SPARK_MODULE_PUBKEY_HEX`), since it's public; the PRIVATE key + module signing stay OFFLINE and
+  never touch CI** ("sign offline, verify everywhere"). When the variable is set, the release build compiles
+  the CLI/service with `--features bip324` (`-p spark-cli -p spark-service --features bip324`, the form that
+  resolves cleanly — `--bin … --features bip324` errors on bip324-core) and pins the pubkey; unset → the
+  previous smaller default. **Size finding:** bip324 adds ~2 MiB/binary (wasmi + secp256k1) — spark 2.2→4.2,
+  spark-service 2.9→4.85 MiB (macOS) — so the release size gate is now conditional: 3 MiB default, 6 MiB
+  when bip324 is on. User chose "every release ships bip324 when the pubkey var is set." Docs §7 runbook
+  updated: `gh variable set SPARK_MODULE_PUBKEY_HEX`, offline signing with `MODULE_SIGNING_KEY`. The single
+  remaining human step is generating the real keypair + setting that variable (I don't mint/hold the prod
+  key). The `size-budget.sh` gate is unchanged (it guards the default no-bip324 build).
+- 2026-07-23 (ADR 0013 §7 — `build-module.sh` OUT_DIR + `sign-module verify`, #116): the module-distribution
+  tooling the runbook (#113) + trust design (#115) listed as pending. Two changes: (1)
+  `build-module.sh` now routes PRODUCTION signing (`MODULE_SIGNING_KEY` set) to `OUT_DIR` (default
+  `dist/modules/`, gitignored) instead of the committed dev fixtures — closes the footgun where the runbook's
+  prod step would have overwritten `core/tests/fixtures/wasm/*.spkw` (the dev-key fixtures the debug tests
+  verify) and dirtied the tree; dev-mode (no key) still regenerates the fixtures byte-identically. (2)
+  `sign-module` grew a fourth subcommand `verify <spkw> --pubkey-hex <hex>` — runs the exact client check
+  (`ModuleVerifier::verify`, `min_version` 0) so an operator can confirm a `.spkw` validates under the pinned
+  pubkey before distributing (runbook step C). Validated: prod-mode run with a throwaway key wrote
+  `dist/modules/{obfs-xor,bip324}.spkw`, fixtures stayed git-clean, `verify` OK under the throwaway pubkey and
+  FAIL (exit 1) under a wrong one. Docs squared: runbook step B/C + open-work, trust-doc producer-flow +
+  work-breakdown checkbox, and §7 step 3 all now say the tooling exists. CI-exact `clippy --workspace
+  --all-targets --all-features` green. (Branch cut clean from merged `main` — a cross-session tangle had
+  duplicated #115's trust-doc commit onto the earlier branch; abandoned it.) Remaining: the config-channel
+  *distribution* step itself (unbuilt — the real next piece).
+- 2026-07-23 (UI: removed the dead Flutter `gui/` app — Tauri is the single UI): the June `gui/` Flutter
+  spike (Model A, macOS-only, last touched 2026-06-19) had gone dormant while ALL cross-platform product
+  work continued on **Tauri** (`gui-tauri/`): Windows MSI + macOS DMG + Android + **iOS on TestFlight**,
+  plus every July feature (desktop tray, Windows routing, split-tunnel, settings, i18n, the unbounded
+  `spark-sharing`/"Unbounded tab" work). Two live UIs in the tree caused real confusion (a session built
+  the wrong DMG via `build-gui-dmg.sh`). Removed: `gui/`, the Flutter-only `spark-bridge` crate (a
+  `flutter_rust_bridge` wrapper with **zero** consumers), `packaging/macos/build-gui-dmg.sh`,
+  `flutter_rust_bridge.yaml`, and the `spark-bridge` member + `flutter_rust_bridge` dep from the root
+  `Cargo.toml`. **Kept:** `spark-backend` (binding-agnostic; used by `spark-ffi` → the Tauri plugin +
+  Apple/Android), `platforms/apple` (the release DMG via `build-dmg.sh` wraps it — Flutter was never in
+  the release path), all of Tauri. Verified `cargo check --workspace` clean, `Cargo.lock` has zero Flutter
+  entries. macOS product DMG is now unambiguously `packaging/macos/build-tauri-dmg.sh`.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

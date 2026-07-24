@@ -261,6 +261,49 @@ as a signed WASM module + config, crypto entirely via host primitives, wire-comp
 deployable to an unchanged client. The north star, demonstrated. Remaining framework work is §7 step 5
 (non-Chrome anchors + a STARTTLS proof), independent of BIP324.
 
+**PR4d landed (2026-07-21): productionize — wire `bip324` into the shippable product builds.** Step 4's
+code was merged but no product build could *enable* it: `cli`/`service`/`platforms/apple`/`platforms/android`
+had no `bip324`/`wasm-transport` passthrough, and none of the build feature-lists carried it. PR4d adds the
+`wasm-transport` + `bip324` passthrough features to all four, so a client can be built with the dynamic
+transport runtime + secp256k1 primitives + splitting egress. **It's opt-in**, because the module-signing
+guard (`signing.rs`) makes it a key-custody step, not just a flag: a *release* build with `wasm-transport`
+refuses to fall back to the repo's dev module-signing key and requires the production pubkey pinned via
+`SPARK_MODULE_PUBKEY_HEX` (a 64-hex-char Ed25519 key; a `None` in release is a compile error — fail-closed,
+so a leaked dev key can't become a module-injection vector). `build-xcframework.sh` therefore enables
+`bip324` *only when* `SPARK_MODULE_PUBKEY_HEX` is set, leaving the default product build byte-identical.
+
+**Shipping a BIP324 (or any dynamic-transport) module — the runbook** (tooling is the `sign-module`
+subcommands, behind the `module-signer` feature; PR4e):
+1. **Mint a production module-signing keypair** — the private half goes to secret storage, never the repo
+   (the committed `.spkw` fixtures use the *dev* key, for tests only). The command prints the pubkey hex:
+   ```
+   cargo run -p spark-core --features module-signer --bin sign-module -- keygen --out prod-module.pkcs8
+   # → prints SPARK_MODULE_PUBKEY_HEX=<64 hex>   (stdout is the bare hex, for scripting)
+   ```
+2. **Bake the public half into the client at build time** by pinning `SPARK_MODULE_PUBKEY_HEX=<64 hex>`.
+   In **CI**, set it as a **repo variable** (it's a *public* key — a variable, not a secret):
+   `gh variable set SPARK_MODULE_PUBKEY_HEX --repo getlantern/spark --body <hex>`. `release.yml` then builds
+   the CLI/service with `--features bip324` on every release (and `build-xcframework.sh` auto-adds it to the
+   Apple slices); until the variable is set, releases build the smaller default (no wasm runtime). Locally,
+   `export SPARK_MODULE_PUBKEY_HEX=<hex>`. (`sign-module pubkey --key-pkcs8 prod-module.pkcs8` re-derives it.)
+3. **Sign the module OFFLINE** with the production *private* key — `MODULE_SIGNING_KEY=prod-module.pkcs8 bash
+   scripts/build-module.sh` (or `sign-module sign --key-pkcs8 …`). With `MODULE_SIGNING_KEY` set, the script
+   writes to `OUT_DIR` (default `dist/modules/`, gitignored) — **never** the committed dev fixtures. **The
+   private key never goes to GitHub**: signing is a rare, high-stakes act done on the trusted host that holds
+   the key (or an HSM), so CI carries only the public key. This "sign offline, verify everywhere" split keeps
+   the private key off CI's attack surface entirely. Before shipping, confirm the artifact validates under
+   the pinned pubkey: `sign-module verify dist/modules/<mod>.spkw --pubkey-hex $SPARK_MODULE_PUBKEY_HEX`.
+4. **Distribute** the signed module + its config over the existing signed config/fronting channel; an
+   already-shipped client that pinned the matching pubkey loads it — **no client release**.
+
+The step-by-step operator procedure (Vault key retrieval, custody hygiene) lives in
+[`prod-module-signing-runbook.md`](./prod-module-signing-runbook.md); the config-channel *distribution*
+design and the multi-signer trust roadmap are in [`module-distribution-and-trust-design.md`](./module-distribution-and-trust-design.md).
+
+The remaining ops step is purely custody: generate the real keypair on a trusted host, store the private
+half in a vault, set the **public** key as the `SPARK_MODULE_PUBKEY_HEX` CI variable, and sign modules
+offline with the private half — it is never uploaded anywhere.
+
 ## 8. Tradeoffs (stated plainly)
 
 - **Opaque engine params** → the core can't validate or GA-optimize protocol-specific fields; the

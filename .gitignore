@@ -11,3 +11,6 @@
 # Live fetched config with real secrets — copied in for manual transport diagnostics, never commit.
 config_raw.json
 **/config_raw.json
+
+# Production module-signing private keys — never commit (lives in Vault: secret/lantern_cloud/spark)
+*.pkcs8

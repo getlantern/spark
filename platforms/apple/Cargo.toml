@@ -45,6 +45,13 @@ fronted-meek = ["spark-core/fronted-meek"]
 # smart_routing/ad_block/route sections, and kindling-fetched .srs rule-sets. Inert unless the fetched
 # config carries rules; the rule-set fetch + lantern-api path ride `config-fetch` (already on).
 smart-routing = ["spark-core/smart-routing"]
+# Dynamic-transport runtime (ADR 0013 §7): the wasmi host for signed byte-transform modules, plus
+# `bip324` (which implies it) adding the secp256k1 host primitives + splitting egress, so the NE
+# provider can run a signed bip324/obfs-xor module delivered by config — no app release. secp256k1
+# cross-compiles for the iOS + macOS slices (verified), so this rides the darwin build alongside the
+# transports above; `build-xcframework.sh` enables `bip324` for the shipped slices.
+wasm-transport = ["spark-core/wasm-transport"]
+bip324 = ["spark-core/bip324"]
 
 [dependencies]
 spark-core = { path = "../../core" }
