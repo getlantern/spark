@@ -26,6 +26,11 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tokio-util = "0.7"
 webpki-roots = "1"
 
+[dev-dependencies]
+# `test-util` adds tokio's mock clock (pause/advance) so the geo-lookup timeout is asserted without a
+# real 5-second wait. Test-only — never compiled into the shipped crate.
+tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }
+
 [profile.release]
 opt-level = 3
 lto = "fat"

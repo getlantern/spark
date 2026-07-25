@@ -19,6 +19,11 @@ use tokio_rustls::TlsConnector;
 const GEO_HOST: &str = "geo.getiantem.org";
 const GEO_PORT: u16 = 443;
 const MAX_GEO_RESPONSE_BYTES: usize = 64 * 1024;
+/// Whole-lookup deadline (connect + TLS + request + read). Geo is decorative — a slow host must
+/// never hold up the sharing event loop that awaits this.
+const GEO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Upper bound on remembered lookups (successes and failures). See [`GeoResolver`].
+const MAX_CACHE_ENTRIES: usize = 512;
 
 /// An approximate geographic location for a peer, as returned by the geo service.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,9 +48,14 @@ type Fetcher = Box<
     dyn Fn(IpAddr) -> Pin<Box<dyn Future<Output = Result<String, GeoError>> + Send>> + Send + Sync,
 >;
 
-/// Resolves peer IPs to approximate locations, caching each result for the process lifetime.
+/// Resolves peer IPs to approximate locations, memoizing successes AND failures.
+///
+/// The cache is bounded ([`MAX_CACHE_ENTRIES`]): besides capping memory in a process that can run
+/// for weeks, it bounds how long the volunteer's RAM holds the addresses of the censored users it
+/// served. Caching failures matters as much as caching hits — without it, a geo service that is down
+/// costs a full DNS+TCP+TLS round trip on *every* peer join rather than one per address.
 pub struct GeoResolver {
-    cache: Mutex<HashMap<IpAddr, Geo>>,
+    cache: Mutex<HashMap<IpAddr, Option<Geo>>>,
     fetch: Fetcher,
 }
 
@@ -72,29 +82,45 @@ impl GeoResolver {
     /// Resolves `ip` to a [`Geo`], returning `None` on any cache miss that cannot be filled.
     ///
     /// The cache lock is released before the network fetch and re-acquired only to insert,
-    /// so no guard is ever held across an `.await`.
+    /// so no guard is ever held across an `.await`. The fetch is bounded by [`GEO_TIMEOUT`]:
+    /// callers drive this from the sharing event loop, so an unbounded wait here would stall peer
+    /// accounting, the tray label, and the UI for as long as the geo host stays unresponsive.
     pub async fn resolve(&self, ip: IpAddr) -> Option<Geo> {
+        // A non-global address can only ever come back empty — don't spend a round trip on it.
+        if !is_geo_lookupable(ip) {
+            return None;
+        }
         // Recover from a poisoned cache lock (via `into_inner`) instead of skipping the cache — a
         // poison must not silently turn every lookup into a fresh network request. The guard is
-        // scoped so it is released before the `.await` below (never held across it).
+        // scoped so it is released before the `.await` below (never held across it). A cached `None`
+        // is a remembered failure and short-circuits just like a hit.
         {
             let cache = self
                 .cache
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if let Some(geo) = cache.get(&ip) {
-                return Some(geo.clone());
+            if let Some(entry) = cache.get(&ip) {
+                return entry.clone();
             }
         }
 
-        let body = (self.fetch)(ip).await.ok()?;
-        let geo = parse_geo(&body).ok()?;
+        let geo = match tokio::time::timeout(GEO_TIMEOUT, (self.fetch)(ip)).await {
+            Ok(Ok(body)) => parse_geo(&body).ok(),
+            // Fetch error, or the timeout elapsed: remember the failure either way.
+            Ok(Err(_)) | Err(_) => None,
+        };
 
-        self.cache
+        let mut cache = self
+            .cache
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(ip, geo.clone());
-        Some(geo)
+            .unwrap_or_else(|poison| poison.into_inner());
+        // Crude bound: clear wholesale at the cap rather than pull in an LRU dependency. The cap is
+        // far above the plausible live-peer count, so a reset costs at most one re-lookup per peer.
+        if cache.len() >= MAX_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(ip, geo.clone());
+        geo
     }
 }
 
@@ -104,31 +130,79 @@ impl Default for GeoResolver {
     }
 }
 
+/// Look up a key case-insensitively. The geo service emits PascalCase (`Country`, `IsoCode`,
+/// `Location`, `Latitude`), but be lenient so a future casing change on the service — or a
+/// hand-written fixture — doesn't silently turn every lookup into `None` again.
+fn get_ci<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    value.get(key).or_else(|| {
+        value
+            .as_object()?
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v)
+    })
+}
+
 fn parse_geo(body: &str) -> Result<Geo, GeoError> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|error| GeoError::Parse(error.to_string()))?;
-    let country_code = value
-        .get("country")
-        .and_then(|country| country.get("iso_code"))
+    let country_code = get_ci(&value, "Country")
+        .and_then(|country| get_ci(country, "IsoCode"))
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| GeoError::Parse("missing country.iso_code".into()))?
+        .ok_or_else(|| GeoError::Parse("missing Country.IsoCode".into()))?
         .to_owned();
-    let location = value
-        .get("location")
-        .ok_or_else(|| GeoError::Parse("missing location".into()))?;
-    let lat = location
-        .get("latitude")
+    // The service answers 200 with an all-empty record for an address it can't place (verified
+    // against a private IP), so an empty ISO code means "unresolved", not "resolved to nowhere".
+    if country_code.is_empty() {
+        return Err(GeoError::Parse("empty Country.IsoCode".into()));
+    }
+    let location =
+        get_ci(&value, "Location").ok_or_else(|| GeoError::Parse("missing Location".into()))?;
+    let lat = get_ci(location, "Latitude")
         .and_then(serde_json::Value::as_f64)
-        .ok_or_else(|| GeoError::Parse("missing location.latitude".into()))?;
-    let lon = location
-        .get("longitude")
+        .ok_or_else(|| GeoError::Parse("missing Location.Latitude".into()))?;
+    let lon = get_ci(location, "Longitude")
         .and_then(serde_json::Value::as_f64)
-        .ok_or_else(|| GeoError::Parse("missing location.longitude".into()))?;
+        .ok_or_else(|| GeoError::Parse("missing Location.Longitude".into()))?;
+    // Same sentinel on the coordinates: the empty record carries 0/0, which as a real position is
+    // open ocean in the Gulf of Guinea. Treat it as unresolved rather than pinning a phantom arc.
+    if lat == 0.0 && lon == 0.0 {
+        return Err(GeoError::Parse("null island (0,0) coordinates".into()));
+    }
     Ok(Geo {
         country_code,
         lat,
         lon,
     })
+}
+
+/// Whether `ip` is worth sending to the geo service. A peer's selected ICE candidate is legitimately
+/// a LAN host candidate when peer and volunteer share a network (or a CGNAT address), which the
+/// service can only answer "unknown" for — so skip it rather than spend a round trip on the join
+/// path and disclose the local addressing.
+fn is_geo_lookupable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || o[0] == 100 && (o[1] & 0xc0) == 64 // 100.64.0.0/10 CGNAT
+                || o[0] == 0)
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.octets()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe) == 0xfc // fc00::/7 unique-local
+                || (first == 0xfe && (v6.octets()[1] & 0xc0) == 0x80))
+            // fe80::/10 link-local
+        }
+    }
 }
 
 /// A process-wide TLS connector for geo lookups, built once from the webpki roots and reused.
@@ -241,40 +315,102 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
+    /// A REAL geo-service response (captured from `GET /lookup/` for an Iranian address, trimmed to
+    /// the fields we read plus the `RepresentedCountry` decoy). The wire format is PascalCase — a
+    /// hand-written lowercase fixture is what previously let a key-casing bug ship green, silently
+    /// resolving every peer to `None`.
+    const REAL_GEO_BODY: &str = r#"{"Country":{"Names":{"en":"Iran"},"IsoCode":"IR","GeoNameID":130758,"IsInEuropeanUnion":false},"Location":{"TimeZone":"Asia/Tehran","Latitude":35.698,"Longitude":51.4115,"MetroCode":0,"AccuracyRadius":1000},"RepresentedCountry":{"Names":null,"IsoCode":"","Type":"","GeoNameID":0,"IsInEuropeanUnion":false}}"#;
+
+    /// The service's "couldn't place this address" answer: HTTP 200 with an empty record.
+    const UNKNOWN_GEO_BODY: &str = r#"{"Country":{"Names":null,"IsoCode":"","GeoNameID":0},"Location":{"Latitude":0,"Longitude":0}}"#;
+
+    /// A routable address, so `is_geo_lookupable` doesn't short-circuit before the fetcher.
+    fn global_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))
+    }
+
     #[tokio::test]
-    async fn caches_and_parses() {
+    async fn caches_and_parses_real_service_body() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c = calls.clone();
-        // fetch_fn returns the raw geo-service JSON body for an IP
         let resolver = GeoResolver::with_fetcher(move |_ip| {
             c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async {
-                Ok::<_, GeoError>(r#"{"country":{"iso_code":"IR"},"location":{"latitude":35.7,"longitude":51.4}}"#.to_string())
-            })
+            Box::pin(async { Ok::<_, GeoError>(REAL_GEO_BODY.to_string()) })
         });
-        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
-        let g = resolver.resolve(ip).await;
+        let g = resolver.resolve(global_ip()).await;
         assert_eq!(
             g,
             Some(Geo {
                 country_code: "IR".into(),
-                lat: 35.7,
-                lon: 51.4
-            })
+                lat: 35.698,
+                lon: 51.4115
+            }),
+            "must parse the real PascalCase wire format, and must not pick up RepresentedCountry"
         );
-        let _ = resolver.resolve(ip).await; // second call hits cache
+        let _ = resolver.resolve(global_ip()).await; // second call hits cache
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn parse_geo_rejects_the_unknown_address_record() {
+        // 200-with-empty-record must be an error (→ `None`), not a phantom pin at (0,0).
+        assert!(parse_geo(UNKNOWN_GEO_BODY).is_err());
+    }
+
     #[tokio::test]
-    async fn resolve_none_on_fetch_error() {
-        let resolver = GeoResolver::with_fetcher(|_ip| {
+    async fn resolve_none_on_fetch_error_and_caches_the_failure() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let resolver = GeoResolver::with_fetcher(move |_ip| {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async { Err(GeoError::Fetch("boom".into())) })
         });
+        assert_eq!(resolver.resolve(global_ip()).await, None);
+        assert_eq!(resolver.resolve(global_ip()).await, None);
         assert_eq!(
-            resolver.resolve(IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
-            None
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a failed lookup must be remembered, not retried on every peer join"
         );
+    }
+
+    #[tokio::test]
+    async fn non_global_ips_never_reach_the_network() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let resolver = GeoResolver::with_fetcher(move |_ip| {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok::<_, GeoError>(REAL_GEO_BODY.to_string()) })
+        });
+        for ip in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
+            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), // CGNAT
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            "fe80::1".parse().expect("link-local literal"),
+            "fd00::1".parse().expect("unique-local literal"),
+        ] {
+            assert_eq!(resolver.resolve(ip).await, None, "{ip} must be skipped");
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // A routable address still resolves.
+        assert!(resolver.resolve(global_ip()).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_gives_up_when_the_fetch_hangs() {
+        // A fetcher that never completes must not park the caller (the sharing event loop).
+        let resolver = GeoResolver::with_fetcher(|_ip| {
+            Box::pin(async {
+                std::future::pending::<()>().await;
+                unreachable!()
+            })
+        });
+        tokio::time::pause();
+        let task = tokio::spawn(async move { resolver.resolve(global_ip()).await });
+        tokio::time::advance(GEO_TIMEOUT + std::time::Duration::from_secs(1)).await;
+        assert_eq!(task.await.expect("resolve task"), None);
     }
 
     #[test]
