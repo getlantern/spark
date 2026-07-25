@@ -816,6 +816,19 @@ pub fn run_fd_lantern_api(
     let waiter = Arc::clone(&stop);
     info!(dir = %data_dir.display(), "lantern-api: starting (daemon self-fetch of boot config)");
     let result: std::io::Result<()> = runtime.block_on(async move {
+        // Tunnel-process diagnostics (design §5 Phase B-lite): full loop — sink +
+        // panic hook + unclean-exit sentinel + uploader fed by this process's own
+        // config cache. `data_dir` here IS the tunnel's cache dir: it came down from
+        // `spark_tunnel_run(data_dir)` → `run_fd_dispatch` and is the same dir
+        // `load_or_fetch`/`run_loop` below cache `device_id` + `config_raw.json`
+        // into, so diag identity matches this process's config identity. Placed
+        // inside `block_on` because init spawns (sink writer, re-parse task,
+        // uploader) and needs the ambient runtime. macOS NE only for now: Android
+        // is deferred deliberately (separate rollout + battery/consent posture),
+        // and the desktop service does its own capture-only wiring.
+        #[cfg(all(feature = "config-fetch", target_os = "macos"))]
+        crate::diag::tunnel_host::init(&data_dir, env!("CARGO_PKG_VERSION"));
+
         let env = FetchEnv::from_env();
         // Cold-start resilience (design §6): keep retrying until a config is obtained (cache or fetch)
         // or stop fires while we wait. `load_or_fetch` returns instantly on a warm cache.
@@ -934,6 +947,13 @@ pub fn run_fd_lantern_api(
     #[cfg(feature = "smart-routing")]
     set_active_router(None);
     set_ready(Readiness::Down);
+    // Controlled exit of the tunnel loop (Ok or Err — either way the teardown path
+    // ran and any error was already logged/captured above): disarm the unclean-exit
+    // sentinel so this return isn't flagged as a crash on the next launch. Belt and
+    // suspenders with the disarm in `spark_tunnel_stop` — the NE host usually stops
+    // us via stop(), but this covers a data path that ends on its own.
+    #[cfg(all(feature = "config-fetch", target_os = "macos"))]
+    crate::diag::tunnel_host::disarm_sentinel();
     match result {
         Ok(()) => 0,
         Err(e) => {

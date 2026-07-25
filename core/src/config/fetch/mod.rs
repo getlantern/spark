@@ -6,9 +6,13 @@
 //! blocked. Free-tier, disk-cached, fed into [`crate::config::Config::from_config_str`]. Trust is
 //! TLS — no signature, matching radiance.
 
-mod cache;
-mod http;
-mod request;
+// cache is pub(crate): `diag::tunnel_host` re-parses the cached `config_raw.json`
+// (via `cache::raw_path`) to feed its uploader's config watch channel.
+pub(crate) mod cache;
+// http + request are pub(crate): the diag uploader (`diag::upload`) reuses the same
+// hand-rolled HTTP/1.1 POST + header hygiene for its OTLP uploads.
+pub(crate) mod http;
+pub(crate) mod request;
 mod user;
 
 use std::path::Path;
@@ -138,31 +142,52 @@ async fn fetch_once(
     req.pro_token = creds.pro_token.clone();
 
     let mut attempts: Vec<FetchAttempt<'_>> = Vec::with_capacity(3);
-    attempts.push(Box::pin(fetch_once_direct(
-        env,
-        &req,
-        cond,
-        ATTEMPT_TIMEOUT,
+    attempts.push(Box::pin(with_outcome(
+        "direct",
+        Box::pin(fetch_once_direct(env, &req, cond, ATTEMPT_TIMEOUT)),
     )));
     if let Some(dialer) = fronted {
-        attempts.push(Box::pin(fetch_once_fronted(
-            env,
-            &req,
-            cond,
-            dialer,
-            ATTEMPT_TIMEOUT,
+        attempts.push(Box::pin(with_outcome(
+            "fronted",
+            Box::pin(fetch_once_fronted(env, &req, cond, dialer, ATTEMPT_TIMEOUT)),
         )));
     }
     if let Some(b) = bootstrap {
-        attempts.push(Box::pin(fetch_once_scanned(
-            env,
-            &req,
-            cond,
-            b,
-            ATTEMPT_TIMEOUT,
+        attempts.push(Box::pin(with_outcome(
+            "scanned",
+            Box::pin(fetch_once_scanned(env, &req, cond, b, ATTEMPT_TIMEOUT)),
         )));
     }
     first_ok(attempts).await
+}
+
+/// Wrap one avenue's fetch future so its outcome (ok / not_modified / error) and
+/// latency land in the diagnostics stream (§C6 `config.fetch_outcome`). Instrumented
+/// here in `fetch_once` — one point covering all three avenues — rather than inside
+/// each avenue fn. An avenue cancelled by losing the race emits nothing (it never
+/// completes), which is the intent: only real outcomes are reported.
+async fn with_outcome<'a>(
+    avenue: &'static str,
+    fut: FetchAttempt<'a>,
+) -> std::io::Result<FetchOutcome> {
+    let start = std::time::Instant::now();
+    let result = fut.await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    crate::diag::emit(crate::diag::events::config_fetch_outcome(
+        outcome_label(&result),
+        avenue,
+        latency_ms,
+    ));
+    result
+}
+
+/// The `result` label for a §C6 `config.fetch_outcome` event.
+fn outcome_label(r: &std::io::Result<FetchOutcome>) -> &'static str {
+    match r {
+        Ok(FetchOutcome::New { .. }) => "ok",
+        Ok(FetchOutcome::NotModified) => "not_modified",
+        Err(_) => "error",
+    }
 }
 
 /// The direct path: dial the API host directly, plain-boring TLS-wrap, send the HTTP/1.1 request, and
@@ -548,6 +573,22 @@ mod tests {
             "should serve the cached pool"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn outcome_label_maps_results() {
+        assert_eq!(
+            outcome_label(&Ok(FetchOutcome::New {
+                raw: String::new(),
+                etag: None
+            })),
+            "ok"
+        );
+        assert_eq!(
+            outcome_label(&Ok(FetchOutcome::NotModified)),
+            "not_modified"
+        );
+        assert_eq!(outcome_label(&Err(std::io::Error::other("x"))), "error");
     }
 
     #[test]

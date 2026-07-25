@@ -1,0 +1,9 @@
+{
+  "unbounded_welcome_title": "欢迎使用 Unbounded",
+  "unbounded_welcome_body": "Unbounded 让你的设备成为身处审查环境中的人们的数字桥梁。开启后，他们的流量会通过你的网络连接前往开放的互联网。",
+  "unbounded_welcome_risks": "开始之前请注意：他们访问的网站和服务会将你的 IP 地址视为该流量的来源；为了在地图上显示，你所帮助的每个人的大致位置会通过 Lantern 的服务查询。请考虑这在你所在的地区是否安全。Unbounded 完全自愿，你可以随时关闭。",
+  "unbounded_welcome_dismiss": "我已了解，开始使用",
+  "settings_diagnostics": "共享诊断信息",
+  "settings_diagnostics_desc": "帮助我们修复问题：Spark 会共享错误和性能报告；IP 地址和网址会被移除。关闭后也会删除本设备上已保存的报告。重启后生效。",
+  "unbounded_help_banner": "安全地共享你的连接，帮助他人绕过审查。"
+}

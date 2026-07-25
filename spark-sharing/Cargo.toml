@@ -14,7 +14,7 @@ spark-transport = ["dep:spark-core"]
 
 [dependencies]
 async-trait = "0.1"
-lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "8478c17afe4309cb42ba586897139f931e633f4a", default-features = false }
+lantern-unbounded = { git = "https://github.com/getlantern/unbounded-rs", rev = "521a356676655f141d81149d414a3e0e8b3c5e82", default-features = false }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -25,6 +25,11 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = "0.7"
 webpki-roots = "1"
+
+[dev-dependencies]
+# `test-util` adds tokio's mock clock (pause/advance) so the geo-lookup timeout is asserted without a
+# real 5-second wait. Test-only — never compiled into the shipped crate.
+tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }
 
 [profile.release]
 opt-level = 3

@@ -33,7 +33,8 @@ pub struct ConfigRequest {
 
 /// Map Rust's `std::env::consts::OS` to the Lantern/Go platform convention (`runtime.GOOS`): macOS is
 /// `"darwin"` there, not `"macos"`. The server keys outbound selection on this, so it must match.
-fn lantern_platform(os: &str) -> &str {
+/// `pub(crate)`: `diag::tunnel_host` stamps the same convention on its OTLP resource attrs.
+pub(crate) fn lantern_platform(os: &str) -> &str {
     match os {
         "macos" => "darwin",
         other => other,
@@ -78,6 +79,12 @@ impl ConfigRequest {
                 "hysteria2".to_string(),
                 "shadowsocks".to_string(),
                 "meek".to_string(),
+                // Advertises Unbounded-volunteer capability. The config server emits the top-level
+                // `unbounded` block (egress_addr/discovery_srv — what the sharing pool dials) ONLY
+                // when the client both has the `unbounded` feature on AND lists "unbounded" here
+                // (lantern-cloud config.go `shouldEmitUnboundedWidget`). Any `unbounded`-type
+                // *outbound* the server also assigns is harmlessly skipped by lantern.rs.
+                "unbounded".to_string(),
             ],
             time_zone: local_timezone(),
         }
@@ -113,7 +120,7 @@ pub struct Conditional {
 /// Strip CR/LF from a value before it's interpolated into a header line, so a tampered/corrupt
 /// non-constant source (the on-disk device id, the env-derived timezone, or a cached server-origin
 /// `ETag`/`Last-Modified`) can't inject extra headers or break request framing. Borrows when clean.
-fn header_safe(v: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn header_safe(v: &str) -> std::borrow::Cow<'_, str> {
     if v.contains(['\r', '\n']) {
         std::borrow::Cow::Owned(v.replace(['\r', '\n'], ""))
     } else {

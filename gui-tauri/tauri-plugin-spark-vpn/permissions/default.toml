@@ -17,4 +17,13 @@ permissions = [
   "allow-list-installed-apps",
   "allow-get-excluded-apps",
   "allow-set-excluded-apps",
+  "allow-unbounded-start",
+  "allow-unbounded-stop",
+  "allow-unbounded-status",
+  "allow-unbounded-available",
+  "allow-unbounded-get-settings",
+  "allow-unbounded-set-settings",
+  "allow-diag-report-webview-error",
+  "allow-diag-set-enabled",
+  "allow-diag-get-enabled",
 ]

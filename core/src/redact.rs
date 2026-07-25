@@ -53,6 +53,62 @@ pub fn redact_addrs(input: &str) -> Cow<'_, str> {
     }
 }
 
+/// The full diagnostics-path backstop: [`redact_addrs`] then [`redact_urls`], composed.
+///
+/// Every string that reaches the diagnostics wire (event fields via
+/// `DiagEvent::insert_str`, session ids, span error strings, array elements) goes
+/// through this one function so the two redactions can never drift apart per-site
+/// again. Borrows when nothing needed redacting.
+pub fn redact_all(input: &str) -> Cow<'_, str> {
+    match redact_addrs(input) {
+        Cow::Borrowed(s) => redact_urls(s),
+        Cow::Owned(s) => match redact_urls(&s) {
+            Cow::Borrowed(_) => Cow::Owned(s),
+            Cow::Owned(o) => Cow::Owned(o),
+        },
+    }
+}
+
+/// Replacement token for a redacted URL.
+const REDACTED_URL: &str = "[redacted-url]";
+
+/// Replace every `scheme://…` token (through the next whitespace) with `[redacted-url]`.
+///
+/// Diagnostics-path backstop (spec §C5 deny-lists URLs), applied by
+/// `DiagEvent::insert_str` alongside [`redact_addrs`] — NOT wired into the logger's
+/// writer, which keeps its existing IP-only behavior. Anchored on `://` so ordinary
+/// prose, module paths (`a::b`), and version strings are never mangled (the same
+/// reason [`redact_addrs`] doesn't match hostnames); the scheme is consumed backwards
+/// from the anchor, the rest of the token forwards to whitespace.
+pub fn redact_urls(input: &str) -> Cow<'_, str> {
+    if !input.contains("://") {
+        return Cow::Borrowed(input);
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(anchor) = rest.find("://") {
+        // Walk the scheme backwards (RFC 3986 scheme chars are all ASCII, so byte
+        // stepping stays on char boundaries).
+        let before = rest.as_bytes();
+        let mut start = anchor;
+        while start > 0 {
+            let b = before[start - 1];
+            if b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.') {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let after = &rest[anchor + 3..];
+        let end = anchor + 3 + after.find(char::is_whitespace).unwrap_or(after.len());
+        out.push_str(&rest[..start]);
+        out.push_str(REDACTED_URL);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
 /// Match a dotted-quad at the start of `b`, returning its byte length (excluding any
 /// `:port`), or `None`. Rejects quads that are actually a prefix of a longer dotted number.
 fn match_ipv4(b: &[u8]) -> Option<usize> {
@@ -170,5 +226,44 @@ mod tests {
     fn empty_and_borrowed_fast_path() {
         assert!(matches!(redact_addrs(""), Cow::Borrowed(_)));
         assert!(matches!(redact_addrs("no address here"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn redacts_urls_through_whitespace() {
+        assert_eq!(
+            redact_urls("GET https://api.example.com/cfg?key=abc failed"),
+            "GET [redacted-url] failed"
+        );
+        assert_eq!(
+            redact_urls("a wss://sig.example.net/ws b tauri://localhost/x c"),
+            "a [redacted-url] b [redacted-url] c"
+        );
+        // Trailing URL (no whitespace after) still redacts to end of string.
+        assert_eq!(redact_urls("see http://example.com"), "see [redacted-url]");
+    }
+
+    #[test]
+    fn redact_all_composes_both() {
+        assert_eq!(
+            redact_all("dial 1.2.3.4:443 via https://relay.example.com/x failed"),
+            "dial [redacted-ip]:443 via [redacted-url] failed"
+        );
+        // IP-only and URL-only inputs each still redact through the composite.
+        assert_eq!(redact_all("from 192.0.2.10"), "from [redacted-ip]");
+        assert_eq!(redact_all("see http://example.com"), "see [redacted-url]");
+        assert!(matches!(redact_all("clean text"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn redact_urls_leaves_plain_text_borrowed() {
+        for s in [
+            "no urls here",
+            "module spark_core::proxy v0.2.2",
+            "MSRV 1.85 and dep 0.2.2",
+            "",
+        ] {
+            assert!(matches!(redact_urls(s), Cow::Borrowed(_)), "{s:?}");
+            assert_eq!(redact_urls(s), s);
+        }
     }
 }

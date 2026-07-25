@@ -182,6 +182,153 @@ pub fn save_ad_block_enabled(base: &Path, enabled: bool) -> crate::Result<()> {
     Ok(())
 }
 
+// ── Unbounded (volunteer-proxy) persistence ───────────────────────────────────
+//
+// One file per setting, mirroring the ad-block/routing-mode scalar files: bools as
+// `"true"`/`"false"`, the cumulative counter as decimal text. All five are opt-in, so a
+// missing/unreadable/garbage file defaults to off (bools → false, counter → 0) — only an
+// explicit `"true"` (trimmed, case-insensitive) turns a bool on.
+//
+// The unbounded module (`unbounded.rs`, desktop-only) consumes these. Both modules are gated
+// `not(target_os = "android")`, so on the Android lib build they're unreferenced; keep the
+// `allow(dead_code)` only where that applies (the private helpers below) — the public accessors
+// are all used by the desktop `unbounded` commands.
+
+/// Read the persisted `unbounded_enabled` toggle from `<base>/unbounded_enabled.txt`.
+///
+/// Returns `false` (off) unless the file holds exactly `"true"` (trimmed, case-insensitive);
+/// a missing/unreadable file or any other contents default to off.
+pub fn load_unbounded_enabled(base: &Path) -> bool {
+    load_unbounded_bool(base, "unbounded_enabled.txt")
+}
+
+/// Persist the `unbounded_enabled` toggle to `<base>/unbounded_enabled.txt` as `"true"`/`"false"`.
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_unbounded_enabled(base: &Path, enabled: bool) -> crate::Result<()> {
+    save_unbounded_bool(base, "unbounded_enabled.txt", enabled)
+}
+
+/// Read the persisted `unbounded_auto_enable` toggle from `<base>/unbounded_auto_enable.txt`.
+///
+/// Returns `false` (off) unless the file holds exactly `"true"` (trimmed, case-insensitive);
+/// a missing/unreadable file or any other contents default to off.
+pub fn load_unbounded_auto_enable(base: &Path) -> bool {
+    load_unbounded_bool(base, "unbounded_auto_enable.txt")
+}
+
+/// Persist the `unbounded_auto_enable` toggle to `<base>/unbounded_auto_enable.txt` as
+/// `"true"`/`"false"`.
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_unbounded_auto_enable(base: &Path, enabled: bool) -> crate::Result<()> {
+    save_unbounded_bool(base, "unbounded_auto_enable.txt", enabled)
+}
+
+/// Read the persisted `unbounded_hidden` toggle from `<base>/unbounded_hidden.txt`.
+///
+/// Returns `false` (not hidden) unless the file holds exactly `"true"` (trimmed,
+/// case-insensitive); a missing/unreadable file or any other contents default to not hidden.
+pub fn load_unbounded_hidden(base: &Path) -> bool {
+    load_unbounded_bool(base, "unbounded_hidden.txt")
+}
+
+/// Persist the `unbounded_hidden` toggle to `<base>/unbounded_hidden.txt` as `"true"`/`"false"`.
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_unbounded_hidden(base: &Path, hidden: bool) -> crate::Result<()> {
+    save_unbounded_bool(base, "unbounded_hidden.txt", hidden)
+}
+
+/// Read the persisted `unbounded_welcome_seen` toggle from `<base>/unbounded_welcome_seen.txt`.
+///
+/// Returns `false` (welcome not yet seen) unless the file holds exactly `"true"` (trimmed,
+/// case-insensitive); a missing/unreadable file or any other contents default to false.
+pub fn load_unbounded_welcome_seen(base: &Path) -> bool {
+    load_unbounded_bool(base, "unbounded_welcome_seen.txt")
+}
+
+/// Persist the `unbounded_welcome_seen` toggle to `<base>/unbounded_welcome_seen.txt` as
+/// `"true"`/`"false"`.
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_unbounded_welcome_seen(base: &Path, seen: bool) -> crate::Result<()> {
+    save_unbounded_bool(base, "unbounded_welcome_seen.txt", seen)
+}
+
+/// Read the persisted cumulative `unbounded_total_helped` counter from
+/// `<base>/unbounded_total_helped.txt`.
+///
+/// Returns `0` if the file is missing, unreadable, or doesn't parse as a decimal `u64`.
+pub fn load_unbounded_total_helped(base: &Path) -> u64 {
+    std::fs::read_to_string(base.join("unbounded_total_helped.txt"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Persist the cumulative `unbounded_total_helped` counter to
+/// `<base>/unbounded_total_helped.txt` as decimal text.
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_unbounded_total_helped(base: &Path, total: u64) -> crate::Result<()> {
+    std::fs::create_dir_all(base)?;
+    std::fs::write(base.join("unbounded_total_helped.txt"), total.to_string())?;
+    Ok(())
+}
+
+// ── Diagnostics persistence ───────────────────────────────────────────────────
+
+/// Read the persisted diagnostics toggle from `<base>/diagnostics_enabled.txt`.
+///
+/// Diagnostics are **ON by default (opt-out) while the feature is under test** — so the opt-out
+/// switch is load-bearing (diag design §C4). Returns `true` unless the file holds exactly `"false"`
+/// (trimmed, case-insensitive); missing, unreadable, and garbage content all leave it on.
+///
+/// This is a deliberate, temporary posture for the testing phase: it maximizes the diagnostics we get
+/// while shaking the feature out. The privacy protections around it do NOT depend on the default and
+/// stay in force either way — IP/URL redaction at every sink, a per-run pseudonym instead of the
+/// peer's real session id, and erasing the local spool + backup log when the user opts out. Revisit
+/// before a broad release: Spark's users include people in surveilled jurisdictions, and an Unbounded
+/// volunteer's diagnostics describe sessions they relayed for censored users.
+pub fn load_diagnostics_enabled(base: &Path) -> bool {
+    std::fs::read_to_string(base.join("diagnostics_enabled.txt"))
+        .ok()
+        // Only an explicit "false" opts out; anything else (incl. missing) stays on.
+        .map(|s| !s.trim().eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+/// Persist the diagnostics toggle to `<base>/diagnostics_enabled.txt` as
+/// `"true"`/`"false"`. Takes effect on next launch (`diag_host::init` runs once).
+///
+/// Creates `base` (and any parents) if they don't exist.
+pub fn save_diagnostics_enabled(base: &Path, enabled: bool) -> crate::Result<()> {
+    std::fs::create_dir_all(base)?;
+    std::fs::write(
+        base.join("diagnostics_enabled.txt"),
+        if enabled { "true" } else { "false" },
+    )?;
+    Ok(())
+}
+
+/// Read an opt-in bool setting from `<base>/<file>`: `true` only when the file holds exactly
+/// `"true"` (trimmed, case-insensitive); missing/unreadable/other contents default to `false`.
+fn load_unbounded_bool(base: &Path, file: &str) -> bool {
+    std::fs::read_to_string(base.join(file))
+        .ok()
+        .map(|s| s.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Write an opt-in bool setting to `<base>/<file>` as `"true"`/`"false"`, creating `base`
+/// (and any parents) if they don't exist.
+fn save_unbounded_bool(base: &Path, file: &str, value: bool) -> crate::Result<()> {
+    std::fs::create_dir_all(base)?;
+    std::fs::write(base.join(file), if value { "true" } else { "false" })?;
+    Ok(())
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -353,5 +500,123 @@ mod tests {
             !base.exists(),
             "save_excluded_apps must not touch the filesystem on invalid input"
         );
+    }
+
+    // (h) unbounded bool toggles all default to false (opt-in) on a missing dir.
+    #[test]
+    fn unbounded_bools_default_false_on_missing_dir() {
+        let base = tmp("unbounded_bools_default_false");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            !load_unbounded_enabled(&base),
+            "load_unbounded_enabled must default to false (opt-in)"
+        );
+        assert!(
+            !load_unbounded_auto_enable(&base),
+            "load_unbounded_auto_enable must default to false (opt-in)"
+        );
+        assert!(
+            !load_unbounded_hidden(&base),
+            "load_unbounded_hidden must default to false"
+        );
+        assert!(
+            !load_unbounded_welcome_seen(&base),
+            "load_unbounded_welcome_seen must default to false"
+        );
+    }
+
+    // (i) unbounded_total_helped counter defaults to 0 on a missing dir.
+    #[test]
+    fn unbounded_total_helped_defaults_zero_on_missing_dir() {
+        let base = tmp("unbounded_total_helped_default");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            load_unbounded_total_helped(&base),
+            0,
+            "load_unbounded_total_helped must default to 0"
+        );
+    }
+
+    // (j) each unbounded bool round-trips: save(true) → load()==true, save(false) → load()==false.
+    #[test]
+    fn unbounded_bools_round_trip() {
+        let base = tmp("unbounded_bools_round_trip");
+        let _ = std::fs::remove_dir_all(&base);
+
+        save_unbounded_enabled(&base, true).expect("save_unbounded_enabled(true)");
+        assert!(load_unbounded_enabled(&base));
+        save_unbounded_enabled(&base, false).expect("save_unbounded_enabled(false)");
+        assert!(!load_unbounded_enabled(&base));
+
+        save_unbounded_auto_enable(&base, true).expect("save_unbounded_auto_enable(true)");
+        assert!(load_unbounded_auto_enable(&base));
+        save_unbounded_auto_enable(&base, false).expect("save_unbounded_auto_enable(false)");
+        assert!(!load_unbounded_auto_enable(&base));
+
+        save_unbounded_hidden(&base, true).expect("save_unbounded_hidden(true)");
+        assert!(load_unbounded_hidden(&base));
+        save_unbounded_hidden(&base, false).expect("save_unbounded_hidden(false)");
+        assert!(!load_unbounded_hidden(&base));
+
+        save_unbounded_welcome_seen(&base, true).expect("save_unbounded_welcome_seen(true)");
+        assert!(load_unbounded_welcome_seen(&base));
+        save_unbounded_welcome_seen(&base, false).expect("save_unbounded_welcome_seen(false)");
+        assert!(!load_unbounded_welcome_seen(&base));
+    }
+
+    // (k') diagnostics toggle defaults to ON (opt-out) during the testing phase, unlike the
+    // fail-closed opt-in unbounded bools. Only an explicit "false" turns it off — see
+    // load_diagnostics_enabled.
+    #[test]
+    fn diagnostics_enabled_defaults_true_on_missing_dir() {
+        let base = tmp("diagnostics_enabled_default");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            load_diagnostics_enabled(&base),
+            "diagnostics default is ON (opt-out) while under test"
+        );
+        // Only an explicit "false" opts out; unrelated content must not silently disable reporting.
+        std::fs::create_dir_all(&base).expect("create base");
+        for content in ["", " ", "yes", "1", "tru", "TRUE"] {
+            std::fs::write(base.join("diagnostics_enabled.txt"), content).expect("write");
+            assert!(
+                load_diagnostics_enabled(&base),
+                "{content:?} is not an explicit opt-out, so diagnostics must stay on"
+            );
+        }
+        // ...and the opt-out itself works, case/whitespace-insensitively.
+        for content in ["false", "FALSE", "  False \n"] {
+            std::fs::write(base.join("diagnostics_enabled.txt"), content).expect("write");
+            assert!(!load_diagnostics_enabled(&base), "{content:?} must opt out");
+        }
+    }
+
+    // (k'') diagnostics toggle round-trips: save(false) → load()==false, save(true) → true.
+    #[test]
+    fn diagnostics_enabled_round_trip() {
+        let base = tmp("diagnostics_enabled_round_trip");
+        let _ = std::fs::remove_dir_all(&base);
+
+        save_diagnostics_enabled(&base, false).expect("save_diagnostics_enabled(false)");
+        assert!(!load_diagnostics_enabled(&base));
+
+        save_diagnostics_enabled(&base, true).expect("save_diagnostics_enabled(true)");
+        assert!(load_diagnostics_enabled(&base));
+    }
+
+    // (k) unbounded_total_helped round-trips a non-default u64 value.
+    #[test]
+    fn unbounded_total_helped_round_trip() {
+        let base = tmp("unbounded_total_helped_round_trip");
+        let _ = std::fs::remove_dir_all(&base);
+
+        save_unbounded_total_helped(&base, 42).expect("save_unbounded_total_helped(42)");
+        assert_eq!(load_unbounded_total_helped(&base), 42);
+
+        save_unbounded_total_helped(&base, 0).expect("save_unbounded_total_helped(0)");
+        assert_eq!(load_unbounded_total_helped(&base), 0);
     }
 }

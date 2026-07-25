@@ -12,6 +12,11 @@
 //! only for spark's own targets ([`is_spark_target`]) — so on-device diagnostics (per-member probe
 //! failures, pool re-probes, dial failovers) are visible without dragging in dependency-internal
 //! `DEBUG`/`TRACE` noise. `TRACE` is dropped.
+//!
+//! Since the bridge owns the process-global subscriber slot, a `tracing_subscriber` registry with
+//! `diag::layer::DiagLayer` can never also be global in the same process — so the bridge forwards
+//! each event into the diagnostics pipeline itself (same shared policy, `capture_decision`). This
+//! is a no-op until a host installs a diag sink; see the comment in [`BridgeSubscriber::event`].
 
 use std::ffi::{c_char, CString};
 use std::fmt::{self, Write as _};
@@ -125,6 +130,39 @@ impl Subscriber for BridgeSubscriber {
         // CString::new fails only on an interior NUL (log lines don't carry one); skip if so.
         if let Ok(c) = CString::new(line) {
             (self.cb)(level, c.as_ptr());
+        }
+
+        // Forward into the diagnostics pipeline (spec §C1). In the NE this subscriber
+        // owns the process-global subscriber slot (`install` calls
+        // `set_global_default`), so a registry+DiagLayer can never ALSO be global
+        // there — the bridge forwards itself instead, applying the same shared policy
+        // (`capture_decision`: self-suppression, level policy, capture knob).
+        //
+        // Free where diag never initializes: the `installed()` guard sits BEFORE any
+        // event construction because this bridge is the NE's subscriber — it sits on
+        // the packet path's logging — so hosts that never init diag must pay zero
+        // allocations here, not just have `emit` drop the finished event. No
+        // feedback loop either: diag internals log at debug! ONLY with
+        // `spark_core::diag*` targets, which `capture_decision` suppresses
+        // unconditionally (the host callback above still receives them — useful in
+        // Console.app — but they never re-enter the sink).
+        if crate::diag::sink::installed() {
+            if let Some(diag_level) =
+                crate::diag::layer::capture_decision(meta.level(), meta.target())
+            {
+                // Message + non-message fields (without the "[target] " prefix — the
+                // target rides as its own event field, mirroring DiagLayer/events::log).
+                // Reuses the message String's buffer (the visitor is done) instead of
+                // format!-ing a fresh allocation — this runs per captured event.
+                let mut msg = visitor.message;
+                msg.push_str(&visitor.fields);
+                let ev = crate::diag::events::log(diag_level, &msg, meta.target());
+                if diag_level == crate::diag::DiagLevel::Error {
+                    crate::diag::emit_error(ev);
+                } else {
+                    crate::diag::emit(ev);
+                }
+            }
         }
     }
 

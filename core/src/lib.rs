@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 // C ABI) call into this.
 pub mod caps;
 pub mod config;
+pub mod diag;
 #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
 pub mod fd_tunnel;
 pub mod log_bridge;

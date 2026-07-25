@@ -5,6 +5,9 @@
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { selectedIndex } from "$lib/selection";
   import { flagEmoji, serverLabel } from "$lib/format";
+  import { unboundedVisible } from "$lib/unbounded";
+  import BottomTabs from "$lib/BottomTabs.svelte";
+  import { vpnState } from "$lib/vpn_state.svelte";
   import { _ } from "$lib/i18n";
   import { listen } from "@tauri-apps/api/event";
   // Fonts + global design tokens live in +layout.svelte (shared across home ↔ server selection).
@@ -25,6 +28,11 @@
 
   const connected = $derived(status.state === "connected");
   const connecting = $derived(status.state === "connecting");
+  // Mirror the live connected state into the shared cache so the Unbounded screen's tab bar
+  // shows the right VPN dot the instant it mounts (no default-false flicker on tab switch).
+  $effect(() => {
+    vpnState.connected = connected;
+  });
   // The server shown in the Smart-location tile: the user's pick if any, else the live current
   // (the auto-ranked best, marked by the snapshot).
   const current = $derived(
@@ -107,23 +115,49 @@
   }
   const routingModeLabel = $derived(routingMode === "full" ? $_("full_tunnel") : $_("smart_routing"));
 
+  // Unbounded volunteer-proxy tab: strictly opt-in + server-gated. Availability comes from the
+  // backend (server `features.unbounded` gate + a config block with the endpoints to dial — Task
+  // 7.1); it defaults false (tab hidden) until the async check resolves, and the tab renders the
+  // moment it flips true.
+  let unboundedServerEnabled = $state(false);
+  let unboundedHidden = $state(false);
+  let unboundedEnabled = $state(false); // live status dot; kept fresh by the spark://unbounded event
+  let unlistenUnbounded: Promise<() => void> | undefined;
+  const showUnboundedTab = $derived(unboundedVisible(unboundedServerEnabled, unboundedHidden));
+  async function loadUnbounded() {
+    try { unboundedServerEnabled = await backend.unboundedAvailable(); } catch { /* keep last */ }
+    try { unboundedHidden = (await backend.unboundedGetSettings()).hidden; } catch { /* keep last */ }
+    try { unboundedEnabled = (await backend.unboundedStatus()).enabled; } catch { /* keep last */ }
+  }
+
   onMount(() => {
     refresh();
     loadSplit();
     loadRouting();
+    loadUnbounded();
     poll = setInterval(() => {
       refresh();
       loadSplit();
       loadRouting();
+      loadUnbounded();
     }, 2000);
     // Phase 2a: the app-side startup config fetch emits spark://servers when the cached list
     // changes — re-pull immediately instead of waiting for the next 2s poll. Tauri-only (`listen`
     // rejects in a plain browser), matching the layout's spark://state guard.
-    if (isTauri()) unlistenServers = listen("spark://servers", () => void refresh());
+    if (isTauri()) {
+      unlistenServers = listen("spark://servers", () => void refresh());
+      // Keep the Unbounded status dot live between polls: the plugin emits spark://unbounded
+      // ({ enabled, helpingNow, totalHelped, peers }) on every peer/enable change.
+      unlistenUnbounded = listen<{ enabled: boolean }>(
+        "spark://unbounded",
+        (e) => (unboundedEnabled = e.payload.enabled),
+      );
+    }
   });
   onDestroy(() => {
     clearInterval(poll);
     unlistenServers?.then((f) => f()).catch(() => {});
+    unlistenUnbounded?.then((f) => f()).catch(() => {});
   });
 </script>
 
@@ -216,6 +250,12 @@
       </button>
     </div>
   </div>
+
+  {#if showUnboundedTab}
+    <!-- Read the shared cache (kept in sync via the $effect above) so the dot is correct on
+         first frame after an Unbounded→home switch, before this screen's own status poll lands. -->
+    <BottomTabs current="vpn" vpnOn={vpnState.connected} unboundedOn={unboundedEnabled} />
+  {/if}
 </main>
 
 {#snippet menu()}

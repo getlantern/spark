@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-unbounded-stop"
+description = "Enables the unbounded_stop command without any pre-configured scope."
+commands.allow = ["unbounded_stop"]
+
+[[permission]]
+identifier = "deny-unbounded-stop"
+description = "Denies the unbounded_stop command without any pre-configured scope."
+commands.deny = ["unbounded_stop"]

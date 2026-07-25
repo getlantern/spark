@@ -12,10 +12,29 @@ pub(crate) mod persist;
 #[cfg(not(target_os = "android"))]
 mod desktop;
 
+// Unbounded (volunteer-proxy) control + aggregation loop + `spark://unbounded` event. Depends on
+// `persist` (durable settings) and `spark-sharing` (the peer-proxy pool). Gated the same as
+// `persist` — desktop only; the Android sharing path lands in a later Unbounded phase.
+#[cfg(not(target_os = "android"))]
+mod unbounded;
+
+// §C6 diagnostic timeline + §C3a session traces for the Unbounded pool: a pure
+// PoolEvent → diag-action mapper applied fire-and-forget by `unbounded`'s aggregation
+// loop. Gated with `unbounded` (and `diag_host`, whose span queue it feeds).
+#[cfg(not(target_os = "android"))]
+mod unbounded_diag;
+
 // Phase 2a: app-side startup config fetch (links spark-core's kindling fetch). Desktop only —
 // Android fetches in the :vpn process over IPC (Phase 2b).
 #[cfg(not(target_os = "android"))]
 mod config_fetch;
+
+// Diagnostics host for the APP process (diag design §C4/§5): sink + panic hook + tracing capture
+// layer + config-gated OTLP uploader, plus the webview error-report / opt-out commands. Compiled
+// everywhere except Android (desktop today, iOS when it lands), like the other spark-core-backed
+// modules — Android's diagnostics ride the tunnel-process phase (spec Phase B).
+#[cfg(not(target_os = "android"))]
+mod diag_host;
 
 // macOS installed-apps catalog for desktop app-based split tunneling (AppleControl uses it).
 #[cfg(target_os = "macos")]
@@ -118,6 +137,27 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::list_installed_apps,
             commands::get_excluded_apps,
             commands::set_excluded_apps,
+            // Unbounded (volunteer-proxy) commands. Desktop only — gated the same as the module.
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_start,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_stop,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_status,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_available,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_get_settings,
+            #[cfg(not(target_os = "android"))]
+            unbounded::unbounded_set_settings,
+            // Diagnostics commands (webview error report + opt-out toggle). Desktop only —
+            // gated the same as the diag_host module.
+            #[cfg(not(target_os = "android"))]
+            diag_host::diag_report_webview_error,
+            #[cfg(not(target_os = "android"))]
+            diag_host::diag_set_enabled,
+            #[cfg(not(target_os = "android"))]
+            diag_host::diag_get_enabled,
         ])
         .setup(|app, _api| {
             app.manage(commands::SelectedServer::default());
@@ -134,8 +174,18 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             }
             #[cfg(not(target_os = "android"))]
             {
+                // Diagnostics first (diag design §C4/§5), so the panic hook and tracing
+                // capture layer are in place before the startup tasks below spawn and any
+                // of their failures can be captured. Infallible and internally detached —
+                // never blocks or fails setup. No-op when the user opted out.
+                diag_host::init(app);
+
                 let ctl = platform::control(app)?;
                 app.manage(ctl);
+
+                // Unbounded (volunteer-proxy) live handles: the running sharing pool + its
+                // aggregation-loop task + latest status. Default = nothing running.
+                app.manage(unbounded::UnboundedState::default());
 
                 // Phase 2a: on every launch, fetch the config into the app's OWN cache dir —
                 // independent of VPN state — so the location list refreshes even before/without
@@ -161,11 +211,75 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                         Ok(false) => {} // 304 / unchanged — nothing to do
                         Err(e) => eprintln!("[spark-vpn] startup config fetch failed: {e}"),
                     }
+                    // Refresh the cached `features.unbounded` gate from whatever config we now have
+                    // (fresh or cached) and repaint the tray. This is the ONLY place that needs to
+                    // re-derive it from disk — the tray and the sharing loop read the cached flag, so
+                    // neither re-parses the whole config on a timer.
+                    let _ = crate::unbounded::refresh_availability(&handle);
+                    #[cfg(desktop)]
+                    crate::tray::refresh(&handle);
+                });
+
+                // Gated startup for Unbounded (volunteer proxy). Two gates, both must pass:
+                // (1) the user's persisted on/off state (`unbounded_enabled`, default false — written when
+                // the user toggles Unbounded; this is the state the UI + tray read, so resuming it here is
+                // what keeps a restart from showing "enabled" while nothing runs — Copilot #90), and
+                // (2) the server allows it AND the config carries the endpoints to dial
+                // (`unbounded_available`, backed by `features.unbounded` + the `unbounded` block). The
+                // separate `unbounded_auto_enable` preference does NOT gate this resume path. `unbounded_start`
+                // self-gates on the same availability check, but check it explicitly here so we don't even
+                // spawn the task when the feature is off, and so the "skipped" log distinguishes
+                // not-available from a real start failure. Detached so it can't block startup or the window.
+                let handle = app.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let Ok(base) = handle.path().app_config_dir() else {
+                        return;
+                    };
+                    // Two durable flags, and BOTH must say yes — Unbounded never starts unless the
+                    // user explicitly authorized it:
+                    //   `unbounded_enabled`    the user's current on/off choice
+                    //   `unbounded_auto_enable` the user's "start automatically when Spark opens"
+                    // Requiring only `enabled` would resume at login for a user who deliberately
+                    // left auto-start off; requiring only `auto_enable` would leave the UI showing
+                    // "on" with nothing running. So: resume on both, and when `enabled` is set
+                    // WITHOUT auto-start, clear it so the persisted state matches reality (nothing
+                    // is relaying) instead of advertising an enrolment that isn't live.
+                    let enabled = crate::persist::load_unbounded_enabled(&base);
+                    let auto = crate::persist::load_unbounded_auto_enable(&base);
+                    if !enabled || !auto {
+                        if enabled && !auto {
+                            let _ = crate::persist::save_unbounded_enabled(&base, false);
+                        }
+                        return;
+                    }
+                    match unbounded::unbounded_available(handle.clone()).await {
+                        Ok(true) => {
+                            if let Err(e) = unbounded::unbounded_start(handle).await {
+                                eprintln!("[spark-vpn] unbounded auto-enable failed: {e}");
+                            }
+                        }
+                        Ok(false) => {} // feature not available for this client — nothing to do
+                        Err(e) => eprintln!("[spark-vpn] unbounded availability check failed: {e}"),
+                    }
                 });
             }
             #[cfg(desktop)]
             tray::init(app)?;
             Ok(())
+        })
+        .on_event(|_app, event| {
+            // Clean-shutdown disarm for the unclean-exit sentinel (diag §C2a). Exit
+            // only — NOT ExitRequested, which can be cancelled (a cancelled exit that
+            // disarmed would leave the rest of the session crash-blind). Known false
+            // positive: OS logout/shutdown may SIGKILL the process before Exit fires,
+            // slightly inflating `error.unclean_exit` during real OS shutdowns; a
+            // SIGTERM disarm hook is a possible future refinement.
+            if let tauri::RunEvent::Exit = event {
+                #[cfg(not(target_os = "android"))]
+                if let Some(s) = diag_host::sentinel() {
+                    s.disarm();
+                }
+            }
         })
         .build()
 }

@@ -1,0 +1,9 @@
+{
+  "unbounded_welcome_title": "Chào mừng đến với Unbounded",
+  "unbounded_welcome_body": "Unbounded cho phép thiết bị của bạn trở thành một cây cầu số cho những người đang sống dưới sự kiểm duyệt. Khi bạn bật, lưu lượng của họ đi qua kết nối internet của bạn để ra internet mở.",
+  "unbounded_welcome_risks": "Trước khi bắt đầu: các trang web và dịch vụ họ truy cập sẽ thấy địa chỉ IP của bạn là nguồn của lưu lượng đó, và vị trí gần đúng của mỗi người bạn giúp được tra cứu qua một dịch vụ của Lantern để hiển thị trên bản đồ của bạn. Hãy cân nhắc liệu điều này có an toàn ở nơi bạn sống. Unbounded hoàn toàn tự nguyện và bạn có thể tắt bất cứ lúc nào.",
+  "unbounded_welcome_dismiss": "Tôi đã hiểu — bắt đầu",
+  "settings_diagnostics": "Chia sẻ dữ liệu chẩn đoán",
+  "settings_diagnostics_desc": "Giúp chúng tôi khắc phục sự cố: Spark chia sẻ báo cáo lỗi và hiệu năng; địa chỉ IP và địa chỉ web được loại bỏ. Tắt đi cũng xóa các báo cáo đã lưu trên thiết bị này. Áp dụng sau khi khởi động lại.",
+  "unbounded_help_banner": "Giúp người khác vượt kiểm duyệt bằng cách chia sẻ kết nối của bạn một cách an toàn."
+}

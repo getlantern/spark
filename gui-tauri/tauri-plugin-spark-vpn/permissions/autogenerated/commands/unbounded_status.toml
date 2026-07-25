@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-unbounded-status"
+description = "Enables the unbounded_status command without any pre-configured scope."
+commands.allow = ["unbounded_status"]
+
+[[permission]]
+identifier = "deny-unbounded-status"
+description = "Denies the unbounded_status command without any pre-configured scope."
+commands.deny = ["unbounded_status"]

@@ -1,7 +1,9 @@
 //! Unprivileged lifecycle adapter for Spark connection sharing.
 
+mod aggregate;
 mod consumer;
 mod freddie;
+mod geo;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+pub use aggregate::{Aggregator, PeerView, SharingDelta, SharingStatus};
 #[cfg(feature = "spark-transport")]
 pub use consumer::ConsumerTransport;
 pub use consumer::{
@@ -20,6 +23,7 @@ pub use consumer::{
     ConsumerRuntimeConfig, ConsumerRuntimeError, ConsumerRuntimeSummary, ConsumerTlsError,
 };
 pub use freddie::{FreddieBuildError, FreddieSignaler};
+pub use geo::{Geo, GeoResolver};
 pub use lantern_unbounded::supervisor::{
     PoolEvent, SupervisorEvent, SupervisorPoolSummary, SupervisorSummary,
 };

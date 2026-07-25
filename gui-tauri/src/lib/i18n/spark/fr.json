@@ -1,0 +1,9 @@
+{
+  "unbounded_welcome_title": "Bienvenue dans Unbounded",
+  "unbounded_welcome_body": "Unbounded permet à votre appareil de servir de pont numérique pour les personnes vivant sous la censure. Lorsque vous l'activez, leur trafic passe par votre connexion internet vers l'internet ouvert.",
+  "unbounded_welcome_risks": "Avant de commencer : les sites et services auxquels elles accèdent verront votre adresse IP comme source de ce trafic, et la localisation approximative de chaque personne que vous aidez est recherchée via un service Lantern afin de l'afficher sur votre carte. Demandez-vous si cela est sûr là où vous vivez. Unbounded est entièrement facultatif et vous pouvez le désactiver à tout moment.",
+  "unbounded_welcome_dismiss": "J'ai compris — commencer",
+  "settings_diagnostics": "Partager les diagnostics",
+  "settings_diagnostics_desc": "Nous aide à résoudre les problèmes : Spark partage des rapports d'erreurs et de performance ; les adresses IP et les adresses web sont supprimées. Le désactiver supprime également les rapports stockés sur cet appareil. Prend effet après redémarrage.",
+  "unbounded_help_banner": "Aidez les autres à contourner la censure en partageant votre connexion en toute sécurité."
+}

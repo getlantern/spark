@@ -18,6 +18,15 @@ Allows all spark-vpn tunnel-control commands.
 - `allow-list-installed-apps`
 - `allow-get-excluded-apps`
 - `allow-set-excluded-apps`
+- `allow-unbounded-start`
+- `allow-unbounded-stop`
+- `allow-unbounded-status`
+- `allow-unbounded-available`
+- `allow-unbounded-get-settings`
+- `allow-unbounded-set-settings`
+- `allow-diag-report-webview-error`
+- `allow-diag-set-enabled`
+- `allow-diag-get-enabled`
 
 ## Permission Table
 
@@ -50,6 +59,84 @@ Enables the connect command without any pre-configured scope.
 <td>
 
 Denies the connect command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-diag-get-enabled`
+
+</td>
+<td>
+
+Enables the diag_get_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-diag-get-enabled`
+
+</td>
+<td>
+
+Denies the diag_get_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-diag-report-webview-error`
+
+</td>
+<td>
+
+Enables the diag_report_webview_error command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-diag-report-webview-error`
+
+</td>
+<td>
+
+Denies the diag_report_webview_error command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-diag-set-enabled`
+
+</td>
+<td>
+
+Enables the diag_set_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-diag-set-enabled`
+
+</td>
+<td>
+
+Denies the diag_set_enabled command without any pre-configured scope.
 
 </td>
 </tr>
@@ -388,6 +475,162 @@ Enables the status command without any pre-configured scope.
 <td>
 
 Denies the status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-available`
+
+</td>
+<td>
+
+Enables the unbounded_available command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-available`
+
+</td>
+<td>
+
+Denies the unbounded_available command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-get-settings`
+
+</td>
+<td>
+
+Enables the unbounded_get_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-get-settings`
+
+</td>
+<td>
+
+Denies the unbounded_get_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-set-settings`
+
+</td>
+<td>
+
+Enables the unbounded_set_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-set-settings`
+
+</td>
+<td>
+
+Denies the unbounded_set_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-start`
+
+</td>
+<td>
+
+Enables the unbounded_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-start`
+
+</td>
+<td>
+
+Denies the unbounded_start command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-status`
+
+</td>
+<td>
+
+Enables the unbounded_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-status`
+
+</td>
+<td>
+
+Denies the unbounded_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:allow-unbounded-stop`
+
+</td>
+<td>
+
+Enables the unbounded_stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`spark-vpn:deny-unbounded-stop`
+
+</td>
+<td>
+
+Denies the unbounded_stop command without any pre-configured scope.
 
 </td>
 </tr>
