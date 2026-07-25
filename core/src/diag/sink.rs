@@ -37,6 +37,21 @@ const LOG_NAME: &str = "diag.log";
 /// is folded back into the spool (at startup or before the next take), not lost.
 const TAKE_NAME: &str = "diagnostics.take.jsonl";
 
+/// Delete every local diagnostic record in `dir`: the spool, the backup log, their single-slot `.1`
+/// rotations, and any leftover take file.
+///
+/// Turning diagnostics OFF must not leave the already-written history sitting on disk. For an
+/// Unbounded volunteer those files are a timestamped record of the sessions they relayed for censored
+/// users, so "stop reporting" has to mean "and forget what was recorded" — otherwise a device search
+/// still surfaces it, and the opt-out is only half an opt-out. Best-effort: a file that is absent or
+/// cannot be removed is skipped (the caller is a user-facing toggle, not a security boundary).
+pub fn purge_local_records(dir: &Path) {
+    for name in [SPOOL_NAME, LOG_NAME, TAKE_NAME] {
+        let _ = fs::remove_file(dir.join(name));
+        let _ = fs::remove_file(dir.join(format!("{name}.1")));
+    }
+}
+
 /// Writer-task inbox: events to append, or a flush marker. The channel is FIFO, so a
 /// [`Msg::Flush`] ack proves everything queued before it has been written.
 enum Msg {

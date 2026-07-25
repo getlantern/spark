@@ -316,7 +316,7 @@ fn report_webview_error(message: &str, source: &str) {
     diag::emit_error(events::error_webview(message, source));
 }
 
-/// The persisted diagnostics toggle (default on).
+/// The persisted diagnostics toggle (default OFF — strictly opt-in).
 #[tauri::command]
 pub(crate) async fn diag_get_enabled<R: Runtime>(app: AppHandle<R>) -> crate::Result<bool> {
     Ok(crate::persist::load_diagnostics_enabled(&base_dir(&app)?))
@@ -330,7 +330,18 @@ pub(crate) async fn diag_set_enabled<R: Runtime>(
     app: AppHandle<R>,
     enabled: bool,
 ) -> crate::Result<()> {
-    crate::persist::save_diagnostics_enabled(&base_dir(&app)?, enabled)
+    let base = base_dir(&app)?;
+    crate::persist::save_diagnostics_enabled(&base, enabled)?;
+    // Opting out also ERASES what was already written. For an Unbounded volunteer the spool and the
+    // local backup log are a timestamped record of the sessions they relayed for censored users;
+    // stopping future writes while leaving that history on disk is only half an opt-out, and there is
+    // no other affordance to find or clear it. (The in-process sink keeps running until the next
+    // launch — a still-live session can append again — but the accumulated history is gone and the
+    // next launch starts clean.)
+    if !enabled {
+        spark_core::diag::sink::purge_local_records(&base);
+    }
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

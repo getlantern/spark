@@ -281,7 +281,18 @@ Gating: the **existing** `features["otel.traces"]` flag + `otel.sample_rate` —
 radiance's client-side contract, zero new server work. Spans that end in an error status
 follow the §C2a rule and bypass sampling.
 
-### C4. Gate / kill switch (default-on ⇒ the switch is load-bearing)
+### C4. Gate / kill switch (default-OFF ⇒ strictly opt-in)
+
+> **REVISED 2026-07-25 — diagnostics are default-OFF and strictly opt-in.** This section originally
+> specified default-on ("so the opt-out switch is load-bearing"). Reversed as a product decision:
+> Spark's users include people in surveilled jurisdictions, and an Unbounded volunteer's diagnostics
+> describe sessions they relayed **for censored users**, so nothing is reported until the user
+> explicitly turns it on. Concretely: `persist::load_diagnostics_enabled` now fails closed (only an
+> exact `"true"` enables it); turning it off **erases the local spool and backup log** rather than only
+> stopping future writes; and the peer session id on `unbounded.*` events is replaced by a per-run
+> pseudonym so diagnostics can't be joined against signaling into
+> (censored user ↔ volunteer ↔ time). The server-side kill switch and the empty-endpoint rule below are
+> unchanged — the local setting is now the *primary* gate rather than a secondary opt-out.
 
 Reuse radiance's gating verbatim, extended by one flag for the logs signal:
 

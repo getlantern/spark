@@ -39,6 +39,28 @@ pub(crate) enum EventView {
     Stopped { slot: usize },
 }
 
+/// Per-run pseudonym for a consumer's session id, for diagnostics only.
+///
+/// The upstream session id is the SAME identifier the consumer presents to signaling, which also sees
+/// the peer's IP — so uploading it next to this device's id would let the two systems be joined back
+/// into (censored user ↔ volunteer ↔ timestamp ↔ duration). Diagnostics only ever need *an* id that is
+/// stable for the life of a session so its spans and events correlate; they never need the peer's real
+/// one. Hashing under a process-random key gives exactly that: stable within this run, and unlinkable
+/// across runs, across volunteers, and to signaling.
+///
+/// The aggregator keeps using the real session id (liveness, dedup) — only the diag view is
+/// pseudonymized.
+fn session_pseudonym(session_id: &str) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static KEY: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+        std::sync::OnceLock::new();
+    let mut hasher = KEY
+        .get_or_init(std::collections::hash_map::RandomState::new)
+        .build_hasher();
+    hasher.write(session_id.as_bytes());
+    format!("{:016x}", hasher.finish())
+}
+
 impl EventView {
     pub(crate) fn capture(ev: &PoolEvent) -> EventView {
         let slot = ev.slot;
@@ -46,15 +68,15 @@ impl EventView {
             SupervisorEvent::AttemptStarted { .. } => EventView::AttemptStarted { slot },
             SupervisorEvent::PeerConnected { session_id, .. } => EventView::PeerConnected {
                 slot,
-                session_id: session_id.clone(),
+                session_id: session_pseudonym(session_id),
             },
             SupervisorEvent::PeerDisconnected { session_id } => EventView::PeerDisconnected {
                 slot,
-                session_id: session_id.clone(),
+                session_id: session_pseudonym(session_id),
             },
             SupervisorEvent::SessionEnded { outcome, .. } => EventView::SessionEnded {
                 slot,
-                session_id: outcome.consumer_session_id.clone(),
+                session_id: session_pseudonym(&outcome.consumer_session_id),
             },
             SupervisorEvent::AttemptFailed { error, .. } => EventView::AttemptFailed {
                 slot,
@@ -496,24 +518,41 @@ mod tests {
             ]
         );
 
-        // Session correlation on the connect/disconnect pair.
-        assert_eq!(all[1].session.as_deref(), Some("s1"));
-        assert_eq!(all[2].session.as_deref(), Some("s1"));
+        // Session correlation on the connect/disconnect pair: the SAME id on both...
+        let session = all[1]
+            .session
+            .as_deref()
+            .expect("connect carries a session id");
+        assert_eq!(
+            all[2].session.as_deref(),
+            Some(session),
+            "connect and disconnect must correlate"
+        );
+        // ...but NOT the consumer's real session id. That id is what the peer presents to signaling
+        // (which also sees its IP), so shipping it beside this device's id would make the two
+        // joinable back into (censored user ↔ volunteer ↔ time).
+        assert_ne!(
+            session, "s1",
+            "the peer's real session id must never reach diagnostics"
+        );
 
         // nat_traversal_ms present and sane.
         let nat = all[1].fields["nat_traversal_ms"].as_u64();
         assert!(nat.is_some(), "nat_traversal_ms must be a u64");
 
-        // SetCtx (at connect) strictly before RetireCtx (at disconnect).
+        // SetCtx (at connect) strictly before RetireCtx (at disconnect) — both under the pseudonym,
+        // and matching the id carried on the events so the correlation still holds end to end.
         assert!(
-            a2.iter()
-                .any(|a| matches!(a, DiagAction::SetCtx { session, .. } if session == "s1")),
-            "connect must register the trace ctx"
+            a2.iter().any(
+                |a| matches!(a, DiagAction::SetCtx { session: s, .. } if s.as_str() == session)
+            ),
+            "connect must register the trace ctx under the same id the events carry"
         );
         assert!(
-            a3.iter()
-                .any(|a| matches!(a, DiagAction::RetireCtx { session } if session == "s1")),
-            "disconnect must retire the trace ctx"
+            a3.iter().any(
+                |a| matches!(a, DiagAction::RetireCtx { session: s } if s.as_str() == session)
+            ),
+            "disconnect must retire that same trace ctx"
         );
 
         // Spans: root "unbounded.session" + "relay" child sharing one trace_id.
@@ -600,10 +639,12 @@ mod tests {
             spans.iter().any(|s| s.name == "unbounded.session"),
             "stop must push the live session's spans"
         );
+        // The ctx is retired under the pseudonym (never the peer's real session id).
         assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, DiagAction::RetireCtx { session } if session == "s1")),
+            actions.iter().any(|a| matches!(
+                a,
+                DiagAction::RetireCtx { session } if session != "s1" && !session.is_empty()
+            )),
             "stop must retire the live session's trace ctx"
         );
         assert_eq!(st.slots_filled(), 0);
@@ -756,9 +797,10 @@ mod tests {
             .find(|s| s.name == "relay")
             .expect("relay child");
         assert!(relay.error.is_none(), "error is stamped on the root only");
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, DiagAction::RetireCtx { session } if session == "s1")));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            DiagAction::RetireCtx { session } if session != "s1" && !session.is_empty()
+        )));
         assert_eq!(st.slots_filled(), 0);
     }
 

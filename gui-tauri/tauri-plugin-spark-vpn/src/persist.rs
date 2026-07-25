@@ -281,15 +281,14 @@ pub fn save_unbounded_total_helped(base: &Path, total: u64) -> crate::Result<()>
 
 /// Read the persisted diagnostics toggle from `<base>/diagnostics_enabled.txt`.
 ///
-/// Diagnostics are ON by default (diag design §C4: default-on, so the opt-out switch is
-/// load-bearing): returns `true` unless the file holds `"false"` (trimmed,
-/// case-insensitive) — the same default-on shape as the ad-block toggle.
+/// Diagnostics are **OFF by default — strictly opt-in.** This revises the diag design's original
+/// §C4 "default-on so the opt-out switch is load-bearing" decision: Spark's users include people in
+/// surveilled jurisdictions, and an Unbounded volunteer's diagnostics describe sessions they relayed
+/// for censored users, so nothing is reported until the user turns it on. Returns `true` only when
+/// the file holds exactly `"true"` (trimmed, case-insensitive); missing, unreadable, truncated, and
+/// garbage content all mean off — the same fail-closed shape as the Unbounded opt-ins.
 pub fn load_diagnostics_enabled(base: &Path) -> bool {
-    std::fs::read_to_string(base.join("diagnostics_enabled.txt"))
-        .ok()
-        // Only an explicit "false" opts out; anything else (incl. missing) stays on.
-        .map(|s| !s.trim().eq_ignore_ascii_case("false"))
-        .unwrap_or(true)
+    load_unbounded_bool(base, "diagnostics_enabled.txt")
 }
 
 /// Persist the diagnostics toggle to `<base>/diagnostics_enabled.txt` as
@@ -562,14 +561,26 @@ mod tests {
     // (k') diagnostics toggle defaults to ON (opt-out) on a missing dir, unlike the
     // opt-in unbounded bools.
     #[test]
-    fn diagnostics_enabled_defaults_true_on_missing_dir() {
+    fn diagnostics_enabled_defaults_false_on_missing_dir() {
         let base = tmp("diagnostics_enabled_default");
         let _ = std::fs::remove_dir_all(&base);
 
         assert!(
-            load_diagnostics_enabled(&base),
-            "load_diagnostics_enabled must default to on (true) on missing dir"
+            !load_diagnostics_enabled(&base),
+            "diagnostics must be strictly opt-in: default OFF on a missing dir"
         );
+        // Garbage / partial content must also fail closed, never enable reporting.
+        std::fs::create_dir_all(&base).expect("create base");
+        for content in ["", " ", "yes", "1", "tru", "TRUE\n\u{0}"] {
+            std::fs::write(base.join("diagnostics_enabled.txt"), content).expect("write");
+            if content.trim().eq_ignore_ascii_case("true") {
+                continue;
+            }
+            assert!(
+                !load_diagnostics_enabled(&base),
+                "{content:?} must not enable diagnostics"
+            );
+        }
     }
 
     // (k'') diagnostics toggle round-trips: save(false) → load()==false, save(true) → true.
