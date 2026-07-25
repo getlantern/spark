@@ -54,14 +54,20 @@ SIGN_IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning \
   | awk -v t="$TEAM_ID" '/Developer ID Application/ && $0 ~ t {print $2; exit}')}"
 [[ -n "$SIGN_IDENTITY" ]] || { echo "no Developer ID Application identity in the keychain" >&2; exit 1; }
 
-# Canonical SHA-1 of the signing cert. SIGN_IDENTITY is a SHA-1 when auto-detected above or passed as
-# one; a passed display name is resolved to the first matching cert's SHA-1.
-if [[ "$SIGN_IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]]; then
-  SIGN_SHA1="$(printf '%s' "$SIGN_IDENTITY" | tr '[:lower:]' '[:upper:]')"
+# Canonical SHA-1 (upper-case, no colons) of the signing cert, for matching against profile certs.
+# SIGN_IDENTITY is a SHA-1 when auto-detected above or passed as one — accept it with or without the
+# colon separators some tools emit; a passed display name is resolved to the first matching cert's SHA-1.
+sign_id_norm="$(printf '%s' "$SIGN_IDENTITY" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+if [[ "$sign_id_norm" =~ ^[0-9A-F]{40}$ ]]; then
+  SIGN_SHA1="$sign_id_norm"
 else
   SIGN_SHA1="$(security find-identity -v -p codesigning \
     | awk -v n="$SIGN_IDENTITY" 'index($0, n) {print $2; exit}')"
 fi
+# Fail early + clearly if the identity didn't resolve, instead of later with a misleading "profile does
+# not embed the signing cert" (which presumes a known cert).
+[[ -n "$SIGN_SHA1" ]] \
+  || { echo "could not resolve SIGN_IDENTITY ('$SIGN_IDENTITY') to a Developer ID Application cert in the keychain" >&2; exit 1; }
 
 # True if provisioning profile $1 embeds the cert whose SHA-1 (upper-case, no colons) is $2.
 profile_has_cert() {
