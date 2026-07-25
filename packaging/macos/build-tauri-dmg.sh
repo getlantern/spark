@@ -102,9 +102,19 @@ else
   log "building the system extension (platforms/apple archive, arch=$MAC_ARCH)"
   "$APPLE_DIR/build-xcframework.sh"
   ( cd "$APPLE_DIR" && xcodegen generate )
+  # Pin the archive to the resolved SIGN_IDENTITY. project.yml's CODE_SIGN_IDENTITY is the generic
+  # "Developer ID Application" name; on a keychain with several Developer ID certs sharing that display
+  # name, xcodebuild can otherwise pick one that isn't in the provisioning profile and fail with
+  # "profile doesn't include signing certificate". A command-line `CODE_SIGN_IDENTITY=<value>` override
+  # takes precedence over project.yml's per-SDK `CODE_SIGN_IDENTITY[sdk=macosx*]` (verified: the archive
+  # signs with the pinned cert). Do NOT also pass `CODE_SIGN_IDENTITY[sdk=macosx*]=…` on the command
+  # line — xcodebuild splits NAME=VALUE on the first `=`, so the `=` inside the brackets mangles the
+  # value ("No certificate matching 'macosx*]=…'"). Pass a SHA-1 via SIGN_IDENTITY to disambiguate
+  # same-named certs (the auto-detected default is the cert *name*).
   xcodebuild -project "$APPLE_DIR/Spark.xcodeproj" -scheme SparkApp -configuration Release \
     -destination 'generic/platform=macOS' -archivePath "$ARCHIVE" \
-    ARCHS="$MAC_ARCH" CURRENT_PROJECT_VERSION="$(date +%s)" archive
+    ARCHS="$MAC_ARCH" CURRENT_PROJECT_VERSION="$(date +%s)" \
+    CODE_SIGN_IDENTITY="$SIGN_IDENTITY" archive
   SYSEXT_SRC="$ARCHIVE/Products/Applications/SparkApp.app/Contents/Library/SystemExtensions/$SYSEXT_ID.systemextension"
   [[ -d "$SYSEXT_SRC" ]] || { echo "system extension not found in archive: $SYSEXT_SRC" >&2; exit 1; }
 fi
