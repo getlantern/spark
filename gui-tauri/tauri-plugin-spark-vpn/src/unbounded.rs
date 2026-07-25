@@ -32,10 +32,23 @@ pub(crate) struct UnboundedState {
     handle: Mutex<Option<SharingHandle>>,
     loop_handle: Mutex<Option<JoinHandle<()>>>,
     latest_status: Mutex<Option<SharingStatus>>,
-    /// Serializes `unbounded_start`: held (async-safe) across the whole start so two concurrent
-    /// callers can't both pass the "already running?" check and each spin up a pool. A `tokio`
-    /// mutex (not `std`) because it is intentionally held across `.await` points.
+    /// Serializes `unbounded_start` AND `unbounded_stop`: held (async-safe) across each so two
+    /// concurrent callers can't interleave. A `tokio` mutex (not `std`) because it is intentionally
+    /// held across `.await` points. Stop must take it too: it mutates the same handles and the same
+    /// durable flag, so a stop overlapping a start could otherwise cancel nothing (taking the handle
+    /// before start stored it) and leave the pool relaying while disk, UI and tray all read "off".
     start_gate: tokio::sync::Mutex<()>,
+    /// Incremented on every start. The aggregation loop captures its value and performs its
+    /// end-of-stream teardown only while still current, so a loop belonging to a previous generation
+    /// can never clear the handle or state of the pool that replaced it.
+    generation: std::sync::atomic::AtomicU64,
+    /// Cached `features.unbounded` availability, refreshed whenever the config is actually read.
+    ///
+    /// The tray polls ~0.7 Hz and repaints on every peer event; resolving availability from disk each
+    /// time meant a `config_raw.json` read plus a full deserialize of the ENTIRE config (all
+    /// outbounds, rule sets, …) at that rate for the whole app lifetime — on every desktop install,
+    /// including users who never enable Unbounded and clients where the server gate is off.
+    available: std::sync::atomic::AtomicBool,
 }
 
 /// Resolve the persistence base dir (the platform-provided app config dir) the same way
@@ -182,12 +195,19 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // Hold the start gate across the whole start (build + spawn + store). `try_lock` makes a second
     // concurrent caller bail immediately instead of blocking, and — because the gate serializes
     // starts — the `handle.is_some()` check below is race-free (only one start runs at a time).
-    let _gate = match state.start_gate.try_lock() {
-        Ok(gate) => gate,
-        Err(_) => return Ok(()),
-    };
+    let _gate = state.start_gate.lock().await;
     if lock_recover(&state.handle).is_some() {
         return Ok(());
+    }
+
+    // Consent gate, enforced here rather than only in the window UI: the volunteer's connection must
+    // never carry other people's traffic before they have been shown the disclosure. Checking it in
+    // the command covers EVERY entry point — including the tray toggle and the startup resume, which
+    // have no dialog of their own.
+    if !crate::persist::load_unbounded_welcome_seen(&base) {
+        return Err(crate::Error::Platform(
+            "unbounded consent not given (disclosure not yet acknowledged)".into(),
+        ));
     }
 
     // Refuses with a typed "unbounded not available" error when the feature is gated off or the
@@ -200,6 +220,12 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
 
     // Store the handle in a tight, non-await scope.
     *lock_recover(&state.handle) = Some(handle);
+
+    // This start's generation; the loop below only tears down state while it is still current.
+    let generation = state
+        .generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
 
     let loop_app = app.clone();
     let loop_base = base.clone();
@@ -267,10 +293,22 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         // before this runs, so reaching here means nobody called stop: reflect "off" so the UI/tray
         // don't stay stuck on "enabled" with a dead pool. (Clear the handle first so a racing start
         // sees no pool and starts cleanly.)
+        //
+        // Only if this loop is still the current generation: `abort()` takes effect at an await
+        // point, so a stop→start can begin a new pool while this tail is mid-flight, and an
+        // unguarded tail would then drop the NEW handle and contradict the start that just
+        // succeeded.
         let ustate = loop_app.state::<UnboundedState>();
+        if ustate.generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            return;
+        }
         *lock_recover(&ustate.handle) = None;
         *lock_recover(&ustate.latest_status) = None;
-        let _ = crate::persist::save_unbounded_enabled(&loop_base, false);
+        // Deliberately do NOT clear the persisted `unbounded_enabled` here. That flag carries the
+        // user's opt-in, so writing `false` on a pool crash silently un-enrolled a volunteer for
+        // good — one transient supervisor panic and the only way back was re-toggling. Reporting
+        // "off" to the UI is honest (nothing is relaying); the durable choice survives, and the
+        // startup resume re-checks it (together with auto-enable + availability) next launch.
         emit_snapshot(&loop_app, false, &empty_status(), total);
     });
 
@@ -287,13 +325,29 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         *lock_recover(&state.latest_status) = None;
         return Err(e);
     }
+
+    // Publish the running state immediately. Without this, nothing reported "enabled" until the first
+    // peer joined — so the tray status line sat at "Unbounded: off" directly above "Disable
+    // Unbounded", potentially for hours on a volunteer nobody has connected to yet.
+    emit_snapshot(&app, true, &empty_status(), total_helped(&base));
     Ok(())
+}
+
+/// The persisted cumulative "people helped" counter.
+fn total_helped(base: &std::path::Path) -> u64 {
+    crate::persist::load_unbounded_total_helped(base)
 }
 
 #[tauri::command]
 pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
     let base = base_dir(&app)?;
     let state = app.state::<UnboundedState>();
+
+    // Serialize against `unbounded_start` (see `start_gate`): the three entry points — window UI,
+    // tray toggle, startup resume — share no other guard, and a stop that interleaved with a start
+    // could take the handle before the start stored it, cancelling nothing and leaving the pool
+    // relaying while every observable said "off".
+    let _gate = state.start_gate.lock().await;
 
     // Take the sharing handle out and drop it — its `Drop` does a cooperative cancel. Do NOT abort.
     // Recover from a poisoned lock (via `lock_recover`) rather than treating it as "no handle" —
@@ -356,16 +410,51 @@ pub(crate) async fn unbounded_status<R: Runtime>(
 /// (e.g. before the first fetch) reports `false`.
 #[tauri::command]
 pub(crate) async fn unbounded_available<R: Runtime>(app: AppHandle<R>) -> crate::Result<bool> {
-    Ok(read_unbounded_config(&app)?.is_available())
+    let available = read_unbounded_config(&app)?.is_available();
+    store_availability(&app, available);
+    Ok(available)
 }
 
-/// Synchronous availability check for the tray, which builds/refreshes on the main thread and can't
-/// await the `unbounded_available` command. Same source (the cached config's `is_available()`); a
-/// missing/unreadable config — e.g. before the first fetch — reports `false`.
-pub(crate) fn unbounded_available_sync<R: Runtime>(app: &AppHandle<R>) -> bool {
-    read_unbounded_config(app)
+/// Re-read the config and update the cached availability flag. Call this wherever the config is
+/// known to have changed (startup fetch) — everything else reads the cache.
+pub(crate) fn refresh_availability<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let available = read_unbounded_config(app)
         .map(|c| c.is_available())
+        .unwrap_or(false);
+    store_availability(app, available);
+    available
+}
+
+fn store_availability<R: Runtime>(app: &AppHandle<R>, available: bool) {
+    if let Some(state) = app.try_state::<UnboundedState>() {
+        state
+            .available
+            .store(available, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Cached availability, for the tray (which repaints on the main thread and can't await) and any
+/// other hot path. Reports `false` until the first config read — the correct pre-first-fetch answer.
+pub(crate) fn unbounded_available_sync<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<UnboundedState>()
+        .map(|s| s.available.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(false)
+}
+
+/// `(pool running, peers currently helped)` from live state — lets the tray render the real status
+/// line without re-deriving it from persisted flags or waiting for the next peer delta.
+pub(crate) fn live_view<R: Runtime>(app: &AppHandle<R>) -> (bool, usize) {
+    match app.try_state::<UnboundedState>() {
+        Some(state) => {
+            let running = lock_recover(&state.handle).is_some();
+            let helping = lock_recover(&state.latest_status)
+                .as_ref()
+                .map(|s| s.helping_now)
+                .unwrap_or(0);
+            (running, helping)
+        }
+        None => (false, 0),
+    }
 }
 
 #[tauri::command]

@@ -194,21 +194,21 @@ pub(crate) fn refresh<R: Runtime>(app: &AppHandle<R>) {
     let _ = handles.routing_full.set_checked(routing == "full");
     let _ = handles.adblock.set_checked(adblock);
 
-    // Re-gate Unbounded on server availability + persisted enabled (Copilot #90). Only touch the
-    // deterministic states — a live "helping N" count is pushed by refresh_unbounded_label from the pool
-    // snapshot, so we must not overwrite it here (hence the `!enabled` guard on the status set).
-    let (ub_enabled, _) = read_unbounded_state(app);
+    // Re-gate Unbounded on server availability, and take the status line from LIVE state (is a pool
+    // running, how many peers) rather than the persisted flag — that is what keeps the line honest
+    // between peer deltas. It previously changed only at menu build and on join/leave, so a running
+    // volunteer with no peer yet showed "Unbounded: off" directly above "Disable Unbounded".
     let ub_available = crate::unbounded::unbounded_available_sync(app);
+    let (ub_running, ub_helping) = crate::unbounded::live_view(app);
     let _ = handles.unbounded_toggle.set_enabled(ub_available);
     let _ = handles
         .unbounded_toggle
-        .set_text(unbounded_toggle_label(ub_enabled));
-    if !ub_available || !ub_enabled {
-        let _ =
-            handles
-                .unbounded_status
-                .set_text(unbounded_status_text(ub_available, ub_enabled, 0));
-    }
+        .set_text(unbounded_toggle_label(ub_running));
+    let _ = handles.unbounded_status.set_text(unbounded_status_text(
+        ub_available,
+        ub_running,
+        ub_helping,
+    ));
 
     // Location check-marks: patch in place if the pool is unchanged, else rebuild the submenu's
     // children. Hold `pool_sig` across the whole rebuild so two concurrent refreshes (poll thread +

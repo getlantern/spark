@@ -15,10 +15,6 @@ tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-# Unbounded (volunteer-proxy) peer-sharing pool + aggregation. Its own workspace (excluded from the
-# root workspace) with a git dep on lantern-unbounded, so it's pulled in by `path` here. The
-# `unbounded` module folds its PoolEvent stream into the `spark://unbounded` UI event.
-spark-sharing = { path = "../../spark-sharing" }
 # Parse the resolved config.toml dev override for the static server list (servers_from_config).
 # Used only on the Apple targets — macOS + iOS (cfg-gated in desktop.rs) — but listed as a
 # non-platform dep to avoid a conditional dep block; a compile-only dependency with no runtime cost
@@ -29,6 +25,15 @@ toml = "0.8"
 # android (which uses the JNI core). macOS is included so the transport-agnostic ipc client +
 # status mapping compile and unit-test on the dev host (its unix-socket path == the Linux path).
 [target.'cfg(not(target_os = "android"))'.dependencies]
+# Unbounded (volunteer-proxy) peer-sharing pool + aggregation. Its own workspace (excluded from the
+# root workspace) with a git dep on lantern-unbounded, so it's pulled in by `path` here. The
+# `unbounded` module folds its PoolEvent stream into the `spark://unbounded` UI event.
+#
+# Android-gated to match the `unbounded` module's own `cfg(not(target_os = "android"))`: otherwise an
+# Android build resolves and compiles the whole WebRTC/QUIC stack (lantern-unbounded, quinn, rustls,
+# rcgen) that the target can never reach — dead weight at best, an NDK toolchain failure at worst,
+# and no CI job builds Android to catch it.
+spark-sharing = { path = "../../spark-sharing" }
 spark-ipc = { path = "../../ipc", features = ["stream"] }
 tokio = { version = "1", features = ["rt", "net", "io-util", "time", "sync"] }
 # Fetch-only use of spark-core: run the same kindling config fetch the tunnel uses, in the app

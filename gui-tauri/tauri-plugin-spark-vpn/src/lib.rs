@@ -211,6 +211,13 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                         Ok(false) => {} // 304 / unchanged — nothing to do
                         Err(e) => eprintln!("[spark-vpn] startup config fetch failed: {e}"),
                     }
+                    // Refresh the cached `features.unbounded` gate from whatever config we now have
+                    // (fresh or cached) and repaint the tray. This is the ONLY place that needs to
+                    // re-derive it from disk — the tray and the sharing loop read the cached flag, so
+                    // neither re-parses the whole config on a timer.
+                    let _ = crate::unbounded::refresh_availability(&handle);
+                    #[cfg(desktop)]
+                    crate::tray::refresh(&handle);
                 });
 
                 // Gated startup for Unbounded (volunteer proxy). Two gates, both must pass:
@@ -228,7 +235,21 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     let Ok(base) = handle.path().app_config_dir() else {
                         return;
                     };
-                    if !crate::persist::load_unbounded_enabled(&base) {
+                    // Two durable flags, and BOTH must say yes — Unbounded never starts unless the
+                    // user explicitly authorized it:
+                    //   `unbounded_enabled`    the user's current on/off choice
+                    //   `unbounded_auto_enable` the user's "start automatically when Spark opens"
+                    // Requiring only `enabled` would resume at login for a user who deliberately
+                    // left auto-start off; requiring only `auto_enable` would leave the UI showing
+                    // "on" with nothing running. So: resume on both, and when `enabled` is set
+                    // WITHOUT auto-start, clear it so the persisted state matches reality (nothing
+                    // is relaying) instead of advertising an enrolment that isn't live.
+                    let enabled = crate::persist::load_unbounded_enabled(&base);
+                    let auto = crate::persist::load_unbounded_auto_enable(&base);
+                    if !enabled || !auto {
+                        if enabled && !auto {
+                            let _ = crate::persist::save_unbounded_enabled(&base, false);
+                        }
                         return;
                     }
                     match unbounded::unbounded_available(handle.clone()).await {
