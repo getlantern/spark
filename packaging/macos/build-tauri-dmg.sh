@@ -46,11 +46,48 @@ SKIP_NOTARIZE="${SKIP_NOTARIZE:-0}"
 
 log() { echo "[build-tauri-dmg] $*" >&2; }
 
-# Pick the Developer ID Application identity for TEAM_ID (not just the first one —
-# avoids signing with the wrong cert when multiple teams are in the keychain).
+# Pick the Developer ID Application identity for TEAM_ID (not just the first one — avoids the wrong
+# cert when multiple teams are in the keychain). Print the SHA-1 ($2), not the display name: several
+# certs can share the same name, so the name is ambiguous; a SHA-1 pins exactly one cert, which the
+# profile selection below matches against.
 SIGN_IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning \
-  | awk -F'"' -v t="$TEAM_ID" '/Developer ID Application/ && $0 ~ t {print $2; exit}')}"
+  | awk -v t="$TEAM_ID" '/Developer ID Application/ && $0 ~ t {print $2; exit}')}"
 [[ -n "$SIGN_IDENTITY" ]] || { echo "no Developer ID Application identity in the keychain" >&2; exit 1; }
+
+# Canonical SHA-1 of the signing cert. SIGN_IDENTITY is a SHA-1 when auto-detected above or passed as
+# one; a passed display name is resolved to the first matching cert's SHA-1.
+if [[ "$SIGN_IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+  SIGN_SHA1="$(printf '%s' "$SIGN_IDENTITY" | tr '[:lower:]' '[:upper:]')"
+else
+  SIGN_SHA1="$(security find-identity -v -p codesigning \
+    | awk -v n="$SIGN_IDENTITY" 'index($0, n) {print $2; exit}')"
+fi
+
+# True if provisioning profile $1 embeds the cert whose SHA-1 (upper-case, no colons) is $2.
+profile_has_cert() {
+  local pl c i=0
+  pl="$(security cms -D -i "$1" 2>/dev/null)" || return 1
+  while c="$(printf '%s' "$pl" | plutil -extract "DeveloperCertificates.$i" raw -o - - 2>/dev/null \
+      | base64 -d 2>/dev/null | openssl x509 -inform DER -noout -fingerprint -sha1 2>/dev/null \
+      | sed 's/.*=//; s/://g' | tr '[:lower:]' '[:upper:]')" && [[ -n "$c" ]]; do
+    [[ "$c" == "$2" ]] && return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Fail loud if a profile's embedded cert doesn't include the signing cert: the app/sysext would
+# notarize fine but AMFI refuses to spawn it (RBS "Launch failed", POSIX 163). An obvious build error
+# beats an unlaunchable, fully-notarized DMG that only fails on the user's first double-click.
+assert_profile_matches() {  # <profile-path> <label>
+  profile_has_cert "$1" "$SIGN_SHA1" && return 0
+  echo "ERROR: the '$2' provisioning profile does not embed the signing cert $SIGN_SHA1:" >&2
+  echo "         $1" >&2
+  echo "       It would notarize but fail to launch (AMFI spawn error 163). Remove stale same-named" >&2
+  echo "       profiles from ~/Library/Developer/Xcode/UserData/Provisioning Profiles/, or point the" >&2
+  echo "       profile at the cert you are signing with." >&2
+  exit 1
+}
 
 NOTARY_ARGS=()
 if [[ "$SKIP_NOTARIZE" != "1" ]]; then
@@ -64,19 +101,27 @@ if [[ "$SKIP_NOTARIZE" != "1" ]]; then
   fi
 fi
 
-# Locate the controlling-app provisioning profile (org.getlantern.spark) in the Xcode store.
+# Locate the controlling-app provisioning profile (org.getlantern.spark) in the Xcode store,
+# PREFERRING one whose embedded cert matches the signing cert. Selecting purely by name/app-id can pick
+# a stale same-named profile carrying a different cert — which passes codesign/notarize but fails to
+# spawn (AMFI: signing cert not in the embedded profile). Fall back to the first app-id match only if
+# none embed the signing cert (the assert below then turns that into a clear error).
 locate_profile() {
   local d="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
-  local f
+  local f fallback=""
   for f in "$d"/*.provisionprofile; do
     [[ -f "$f" ]] || continue
-    if security cms -D -i "$f" 2>/dev/null | plutil -p - 2>/dev/null \
-         | grep -q "$TEAM_ID.org.getlantern.spark\""; then echo "$f"; return 0; fi
+    security cms -D -i "$f" 2>/dev/null | plutil -p - 2>/dev/null \
+      | grep -q "$TEAM_ID.org.getlantern.spark\"" || continue
+    fallback="${fallback:-$f}"
+    profile_has_cert "$f" "$SIGN_SHA1" && { echo "$f"; return 0; }
   done
+  [[ -n "$fallback" ]] && { echo "$fallback"; return 0; }
   return 1
 }
 APP_PROFILE="${APP_PROFILE:-$(locate_profile || true)}"
 [[ -f "$APP_PROFILE" ]] || { echo "no 'Spark macOS App' provisioning profile found (set APP_PROFILE)" >&2; exit 1; }
+assert_profile_matches "$APP_PROFILE" "Spark macOS App"
 
 # 1. System extension: build fresh, OR reuse a prebuilt .systemextension via REUSE_SYSEXT to keep
 #    its version stable. App-only changes (Rust/JS) don't need a new sysext, and a fresh build bumps
@@ -118,6 +163,12 @@ else
   SYSEXT_SRC="$ARCHIVE/Products/Applications/SparkApp.app/Contents/Library/SystemExtensions/$SYSEXT_ID.systemextension"
   [[ -d "$SYSEXT_SRC" ]] || { echo "system extension not found in archive: $SYSEXT_SRC" >&2; exit 1; }
 fi
+
+# Guard the sysext's embedded profile too. Its profile comes from the archive's by-name selection,
+# which (unlike the app profile) we can't pin per-target on the xcodebuild command line — so if a stale
+# same-named "Spark macOS Tunnel" profile with a different cert is picked, catch it here rather than
+# shipping a sysext that can't activate.
+assert_profile_matches "$SYSEXT_SRC/Contents/embedded.provisionprofile" "Spark macOS Tunnel"
 
 # 2. The Tauri controlling app (config resolves at runtime via config.rs: config.toml → SPARK_CONFIG
 #    → SPARK_PROXY → direct, so there's nothing to bake here).
