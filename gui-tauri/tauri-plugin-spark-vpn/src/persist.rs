@@ -558,8 +558,8 @@ mod tests {
         assert!(!load_unbounded_welcome_seen(&base));
     }
 
-    // (k') diagnostics toggle defaults to ON (opt-out) on a missing dir, unlike the
-    // opt-in unbounded bools.
+    // (k') diagnostics toggle defaults to OFF on a missing dir — strictly opt-in, the same
+    // fail-closed shape as the unbounded bools (see load_diagnostics_enabled).
     #[test]
     fn diagnostics_enabled_defaults_false_on_missing_dir() {
         let base = tmp("diagnostics_enabled_default");

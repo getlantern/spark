@@ -92,7 +92,7 @@ export interface SparkBackend {
   /** Forward a webview error (JS exception / unhandled rejection) to diagnostics.
    * Fire-and-forget safe: callers may ignore the promise. */
   reportError(message: string, source: string): Promise<void>;
-  /** Whether the diagnostics opt-out toggle is on (defaults on). */
+  /** Whether the diagnostics toggle is on (strictly opt-in — defaults OFF). */
   diagnosticsEnabled(): Promise<boolean>;
   /** Persist the diagnostics toggle; takes effect on next launch (the sink installs once at startup). */
   setDiagnosticsEnabled(enabled: boolean): Promise<void>;
@@ -119,7 +119,7 @@ const mockState: {
   hidden: boolean;
   welcomeSeen: boolean;
   diagnosticsEnabled: boolean;
-} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [] }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false, diagnosticsEnabled: true };
+} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [] }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false, diagnosticsEnabled: false };
 
 export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
