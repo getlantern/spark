@@ -98,8 +98,9 @@ pub(crate) fn arm_and_register(dir: &Path, version: &str) -> Option<DiagEvent> {
 /// context (tauri's async runtime IS tokio, but plugin setup itself isn't guaranteed
 /// to run inside it).
 pub fn init<R: Runtime>(app: &AppHandle<R>) {
-    // Local opt-out (spec §C4.3): dev env override first, then the persisted toggle
-    // (default on — see persist::load_diagnostics_enabled).
+    // Local gate (spec §C4, revised): dev env override first, then the persisted toggle — which is
+    // strictly opt-in and defaults OFF, so this returns early on a fresh install and nothing is
+    // captured or spooled until the user turns it on (see persist::load_diagnostics_enabled).
     if std::env::var("SPARK_DIAGNOSTICS").as_deref() == Ok("off") {
         return;
     }
