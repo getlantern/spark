@@ -11,11 +11,10 @@
 
   // Ad-block defaults on (persisted flag defaults true); load the real value on mount.
   let adBlock = $state(true);
-  // Diagnostics are strictly opt-in (default OFF), so start false: the real value arrives from the
-  // backend a moment later, and starting `true` both showed the wrong state initially and flashed
-  // on→off. Changes take effect on next launch (the diag sink installs once at startup), which the
-  // row's description line spells out.
-  let diagnostics = $state(false);
+  // Diagnostics default ON (opt-out) while the feature is under test, so start true to match the
+  // backend and avoid an off→on flash once the real value loads. Changes take effect on next launch
+  // (the diag sink installs once at startup), which the row's description line spells out.
+  let diagnostics = $state(true);
   let snack = $state<string | null>(null);
   let snackTimer: ReturnType<typeof setTimeout> | undefined;
 

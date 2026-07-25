@@ -281,18 +281,21 @@ Gating: the **existing** `features["otel.traces"]` flag + `otel.sample_rate` —
 radiance's client-side contract, zero new server work. Spans that end in an error status
 follow the §C2a rule and bypass sampling.
 
-### C4. Gate / kill switch (default-OFF ⇒ strictly opt-in)
+### C4. Gate / kill switch (default-on ⇒ the switch is load-bearing)
 
-> **REVISED 2026-07-25 — diagnostics are default-OFF and strictly opt-in.** This section originally
-> specified default-on ("so the opt-out switch is load-bearing"). Reversed as a product decision:
-> Spark's users include people in surveilled jurisdictions, and an Unbounded volunteer's diagnostics
-> describe sessions they relayed **for censored users**, so nothing is reported until the user
-> explicitly turns it on. Concretely: `persist::load_diagnostics_enabled` now fails closed (only an
-> exact `"true"` enables it); turning it off **erases the local spool and backup log** rather than only
-> stopping future writes; and the peer session id on `unbounded.*` events is replaced by a per-run
-> pseudonym so diagnostics can't be joined against signaling into
-> (censored user ↔ volunteer ↔ time). The server-side kill switch and the empty-endpoint rule below are
-> unchanged — the local setting is now the *primary* gate rather than a secondary opt-out.
+> **2026-07-25 — default-on RETAINED for the testing phase, with the privacy hardening kept.** The
+> default briefly flipped to opt-in and was reversed: while the feature is still being tested we want
+> the coverage, so `load_diagnostics_enabled` stays default-on (only an explicit `"false"` opts out) and
+> the opt-out switch remains the load-bearing control this section describes.
+>
+> Two protections added alongside it are **independent of the default and stay in force**: turning
+> diagnostics off now **erases the local spool and backup log** (not just stops future writes), and the
+> peer session id on `unbounded.*` events is replaced by a **per-run pseudonym** so diagnostics can't be
+> joined against signaling into (censored user ↔ volunteer ↔ time).
+>
+> **Revisit the default before a broad release.** Spark's users include people in surveilled
+> jurisdictions, and an Unbounded volunteer's diagnostics describe sessions they relayed *for censored
+> users* — the argument for opt-in gets stronger the wider the audience.
 
 Reuse radiance's gating verbatim, extended by one flag for the logs signal:
 

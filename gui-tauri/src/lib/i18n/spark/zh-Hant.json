@@ -4,6 +4,6 @@
   "unbounded_welcome_risks": "開始之前請注意：他們造訪的網站與服務會將你的 IP 位址視為該流量的來源；為了在地圖上顯示，你所協助的每個人的大致位置會透過 Lantern 的服務查詢。請考量這在你所在的地區是否安全。Unbounded 完全自願，你可以隨時關閉。",
   "unbounded_welcome_dismiss": "我已了解，開始使用",
   "settings_diagnostics": "分享診斷資訊",
-  "settings_diagnostics_desc": "預設關閉。開啟後，Spark 會分享錯誤與效能報告以協助修正問題；IP 位址與網址會被移除。關閉後也會刪除本裝置上已儲存的報告。重新啟動後生效。",
+  "settings_diagnostics_desc": "協助我們修正問題：Spark 會分享錯誤與效能報告；IP 位址與網址會被移除。關閉後也會刪除本裝置上已儲存的報告。重新啟動後生效。",
   "unbounded_help_banner": "安全地分享你的連線，協助他人繞過審查。"
 }

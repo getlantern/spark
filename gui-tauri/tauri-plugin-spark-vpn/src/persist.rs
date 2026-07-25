@@ -281,14 +281,22 @@ pub fn save_unbounded_total_helped(base: &Path, total: u64) -> crate::Result<()>
 
 /// Read the persisted diagnostics toggle from `<base>/diagnostics_enabled.txt`.
 ///
-/// Diagnostics are **OFF by default — strictly opt-in.** This revises the diag design's original
-/// §C4 "default-on so the opt-out switch is load-bearing" decision: Spark's users include people in
-/// surveilled jurisdictions, and an Unbounded volunteer's diagnostics describe sessions they relayed
-/// for censored users, so nothing is reported until the user turns it on. Returns `true` only when
-/// the file holds exactly `"true"` (trimmed, case-insensitive); missing, unreadable, truncated, and
-/// garbage content all mean off — the same fail-closed shape as the Unbounded opt-ins.
+/// Diagnostics are **ON by default (opt-out) while the feature is under test** — so the opt-out
+/// switch is load-bearing (diag design §C4). Returns `true` unless the file holds exactly `"false"`
+/// (trimmed, case-insensitive); missing, unreadable, and garbage content all leave it on.
+///
+/// This is a deliberate, temporary posture for the testing phase: it maximizes the diagnostics we get
+/// while shaking the feature out. The privacy protections around it do NOT depend on the default and
+/// stay in force either way — IP/URL redaction at every sink, a per-run pseudonym instead of the
+/// peer's real session id, and erasing the local spool + backup log when the user opts out. Revisit
+/// before a broad release: Spark's users include people in surveilled jurisdictions, and an Unbounded
+/// volunteer's diagnostics describe sessions they relayed for censored users.
 pub fn load_diagnostics_enabled(base: &Path) -> bool {
-    load_unbounded_bool(base, "diagnostics_enabled.txt")
+    std::fs::read_to_string(base.join("diagnostics_enabled.txt"))
+        .ok()
+        // Only an explicit "false" opts out; anything else (incl. missing) stays on.
+        .map(|s| !s.trim().eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
 }
 
 /// Persist the diagnostics toggle to `<base>/diagnostics_enabled.txt` as
@@ -558,28 +566,31 @@ mod tests {
         assert!(!load_unbounded_welcome_seen(&base));
     }
 
-    // (k') diagnostics toggle defaults to OFF on a missing dir — strictly opt-in, the same
-    // fail-closed shape as the unbounded bools (see load_diagnostics_enabled).
+    // (k') diagnostics toggle defaults to ON (opt-out) during the testing phase, unlike the
+    // fail-closed opt-in unbounded bools. Only an explicit "false" turns it off — see
+    // load_diagnostics_enabled.
     #[test]
-    fn diagnostics_enabled_defaults_false_on_missing_dir() {
+    fn diagnostics_enabled_defaults_true_on_missing_dir() {
         let base = tmp("diagnostics_enabled_default");
         let _ = std::fs::remove_dir_all(&base);
 
         assert!(
-            !load_diagnostics_enabled(&base),
-            "diagnostics must be strictly opt-in: default OFF on a missing dir"
+            load_diagnostics_enabled(&base),
+            "diagnostics default is ON (opt-out) while under test"
         );
-        // Garbage / partial content must also fail closed, never enable reporting.
+        // Only an explicit "false" opts out; unrelated content must not silently disable reporting.
         std::fs::create_dir_all(&base).expect("create base");
-        for content in ["", " ", "yes", "1", "tru", "TRUE\n\u{0}"] {
+        for content in ["", " ", "yes", "1", "tru", "TRUE"] {
             std::fs::write(base.join("diagnostics_enabled.txt"), content).expect("write");
-            if content.trim().eq_ignore_ascii_case("true") {
-                continue;
-            }
             assert!(
-                !load_diagnostics_enabled(&base),
-                "{content:?} must not enable diagnostics"
+                load_diagnostics_enabled(&base),
+                "{content:?} is not an explicit opt-out, so diagnostics must stay on"
             );
+        }
+        // ...and the opt-out itself works, case/whitespace-insensitively.
+        for content in ["false", "FALSE", "  False \n"] {
+            std::fs::write(base.join("diagnostics_enabled.txt"), content).expect("write");
+            assert!(!load_diagnostics_enabled(&base), "{content:?} must opt out");
         }
     }
 
