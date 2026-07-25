@@ -240,7 +240,16 @@ if MNT="$(hdiutil attach -readwrite -noverify -noautoopen "$RW" 2>/dev/null | gr
   else
     log "WARN: SetFile not found (install Xcode command-line tools) — volume icon skipped"
   fi
-  if osascript >/dev/null 2>&1 <<EOF
+  # Style the DMG window (background + icon layout). PREFER a committed .DS_Store template so styling
+  # works HEADLESSLY (CI, background/automated builds) with no Finder automation or Aqua session; fall
+  # back to driving Finder via osascript when the template is absent. Regenerate the template from a
+  # known-good branded DMG: `hdiutil attach Spark.dmg` then
+  # `cp "/Volumes/Spark/.DS_Store" packaging/branding/dmg.DS_Store`.
+  DS_TEMPLATE="$REPO_ROOT/packaging/branding/dmg.DS_Store"
+  if [[ -f "$DS_TEMPLATE" ]]; then
+    cp "$DS_TEMPLATE" "$MNT/.DS_Store"
+    log "DMG styled from committed .DS_Store template (headless — no Finder automation needed)"
+  elif osascript >/dev/null 2>&1 <<EOF
 tell application "Finder"
   tell disk "$VOL"
     open
@@ -261,7 +270,7 @@ tell application "Finder"
   end tell
 end tell
 EOF
-  then log "DMG window laid out"; else log "WARN: Finder layout skipped (automation unavailable) — DMG uses default layout"; fi
+  then log "DMG window laid out (Finder automation)"; else log "WARN: no .DS_Store template and Finder automation unavailable — DMG uses default layout"; fi
   sync
   hdiutil detach "$MNT" >/dev/null 2>&1 || hdiutil detach "$MNT" -force >/dev/null 2>&1 || true
 fi
