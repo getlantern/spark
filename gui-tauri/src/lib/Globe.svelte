@@ -166,6 +166,12 @@
         console.warn("globe: continents failed to load", e);
       }
 
+      // Bail if the component was destroyed while the dynamic imports / TopoJSON fetch above were in
+      // flight: `onDestroy` has already disconnected the (still-undefined) observers, so creating them
+      // here would observe a detached node that nothing ever disconnects — leaking an observer pair
+      // plus the element on every tab switch during load.
+      if (disposed || !el) return;
+
       io = new IntersectionObserver(
         (entries) => {
           onScreen = entries.some((e) => e.isIntersecting);

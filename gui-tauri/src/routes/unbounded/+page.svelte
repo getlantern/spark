@@ -18,8 +18,27 @@
 
   let status = $state<UnboundedStatus>({ enabled: false, helpingNow: 0, totalHelped: 0, peers: [] });
   let autoEnable = $state(false);
-  let showWelcome = $state(false);
+  // Consent state. `settingsLoaded` is a safety concern, not just UX: whether the disclosure has been
+  // acknowledged is only known after an async round trip, and until it lands the user must not be able
+  // to turn sharing on. Previously the page painted with a live toggle during that window, so a fast
+  // click could start relaying other people's traffic before the disclosure had appeared. (The plugin
+  // also refuses `unbounded_start` without consent — that backstop covers the tray, which has no
+  // dialog of its own.)
+  let settingsLoaded = $state(false);
+  let welcomeSeen = $state(false);
+  const showWelcome = $derived(settingsLoaded && !welcomeSeen);
+  const consentGiven = $derived(settingsLoaded && welcomeSeen);
   let busy = $state(false);
+  // Transient error banner (same shape as the settings page). Without it every failure below was
+  // swallowed, so a refused start looked exactly like "I chose not to".
+  let snack = $state<string | null>(null);
+  let snackTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function showSnack(msg: string) {
+    snack = msg;
+    clearTimeout(snackTimer);
+    snackTimer = setTimeout(() => (snack = null), 2500);
+  }
   let poll: ReturnType<typeof setInterval>;
   let unlistenUnbounded: Promise<() => void> | undefined; // spark://unbounded subscription (Tauri only)
 
@@ -35,6 +54,9 @@
 
   async function toggle() {
     if (busy) return;
+    // Never start sharing before the disclosure has been shown and acknowledged (stopping is always
+    // allowed). Belt-and-braces with the plugin-side check.
+    if (!status.enabled && !consentGiven) return;
     busy = true;
     try {
       if (status.enabled) {
@@ -43,7 +65,13 @@
         await backend.unboundedStart();
       }
       await refresh();
-    } catch { /* leave the toggle reflecting the last-known status */ } finally {
+    } catch {
+      // Surface it: a start can legitimately fail (feature not available for this client, bad
+      // signaling endpoint, persist error), and a silent snap-back is indistinguishable from a
+      // deliberate decline.
+      showSnack($_("unbounded_err_toggle"));
+      await refresh();
+    } finally {
       busy = false;
     }
   }
@@ -55,12 +83,19 @@
       await backend.unboundedSetSettings({ autoEnable });
     } catch {
       autoEnable = prev;
+      showSnack($_("err_save_changes"));
     }
   }
 
   async function dismissWelcome() {
-    showWelcome = false;
-    try { await backend.unboundedSetSettings({ welcomeSeen: true }); } catch { /* best-effort */ }
+    try {
+      await backend.unboundedSetSettings({ welcomeSeen: true });
+      welcomeSeen = true;
+    } catch {
+      // Keep the dialog up rather than letting a failed write leave the user "consented" in this
+      // session only — the plugin would refuse the start anyway, which would be baffling.
+      showSnack($_("err_save_changes"));
+    }
   }
 
   onMount(() => {
@@ -69,8 +104,13 @@
       try {
         const settings = await backend.unboundedGetSettings();
         autoEnable = settings.autoEnable;
-        showWelcome = !settings.welcomeSeen;
-      } catch { /* keep defaults */ }
+        welcomeSeen = settings.welcomeSeen;
+        settingsLoaded = true;
+      } catch {
+        // Leave `settingsLoaded` false: consent is unknown, so the toggle stays inert rather than
+        // assuming consent was given.
+        showSnack($_("unbounded_err_settings"));
+      }
     })();
     poll = setInterval(refresh, 2000);
     // Keep the stats live between polls: the plugin emits spark://unbounded with the full status
@@ -85,6 +125,7 @@
   });
   onDestroy(() => {
     clearInterval(poll);
+    clearTimeout(snackTimer);
     unlistenUnbounded?.then((f) => f()).catch(() => {});
   });
 </script>
@@ -114,7 +155,7 @@
         <div class="meta">
           <div class="name">{$_("unbounded_status")}: <span class="state" class:on={status.enabled}>{status.enabled ? $_("unbounded_state_enabled") : $_("unbounded_state_disabled")}</span></div>
         </div>
-        <button class="switch" class:on={status.enabled} role="switch" aria-checked={status.enabled} aria-busy={busy} aria-label={$_("unbounded_status")} onclick={toggle}><span class="knob"></span></button>
+        <button class="switch" class:on={status.enabled} role="switch" aria-checked={status.enabled} aria-busy={busy} aria-label={$_("unbounded_status")} disabled={!status.enabled && !consentGiven} onclick={toggle}><span class="knob"></span></button>
       </div>
       <div class="divider"></div>
       <div class="row stat-row">
@@ -165,12 +206,18 @@
     <div class="dialog">
       <h2 id="unbounded-welcome-title">{$_("unbounded_welcome_title")}</h2>
       <p>{$_("unbounded_welcome_body")}</p>
+      <p class="risks">{$_("unbounded_welcome_risks")}</p>
       <button class="primary" onclick={dismissWelcome}>{$_("unbounded_welcome_dismiss")}</button>
     </div>
   </div>
 {/if}
 
+{#if snack}<div class="snack">{snack}</div>{/if}
+
 <style>
+  .snack { position: fixed; left: 16px; right: 16px; bottom: 20px; background: var(--snack-bg); color: #fff; padding: 12px 16px; border-radius: 10px; font-size: 14px; text-align: center; box-shadow: 0 6px 24px rgba(0,0,0,.25); z-index: 10; }
+  .switch:disabled { opacity: .5; cursor: not-allowed; }
+  .risks { font-size: 13px; opacity: .85; }
   .app { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
   .appbar {
     height: 56px; flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px;
