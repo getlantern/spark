@@ -1,0 +1,9 @@
+{
+  "unbounded_welcome_title": "Unbounded'a hoş geldiniz",
+  "unbounded_welcome_body": "Unbounded, cihazınızın sansür altında yaşayan insanlar için dijital bir köprü olmasını sağlar. Açtığınızda onların trafiği sizin internet bağlantınız üzerinden açık internete ulaşır.",
+  "unbounded_welcome_risks": "Başlamadan önce: eriştikleri siteler ve hizmetler, bu trafiğin kaynağı olarak sizin IP adresinizi görür ve yardım ettiğiniz her kişinin yaklaşık konumu, haritanızda gösterilebilmesi için bir Lantern hizmeti aracılığıyla sorgulanır. Lütfen bunun yaşadığınız yerde güvenli olup olmadığını değerlendirin. Unbounded tamamen isteğe bağlıdır ve dilediğiniz zaman kapatabilirsiniz.",
+  "unbounded_welcome_dismiss": "Anladım — başlayalım",
+  "settings_diagnostics": "Tanılama verilerini paylaş",
+  "settings_diagnostics_desc": "Varsayılan olarak kapalıdır. Açıkken Spark, sorunların giderilmesine yardımcı olmak için hata ve performans raporlarını paylaşır; IP adresleri ve web adresleri kaldırılır. Kapatmak, bu cihazda saklanan raporları da siler. Yeniden başlatıldıktan sonra geçerli olur.",
+  "unbounded_help_banner": "Bağlantınızı güvenli biçimde paylaşarak başkalarının sansürü aşmasına yardım edin."
+}

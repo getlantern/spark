@@ -1,0 +1,9 @@
+{
+  "unbounded_welcome_title": "Selamat datang ke Unbounded",
+  "unbounded_welcome_body": "Unbounded membolehkan peranti anda bertindak sebagai jambatan digital untuk orang yang hidup di bawah penapisan. Apabila anda menghidupkannya, trafik mereka melalui sambungan internet anda ke internet terbuka.",
+  "unbounded_welcome_risks": "Sebelum anda mula: laman web dan perkhidmatan yang mereka akses akan melihat alamat IP anda sebagai sumber trafik tersebut, dan lokasi anggaran setiap orang yang anda bantu dicari melalui perkhidmatan Lantern supaya dapat ditunjukkan pada peta anda. Sila pertimbangkan sama ada ini selamat di tempat anda tinggal. Unbounded sepenuhnya pilihan dan anda boleh mematikannya pada bila-bila masa.",
+  "unbounded_welcome_dismiss": "Saya faham — mulakan",
+  "settings_diagnostics": "Kongsi diagnostik",
+  "settings_diagnostics_desc": "Dimatikan secara lalai. Apabila dihidupkan, Spark berkongsi laporan ralat dan prestasi untuk membantu membetulkan masalah; alamat IP dan alamat web dibuang. Mematikannya juga memadam laporan yang disimpan pada peranti ini. Berkuat kuasa selepas dimulakan semula.",
+  "unbounded_help_banner": "Bantu orang lain memintas penapisan dengan berkongsi sambungan anda secara selamat."
+}
