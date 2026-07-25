@@ -68,6 +68,9 @@ fi
 # not embed the signing cert" (which presumes a known cert).
 [[ -n "$SIGN_SHA1" ]] \
   || { echo "could not resolve SIGN_IDENTITY ('$SIGN_IDENTITY') to a Developer ID Application cert in the keychain" >&2; exit 1; }
+# Sign with the canonical SHA-1 from here on — not a possibly-ambiguous display name or colon-separated
+# form — so the cert actually used to sign is exactly the one validated against the profiles below.
+SIGN_IDENTITY="$SIGN_SHA1"
 
 # True if provisioning profile $1 embeds the cert whose SHA-1 (upper-case, no colons) is $2.
 profile_has_cert() {
@@ -86,6 +89,7 @@ profile_has_cert() {
 # notarize fine but AMFI refuses to spawn it (RBS "Launch failed", POSIX 163). An obvious build error
 # beats an unlaunchable, fully-notarized DMG that only fails on the user's first double-click.
 assert_profile_matches() {  # <profile-path> <label>
+  [[ -f "$1" ]] || { echo "ERROR: the '$2' provisioning profile was not found: $1" >&2; exit 1; }
   profile_has_cert "$1" "$SIGN_SHA1" && return 0
   echo "ERROR: the '$2' provisioning profile does not embed the signing cert $SIGN_SHA1:" >&2
   echo "         $1" >&2
@@ -118,7 +122,7 @@ locate_profile() {
   for f in "$d"/*.provisionprofile; do
     [[ -f "$f" ]] || continue
     security cms -D -i "$f" 2>/dev/null | plutil -p - 2>/dev/null \
-      | grep -q "$TEAM_ID.org.getlantern.spark\"" || continue
+      | grep -qF "$TEAM_ID.org.getlantern.spark\"" || continue
     fallback="${fallback:-$f}"
     profile_has_cert "$f" "$SIGN_SHA1" && { echo "$f"; return 0; }
   done
