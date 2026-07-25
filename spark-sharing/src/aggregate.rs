@@ -101,6 +101,14 @@ impl Aggregator {
         self.live.keys().any(|(_, id)| id == session_id)
     }
 
+    /// A location already resolved for `session_id` on some other slot, if any.
+    fn session_geo(&self, session_id: &str) -> Option<Geo> {
+        self.live
+            .iter()
+            .find(|((_, id), geo)| id == session_id && geo.is_some())
+            .and_then(|(_, geo)| geo.clone())
+    }
+
     /// Like [`Aggregator::apply`], but resolves peer geolocation before emitting a
     /// `Joined` delta. Used by the plugin's aggregation loop; the sync [`Aggregator::apply`]
     /// stays for pure unit tests.
@@ -117,9 +125,16 @@ impl Aggregator {
                 if self.live.contains_key(&(slot, session_id.clone())) {
                     return None;
                 }
-                let geo = match remote {
-                    Some(addr) => resolver.resolve(addr.ip()).await,
-                    None => None,
+                // Reuse a location another slot already resolved for this same consumer. Liveness is
+                // slot-keyed, so without this a consumer spread over N slots would pay N lookups —
+                // each one awaited on the event loop's critical path — and paths whose lookup failed
+                // would disagree with paths whose succeeded.
+                let geo = match self.session_geo(&session_id) {
+                    Some(geo) => Some(geo),
+                    None => match remote {
+                        Some(addr) => resolver.resolve(addr.ip()).await,
+                        None => None,
+                    },
                 };
                 self.connect(slot, session_id, geo)
             }

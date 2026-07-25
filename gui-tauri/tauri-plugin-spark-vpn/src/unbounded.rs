@@ -192,9 +192,11 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // tray toggle, or racing UI call would start a second pool and overwrite the stored handles,
     // orphaning the first pool + its aggregation task (still consuming resources / emitting).
     //
-    // Hold the start gate across the whole start (build + spawn + store). `try_lock` makes a second
-    // concurrent caller bail immediately instead of blocking, and — because the gate serializes
-    // starts — the `handle.is_some()` check below is race-free (only one start runs at a time).
+    // Hold the start gate across the whole start (build + spawn + store). A second concurrent caller
+    // WAITS on the gate (`lock().await`, not `try_lock`) and then falls through to the `handle`
+    // check below, which sees the pool the winner stored and returns Ok — same idempotency, but the
+    // return value is honest: `Ok` always means "a pool is running", never "someone else might be
+    // starting one". Because the gate serializes start and stop, that check is race-free.
     let _gate = state.start_gate.lock().await;
     if lock_recover(&state.handle).is_some() {
         return Ok(());
