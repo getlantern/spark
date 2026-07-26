@@ -232,23 +232,44 @@ pub(crate) fn refresh<R: Runtime>(app: &AppHandle<R>) {
             .lock()
             .expect("unbounded_shown lock");
         if *shown != want_shown {
-            if want_shown {
-                let _ = handles
+            // Clear the block first, in reverse order so an earlier removal can't shift the ones still
+            // to go. Errors are ignored HERE on purpose: the items may legitimately not be in the menu,
+            // and starting from "known absent" makes the whole reconcile idempotent — so a retry after
+            // a partial failure re-inserts cleanly instead of duplicating items.
+            let _ = handles.menu.remove(&handles.unbounded_toggle);
+            let _ = handles.menu.remove(&handles.unbounded_status);
+            let _ = handles.menu.remove(&handles.unbounded_sep);
+
+            let applied = if want_shown {
+                handles
                     .menu
-                    .insert(&handles.unbounded_sep, UNBOUNDED_BLOCK_AT);
-                let _ = handles
-                    .menu
-                    .insert(&handles.unbounded_status, UNBOUNDED_BLOCK_AT + 1);
-                let _ = handles
-                    .menu
-                    .insert(&handles.unbounded_toggle, UNBOUNDED_BLOCK_AT + 2);
+                    .insert(&handles.unbounded_sep, UNBOUNDED_BLOCK_AT)
+                    .and_then(|()| {
+                        handles
+                            .menu
+                            .insert(&handles.unbounded_status, UNBOUNDED_BLOCK_AT + 1)
+                    })
+                    .and_then(|()| {
+                        handles
+                            .menu
+                            .insert(&handles.unbounded_toggle, UNBOUNDED_BLOCK_AT + 2)
+                    })
             } else {
-                // Reverse order so an earlier removal can't shift the ones still to go.
-                let _ = handles.menu.remove(&handles.unbounded_toggle);
-                let _ = handles.menu.remove(&handles.unbounded_status);
-                let _ = handles.menu.remove(&handles.unbounded_sep);
+                // Hiding IS the removals above. A failed remove almost certainly means the item was
+                // already gone, which is the state we wanted.
+                Ok(())
+            };
+            match applied {
+                // Commit only on success. Flipping the flag regardless would desync it from the real
+                // menu and stop every later refresh from reconciling — leaving the menu wrong for the
+                // rest of the run. Left unflipped, the ~1.5s poll simply retries.
+                Ok(()) => *shown = want_shown,
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    want_shown,
+                    "tray: could not apply Unbounded visibility; will retry on the next refresh"
+                ),
             }
-            *shown = want_shown;
         }
     }
 
