@@ -89,8 +89,13 @@ pub(crate) fn unbounded_status_text(available: bool, enabled: bool, helping_now:
 /// Note hiding is presentational only: it never stops a running pool. A volunteer who hides the
 /// feature while sharing keeps sharing, and the Settings → Unbounded row stays reachable so the
 /// choice is reversible.
-pub(crate) fn unbounded_tray_visible(available: bool, hidden: bool) -> bool {
-    available && !hidden
+///
+/// `hidden` is a closure, not a bool, because reading that preference touches the disk and this is
+/// evaluated on the 1.5s tray poll: taking it eagerly meant a file read every poll for every user
+/// whose server gate is off (the common case). `&&` short-circuits, so it's only consulted when the
+/// feature is available at all.
+pub(crate) fn unbounded_tray_visible(available: bool, hidden: impl FnOnce() -> bool) -> bool {
+    available && !hidden()
 }
 
 /// The disabled top-of-menu header: connection status plus the selected location. A manual pin
@@ -225,7 +230,7 @@ pub(crate) fn refresh<R: Runtime>(app: &AppHandle<R>) {
     // inserts/removes them — and only when the desired state actually changed, since this runs on the
     // 1.5s poll. Availability arrives after the first config read and "Hide Unbounded" is a settings
     // toggle, so both directions take effect live, with no restart.
-    let want_shown = unbounded_tray_visible(ub_available, read_unbounded_hidden(app));
+    let want_shown = unbounded_tray_visible(ub_available, || read_unbounded_hidden(app));
     {
         let mut shown = handles
             .unbounded_shown
@@ -457,7 +462,7 @@ fn build_menu<R: Runtime>(
             .build(app)?;
     // Built whether or not it's shown, so a later un-hide can insert the same handles.
     let unbounded_sep = tauri::menu::PredefinedMenuItem::separator(app)?;
-    let ub_shown = unbounded_tray_visible(ub_available, read_unbounded_hidden(app));
+    let ub_shown = unbounded_tray_visible(ub_available, || read_unbounded_hidden(app));
 
     let show = MenuItemBuilder::with_id("show", "Show Spark").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Spark").build(app)?;
@@ -694,13 +699,25 @@ mod tests {
     /// agree, so "Hide Unbounded" hides it everywhere.
     #[test]
     fn unbounded_tray_shows_only_when_available_and_not_hidden() {
-        assert!(unbounded_tray_visible(true, false));
-        assert!(!unbounded_tray_visible(true, true), "hidden wins");
+        assert!(unbounded_tray_visible(true, || false));
+        assert!(!unbounded_tray_visible(true, || true), "hidden wins");
         assert!(
-            !unbounded_tray_visible(false, false),
+            !unbounded_tray_visible(false, || false),
             "server gate off ⇒ nothing surfaced"
         );
-        assert!(!unbounded_tray_visible(false, true));
+        assert!(!unbounded_tray_visible(false, || true));
+
+        // Reading the hidden preference touches the disk, and this runs on the 1.5s tray poll — so it
+        // must not be consulted at all when the feature isn't available (the common case).
+        let mut consulted = false;
+        assert!(!unbounded_tray_visible(false, || {
+            consulted = true;
+            false
+        }));
+        assert!(
+            !consulted,
+            "hidden must not be read when the feature is unavailable"
+        );
     }
 
     #[test]
