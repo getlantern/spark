@@ -69,13 +69,28 @@ pub(crate) fn unbounded_tray_label(enabled: bool, helping_now: usize) -> String 
 /// Status line gated on server availability: "Unbounded: unavailable" when the server gate
 /// (`features.unbounded`) is off — otherwise the normal enabled/off/helping label. The tray toggle is
 /// also disabled when unavailable, so a user can't interact with Unbounded that the server hasn't
-/// enabled for this client.
+/// enabled for this client. (With [`unbounded_tray_visible`] the items are normally absent rather than
+/// shown as "unavailable"; this stays the label for the window between the tray being built and the
+/// first config read resolving availability.)
 pub(crate) fn unbounded_status_text(available: bool, enabled: bool, helping_now: usize) -> String {
     if !available {
         "Unbounded: unavailable".to_string()
     } else {
         unbounded_tray_label(enabled, helping_now)
     }
+}
+
+/// Whether the tray surfaces its Unbounded items at all.
+///
+/// Deliberately the same condition as the tab — `unboundedVisible(serverEnabled, hidden)` in
+/// `gui-tauri/src/lib/unbounded.ts` — so "Hide Unbounded" means hidden *everywhere*, not just in the
+/// window. Both inputs default false, so an unknown server gate keeps the items out of the menu.
+///
+/// Note hiding is presentational only: it never stops a running pool. A volunteer who hides the
+/// feature while sharing keeps sharing, and the Settings → Unbounded row stays reachable so the
+/// choice is reversible.
+pub(crate) fn unbounded_tray_visible(available: bool, hidden: bool) -> bool {
+    available && !hidden
 }
 
 /// The disabled top-of-menu header: connection status plus the selected location. A manual pin
@@ -109,6 +124,11 @@ use tauri::{
 /// Menu id for the Unbounded enable/disable toggle. The status line above it is a disabled
 /// (non-clickable) text item, so it needs no id.
 const MENU_UNBOUNDED_TOGGLE: &str = "unbounded_toggle";
+
+/// Menu index the Unbounded block sits at: separator, status line, toggle. Ties to `build_menu`'s
+/// fixed prefix — header, connect toggle, separator, Location, Routing, Ad Blocking, Split Tunneling
+/// — so keep the two in step if that prefix ever changes.
+const UNBOUNDED_BLOCK_AT: usize = 7;
 
 /// Toggle label for the Unbounded enable/disable item, given the current enabled state.
 pub(crate) fn unbounded_toggle_label(enabled: bool) -> &'static str {
@@ -200,6 +220,39 @@ pub(crate) fn refresh<R: Runtime>(app: &AppHandle<R>) {
     // volunteer with no peer yet showed "Unbounded: off" directly above "Disable Unbounded".
     let ub_available = crate::unbounded::unbounded_available_sync(app);
     let (ub_running, ub_helping) = crate::unbounded::live_view(app);
+
+    // Show/hide the whole block on a transition. muda items have no `set_visible`, so this
+    // inserts/removes them — and only when the desired state actually changed, since this runs on the
+    // 1.5s poll. Availability arrives after the first config read and "Hide Unbounded" is a settings
+    // toggle, so both directions take effect live, with no restart.
+    let want_shown = unbounded_tray_visible(ub_available, read_unbounded_hidden(app));
+    {
+        let mut shown = handles
+            .unbounded_shown
+            .lock()
+            .expect("unbounded_shown lock");
+        if *shown != want_shown {
+            if want_shown {
+                let _ = handles
+                    .menu
+                    .insert(&handles.unbounded_sep, UNBOUNDED_BLOCK_AT);
+                let _ = handles
+                    .menu
+                    .insert(&handles.unbounded_status, UNBOUNDED_BLOCK_AT + 1);
+                let _ = handles
+                    .menu
+                    .insert(&handles.unbounded_toggle, UNBOUNDED_BLOCK_AT + 2);
+            } else {
+                // Reverse order so an earlier removal can't shift the ones still to go.
+                let _ = handles.menu.remove(&handles.unbounded_toggle);
+                let _ = handles.menu.remove(&handles.unbounded_status);
+                let _ = handles.menu.remove(&handles.unbounded_sep);
+            }
+            *shown = want_shown;
+        }
+    }
+
+    // Patching text/enabled is harmless while the block is out of the menu, so it stays unconditional.
     let _ = handles.unbounded_toggle.set_enabled(ub_available);
     let _ = handles
         .unbounded_toggle
@@ -255,6 +308,15 @@ pub(crate) struct TrayHandles<R: Runtime> {
     pub unbounded_status: MenuItem<R>,
     /// Enable/disable toggle, label from `unbounded_toggle_label(...)`.
     pub unbounded_toggle: MenuItem<R>,
+    /// The separator that leads the Unbounded block. Held because hiding the block removes this too —
+    /// otherwise hiding would leave two adjacent separators in the menu.
+    pub unbounded_sep: tauri::menu::PredefinedMenuItem<R>,
+    /// Whether the Unbounded block is currently IN the menu. muda menu items have no `set_visible`
+    /// (only `set_enabled`), so showing/hiding means inserting/removing them — and that must only
+    /// happen on an actual transition, not on every 1.5s poll.
+    pub unbounded_shown: std::sync::Mutex<bool>,
+    /// The tray menu itself, needed for those inserts/removes.
+    pub menu: Menu<R>,
     /// (pin, item) for each location entry incl. Smart (pin = None).
     pub locations: std::sync::Mutex<Vec<(Option<usize>, CheckMenuItem<R>)>>,
     /// Server pool signature (index+cc+city) used to detect when the submenu must be rebuilt.
@@ -372,25 +434,31 @@ fn build_menu<R: Runtime>(
         MenuItemBuilder::with_id(MENU_UNBOUNDED_TOGGLE, unbounded_toggle_label(ub_enabled))
             .enabled(ub_available)
             .build(app)?;
+    // Built whether or not it's shown, so a later un-hide can insert the same handles.
+    let unbounded_sep = tauri::menu::PredefinedMenuItem::separator(app)?;
+    let ub_shown = unbounded_tray_visible(ub_available, read_unbounded_hidden(app));
 
     let show = MenuItemBuilder::with_id("show", "Show Spark").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Spark").build(app)?;
 
-    let menu = MenuBuilder::new(app)
+    // The Unbounded block (its leading separator + the two items) is included only when it should be
+    // visible; `refresh` inserts/removes it at UNBOUNDED_BLOCK_AT on a transition. Either way exactly
+    // one separator sits above Show/Quit.
+    let mut builder = MenuBuilder::new(app)
         .item(&header)
         .item(&toggle)
         .separator()
         .item(&location_submenu)
         .item(&routing_submenu)
         .item(&adblock_item)
-        .item(&split)
-        .separator()
-        .item(&unbounded_status)
-        .item(&unbounded_toggle)
-        .separator()
-        .item(&show)
-        .item(&quit)
-        .build()?;
+        .item(&split);
+    if ub_shown {
+        builder = builder
+            .item(&unbounded_sep)
+            .item(&unbounded_status)
+            .item(&unbounded_toggle);
+    }
+    let menu = builder.separator().item(&show).item(&quit).build()?;
 
     let handles = TrayHandles {
         header,
@@ -400,6 +468,9 @@ fn build_menu<R: Runtime>(
         adblock: adblock_item,
         unbounded_status,
         unbounded_toggle,
+        unbounded_sep,
+        unbounded_shown: std::sync::Mutex::new(ub_shown),
+        menu: menu.clone(),
         locations: std::sync::Mutex::new(locations),
         pool_sig: std::sync::Mutex::new(pool_sig),
         location_submenu,
@@ -444,6 +515,15 @@ fn read_unbounded_state<R: Runtime>(app: &AppHandle<R>) -> (bool, usize) {
         Err(_) => false,
     };
     (enabled, 0)
+}
+
+/// The persisted "Hide Unbounded" preference. Unreadable config dir → not hidden (the server gate in
+/// [`unbounded_tray_visible`] is what fails closed).
+fn read_unbounded_hidden<R: Runtime>(app: &AppHandle<R>) -> bool {
+    match app.path().app_config_dir() {
+        Ok(base) => crate::persist::load_unbounded_hidden(&base),
+        Err(_) => false,
+    }
 }
 
 /// Patch the Unbounded status line + toggle label in place from `(enabled, helping_now)`. Called
@@ -588,6 +668,19 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mirrors `unboundedVisible`'s test in gui-tauri/src/lib/unbounded.ts — the tray and the tab must
+    /// agree, so "Hide Unbounded" hides it everywhere.
+    #[test]
+    fn unbounded_tray_shows_only_when_available_and_not_hidden() {
+        assert!(unbounded_tray_visible(true, false));
+        assert!(!unbounded_tray_visible(true, true), "hidden wins");
+        assert!(
+            !unbounded_tray_visible(false, false),
+            "server gate off ⇒ nothing surfaced"
+        );
+        assert!(!unbounded_tray_visible(false, true));
+    }
 
     #[test]
     fn flag_emoji_maps_valid_two_letter_codes() {
