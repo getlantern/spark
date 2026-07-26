@@ -88,15 +88,24 @@
 
     let disposed = false;
     (async () => {
-      // globe.gl + three are a ~1.9 MB lazy chunk. If it can't load — a failed chunk fetch, or the
-      // deliberate mobile stub (see vite.config.js) — degrade to the static placeholder instead of
-      // letting the rejection escape this detached async block: an unhandled rejection here would be
-      // picked up by the webview error bridge and reported as a diagnostics error.
-      let GlobeGl: typeof import("globe.gl").default;
+      // globe.gl + three are a ~1.9 MB lazy chunk. Two distinct ways it can be absent, and BOTH must
+      // degrade to the static placeholder rather than let a rejection escape this detached async
+      // block — an unhandled rejection here is picked up by the webview error bridge and reported as
+      // a diagnostics error:
+      //   1. the import itself rejects (failed chunk fetch, cache miss)      → the catch below;
+      //   2. it resolves but carries no renderer — the mobile stub exports
+      //      `default undefined` (see vite.config.js)                        → the typeof guard.
+      // The guard is load-bearing: without it the stub sails through the try and only blows up later
+      // at `new GlobeGl(el)`, outside any handler.
+      let GlobeGl: typeof import("globe.gl").default | undefined;
       try {
         GlobeGl = (await import("globe.gl")).default;
       } catch (e) {
-        console.warn("globe: renderer unavailable, showing placeholder", e);
+        console.warn("globe: renderer failed to load, showing placeholder", e);
+        return;
+      }
+      if (typeof GlobeGl !== "function") {
+        console.warn("globe: renderer unavailable on this platform, showing placeholder");
         return;
       }
       if (disposed || !el) return;
