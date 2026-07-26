@@ -13,15 +13,20 @@ pub(crate) mod persist;
 mod desktop;
 
 // Unbounded (volunteer-proxy) control + aggregation loop + `spark://unbounded` event. Depends on
-// `persist` (durable settings) and `spark-sharing` (the peer-proxy pool). Gated the same as
-// `persist` — desktop only; the Android sharing path lands in a later Unbounded phase.
-#[cfg(not(target_os = "android"))]
+// `persist` (durable settings) and `spark-sharing` (the peer-proxy pool).
+//
+// `cfg(desktop)` — i.e. NOT iOS and NOT Android. Acting as a sharing proxy is a desktop-only role:
+// a phone in an uncensored region should not be relaying strangers' traffic (battery, data plan, NAT,
+// and the legal exposure of being the visible source of that traffic). Being a censored *consumer* of
+// Unbounded is a separate concern and is deliberately NOT gated here — that path lives behind
+// spark-sharing's `spark-transport` feature (`ConsumerTransport`) and is wired independently.
+#[cfg(desktop)]
 mod unbounded;
 
 // §C6 diagnostic timeline + §C3a session traces for the Unbounded pool: a pure
 // PoolEvent → diag-action mapper applied fire-and-forget by `unbounded`'s aggregation
-// loop. Gated with `unbounded` (and `diag_host`, whose span queue it feeds).
-#[cfg(not(target_os = "android"))]
+// loop. Gated with `unbounded` (desktop only), whose span queue it feeds via `diag_host`.
+#[cfg(desktop)]
 mod unbounded_diag;
 
 // Phase 2a: app-side startup config fetch (links spark-core's kindling fetch). Desktop only —
@@ -137,18 +142,20 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::list_installed_apps,
             commands::get_excluded_apps,
             commands::set_excluded_apps,
-            // Unbounded (volunteer-proxy) commands. Desktop only — gated the same as the module.
-            #[cfg(not(target_os = "android"))]
+            // Unbounded (volunteer-proxy) commands. Desktop only — gated the same as the module, so
+            // on iOS/Android they are not registered at all and the UI's `unboundedAvailable()` probe
+            // fails closed (the tab stays hidden).
+            #[cfg(desktop)]
             unbounded::unbounded_start,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(desktop)]
             unbounded::unbounded_stop,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(desktop)]
             unbounded::unbounded_status,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(desktop)]
             unbounded::unbounded_available,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(desktop)]
             unbounded::unbounded_get_settings,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(desktop)]
             unbounded::unbounded_set_settings,
             // Diagnostics commands (webview error report + opt-out toggle). Desktop only —
             // gated the same as the diag_host module.
@@ -184,7 +191,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 app.manage(ctl);
 
                 // Unbounded (volunteer-proxy) live handles: the running sharing pool + its
-                // aggregation-loop task + latest status. Default = nothing running.
+                // aggregation-loop task + latest status. Default = nothing running. Desktop only —
+                // phones don't act as sharing proxies (see `mod unbounded`).
+                #[cfg(desktop)]
                 app.manage(unbounded::UnboundedState::default());
 
                 // Phase 2a: on every launch, fetch the config into the app's OWN cache dir —
@@ -215,6 +224,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     // (fresh or cached) and repaint the tray. This is the ONLY place that needs to
                     // re-derive it from disk — the tray and the sharing loop read the cached flag, so
                     // neither re-parses the whole config on a timer.
+                    #[cfg(desktop)]
                     let _ = crate::unbounded::refresh_availability(&handle);
                     #[cfg(desktop)]
                     crate::tray::refresh(&handle);
@@ -230,38 +240,45 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 // self-gates on the same availability check, but check it explicitly here so we don't even
                 // spawn the task when the feature is off, and so the "skipped" log distinguishes
                 // not-available from a real start failure. Detached so it can't block startup or the window.
-                let handle = app.app_handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let Ok(base) = handle.path().app_config_dir() else {
-                        return;
-                    };
-                    // Two durable flags, and BOTH must say yes — Unbounded never starts unless the
-                    // user explicitly authorized it:
-                    //   `unbounded_enabled`    the user's current on/off choice
-                    //   `unbounded_auto_enable` the user's "start automatically when Spark opens"
-                    // Requiring only `enabled` would resume at login for a user who deliberately
-                    // left auto-start off; requiring only `auto_enable` would leave the UI showing
-                    // "on" with nothing running. So: resume on both, and when `enabled` is set
-                    // WITHOUT auto-start, clear it so the persisted state matches reality (nothing
-                    // is relaying) instead of advertising an enrolment that isn't live.
-                    let enabled = crate::persist::load_unbounded_enabled(&base);
-                    let auto = crate::persist::load_unbounded_auto_enable(&base);
-                    if !enabled || !auto {
-                        if enabled && !auto {
-                            let _ = crate::persist::save_unbounded_enabled(&base, false);
+                //
+                // Desktop only: a phone never resumes as a sharing proxy (see `mod unbounded`).
+                #[cfg(desktop)]
+                {
+                    let handle = app.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        let Ok(base) = handle.path().app_config_dir() else {
+                            return;
+                        };
+                        // Two durable flags, and BOTH must say yes — Unbounded never starts unless the
+                        // user explicitly authorized it:
+                        //   `unbounded_enabled`    the user's current on/off choice
+                        //   `unbounded_auto_enable` the user's "start automatically when Spark opens"
+                        // Requiring only `enabled` would resume at login for a user who deliberately
+                        // left auto-start off; requiring only `auto_enable` would leave the UI showing
+                        // "on" with nothing running. So: resume on both, and when `enabled` is set
+                        // WITHOUT auto-start, clear it so the persisted state matches reality (nothing
+                        // is relaying) instead of advertising an enrolment that isn't live.
+                        let enabled = crate::persist::load_unbounded_enabled(&base);
+                        let auto = crate::persist::load_unbounded_auto_enable(&base);
+                        if !enabled || !auto {
+                            if enabled && !auto {
+                                let _ = crate::persist::save_unbounded_enabled(&base, false);
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    match unbounded::unbounded_available(handle.clone()).await {
-                        Ok(true) => {
-                            if let Err(e) = unbounded::unbounded_start(handle).await {
-                                eprintln!("[spark-vpn] unbounded auto-enable failed: {e}");
+                        match unbounded::unbounded_available(handle.clone()).await {
+                            Ok(true) => {
+                                if let Err(e) = unbounded::unbounded_start(handle).await {
+                                    eprintln!("[spark-vpn] unbounded auto-enable failed: {e}");
+                                }
+                            }
+                            Ok(false) => {} // feature not available for this client — nothing to do
+                            Err(e) => {
+                                eprintln!("[spark-vpn] unbounded availability check failed: {e}")
                             }
                         }
-                        Ok(false) => {} // feature not available for this client — nothing to do
-                        Err(e) => eprintln!("[spark-vpn] unbounded availability check failed: {e}"),
-                    }
-                });
+                    });
+                } // end cfg(desktop) — Unbounded startup resume
             }
             #[cfg(desktop)]
             tray::init(app)?;
