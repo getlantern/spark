@@ -57,6 +57,7 @@ static SENTINEL: OnceLock<Arc<SessionSentinel>> = OnceLock::new();
 /// until [`init`] has completed its async body — or forever, when diagnostics are
 /// disabled — so instrumentation callers (`unbounded_diag::apply_actions`) must treat
 /// `None` as "spans off".
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn span_queue() -> Option<Arc<SpanQueue>> {
     STATE.get().map(|s| s.queue.clone())
 }

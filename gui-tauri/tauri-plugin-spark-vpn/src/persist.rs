@@ -198,6 +198,7 @@ pub fn save_ad_block_enabled(base: &Path, enabled: bool) -> crate::Result<()> {
 ///
 /// Returns `false` (off) unless the file holds exactly `"true"` (trimmed, case-insensitive);
 /// a missing/unreadable file or any other contents default to off.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn load_unbounded_enabled(base: &Path) -> bool {
     load_unbounded_bool(base, "unbounded_enabled.txt")
 }
@@ -205,6 +206,7 @@ pub fn load_unbounded_enabled(base: &Path) -> bool {
 /// Persist the `unbounded_enabled` toggle to `<base>/unbounded_enabled.txt` as `"true"`/`"false"`.
 ///
 /// Creates `base` (and any parents) if they don't exist.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn save_unbounded_enabled(base: &Path, enabled: bool) -> crate::Result<()> {
     save_unbounded_bool(base, "unbounded_enabled.txt", enabled)
 }
@@ -213,6 +215,7 @@ pub fn save_unbounded_enabled(base: &Path, enabled: bool) -> crate::Result<()> {
 ///
 /// Returns `false` (off) unless the file holds exactly `"true"` (trimmed, case-insensitive);
 /// a missing/unreadable file or any other contents default to off.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn load_unbounded_auto_enable(base: &Path) -> bool {
     load_unbounded_bool(base, "unbounded_auto_enable.txt")
 }
@@ -221,6 +224,7 @@ pub fn load_unbounded_auto_enable(base: &Path) -> bool {
 /// `"true"`/`"false"`.
 ///
 /// Creates `base` (and any parents) if they don't exist.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn save_unbounded_auto_enable(base: &Path, enabled: bool) -> crate::Result<()> {
     save_unbounded_bool(base, "unbounded_auto_enable.txt", enabled)
 }
@@ -229,6 +233,7 @@ pub fn save_unbounded_auto_enable(base: &Path, enabled: bool) -> crate::Result<(
 ///
 /// Returns `false` (not hidden) unless the file holds exactly `"true"` (trimmed,
 /// case-insensitive); a missing/unreadable file or any other contents default to not hidden.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn load_unbounded_hidden(base: &Path) -> bool {
     load_unbounded_bool(base, "unbounded_hidden.txt")
 }
@@ -236,6 +241,7 @@ pub fn load_unbounded_hidden(base: &Path) -> bool {
 /// Persist the `unbounded_hidden` toggle to `<base>/unbounded_hidden.txt` as `"true"`/`"false"`.
 ///
 /// Creates `base` (and any parents) if they don't exist.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn save_unbounded_hidden(base: &Path, hidden: bool) -> crate::Result<()> {
     save_unbounded_bool(base, "unbounded_hidden.txt", hidden)
 }
@@ -244,6 +250,7 @@ pub fn save_unbounded_hidden(base: &Path, hidden: bool) -> crate::Result<()> {
 ///
 /// Returns `false` (welcome not yet seen) unless the file holds exactly `"true"` (trimmed,
 /// case-insensitive); a missing/unreadable file or any other contents default to false.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn load_unbounded_welcome_seen(base: &Path) -> bool {
     load_unbounded_bool(base, "unbounded_welcome_seen.txt")
 }
@@ -252,6 +259,7 @@ pub fn load_unbounded_welcome_seen(base: &Path) -> bool {
 /// `"true"`/`"false"`.
 ///
 /// Creates `base` (and any parents) if they don't exist.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn save_unbounded_welcome_seen(base: &Path, seen: bool) -> crate::Result<()> {
     save_unbounded_bool(base, "unbounded_welcome_seen.txt", seen)
 }
@@ -260,6 +268,7 @@ pub fn save_unbounded_welcome_seen(base: &Path, seen: bool) -> crate::Result<()>
 /// `<base>/unbounded_total_helped.txt`.
 ///
 /// Returns `0` if the file is missing, unreadable, or doesn't parse as a decimal `u64`.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn load_unbounded_total_helped(base: &Path) -> u64 {
     std::fs::read_to_string(base.join("unbounded_total_helped.txt"))
         .ok()
@@ -271,6 +280,7 @@ pub fn load_unbounded_total_helped(base: &Path) -> u64 {
 /// `<base>/unbounded_total_helped.txt` as decimal text.
 ///
 /// Creates `base` (and any parents) if they don't exist.
+#[cfg_attr(not(desktop), allow(dead_code))]
 pub fn save_unbounded_total_helped(base: &Path, total: u64) -> crate::Result<()> {
     std::fs::create_dir_all(base)?;
     std::fs::write(base.join("unbounded_total_helped.txt"), total.to_string())?;
@@ -314,6 +324,7 @@ pub fn save_diagnostics_enabled(base: &Path, enabled: bool) -> crate::Result<()>
 
 /// Read an opt-in bool setting from `<base>/<file>`: `true` only when the file holds exactly
 /// `"true"` (trimmed, case-insensitive); missing/unreadable/other contents default to `false`.
+#[cfg_attr(not(desktop), allow(dead_code))]
 fn load_unbounded_bool(base: &Path, file: &str) -> bool {
     std::fs::read_to_string(base.join(file))
         .ok()
@@ -323,6 +334,7 @@ fn load_unbounded_bool(base: &Path, file: &str) -> bool {
 
 /// Write an opt-in bool setting to `<base>/<file>` as `"true"`/`"false"`, creating `base`
 /// (and any parents) if they don't exist.
+#[cfg_attr(not(desktop), allow(dead_code))]
 fn save_unbounded_bool(base: &Path, file: &str, value: bool) -> crate::Result<()> {
     std::fs::create_dir_all(base)?;
     std::fs::write(base.join(file), if value { "true" } else { "false" })?;
