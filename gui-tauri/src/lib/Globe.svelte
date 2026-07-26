@@ -88,7 +88,17 @@
 
     let disposed = false;
     (async () => {
-      const GlobeGl = (await import("globe.gl")).default;
+      // globe.gl + three are a ~1.9 MB lazy chunk. If it can't load — a failed chunk fetch, or the
+      // deliberate mobile stub (see vite.config.js) — degrade to the static placeholder instead of
+      // letting the rejection escape this detached async block: an unhandled rejection here would be
+      // picked up by the webview error bridge and reported as a diagnostics error.
+      let GlobeGl: typeof import("globe.gl").default;
+      try {
+        GlobeGl = (await import("globe.gl")).default;
+      } catch (e) {
+        console.warn("globe: renderer unavailable, showing placeholder", e);
+        return;
+      }
       if (disposed || !el) return;
 
       const asArc = (o: object) => o as Arc;
