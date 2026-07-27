@@ -451,15 +451,33 @@ impl SelectingTransport {
         // `current` must be the member a flow would ACTUALLY dial first, which since the recent-failure
         // sink is no longer `ranked.first()` — reporting the ranking's head would name a member that
         // flows are now skipping.
+        //
+        // NOTE this is not a pure read: `members_and_order` lazily promotes an elapsed quarantine to
+        // `OnTrial`. Harmless (the cooldown has genuinely elapsed, and the next dial would do it
+        // anyway) but it means a UI poll can advance that transition a little sooner than flow traffic
+        // would. Reimplementing the order here to avoid it would just risk the two drifting apart.
+        //
+        // The epoch is captured alongside it: `dial_first` indexes the generation live at this moment,
+        // while `members` below is read under the selection lock and may be a NEWER one if a `reload`
+        // lands in between. Comparing epochs detects exactly that, and we fall back to the ranking head
+        // — which IS generation-consistent with `members`, being read under the same lock.
+        let gen_before = self.epoch.load(Ordering::Relaxed);
         let dial_first = self.members_and_order().1.first().copied();
         // Read members under the selection lock (selection → members order) so a racing `reload`
         // can't pair one generation's members with another's ranking/latency.
         let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         let members = self.members();
-        // The member new flows dial first: the pin if valid, else the head of the real dial order.
+        // The member new flows dial first: the pin if valid, else the head of the real dial order —
+        // falling back to the ranking head if a reload raced us, and range-checked either way so a
+        // stale index can't silently leave every member `is_current: false`.
+        let head = if self.epoch.load(Ordering::Relaxed) == gen_before {
+            dial_first
+        } else {
+            sel.ranked.first().copied()
+        };
         let current = match sel.pinned {
             Some(p) if p < members.len() => Some(p),
-            _ => dial_first,
+            _ => head.filter(|&i| i < members.len()),
         };
         (0..members.len())
             .map(|i| {
@@ -1030,6 +1048,7 @@ async fn prober_loop(
         } else {
             std::collections::HashSet::new()
         };
+        let mut applied = false;
         {
             let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
             // Discard outcomes if a `reload` swapped the pool while we were probing — writing them
@@ -1051,9 +1070,20 @@ async fn prober_loop(
                     rank(&outcomes, &failing).into()
                 };
                 measured = true;
+                applied = true;
             } else {
                 tracing::debug!("pool reloaded mid-probe; discarding stale-generation outcomes");
             }
+        }
+        // Only report on outcomes we actually applied. After a mid-round `reload` the indices in
+        // `outcomes` belong to the previous pool generation, so logging them would name the wrong
+        // members — and the contradiction below is a WARN, which is a bad place to be wrong.
+        if !applied {
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = reprobe.notified() => {}
+            }
+            continue;
         }
         let probe_healthy = outcomes.iter().filter(|(_, o)| o.healthy).count();
         // Members the probe called healthy while their real flows are failing. This contradiction is
