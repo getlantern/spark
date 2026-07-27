@@ -364,7 +364,15 @@ impl SelectingTransport {
         //    in front — a member whose probe callback succeeds while real dials time out would
         //    otherwise stay first choice indefinitely, with every new flow paying its dial timeout.
         //    Applied per-dial after `ranked` is read, so no re-probe can clobber it.
-        let failed = self.recently_failed();
+        // Intersect with `order` first: `recently_failed` spans every member, while `order` has already
+        // had the quarantined ones filtered out, so comparing raw lengths could read "everything is
+        // penalised" when a quarantined member made up the difference — leaving a penalised member
+        // ahead of a clean one.
+        let failed: std::collections::HashSet<usize> = self
+            .recently_failed()
+            .into_iter()
+            .filter(|i| order.contains(i))
+            .collect();
         let order: Arc<[usize]> = if failed.is_empty() || failed.len() == order.len() {
             order // nothing to sink, or everything is penalised → the existing order stands
         } else {
@@ -592,10 +600,13 @@ impl SelectingTransport {
         let now_ms = now.duration_since(self.health_base).as_millis() as u64;
         let window_ms = self.stall.dial_failure_window.as_millis() as u64;
         let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
-        // Count dialable members BEFORE the mutable borrow, for the pool-floor check below.
+        // Count dialable members BEFORE the mutable borrow, for the pool-floor check below. Matches
+        // `excluded()`'s definition exactly — a quarantined member whose cooldown has already elapsed
+        // is still offered to flows (it is promoted to `OnTrial` lazily), so it counts as dialable.
+        // Counting it as absent would hold the breaker off while the pool could in fact spare a member.
         let live = health
             .iter()
-            .filter(|h| !matches!(h.state, MemberState::Quarantined { .. }))
+            .filter(|h| !matches!(h.state, MemberState::Quarantined { until, .. } if until > now))
             .count();
         let Some(h) = health.get_mut(member) else {
             return;
@@ -614,10 +625,16 @@ impl SelectingTransport {
         if live <= 1 {
             // Hold the failing member in rotation — a bad proxy beats a real-IP leak. The history is
             // kept, so it trips as soon as some other member is dialable.
-            tracing::warn!(
-                member,
-                "dial-failure breaker held off: quarantining would empty the pool (fail-open to direct)"
-            );
+            //
+            // Log only on the crossing, not on every later failure: because the history is retained,
+            // an outage on a one-member pool would otherwise emit a warn per failed dial, burying the
+            // signal it exists to give (window pruning can re-cross, so this is ~once per window).
+            if h.recent_dial_failures.len() as u32 == self.stall.dial_failure_count {
+                tracing::warn!(
+                    member,
+                    "dial-failure breaker held off: quarantining would empty the pool (fail-open to direct)"
+                );
+            }
             return;
         }
         let strikes = match h.state {
@@ -663,9 +680,12 @@ impl SelectingTransport {
     /// Members with a failed dial inside `dial_failure_window` — dialed only after the clean ones
     /// (see [`Self::members_and_order`]). Prunes nothing; stale entries are dropped on the next
     /// [`Self::record_dial_failure`], and a success clears them outright.
-    fn recently_failed(&self) -> Vec<usize> {
+    ///
+    /// Returns a `HashSet` (like [`Self::excluded`]) because the caller membership-tests it once per
+    /// entry in the dial order, on every dial.
+    fn recently_failed(&self) -> std::collections::HashSet<usize> {
         if !self.stall.breaker_enabled() {
-            return Vec::new();
+            return std::collections::HashSet::new();
         }
         let now_ms = tokio::time::Instant::now()
             .duration_since(self.health_base)
@@ -1746,6 +1766,45 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn pool_floor_counts_elapsed_quarantine_as_dialable() {
+        // A quarantined member whose cooldown has elapsed is still offered to flows, so the pool can
+        // spare the failing one — the floor must not treat it as absent and hold the breaker off.
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 1);
+        }
+        assert!(t.is_quarantined(1));
+        tokio::time::advance(std::time::Duration::from_secs(61)).await; // cooldown elapses
+        for _ in 0..3 {
+            t.record_dial_failure(0);
+        }
+        assert!(
+            t.is_quarantined(0),
+            "member 1 is dialable again (pending lazy promotion), so member 0 may be parked"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn penalty_ignores_quarantined_members_when_counting() {
+        // `recently_failed` spans all members but `order` excludes quarantined ones. A penalised
+        // member plus a quarantined one must not read as "everything is penalised" and skip the sink.
+        let t = selecting(
+            vec![member(true), member(true), member(true)],
+            vec![0, 1, 2],
+        );
+        for _ in 0..3 {
+            t.record_dial_failure(2); // member 2 → quarantined, and carries failure history
+        }
+        assert!(t.is_quarantined(2));
+        t.record_dial_failure(0); // member 0 → penalised but healthy
+        assert_eq!(
+            t.members_and_order().1.to_vec(),
+            vec![1, 0],
+            "member 2 is excluded; member 0 still sinks behind the clean member 1"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn breaker_off_when_count_is_zero() {
         let mut cfg = test_stall_cfg();
         cfg.dial_failure_count = 0;
@@ -1759,6 +1818,20 @@ mod tests {
             vec![0, 1],
             "and no ordering penalty is applied"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_off_when_window_is_zero() {
+        // A zero window disables the breaker just as a zero count does — `breaker_enabled` requires
+        // both, and the config docs promise it.
+        let mut cfg = test_stall_cfg();
+        cfg.dial_failure_window = std::time::Duration::ZERO;
+        let t = selecting_with_stall(vec![member(true), member(true)], vec![0, 1], cfg);
+        for _ in 0..10 {
+            t.record_dial_failure(0);
+        }
+        assert!(!t.is_quarantined(0), "zero window disables the breaker");
+        assert_eq!(t.members_and_order().1.to_vec(), vec![0, 1]);
     }
 
     #[cfg(feature = "multi-server")]

@@ -412,7 +412,8 @@ pub struct TransportConfig {
     /// `stall_quarantine_*` / `stall_trial_flows` knobs, which are signal-agnostic.
     #[serde(default = "default_dial_failure_count")]
     pub dial_failure_count: u32,
-    /// The sliding window (seconds) over which `dial_failure_count` is measured.
+    /// The sliding window (seconds) over which `dial_failure_count` is measured. `0` also disables
+    /// the breaker (it needs a non-zero count *and* window to arm).
     #[serde(default = "default_dial_failure_window_secs")]
     pub dial_failure_window_secs: u64,
 }
