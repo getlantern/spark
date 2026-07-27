@@ -111,3 +111,32 @@ defaults `BUILD_NUMBER` to a timestamp so TestFlight never sees a duplicate.
 
 Verified 2026-07-24: **v0.1.0 build `2607241019`** built + exported + uploaded from a headless Mac
 (no Apple ID signed into Xcode) — `UPLOAD SUCCEEDED`.
+
+### `UPLOAD SUCCEEDED` does NOT mean the build reached testers
+
+Export compliance is a separate gate, and it is silent: a build with no answer to Apple's
+"non-exempt encryption?" question processes to `VALID` but sits at
+`internalBuildState = MISSING_EXPORT_COMPLIANCE` and is delivered to **nobody**. Three uploads
+(`2607241019`, `2607251356`, `2607261714`) were stuck this way before anyone noticed, because the
+upload step reports success either way.
+
+`ITSAppUsesNonExemptEncryption = false` now lives in
+`gui-tauri/src-tauri/gen/apple/gui-tauri_iOS/Info.plist`, so uploads no longer land in that state.
+(Tauri's generated plist doesn't include the key, which is why every upload re-asked. It's set on the
+app bundle only — if a future upload still lands MISSING, check the `SparkTunnel` appex plist next.)
+
+**Verifying an upload actually landed** — don't infer it from `altool`. Query App Store Connect:
+
+```
+GET /v1/builds?filter[app]=<appId>&sort=-uploadedDate      # processingState should be VALID
+GET /v1/builds/<buildId>/buildBetaDetail                   # internalBuildState should be
+                                                           # READY_FOR_BETA_TESTING
+```
+`org.getlantern.spark` is app id `6790541695`. Auth is an ES256 JWT from the same ASC API key the
+upload uses (`kid` = key id, `aud` = `appstoreconnect-v1`); note JOSE wants the signature as raw
+`r||s`, not the DER form most crypto libraries return.
+
+To clear a build that is already stuck, `PATCH /v1/builds/<buildId>` with
+`{"attributes": {"usesNonExemptEncryption": false}}` — it flips to `READY_FOR_BETA_TESTING` within
+seconds. Note this is a **compliance declaration about the app's cryptography**, not a build setting:
+confirm it with whoever owns that call before answering for a new crypto surface.
