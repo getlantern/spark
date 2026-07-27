@@ -195,16 +195,16 @@ This cost three rounds of "the new build never appeared." Every `0.1.0` upload l
 
 Because Tauri stamps `CFBundleVersion` as `<marketing-version>.<--build-number>`, every build in the
 `0.1.0` train is prefixed `0.1.0.` — so **no build number can ever outrank that single 14-digit
-component**. The train is permanently poisoned; the only escapes are to bump the marketing version
-(what we did — `0.1.1`, verified 2026-07-27 with build `2607271505`) or to detach the offending build
-from the group.
+component**. The train is permanently poisoned. The fix used was to bump the marketing version —
+`0.1.1`, verified 2026-07-27 with build `2607271505`, which testers could see. (Detaching the offending
+build from the group should work too, since a group only surfaces builds attached to it, but that route
+is untested here.)
 
 **So don't stop at "is it delivered?" — check "is it the top build in its train?":**
 
-```bash
-# every build with its marketing version (the train) and CFBundleVersion (the ordering key)
-GET /v1/builds?filter[app]=6790541695&sort=-uploadedDate     # → attributes.version
-GET /v1/builds/<buildId>/preReleaseVersion                   # → attributes.version (the train)
+```
+GET /v1/builds?filter[app]=6790541695&sort=-uploadedDate     # attributes.version = the ordering key
+GET /v1/builds/<buildId>/preReleaseVersion                   # attributes.version = the train
 ```
 
 Keep build numbers monotonic **and** single-component going forward. Note `0.1.1.<timestamp>` is still
