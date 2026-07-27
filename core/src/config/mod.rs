@@ -405,6 +405,17 @@ pub struct TransportConfig {
     /// Clean (non-stalling, ever-active) trial flows required to restore a quarantined member.
     #[serde(default = "default_stall_trial_flows")]
     pub stall_trial_flows: u32,
+    /// Failed dials a member may accrue within `dial_failure_window_secs` before it is quarantined.
+    /// **Default 3 (ON).** Unlike the stall signal above, a failed dial is *directly observed* — the
+    /// transport returned an error — not inferred from quiet, so it cannot false-positive on an idle
+    /// keep-alive. `0` disables the breaker. Quarantine cooldown/backoff/re-admission reuse the
+    /// `stall_quarantine_*` / `stall_trial_flows` knobs, which are signal-agnostic.
+    #[serde(default = "default_dial_failure_count")]
+    pub dial_failure_count: u32,
+    /// The sliding window (seconds) over which `dial_failure_count` is measured. `0` also disables
+    /// the breaker (it needs a non-zero count *and* window to arm).
+    #[serde(default = "default_dial_failure_window_secs")]
+    pub dial_failure_window_secs: u64,
 }
 
 fn default_stall_window_secs() -> u64 {
@@ -424,6 +435,12 @@ fn default_stall_quarantine_max_secs() -> u64 {
 }
 fn default_stall_trial_flows() -> u32 {
     2
+}
+fn default_dial_failure_count() -> u32 {
+    3
+}
+fn default_dial_failure_window_secs() -> u64 {
+    30
 }
 
 impl Default for TransportConfig {
@@ -449,6 +466,8 @@ impl Default for TransportConfig {
             stall_quarantine_secs: default_stall_quarantine_secs(),
             stall_quarantine_max_secs: default_stall_quarantine_max_secs(),
             stall_trial_flows: default_stall_trial_flows(),
+            dial_failure_count: default_dial_failure_count(),
+            dial_failure_window_secs: default_dial_failure_window_secs(),
         }
     }
 }
@@ -1064,6 +1083,8 @@ mod tests {
                     stall_quarantine_secs: 60,
                     stall_quarantine_max_secs: 600,
                     stall_trial_flows: 2,
+                    dial_failure_count: 3,
+                    dial_failure_window_secs: 30,
                 },
                 udp: UdpConfig {
                     idle_timeout_secs: 30,
