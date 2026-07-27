@@ -343,6 +343,10 @@ fn build_selecting(
         quarantine: std::time::Duration::from_secs(config.transport.stall_quarantine_secs),
         quarantine_max: std::time::Duration::from_secs(config.transport.stall_quarantine_max_secs),
         trial_flows: config.transport.stall_trial_flows,
+        dial_failure_count: config.transport.dial_failure_count,
+        dial_failure_window: std::time::Duration::from_secs(
+            config.transport.dial_failure_window_secs,
+        ),
     };
     let st = Arc::new(SelectingTransport::new(
         members,

@@ -21,7 +21,10 @@ use crate::transport::{
 };
 use crate::BoxedStream;
 
-/// Stall-detection tunables captured from `TransportConfig` at pool build.
+/// Liveness tunables captured from `TransportConfig` at pool build. Carries BOTH demotion signals:
+/// the stall detector (`window`/`demote_*`, off by default) and the dial-failure breaker
+/// (`dial_failure_*`, on by default). The quarantine cooldown/backoff/re-admission fields are shared
+/// — they describe what happens after a demotion, independent of which signal caused it.
 #[derive(Clone, Copy)]
 pub(crate) struct StallConfig {
     pub(crate) window: std::time::Duration,
@@ -30,11 +33,20 @@ pub(crate) struct StallConfig {
     pub(crate) quarantine: std::time::Duration,
     pub(crate) quarantine_max: std::time::Duration,
     pub(crate) trial_flows: u32,
+    pub(crate) dial_failure_count: u32,
+    pub(crate) dial_failure_window: std::time::Duration,
 }
 
 impl StallConfig {
     pub(crate) fn enabled(&self) -> bool {
         !self.window.is_zero()
+    }
+
+    /// Whether the dial-failure breaker is armed. Independent of [`Self::enabled`]: the stall signal
+    /// ships off (it infers trouble from quiet and false-positives), while an errored dial is a
+    /// direct observation and needs no such caution.
+    pub(crate) fn breaker_enabled(&self) -> bool {
+        self.dial_failure_count > 0 && !self.dial_failure_window.is_zero()
     }
 }
 
@@ -119,6 +131,9 @@ struct MemberHealth {
     state: MemberState,
     /// Millis-since-pool-start of recent stalls (for the K-in-window count).
     recent_stalls: std::collections::VecDeque<u64>,
+    /// Millis-since-pool-start of recent failed dials (for the breaker's K-in-window count). Also
+    /// drives dial ordering: a member with any entry here is dialed after the clean ones.
+    recent_dial_failures: std::collections::VecDeque<u64>,
 }
 
 impl MemberHealth {
@@ -126,6 +141,7 @@ impl MemberHealth {
         Self {
             state: MemberState::Healthy,
             recent_stalls: std::collections::VecDeque::new(),
+            recent_dial_failures: std::collections::VecDeque::new(),
         }
     }
 }
@@ -289,9 +305,10 @@ impl SelectingTransport {
     /// Quarantined members whose cooldown has elapsed are lazily promoted to `OnTrial` here.
     /// Quarantined members are filtered out AFTER the selection lock is released, then `health` is
     /// locked — the two locks are never held simultaneously. Neither lock is held across `.await`.
-    /// An `OnTrial` member (not excluded) is moved to the front so the next flow proves it first.
-    /// `health` is locked in up to three short scopes (promotion, excluded, trial-position); the
-    /// `selection` lock occupies one scope — NONE of these four scopes overlap.
+    /// Members that recently failed a dial are sunk behind the clean ones, then an `OnTrial` member
+    /// (not excluded) is moved to the front so the next flow proves it first.
+    /// `health` is locked in up to four short scopes (promotion, excluded, recently-failed,
+    /// trial-position); the `selection` lock occupies one scope — NONE of these five scopes overlap.
     fn members_and_order(&self) -> (Arc<Vec<Member>>, Arc<[usize]>) {
         // 1. Promotion: lazily advance any elapsed quarantine to OnTrial (health lock only).
         {
@@ -340,9 +357,27 @@ impl SelectingTransport {
                 .collect()
         };
 
-        // 4. Trial routing: if any member is OnTrial (not excluded → present in order), lead the
+        // 4. Recent-success ordering: sink members that failed a dial inside the breaker's window
+        //    behind the clean ones, preserving relative order within each group. This must live here
+        //    rather than in the prober's `rank`: `demote` reorders `ranked` and then *wakes the
+        //    prober*, which re-sorts on probe latency alone and puts the failing member straight back
+        //    in front — a member whose probe callback succeeds while real dials time out would
+        //    otherwise stay first choice indefinitely, with every new flow paying its dial timeout.
+        //    Applied per-dial after `ranked` is read, so no re-probe can clobber it.
+        let failed = self.recently_failed();
+        let order: Arc<[usize]> = if failed.is_empty() || failed.len() == order.len() {
+            order // nothing to sink, or everything is penalised → the existing order stands
+        } else {
+            let mut v = Vec::with_capacity(order.len());
+            v.extend(order.iter().copied().filter(|i| !failed.contains(i)));
+            v.extend(order.iter().copied().filter(|i| failed.contains(i)));
+            v.into()
+        };
+
+        // 5. Trial routing: if any member is OnTrial (not excluded → present in order), lead the
         //    order with it so the next flow is handed to it for re-admission proof (health lock only;
-        //    selection guard already dropped in step 2).
+        //    selection guard already dropped in step 2). Deliberately after step 4 — a trial exists
+        //    precisely to re-test a member that failed, so it outranks the recent-failure penalty.
         let trial = {
             let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
             health
@@ -539,6 +574,116 @@ impl SelectingTransport {
         self.reprobe.notify_one();
     }
 
+    /// Note a failed dial through `member`, tripping the breaker once it accumulates
+    /// `dial_failure_count` failures inside `dial_failure_window`.
+    ///
+    /// Reuses the stall path's quarantine cooldown, exponential backoff and `OnTrial` re-admission —
+    /// only what counts as a strike differs. It ships armed where the stall signal does not, because
+    /// an errored dial is observed rather than inferred (see [`StallConfig::breaker_enabled`]).
+    ///
+    /// **Pool floor:** never quarantines the last non-quarantined member. An empty pool makes
+    /// [`SelectingTransport::dial`] fail open to a *direct* dial, leaking the user's real IP — worse
+    /// than a slow proxy. This is the guard whose absence took the stall signal out of service.
+    fn record_dial_failure(&self, member: usize) {
+        if !self.stall.breaker_enabled() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let now_ms = now.duration_since(self.health_base).as_millis() as u64;
+        let window_ms = self.stall.dial_failure_window.as_millis() as u64;
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        // Count dialable members BEFORE the mutable borrow, for the pool-floor check below.
+        let live = health
+            .iter()
+            .filter(|h| !matches!(h.state, MemberState::Quarantined { .. }))
+            .count();
+        let Some(h) = health.get_mut(member) else {
+            return;
+        };
+        h.recent_dial_failures.push_back(now_ms);
+        while let Some(&front) = h.recent_dial_failures.front() {
+            if now_ms.saturating_sub(front) > window_ms {
+                h.recent_dial_failures.pop_front();
+            } else {
+                break;
+            }
+        }
+        if (h.recent_dial_failures.len() as u32) < self.stall.dial_failure_count {
+            return;
+        }
+        if live <= 1 {
+            // Hold the failing member in rotation — a bad proxy beats a real-IP leak. The history is
+            // kept, so it trips as soon as some other member is dialable.
+            tracing::warn!(
+                member,
+                "dial-failure breaker held off: quarantining would empty the pool (fail-open to direct)"
+            );
+            return;
+        }
+        let strikes = match h.state {
+            MemberState::Quarantined { strikes, .. } | MemberState::OnTrial { strikes, .. } => {
+                strikes
+            }
+            MemberState::Healthy => 0,
+        };
+        let n = strikes.saturating_add(1);
+        let shift = (n - 1).min(16);
+        let backoff = self
+            .stall
+            .quarantine
+            .saturating_mul(1u32 << shift)
+            .min(self.stall.quarantine_max);
+        h.state = MemberState::Quarantined {
+            until: now + backoff,
+            strikes: n,
+        };
+        h.recent_dial_failures.clear();
+        h.recent_stalls.clear();
+        tracing::info!(
+            member,
+            strikes = n,
+            backoff_secs = backoff.as_secs(),
+            "pool member quarantined (dial failures)"
+        );
+    }
+
+    /// Note a successful dial through `member`, clearing its dial-failure history so transient blips
+    /// age out and stop penalising its dial order. Mirrors how a clean flow ages out stalls in
+    /// [`StallSink::record_flow_ok`].
+    fn record_dial_ok(&self, member: usize) {
+        if !self.stall.breaker_enabled() {
+            return;
+        }
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(h) = health.get_mut(member) {
+            h.recent_dial_failures.clear();
+        }
+    }
+
+    /// Members with a failed dial inside `dial_failure_window` — dialed only after the clean ones
+    /// (see [`Self::members_and_order`]). Prunes nothing; stale entries are dropped on the next
+    /// [`Self::record_dial_failure`], and a success clears them outright.
+    fn recently_failed(&self) -> Vec<usize> {
+        if !self.stall.breaker_enabled() {
+            return Vec::new();
+        }
+        let now_ms = tokio::time::Instant::now()
+            .duration_since(self.health_base)
+            .as_millis() as u64;
+        let window_ms = self.stall.dial_failure_window.as_millis() as u64;
+        let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        health
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| {
+                h.recent_dial_failures
+                    .iter()
+                    .any(|&t| now_ms.saturating_sub(t) <= window_ms)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Test-only: returns `true` if member `i` is currently quarantined.
     #[cfg(test)]
     pub(crate) fn is_quarantined(&self, i: usize) -> bool {
@@ -666,12 +811,14 @@ impl Transport for SelectingTransport {
             let Some(m) = members.get(i) else { continue };
             match m.transport.dial(target).await {
                 Ok(s) => {
+                    self.record_dial_ok(i);
                     return Ok(match self.arc() {
                         Some(me) => me.guard_stream(i, s),
                         None => s,
                     });
                 }
                 Err(e) => {
+                    self.record_dial_failure(i);
                     self.demote(i);
                     tracing::debug!(member = i, error = %e, "pool member dial failed; failing over");
                 }
@@ -692,6 +839,7 @@ impl Transport for SelectingTransport {
             let Some(m) = members.get(i) else { continue };
             match m.transport.dial_addr(target.clone()).await {
                 Ok(s) => {
+                    self.record_dial_ok(i);
                     return Ok(match self.arc() {
                         Some(me) => me.guard_stream(i, s),
                         None => s,
@@ -701,6 +849,7 @@ impl Transport for SelectingTransport {
                     // Don't demote a member that merely can't carry a domain target (`Unsupported`) —
                     // it's healthy for the IP-based retry path. Demote only on a real dial failure.
                     if e.kind() != io::ErrorKind::Unsupported {
+                        self.record_dial_failure(i);
                         self.demote(i);
                     }
                     tracing::debug!(member = i, error = %e, "pool member dial_addr failed; failing over");
@@ -739,12 +888,14 @@ impl UdpTransport for SelectingTransport {
             let Some(m) = members.get(i) else { continue };
             match m.udp.dial_udp(target).await {
                 Ok(p) => {
+                    self.record_dial_ok(i);
                     return Ok(match self.arc() {
                         Some(me) => me.guard_udp(i, p.0, p.1),
                         None => p,
                     });
                 }
                 Err(e) => {
+                    self.record_dial_failure(i);
                     self.demote(i);
                     tracing::debug!(member = i, error = %e, "pool member udp dial failed; failing over");
                 }
@@ -771,6 +922,7 @@ impl UdpTransport for SelectingTransport {
             let Some(m) = members.get(i) else { continue };
             match m.udp.dial_udp_addr(target.clone()).await {
                 Ok(p) => {
+                    self.record_dial_ok(i);
                     return Ok(match self.arc() {
                         Some(me) => me.guard_udp(i, p.0, p.1),
                         None => p,
@@ -783,6 +935,7 @@ impl UdpTransport for SelectingTransport {
                     );
                 }
                 Err(e) => {
+                    self.record_dial_failure(i);
                     self.demote(i);
                     tracing::debug!(member = i, error = %e, "pool member udp dial_udp_addr failed; failing over");
                 }
@@ -935,6 +1088,8 @@ mod tests {
             quarantine: std::time::Duration::from_secs(60),
             quarantine_max: std::time::Duration::from_secs(600),
             trial_flows: 2,
+            dial_failure_count: 3,
+            dial_failure_window: std::time::Duration::from_secs(30),
         }
     }
 
@@ -1100,6 +1255,16 @@ mod tests {
             Arc::new(FakeT { ok: true }),
             Arc::new(OkUdp),
         )
+    }
+    /// As [`selecting`], with an explicit liveness config (for exercising the breaker's own knobs).
+    fn selecting_with_stall(
+        members: Vec<Member>,
+        ranked: Vec<usize>,
+        stall: StallConfig,
+    ) -> SelectingTransport {
+        let mut t = selecting(members, ranked);
+        t.stall = stall;
+        t
     }
     fn selecting_with_direct(
         members: Vec<Member>,
@@ -1450,6 +1615,149 @@ mod tests {
         assert!(
             t.is_quarantined(0),
             "second-strike cooldown is ~120s, not 60s"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_quarantines_after_k_dial_failures() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        t.record_dial_failure(0);
+        t.record_dial_failure(0);
+        assert!(!t.is_quarantined(0), "below the K=3 threshold");
+        t.record_dial_failure(0);
+        assert!(t.is_quarantined(0), "3rd failure inside the window trips");
+        assert!(!t.is_quarantined(1), "other member unaffected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_ages_failures_out_of_the_window() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        t.record_dial_failure(0);
+        t.record_dial_failure(0);
+        // Past the 30s window, the first two no longer count toward the threshold.
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        t.record_dial_failure(0);
+        assert!(!t.is_quarantined(0), "stale failures must not accumulate");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_pool_floor_never_empties_the_pool() {
+        // A one-member pool: quarantining it would leave `dial` no member and fail open to a DIRECT
+        // dial, leaking the user's real IP. A failing proxy is the lesser evil, so the breaker holds.
+        let t = selecting(vec![member(true)], vec![0]);
+        for _ in 0..10 {
+            t.record_dial_failure(0);
+        }
+        assert!(
+            !t.is_quarantined(0),
+            "last dialable member must stay in rotation"
+        );
+        assert!(
+            t.members_and_order().1.contains(&0),
+            "and must still be offered to flows"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_trips_once_a_second_member_is_available() {
+        // The floor is about the pool's state, not a permanent exemption: the retained history trips
+        // as soon as quarantining no longer empties the pool.
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 1); // park member 1 so only member 0 is dialable
+        }
+        assert!(t.is_quarantined(1));
+        for _ in 0..3 {
+            t.record_dial_failure(0);
+        }
+        assert!(!t.is_quarantined(0), "held off while it is the last member");
+        // Member 1's cooldown elapses → it becomes dialable again, so member 0 may now be parked.
+        // The 61s wait also ages the failures above out of the 30s window (as it should), so the
+        // breaker is re-armed by fresh failures rather than stale ones.
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let _ = t.members_and_order(); // lazily promotes member 1 to OnTrial
+        for _ in 0..3 {
+            t.record_dial_failure(0);
+        }
+        assert!(t.is_quarantined(0), "trips once the pool can spare it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_dial_clears_failure_history() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        t.record_dial_failure(0);
+        t.record_dial_failure(0);
+        t.record_dial_ok(0); // a good dial ages out the transient failures
+        t.record_dial_failure(0);
+        t.record_dial_failure(0);
+        assert!(
+            !t.is_quarantined(0),
+            "a success resets the count, so 2 more must not trip"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recently_failed_member_is_dialed_last() {
+        // The regression this exists for: a member whose probe callback succeeds while real dials
+        // time out used to stay first choice, because `demote` woke the prober and the prober
+        // re-sorted on probe latency alone. The order must reflect real dial outcomes.
+        let t = selecting(
+            vec![member(true), member(true), member(true)],
+            vec![0, 1, 2],
+        );
+        t.record_dial_failure(0); // one failure: below the breaker threshold, still penalised
+        assert!(!t.is_quarantined(0));
+        let order = t.members_and_order().1;
+        assert_eq!(
+            order.to_vec(),
+            vec![1, 2, 0],
+            "penalised member sinks to the back, clean members keep their relative order"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn all_members_penalised_keeps_the_existing_order() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        t.record_dial_failure(0);
+        t.record_dial_failure(1);
+        assert_eq!(
+            t.members_and_order().1.to_vec(),
+            vec![0, 1],
+            "nothing to gain from reordering when every member is penalised"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trial_member_outranks_the_recent_failure_penalty() {
+        // A trial exists precisely to re-test a member that failed, so it must lead the order even
+        // though it carries a recent failure (ordering step 5 runs after step 4).
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        for _ in 0..3 {
+            StallSink::record_stall(&t, 0);
+        }
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let _ = t.members_and_order(); // promotes member 0 to OnTrial
+        t.record_dial_failure(0);
+        assert_eq!(
+            t.members_and_order().1.first().copied(),
+            Some(0),
+            "trial routing wins over the penalty"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_off_when_count_is_zero() {
+        let mut cfg = test_stall_cfg();
+        cfg.dial_failure_count = 0;
+        let t = selecting_with_stall(vec![member(true), member(true)], vec![0, 1], cfg);
+        for _ in 0..10 {
+            t.record_dial_failure(0);
+        }
+        assert!(!t.is_quarantined(0), "breaker disabled by config");
+        assert_eq!(
+            t.members_and_order().1.to_vec(),
+            vec![0, 1],
+            "and no ordering penalty is applied"
         );
     }
 
