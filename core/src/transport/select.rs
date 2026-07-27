@@ -175,7 +175,11 @@ pub struct SelectingTransport {
     /// Per-member health state (stall accounting). LOCK ORDER: `health` is NEVER held at the same
     /// time as `selection` — `record_stall` locks only `health`; the dial path locks only
     /// `selection`. Keeping them separate avoids deadlock.
-    health: Mutex<Vec<MemberHealth>>,
+    /// `Arc` because the prober reads it too: the probe cannot observe establishment health on a
+    /// connection-caching transport (its `dial` reuses the cached connection — hysteria2 probes come
+    /// back at `dial_ms=0`), so real flow outcomes are the only evidence that a member can still serve
+    /// a NEW flow, and the ranking/health verdict has to see them.
+    health: Arc<Mutex<Vec<MemberHealth>>>,
     /// Epoch base for computing millis-since-pool-start in stall timestamps.
     health_base: tokio::time::Instant,
     /// Weak self-reference so the guard helpers can obtain an `Arc<Self>` for the `StallSink` impl
@@ -210,6 +214,8 @@ impl SelectingTransport {
         }));
         let reprobe = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
+        let health = Arc::new(Mutex::new((0..len).map(|_| MemberHealth::new()).collect()));
+        let health_base = tokio::time::Instant::now();
         // Clamp to ≥1s so a misconfigured `probe_interval_secs = 0` can't spin the prober.
         let interval = interval.max(std::time::Duration::from_secs(1));
         let task = tokio::spawn(prober_loop(
@@ -219,6 +225,9 @@ impl SelectingTransport {
             Arc::clone(&reprobe),
             interval,
             window.max(1),
+            Arc::clone(&health),
+            health_base,
+            stall,
         ));
         SelectingTransport {
             members,
@@ -229,8 +238,8 @@ impl SelectingTransport {
             direct_tcp,
             direct_udp,
             stall,
-            health: Mutex::new((0..len).map(|_| MemberHealth::new()).collect()),
-            health_base: tokio::time::Instant::now(),
+            health,
+            health_base,
             me: std::sync::OnceLock::new(),
         }
     }
@@ -432,19 +441,25 @@ impl SelectingTransport {
     /// A point-in-time view of every pool member — metadata, last-probe latency/health, and which
     /// one new flows currently dial first — for the server-selection UI. Reads the live state under
     /// the short selection lock (never across `.await`); ordered by pool index (the UI groups/sorts).
-    /// Quarantined members are reported as unhealthy. `excluded()` is called before the `selection`
+    /// Quarantined members, and members whose recent real dials failed, are reported as unhealthy.
+    /// `excluded()` / `recently_failed()` / `members_and_order()` are all called before the `selection`
     /// lock is taken so that `health` and `selection` are never held simultaneously.
     pub fn snapshot(&self) -> Vec<MemberStatus> {
-        // Compute excluded BEFORE taking selection lock (locks only `health`).
+        // All three lock only `health` (or take and release both), and run BEFORE the selection lock.
         let excluded = self.excluded();
+        let failing = self.recently_failed();
+        // `current` must be the member a flow would ACTUALLY dial first, which since the recent-failure
+        // sink is no longer `ranked.first()` — reporting the ranking's head would name a member that
+        // flows are now skipping.
+        let dial_first = self.members_and_order().1.first().copied();
         // Read members under the selection lock (selection → members order) so a racing `reload`
         // can't pair one generation's members with another's ranking/latency.
         let sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
         let members = self.members();
-        // The member new flows dial first: the pin if valid, else the latency-ranked best.
+        // The member new flows dial first: the pin if valid, else the head of the real dial order.
         let current = match sel.pinned {
             Some(p) if p < members.len() => Some(p),
-            _ => sel.ranked.first().copied(),
+            _ => dial_first,
         };
         (0..members.len())
             .map(|i| {
@@ -459,8 +474,11 @@ impl SelectingTransport {
                     latency_ms: outcome
                         .filter(|o| o.healthy)
                         .map(|o| o.latency.as_millis() as u64),
-                    // Quarantined members are reported unhealthy even if probe said otherwise.
-                    healthy: probe_healthy && !excluded.contains(&i),
+                    // A quarantined member, or one whose recent real dials failed, is reported
+                    // unhealthy even when the probe said otherwise — on a caching transport the probe
+                    // reuses its connection and cannot see that establishment is broken, so believing
+                    // it here is what made `healthy=5 pool=5` true while nothing could connect.
+                    healthy: probe_healthy && !excluded.contains(&i) && !failing.contains(&i),
                     is_current: Some(i) == current,
                 }
             })
@@ -687,21 +705,8 @@ impl SelectingTransport {
         if !self.stall.breaker_enabled() {
             return std::collections::HashSet::new();
         }
-        let now_ms = tokio::time::Instant::now()
-            .duration_since(self.health_base)
-            .as_millis() as u64;
-        let window_ms = self.stall.dial_failure_window.as_millis() as u64;
         let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
-        health
-            .iter()
-            .enumerate()
-            .filter(|(_, h)| {
-                h.recent_dial_failures
-                    .iter()
-                    .any(|&t| now_ms.saturating_sub(t) <= window_ms)
-            })
-            .map(|(i, _)| i)
-            .collect()
+        recently_failed_in(&health, self.health_base, self.stall.dial_failure_window)
     }
 
     /// Test-only: returns `true` if member `i` is currently quarantined.
@@ -976,6 +981,7 @@ impl Drop for SelectingTransport {
 /// Background prober: probe the pool (windowed), update the ranked selection (with hysteresis), then
 /// wait `interval` (or until a demotion wakes it early) and repeat. Per-probe deadline = `interval`
 /// capped at 10s so a slow server can't stall a whole round on a short interval.
+#[allow(clippy::too_many_arguments)] // plumbing, not logic: every arg is a shared handle or a tunable
 async fn prober_loop(
     members: Arc<Mutex<Arc<Vec<Member>>>>,
     selection: Arc<Mutex<Selection>>,
@@ -983,6 +989,9 @@ async fn prober_loop(
     reprobe: Arc<tokio::sync::Notify>,
     interval: std::time::Duration,
     window: usize,
+    health: Arc<Mutex<Vec<MemberHealth>>>,
+    health_base: tokio::time::Instant,
+    stall: StallConfig,
 ) {
     use crate::transport::probe::probe;
     let per_probe = interval.min(std::time::Duration::from_secs(10));
@@ -1011,6 +1020,16 @@ async fn prober_loop(
             async move { probe(&transport, &callback, per_probe, &label).await }
         })
         .await;
+        // Real flow outcomes, read BEFORE the selection lock (the two are never held together). The
+        // probe cannot see this for itself: on a connection-caching transport its `dial` reuses the
+        // cached connection, so it reports healthy for a member that currently cannot establish a new
+        // one — observed as `dial_ms=0` on every hysteria2 probe while that member's flows timed out.
+        let failing = if stall.breaker_enabled() {
+            let h = health.lock().unwrap_or_else(|e| e.into_inner());
+            recently_failed_in(&h, health_base, stall.dial_failure_window)
+        } else {
+            std::collections::HashSet::new()
+        };
         {
             let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
             // Discard outcomes if a `reload` swapped the pool while we were probing — writing them
@@ -1027,17 +1046,33 @@ async fn prober_loop(
                     }
                 }
                 sel.ranked = if measured {
-                    next_order(&sel.ranked, &outcomes).into()
+                    next_order(&sel.ranked, &outcomes, &failing).into()
                 } else {
-                    rank(&outcomes).into()
+                    rank(&outcomes, &failing).into()
                 };
                 measured = true;
             } else {
                 tracing::debug!("pool reloaded mid-probe; discarding stale-generation outcomes");
             }
         }
+        let probe_healthy = outcomes.iter().filter(|(_, o)| o.healthy).count();
+        // Members the probe called healthy while their real flows are failing. This contradiction is
+        // the signature of a caching transport whose cached connection still works but whose
+        // establishment path does not — and it is exactly what a `healthy=N pool=N` line hides.
+        let contradicting: Vec<usize> = outcomes
+            .iter()
+            .filter(|(i, o)| o.healthy && failing.contains(i))
+            .map(|(i, _)| *i)
+            .collect();
+        if !contradicting.is_empty() {
+            tracing::warn!(
+                members = ?contradicting,
+                "probe reports healthy but recent dials failed — trusting flow outcomes and ranking these last"
+            );
+        }
         tracing::debug!(
-            healthy = outcomes.iter().filter(|(_, o)| o.healthy).count(),
+            healthy = probe_healthy,
+            failing = failing.len(),
             pool = members.len(),
             "pool re-probed"
         );
@@ -1048,26 +1083,66 @@ async fn prober_loop(
     }
 }
 
+/// Members with a failed dial inside `window`. Shared by [`SelectingTransport::recently_failed`] (the
+/// dial path) and the prober (ranking + the honest health count), so both read "recently failing" the
+/// same way.
+fn recently_failed_in(
+    health: &[MemberHealth],
+    base: tokio::time::Instant,
+    window: Duration,
+) -> std::collections::HashSet<usize> {
+    let now_ms = tokio::time::Instant::now().duration_since(base).as_millis() as u64;
+    let window_ms = window.as_millis() as u64;
+    health
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| {
+            h.recent_dial_failures
+                .iter()
+                .any(|&t| now_ms.saturating_sub(t) <= window_ms)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// How much lower a challenger's latency must be to displace the incumbent best (hysteresis).
 const SWITCH_MARGIN: f64 = 0.20;
 
-/// Healthy members, best (lowest latency) first; unhealthy dropped.
-fn rank(outcomes: &[(usize, ProbeOutcome)]) -> Vec<usize> {
+/// Healthy members, best (lowest latency) first; unhealthy dropped. Members in `failing` (a recent
+/// real dial failure) sort **behind** every clean member regardless of probe latency — on a
+/// connection-caching transport the probe reuses its cached connection and so reports a fast, healthy
+/// result for a member that cannot currently establish a new one. Probe latency alone would keep
+/// promoting it.
+fn rank(
+    outcomes: &[(usize, ProbeOutcome)],
+    failing: &std::collections::HashSet<usize>,
+) -> Vec<usize> {
     let mut healthy: Vec<&(usize, ProbeOutcome)> =
         outcomes.iter().filter(|(_, o)| o.healthy).collect();
-    healthy.sort_by_key(|(_, o)| o.latency);
+    healthy.sort_by_key(|(i, o)| (failing.contains(i), o.latency));
     healthy.iter().map(|(i, _)| *i).collect()
 }
 
 /// New best-first order given the `current` order and a fresh probe round. The fresh ranking wins,
 /// EXCEPT the incumbent best is kept in front unless a challenger is ≥ `SWITCH_MARGIN` lower latency
 /// or the incumbent is no longer healthy — hysteresis against flapping between near-equal servers.
-fn next_order(current: &[usize], fresh: &[(usize, ProbeOutcome)]) -> Vec<usize> {
-    let ranked = rank(fresh);
+///
+/// An incumbent in `failing` forfeits the hysteresis outright: keeping a member whose real dials are
+/// failing in front — on the strength of a probe that reused its cached connection — is what let one
+/// bad server stay first choice for 140 of 152 seconds.
+fn next_order(
+    current: &[usize],
+    fresh: &[(usize, ProbeOutcome)],
+    failing: &std::collections::HashSet<usize>,
+) -> Vec<usize> {
+    let ranked = rank(fresh, failing);
     let incumbent = match current.first() {
         Some(i) => *i,
         None => return ranked, // nothing to keep
     };
+    if failing.contains(&incumbent) {
+        return ranked; // no hysteresis for a member whose flows are failing
+    }
     let incumbent_latency = fresh
         .iter()
         .find(|(i, _)| *i == incumbent)
@@ -1266,6 +1341,10 @@ mod tests {
     fn member_labeled(ok: bool, meta: ServerMeta, label: &str) -> Member {
         member_with_meta(ok, meta).with_label(label.to_string())
     }
+    // No member has a recent dial failure — the baseline for the pure ranking tests.
+    fn no_failures() -> std::collections::HashSet<usize> {
+        std::collections::HashSet::new()
+    }
     // A selecting transport with a healthy direct fallback (TCP + UDP both succeed), so the tests
     // that exercise fail-open observe a successful direct dial.
     fn selecting(members: Vec<Member>, ranked: Vec<usize>) -> SelectingTransport {
@@ -1306,7 +1385,7 @@ mod tests {
             direct_tcp,
             direct_udp,
             stall: test_stall_cfg(),
-            health: Mutex::new((0..n).map(|_| MemberHealth::new()).collect()),
+            health: Arc::new(Mutex::new((0..n).map(|_| MemberHealth::new()).collect())),
             health_base: tokio::time::Instant::now(),
             me: std::sync::OnceLock::new(),
         }
@@ -1820,6 +1899,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rank_sinks_a_failing_member_despite_the_best_probe_latency() {
+        // The regression in one assertion: member 0 has the FASTEST probe (because a caching transport
+        // reuses its connection, so the probe measures nothing about establishment) while its real
+        // dials are failing. Latency alone would rank it first.
+        let outs = vec![
+            (
+                0,
+                ProbeOutcome {
+                    latency: Duration::from_millis(5),
+                    healthy: true,
+                },
+            ),
+            (
+                1,
+                ProbeOutcome {
+                    latency: Duration::from_millis(200),
+                    healthy: true,
+                },
+            ),
+        ];
+        let failing: std::collections::HashSet<usize> = [0].into_iter().collect();
+        assert_eq!(
+            rank(&outs, &failing),
+            vec![1, 0],
+            "flow outcomes outweigh probe latency"
+        );
+        assert_eq!(
+            rank(&outs, &no_failures()),
+            vec![0, 1],
+            "and without failures, latency decides"
+        );
+    }
+
+    #[test]
+    fn failing_incumbent_forfeits_hysteresis() {
+        // Hysteresis normally keeps the incumbent in front unless a challenger is 20% faster. A
+        // failing incumbent must lose it outright, or a 5ms-probe member that cannot connect stays
+        // first choice forever.
+        let current = vec![0, 1];
+        let fresh = vec![
+            (
+                0,
+                ProbeOutcome {
+                    latency: Duration::from_millis(100),
+                    healthy: true,
+                },
+            ),
+            (
+                1,
+                ProbeOutcome {
+                    latency: Duration::from_millis(95),
+                    healthy: true,
+                },
+            ),
+        ];
+        assert_eq!(
+            next_order(&current, &fresh, &no_failures())[0],
+            0,
+            "95ms is not 20% better, so the incumbent keeps the lead"
+        );
+        let failing: std::collections::HashSet<usize> = [0].into_iter().collect();
+        assert_eq!(
+            next_order(&current, &fresh, &failing)[0],
+            1,
+            "but a failing incumbent yields immediately"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_reports_a_failing_member_unhealthy_and_names_the_real_current() {
+        // `healthy=5 pool=5` while nothing could connect was true only because health came from the
+        // probe alone. A member with recent dial failures must read unhealthy, and `is_current` must
+        // name the member flows actually dial first — not the head of the latency ranking.
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        {
+            let mut sel = t.selection.lock().unwrap();
+            sel.latest = vec![
+                Some(ProbeOutcome {
+                    latency: Duration::from_millis(5),
+                    healthy: true,
+                }),
+                Some(ProbeOutcome {
+                    latency: Duration::from_millis(200),
+                    healthy: true,
+                }),
+            ];
+        }
+        assert!(
+            t.snapshot()[0].healthy,
+            "clean member 0 starts healthy and current"
+        );
+        assert!(t.snapshot()[0].is_current);
+
+        t.record_dial_failure(0); // one failure: penalised, still below the breaker threshold
+        let snap = t.snapshot();
+        assert!(
+            !snap[0].healthy,
+            "probe said healthy; the failed dial overrides it"
+        );
+        assert!(snap[1].healthy);
+        assert!(!snap[0].is_current, "flows no longer dial member 0 first");
+        assert!(snap[1].is_current, "so the snapshot must name member 1");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn breaker_off_when_window_is_zero() {
         // A zero window disables the breaker just as a zero count does — `breaker_enabled` requires
@@ -1882,7 +2066,7 @@ mod tests {
                 },
             ),
         ];
-        assert_eq!(rank(&outs), vec![2, 0]); // 20ms before 80ms; index 1 dropped
+        assert_eq!(rank(&outs, &no_failures()), vec![2, 0]); // 20ms before 80ms; index 1 dropped
     }
 
     #[test]
@@ -1907,7 +2091,7 @@ mod tests {
                 },
             ),
         ];
-        assert_eq!(next_order(&current, &fresh)[0], 0);
+        assert_eq!(next_order(&current, &fresh, &no_failures())[0], 0);
         // index 2 = 70ms: 30% better → it leads.
         let fresh = vec![
             (
@@ -1925,7 +2109,7 @@ mod tests {
                 },
             ),
         ];
-        assert_eq!(next_order(&current, &fresh)[0], 2);
+        assert_eq!(next_order(&current, &fresh, &no_failures())[0], 2);
         // current became unhealthy → challenger leads regardless of margin.
         let fresh = vec![
             (
@@ -1943,6 +2127,6 @@ mod tests {
                 },
             ),
         ];
-        assert_eq!(next_order(&current, &fresh)[0], 2);
+        assert_eq!(next_order(&current, &fresh, &no_failures())[0], 2);
     }
 }
