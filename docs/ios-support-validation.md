@@ -178,3 +178,35 @@ dependency (only Homebrew's Python has `cryptography` on the signing host). The 
 encoding: `openssl dgst -sign` emits ASN.1 DER, while JOSE wants raw `r‖s` as two fixed 32-byte
 integers — DER omits leading zero bytes and prepends one when the high bit is set, so both halves must be
 re-padded to exactly 32 bytes.
+
+### The third gate: build ORDERING within a version train
+
+A build can pass both gates above — `VALID`, compliance answered, attached, `IN_BETA_TESTING` — and still
+go unnoticed, because TestFlight groups builds by **marketing version** (`CFBundleShortVersionString`) and
+orders them by `CFBundleVersion` **component-wise**. If your build doesn't rank as newest in its train, it
+is delivered but not surfaced.
+
+This cost three rounds of "the new build never appeared." Every `0.1.0` upload lost to a two-week-old one:
+
+| Build | `CFBundleVersion` | First component |
+|---|---|---:|
+| Jul 13 | `20260713213236` | 20260713213236 |
+| Jul 24–27 | `0.1.0.<timestamp>` | **0** |
+
+Because Tauri stamps `CFBundleVersion` as `<marketing-version>.<--build-number>`, every build in the
+`0.1.0` train is prefixed `0.1.0.` — so **no build number can ever outrank that single 14-digit
+component**. The train is permanently poisoned. The fix used was to bump the marketing version —
+`0.1.1`, verified 2026-07-27 with build `2607271505`, which testers could see. (Detaching the offending
+build from the group should work too, since a group only surfaces builds attached to it, but that route
+is untested here.)
+
+**So don't stop at "is it delivered?" — check "is it the top build in its train?":**
+
+```
+GET /v1/builds?filter[app]=<appId>&sort=-uploadedDate         # attributes.version = the ordering key
+GET /v1/builds/<buildId>/preReleaseVersion                    # attributes.version = the train
+```
+
+Keep build numbers monotonic **and** single-component going forward. Note `0.1.1.<timestamp>` is still
+four components where Apple's spec allows three; ASC tolerates it, and ordering is correct within the
+train, but a two-component marketing version (`0.1`) would yield a spec-clean three.
