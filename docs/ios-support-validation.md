@@ -203,8 +203,8 @@ is untested here.)
 **So don't stop at "is it delivered?" — check "is it the top build in its train?":**
 
 ```
-GET /v1/builds?filter[app]=6790541695&sort=-uploadedDate     # attributes.version = the ordering key
-GET /v1/builds/<buildId>/preReleaseVersion                   # attributes.version = the train
+GET /v1/builds?filter[app]=<appId>&sort=-uploadedDate         # attributes.version = the ordering key
+GET /v1/builds/<buildId>/preReleaseVersion                    # attributes.version = the train
 ```
 
 Keep build numbers monotonic **and** single-component going forward. Note `0.1.1.<timestamp>` is still
