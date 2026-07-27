@@ -1,6 +1,6 @@
 [package]
 name = "gui-tauri"
-version = "0.1.0"
+version = "0.1.1"
 description = "Spark — Lantern desktop client (Tauri UI)"
 authors = ["Lantern <support@getlantern.org>"]
 edition = "2021"
