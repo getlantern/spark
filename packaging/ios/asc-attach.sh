@@ -74,14 +74,24 @@ mint_token() {
 CURL_TIMEOUTS=(--connect-timeout 15 --max-time 60)
 
 # api <METHOD> <path> [json-body] — response body on stdout; Apple's error detail on stderr for non-2xx.
+#
+# curl's exit status is captured explicitly (`|| rc=$?`) rather than left to `set -e`. Without that,
+# a transport error (timeout, DNS) inside the assignment makes the failure depend on how the caller
+# invoked us: as a plain command it kills the whole script before the diagnostic below ever prints,
+# while inside `$( … )` it silently yields an empty result. Returning 1 the same way in every context
+# is what lets callers actually handle it.
 api() {
-    local method="$1" path="$2" body="${3:-}" code out="$TMP/resp.json"
+    local method="$1" path="$2" body="${3:-}" code out="$TMP/resp.json" rc=0
     if [ -n "$body" ]; then
         code="$(curl -sS "${CURL_TIMEOUTS[@]}" -o "$out" -w '%{http_code}' -X "$method" "$API$path" \
-            -H "Authorization: Bearer $(mint_token)" -H "Content-Type: application/json" -d "$body")"
+            -H "Authorization: Bearer $(mint_token)" -H "Content-Type: application/json" -d "$body")" || rc=$?
     else
         code="$(curl -sS "${CURL_TIMEOUTS[@]}" -o "$out" -w '%{http_code}' -X "$method" "$API$path" \
-            -H "Authorization: Bearer $(mint_token)")"
+            -H "Authorization: Bearer $(mint_token)")" || rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "App Store Connect $method $path -> curl failed (exit $rc)" >&2
+        return 1
     fi
     case "$code" in
         2*) cat "$out"; return 0 ;;
@@ -132,9 +142,12 @@ GROUP_ID="$(api GET "/v1/betaGroups?filter%5Bapp%5D=$APP_ID&limit=200" \
     | jq -r --arg n "$GROUP" '[.data[] | select(.attributes.name == $n)][0].id // empty')"
 [ -n "$GROUP_ID" ] || die "no beta group named '$GROUP' on this app (App Store Connect -> TestFlight -> Groups)"
 
+# Default to "not attached" when the lookup itself fails (empty result): re-attaching is idempotent —
+# Apple returns 204 — whereas trusting an empty answer would report "already attached" and silently
+# skip the attach, which is the exact failure this script exists to prevent.
 ATTACHED="$(api GET "/v1/betaGroups/$GROUP_ID/builds?limit=200" \
-    | jq -r --arg id "$BUILD_ID" '[.data[] | select(.id == $id)] | length')"
-if [ "$ATTACHED" = "0" ]; then
+    | jq -r --arg id "$BUILD_ID" '[.data[] | select(.id == $id)] | length' || true)"
+if [ "${ATTACHED:-0}" = "0" ]; then
     api POST "/v1/betaGroups/$GROUP_ID/relationships/builds" \
         "$(jq -nc --arg id "$BUILD_ID" '{data:[{type:"builds",id:$id}]}')" >/dev/null
     echo "==> attached build $BUILD_NUMBER to beta group '$GROUP'" >&2
