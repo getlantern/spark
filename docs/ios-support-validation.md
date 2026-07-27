@@ -140,3 +140,41 @@ To clear a build that is already stuck, `PATCH /v1/builds/<buildId>` with
 `{"attributes": {"usesNonExemptEncryption": false}}` — it flips to `READY_FOR_BETA_TESTING` within
 seconds. Note this is a **compliance declaration about the app's cryptography**, not a build setting:
 confirm it with whoever owns that call before answering for a new crypto surface.
+
+### The second silent gate: beta-group attachment
+
+Compliance is only gate one. A build can be `VALID` **and** `READY_FOR_BETA_TESTING` and still reach
+nobody, because a beta group with `hasAccessToAllBuilds = false` shows **only the builds explicitly
+attached to it** — and a fresh upload is attached to nothing. `org.getlantern.spark` has one group,
+**Team** (internal), with that flag `false`, and the only builds visible in it had been attached by hand.
+The July 24–26 uploads were therefore invisible for two distinct reasons in sequence.
+
+This one **cannot** be fixed once on the group: `hasAccessToAllBuilds` is create-only, and a PATCH is
+rejected with
+
+```
+409 ENTITY_ERROR.ATTRIBUTE.NOT_ALLOWED
+The attribute 'hasAccessToAllBuilds' can not be included in a 'UPDATE' operation
+```
+
+(Flipping "Automatically distribute builds" in the App Store Connect **UI** is the only way to change it
+on an existing group; the API cannot.) So the fix lives on the build side:
+`packaging/ios/build-testflight.sh` now ends by running **`packaging/ios/asc-attach.sh <build-number>`**,
+which waits for processing, attaches the build to `TESTFLIGHT_GROUP` (default `Team`), and then
+*verifies* the result instead of inferring it. Re-attaching is idempotent (HTTP 204), so re-running after
+a timeout is safe. `TESTFLIGHT_GROUP=""` skips the step and says out loud that the build reaches no
+testers.
+
+Two states both count as success, and the distinction matters when reading the output:
+`READY_FOR_BETA_TESTING` = processed and compliant but not yet distributed; **`IN_BETA_TESTING`** = being
+distributed to a group, i.e. testers can actually install it.
+
+Note the build number that reaches the API is not the one you passed: Tauri stamps `CFBundleVersion` as
+`<marketing-version>.<build-number>`, so `BUILD_NUMBER=2607270436` appears as `0.1.0.2607270436` — the
+script matches either form.
+
+`asc-attach.sh` mints its own ES256 JWT with `openssl`, deliberately avoiding a Python/`PyJWT`
+dependency (only Homebrew's Python has `cryptography` on the signing host). The trap is signature
+encoding: `openssl dgst -sign` emits ASN.1 DER, while JOSE wants raw `r‖s` as two fixed 32-byte
+integers — DER omits leading zero bytes and prepends one when the high bit is set, so both halves must be
+re-padded to exactly 32 bytes.

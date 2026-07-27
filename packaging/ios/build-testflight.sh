@@ -16,6 +16,8 @@
 #   ASC_API_KEY_ID   App Store Connect API key ID (the <KEYID> in AuthKey_<KEYID>.p8). REQUIRED.
 #   ASC_ISSUER_ID    App Store Connect issuer UUID (Users and Access -> Integrations). REQUIRED.
 #   BUILD_NUMBER     CFBundleVersion; default a monotonic timestamp so TestFlight never sees a dup.
+#   TESTFLIGHT_GROUP Beta group to distribute to once the upload processes; default "Team". Set to ""
+#                    to skip — the build then reaches no testers (see packaging/ios/asc-attach.sh).
 #
 # Credentials never live in the repo: the key ID + issuer are passed in, and the private .p8 stays in
 # ~/.appstoreconnect/ (altool finds it there). Mirrors "sign offline, verify everywhere".
@@ -59,4 +61,9 @@ echo "==> IPA: $IPA ($(du -h "$IPA" | cut -f1))" >&2
 
 echo "==> uploading to TestFlight (altool, API key $ASC_API_KEY_ID)" >&2
 xcrun altool --upload-app -f "$IPA" -t ios --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
-echo "==> done: uploaded '$IPA' as build $BUILD_NUMBER — processing in App Store Connect -> TestFlight" >&2
+echo "==> uploaded '$IPA' as build $BUILD_NUMBER — App Store Connect is processing it" >&2
+
+# An accepted upload is NOT a delivered build: the "Team" group has hasAccessToAllBuilds=false, so it
+# only shows builds explicitly attached to it, and Apple won't let that flag be flipped after the group
+# exists. Wait for processing, attach, and verify — otherwise the build silently reaches nobody.
+exec packaging/ios/asc-attach.sh "$BUILD_NUMBER"
