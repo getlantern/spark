@@ -67,14 +67,20 @@ mint_token() {
         "$(printf '%s%s' "$(pad32 "$r")" "$(pad32 "$s")" | xxd -r -p | b64u)"
 }
 
+# Bounded so a stalled connect/TLS handshake can't hang the release: every call here is a tiny JSON
+# request, and the WAIT_SECS deadline below is only checked BETWEEN polls — an unbounded curl would sit
+# inside one iteration and ignore it entirely. This script is `exec`d as the last step of
+# build-testflight.sh, so a hang would wedge the whole release.
+CURL_TIMEOUTS=(--connect-timeout 15 --max-time 60)
+
 # api <METHOD> <path> [json-body] — response body on stdout; Apple's error detail on stderr for non-2xx.
 api() {
     local method="$1" path="$2" body="${3:-}" code out="$TMP/resp.json"
     if [ -n "$body" ]; then
-        code="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" "$API$path" \
+        code="$(curl -sS "${CURL_TIMEOUTS[@]}" -o "$out" -w '%{http_code}' -X "$method" "$API$path" \
             -H "Authorization: Bearer $(mint_token)" -H "Content-Type: application/json" -d "$body")"
     else
-        code="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" "$API$path" \
+        code="$(curl -sS "${CURL_TIMEOUTS[@]}" -o "$out" -w '%{http_code}' -X "$method" "$API$path" \
             -H "Authorization: Bearer $(mint_token)")"
     fi
     case "$code" in
@@ -100,7 +106,14 @@ BUILD_ID=""
 STATE=""
 DEADLINE="$(( $(date +%s) + WAIT_SECS ))"
 while :; do
-    RESP="$(api GET "/v1/builds?filter%5Bapp%5D=$APP_ID&sort=-uploadedDate&limit=20")"
+    # limit=200 (the API max), not a token amount: the version match is client-side, so the target
+    # build must still be inside the page. A handful of uploads landing during a 30-minute wait would
+    # push it off a short page and produce a false timeout.
+    #
+    # `|| true` so one transient failure (now that curl is time-bounded) just retries on the next tick
+    # instead of aborting the attach under `set -e` — a persistent failure still ends at the deadline
+    # below with a clear message.
+    RESP="$(api GET "/v1/builds?filter%5Bapp%5D=$APP_ID&sort=-uploadedDate&limit=200" || true)"
     BUILD_ID="$(printf '%s' "$RESP" | jq -r --arg b "$BUILD_NUMBER" \
         '[.data[] | select(.attributes.version == $b or (.attributes.version | endswith("." + $b)))][0].id // empty')"
     STATE="$(printf '%s' "$RESP" | jq -r --arg b "$BUILD_NUMBER" \
