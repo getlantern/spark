@@ -3,8 +3,8 @@
 //!
 //! The Swift provider resolves the `utun` file descriptor (KVC `socket.fileDescriptor` → a
 //! public-symbol fd-scan fallback — the WireGuard/sing-box/Mullvad/Proton/lantern technique) and
-//! calls `spark_tunnel_run(fd, mtu, config, data_dir, split_tunnel, routing_mode)`; `spark_tunnel_stop()` on
-//! teardown. Packets never cross the
+//! calls `spark_tunnel_run(fd, mtu, config, data_dir, split_tunnel, routing_mode, identity)`;
+//! `spark_tunnel_stop()` on teardown. Packets never cross the
 //! FFI — Rust owns the fd and runs the whole netstack ([`spark_core::fd_tunnel`]), so the C ABI
 //! is control-only (mirroring the Android JNI). One core surface, two thin platform adapters.
 //!
@@ -54,6 +54,10 @@ mod ffi {
     /// `data_dir` must be null or a valid NUL-terminated C string for the duration of this call.
     /// `split_tunnel` must be null or a valid NUL-terminated C string for the duration of this call.
     /// `routing_mode` must be null or a valid NUL-terminated C string for the duration of this call.
+    /// `identity` must be null or a valid NUL-terminated C string for the duration of this call.
+    ///
+    /// Unlike the optionals above, a missing/malformed `identity` is **not** best-effort: in self-fetch
+    /// mode it returns -1 rather than let this process register its own account (see the check below).
     #[no_mangle]
     pub unsafe extern "C" fn spark_tunnel_run(
         fd: c_int,
@@ -130,15 +134,24 @@ mod ffi {
         // entitlement bought against the app's account never reached the servers in use. Failing here
         // makes a misconfigured host loud instead of silently minting a second account.
         // (An explicit `config` is a dev override that does no fetching, so it needs no identity.)
-        let self_fetch = cfg.map(str::trim).unwrap_or("").is_empty()
-            || cfg.map(str::trim) == Some("lantern-api");
-        if self_fetch && spark_core::config::fetch::Identity::parse(ident.unwrap_or("")).is_none() {
-            tracing::error!(
-                "tunnel start refused: self-fetch requires providerConfiguration[\"identity\"] \
-                 ({{device_id,user_id,pro_token}}); refusing to register a second account"
-            );
-            spark_core::fd_tunnel::abandon_fd(fd);
-            return -1;
+        //
+        // Gated on `config-fetch` for two reasons: `config::fetch` (and so `Identity`) only exists on
+        // that slice, and without it an absent config means DIRECT forwarding — which fetches nothing
+        // and must not be made to require an identity.
+        #[cfg(feature = "config-fetch")]
+        {
+            let self_fetch = cfg.map(str::trim).unwrap_or("").is_empty()
+                || cfg.map(str::trim) == Some("lantern-api");
+            if self_fetch
+                && spark_core::config::fetch::Identity::parse(ident.unwrap_or("")).is_none()
+            {
+                tracing::error!(
+                    "tunnel start refused: self-fetch requires providerConfiguration[\"identity\"] \
+                     ({{device_id,user_id,pro_token}}); refusing to register a second account"
+                );
+                spark_core::fd_tunnel::abandon_fd(fd);
+                return -1;
+            }
         }
 
         // The shared, cross-platform policy home (the Apple C-ABI + Android JNI call it today; the
