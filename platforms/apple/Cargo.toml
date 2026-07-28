@@ -55,3 +55,6 @@ bip324 = ["spark-core/bip324"]
 
 [dependencies]
 spark-core = { path = "../../core" }
+# This crate emits a few `tracing` events of its own (notably the refusal to start without a supplied
+# identity); the NE's log bridge forwards them to os_log alongside core's.
+tracing.workspace = true

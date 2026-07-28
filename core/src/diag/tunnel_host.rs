@@ -18,13 +18,15 @@
 //! disarmed after the first clean stop: a crash in any later session in the same
 //! process went undetected.)
 //!
-//! ## Device identity (deliberate split)
+//! ## Device identity
 //! The NE and the app run in separate containers by platform constraint — the root
 //! sysext cannot read the user's App Group container (sandbox-denied), so there is no
-//! shared `device_id` file. Each process derives its own id from its own data dir,
-//! meaning one physical device reports TWO `client.device_id` values (`spark.component`
-//! "app" vs "tunnel"). Unifying them by passing the app's id through
-//! `providerConfiguration` is an explicit follow-up, not this module.
+//! shared `device_id` file. The app therefore hands its id down through
+//! `providerConfiguration` and [`init`] takes it as `device_id`, so one physical device
+//! reports ONE `client.device_id` with `spark.component` ("app" / "tunnel")
+//! distinguishing the processes. Only when no id is supplied (Android, CLI) does this
+//! fall back to deriving one from the data dir — which also *persists* it, and is why
+//! the supplied path must not fall through. See `docs/identity-unification-design.md`.
 //!
 //! ## Opt-out
 //! Only the local `SPARK_DIAGNOSTICS=off` env override is honored here — the tunnel
@@ -92,9 +94,15 @@ fn lock_sentinel() -> MutexGuard<'static, Option<Arc<SessionSentinel>>> {
 /// only re-arm the unclean-exit sentinel (see the module doc).
 ///
 /// `data_dir` is the tunnel's own cache dir — the same one its config fetch uses
-/// (`fetch::run_loop`), so the `device_id` and the re-parsed `config_raw.json` match
-/// the identity/config of the requests this process actually makes.
-pub fn init(data_dir: &Path, version: &str) {
+/// (`fetch::run_loop`), so the re-parsed `config_raw.json` matches the config of the
+/// requests this process actually makes.
+///
+/// `device_id` is the app-supplied one when the controlling app handed identity down.
+/// Passing it matters twice over: telemetry then attributes one physical device to ONE
+/// `client.device_id` (retiring the split described in the module doc), and — because the
+/// fallback `fetch::device_id()` *creates and persists* a file — it is what keeps the
+/// tunnel from minting its own identity behind the fetch path's back.
+pub fn init(data_dir: &Path, version: &str, device_id: Option<&str>) {
     // Local opt-out (spec §C4.3): env override only — see the module doc for why the
     // tunnel has no persisted toggle.
     if std::env::var("SPARK_DIAGNOSTICS").as_deref() == Ok("off") {
@@ -123,7 +131,7 @@ pub fn init(data_dir: &Path, version: &str) {
         tracing::debug!("diag: sink already installed — skipping duplicate tunnel host init");
         return;
     }
-    init_with_sink(sink, data_dir, version);
+    init_with_sink(sink, data_dir, version, device_id);
 }
 
 /// Clean-shutdown disarm for the unclean-exit sentinel. Safe to call at any time —
@@ -143,7 +151,7 @@ pub fn disarm_sentinel() {
 /// so tests can drive it against a test sink without touching the global `SINK`
 /// OnceLock (which can only be set once per process — installing it in a test would
 /// leak into every other test; same constraint the sink/layer tests document).
-fn init_with_sink(sink: Arc<DiagSink>, data_dir: &Path, version: &str) {
+fn init_with_sink(sink: Arc<DiagSink>, data_dir: &Path, version: &str, device_id: Option<&str>) {
     // Crash capture (§C2a): a panic's message + location reach the spool before the
     // process dies, uploading on next launch. (Idempotent; chains the previous hook.)
     panic_hook::install();
@@ -158,11 +166,13 @@ fn init_with_sink(sink: Arc<DiagSink>, data_dir: &Path, version: &str) {
         sink.push_error(ev);
     }
 
-    // Resource attributes stamped on every OTLP upload. The device id comes from the
-    // SAME dir the tunnel's config fetch uses, so diagnostics and config requests
-    // report one identity for this process (see the module doc for the app/tunnel
-    // device-id split).
-    let device_id = crate::config::fetch::device_id(data_dir).unwrap_or_else(|_| "unknown".into());
+    // Resource attributes stamped on every OTLP upload. Prefer the app-supplied device id so
+    // diagnostics report the SAME identity the config requests use. The dir-backed fallback is for
+    // hosts that own their own identity (Android, CLI) — note it *persists* a `device_id` file, which
+    // is precisely why the supplied path must not fall through to it.
+    let device_id = device_id.map(str::to_owned).unwrap_or_else(|| {
+        crate::config::fetch::device_id(data_dir).unwrap_or_else(|_| "unknown".into())
+    });
     let cache_path = crate::config::fetch::cache::raw_path(data_dir);
     let res = resource_attrs(version, &device_id, &cache_path);
 
@@ -425,7 +435,7 @@ mod tests {
         disarm_sentinel();
 
         let sink = DiagSink::new(&dir, "tunnel").expect("sink in tempdir");
-        init_with_sink(sink, &dir, "9.9.9");
+        init_with_sink(sink, &dir, "9.9.9", None);
 
         // Sink files + the armed sentinel marker exist; no cache file is fine (the
         // watch channel seeds None and the uploader stays gated off).

@@ -40,9 +40,19 @@ extern "C" {
  * `routing_mode` is an optional NUL-terminated "smart"/"full" string that sets the initial
  * routing mode. NULL defaults to the core's built-in default. A bad or non-UTF-8 value is
  * silently ignored (treated as NULL) — the routing mode is non-critical and must not prevent
- * the tunnel from starting. */
+ * the tunnel from starting.
+ *
+ * `identity` is the controlling app's device + account identity as
+ * `{"device_id":...,"user_id":...,"pro_token":...}` JSON. Unlike the optionals above this is NOT
+ * best-effort: in self-fetch mode (an empty/NULL `config`, or "lantern-api") a missing, malformed or
+ * partial value returns -1 and the tunnel does NOT start. Failing closed is deliberate — the core used
+ * to mint its own account via /user-create when none was supplied, which gave every install two
+ * Lantern accounts and stranded any purchased entitlement on the app's, silently. NULL is fine only
+ * with an explicit `config` (a dev override does no fetching). See
+ * docs/identity-unification-design.md. */
 int32_t spark_tunnel_run(int32_t fd, int32_t mtu, const char *config, const char *data_dir,
-                         const char *split_tunnel, const char *routing_mode);
+                         const char *split_tunnel, const char *routing_mode,
+                         const char *identity);
 
 /* Signal a running spark_tunnel_run() to stop. */
 void spark_tunnel_stop(void);

@@ -73,6 +73,45 @@ pub struct FetchEnv {
     /// Pro/account host for the `/user-create` pre-step (a *different* host than config-new). Port 443.
     pub pro_host: String,
     pub pro_path: String,
+    /// Identity handed down by the controlling app. When set it is used verbatim, and NOTHING about
+    /// identity is read from or written to the data dir — see [`Identity`].
+    pub identity: Option<Identity>,
+}
+
+/// A device + account identity supplied by the controlling app instead of minted here.
+///
+/// The app owns the single durable copy; the tunnel receives it per start and keeps it in memory only.
+/// That is the point: when each process minted its own (both calling `/user-create`, because on macOS
+/// neither can see the other's container) every install produced **two** Lantern accounts — and since
+/// the tunnel is the process that fetches the proxy config, entitlement bought against the app's
+/// account never reached the servers actually in use. One copy cannot drift from itself.
+/// See `docs/identity-unification-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Identity {
+    pub device_id: String,
+    pub user_id: String,
+    pub pro_token: String,
+}
+
+impl Identity {
+    /// Parse the `{"device_id":…,"user_id":…,"pro_token":…}` blob handed across the FFI.
+    ///
+    /// `None` for blank input, malformed JSON, or **any** empty field — including the anonymous
+    /// `user_id` placeholder `"0"`. A half-populated identity is worse than none: it would fetch as a
+    /// partial user and still look like it worked. Callers turn `None` into a hard failure on the
+    /// self-fetch path rather than falling back to registering.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let id: Identity = serde_json::from_str(s).ok()?;
+        let blank = id.device_id.trim().is_empty()
+            || id.user_id.trim().is_empty()
+            || id.user_id.trim() == "0"
+            || id.pro_token.trim().is_empty();
+        (!blank).then_some(id)
+    }
 }
 
 impl FetchEnv {
@@ -83,6 +122,7 @@ impl FetchEnv {
             port: 443,
             pro_host: "api.getiantem.org".into(),
             pro_path: "/user-create".into(),
+            identity: None,
         }
     }
     pub fn staging() -> Self {
@@ -92,7 +132,13 @@ impl FetchEnv {
             port: 443,
             pro_host: "api.staging.iantem.io".into(),
             pro_path: "/pro-server/user-create".into(),
+            identity: None,
         }
+    }
+    /// Use `id` for every fetch instead of the data dir's `device_id` + `/user-create` creds.
+    pub fn with_identity(mut self, id: Identity) -> Self {
+        self.identity = Some(id);
+        self
     }
     /// Select via `SPARK_CONFIG_ENV=staging`, else prod.
     pub fn from_env() -> Self {
@@ -328,18 +374,37 @@ async fn resolve(host: &str, port: u16) -> std::io::Result<std::net::SocketAddr>
         })
 }
 
+/// The `(device_id, creds)` a fetch runs as.
+///
+/// With a supplied [`Identity`] this touches neither the filesystem nor `/user-create` — that is what
+/// keeps the tunnel from minting a second account. Without one (CLI/dev, or a host that owns its own
+/// identity) it falls back to the historical dir-backed pair: read-or-create `device_id`, then
+/// cached-or-minted creds.
+async fn resolve_identity(dir: &Path, env: &FetchEnv) -> std::io::Result<(String, user::Creds)> {
+    if let Some(id) = &env.identity {
+        return Ok((
+            id.device_id.clone(),
+            user::Creds {
+                user_id: id.user_id.clone(),
+                pro_token: id.pro_token.clone(),
+            },
+        ));
+    }
+    let did = device_id(dir)?;
+    // config-new requires account creds; mint them once via /user-create (persisted, reused).
+    let creds = user::ensure_user(dir, &env.pro_host, &env.pro_path).await?;
+    Ok((did, creds))
+}
+
 /// Bootstrap a [`Config`] for connect: **always fetch fresh and overwrite the cache**, using the
 /// last-good cache only as an offline fallback (not as a way to skip the fetch). So a cached copy never
 /// suppresses the fetch — you get the latest pool on every connect, and the cache is the safety net
 /// when the network/API is unavailable. Errors only when the fetch fails AND there's no usable cache
 /// (cold start offline). Returns the adapted Config + meta.
 pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Config, CacheMeta)> {
-    let did = device_id(dir)?;
     let cached = cache::load(dir); // for the offline fallback below; does NOT short-circuit the fetch
-                                   // config-new requires account creds; mint them once via /user-create (persisted, reused). If we
-                                   // can't (first run offline) but have a usable cache, use it.
-    let creds = match user::ensure_user(dir, &env.pro_host, &env.pro_path).await {
-        Ok(c) => c,
+    let (did, creds) = match resolve_identity(dir, env).await {
+        Ok(v) => v,
         Err(e) => return cached_or_err(cached, e),
     };
     // Unconditional fetch (no If-None-Match): every connect pulls the current config and overwrites.
@@ -416,18 +481,12 @@ where
     F: FnMut(Config),
     Stop: Fn() -> bool,
 {
-    let did = match device_id(dir) {
-        Ok(d) => d,
+    // Same identity the connect fetch used — supplied by the app, or dir-backed when it wasn't. Every
+    // refresh MUST run as that same user: re-deriving here is how a second identity would creep back in.
+    let (did, creds) = match resolve_identity(dir, env).await {
+        Ok(v) => v,
         Err(e) => {
-            tracing::warn!(err = %e, "config-fetch: device_id failed, refresh loop will not run");
-            return;
-        }
-    };
-    // Account creds for every fetch; persisted by load_or_fetch on connect, so this just reads them.
-    let creds = match user::ensure_user(dir, &env.pro_host, &env.pro_path).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(err = %e, "config-fetch: no account creds, refresh loop will not run");
+            tracing::warn!(err = %e, "config-fetch: no identity, refresh loop will not run");
             return;
         }
     };
@@ -565,6 +624,7 @@ mod tests {
             port: 443,
             pro_host: "pro.invalid".into(),
             pro_path: "/user-create".into(),
+            identity: None,
         };
         let (cfg, _meta) = load_or_fetch(&dir, &env).await.unwrap();
         assert_eq!(
@@ -653,6 +713,78 @@ mod tests {
             }
             FetchOutcome::NotModified => panic!("unexpected 304 on unconditional fronted fetch"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn identity_parse_accepts_a_complete_blob() {
+        let id =
+            Identity::parse(r#"{"device_id":"abc123","user_id":"389150267","pro_token":"tok"}"#)
+                .expect("complete identity parses");
+        assert_eq!(id.device_id, "abc123");
+        assert_eq!(id.user_id, "389150267");
+        assert_eq!(id.pro_token, "tok");
+    }
+
+    #[test]
+    fn identity_parse_rejects_partial_and_placeholder() {
+        // A half-populated identity must not half-apply: it would fetch as a partial user and still
+        // look like it worked, which is exactly the silent-wrong-account failure this replaces.
+        for bad in [
+            "",
+            "   ",
+            "not json",
+            r#"{"device_id":"","user_id":"1","pro_token":"t"}"#,
+            r#"{"device_id":"d","user_id":"","pro_token":"t"}"#,
+            r#"{"device_id":"d","user_id":"1","pro_token":""}"#,
+            // "0" is the anonymous placeholder from ConfigRequest::new, not an identity.
+            r#"{"device_id":"d","user_id":"0","pro_token":"t"}"#,
+            r#"{"user_id":"1","pro_token":"t"}"#, // missing field entirely
+        ] {
+            assert!(
+                Identity::parse(bad).is_none(),
+                "must reject partial identity: {bad}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn supplied_identity_bypasses_the_data_dir_entirely() {
+        // The load-bearing property: with an identity supplied, resolve_identity writes no `device_id`
+        // file and never reaches /user-create. If it touched the dir, the tunnel would be persisting a
+        // second identity again — the very thing that produced two accounts per install.
+        let dir = std::env::temp_dir().join(format!("spark-ident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = FetchEnv {
+            host: "config.invalid".into(),
+            path: "/".into(),
+            port: 443,
+            // Unreachable on purpose: reaching it at all would be the bug.
+            pro_host: "pro.invalid".into(),
+            pro_path: "/user-create".into(),
+            identity: None,
+        }
+        .with_identity(Identity {
+            device_id: "supplied-device".into(),
+            user_id: "389150267".into(),
+            pro_token: "supplied-token".into(),
+        });
+
+        let (did, creds) = resolve_identity(&dir, &env)
+            .await
+            .expect("no network needed");
+        assert_eq!(did, "supplied-device");
+        assert_eq!(creds.user_id, "389150267");
+        assert_eq!(creds.pro_token, "supplied-token");
+        assert!(
+            !dir.join("device_id").exists(),
+            "supplied identity must not persist a device_id"
+        );
+        assert!(
+            !dir.join("user.json").exists(),
+            "supplied identity must not persist creds"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
