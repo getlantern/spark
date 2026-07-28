@@ -11,6 +11,8 @@
 #   SKIP_NOTARIZE=1 build signed-but-not-notarized (fast local iteration)
 #   NOTARY_TIMEOUT  seconds to wait for each notarization verdict (default 1800). On timeout the
 #                   submission id is printed so the wait can be resumed without rebuilding.
+#   NOTARY_SUBMIT_TRIES  upload attempts before giving up (default 3); Apple's notary endpoint
+#                   intermittently connect-times-out, and a failed upload has no id to resume from.
 #   REUSE_SYSEXT    path to a prebuilt .systemextension to embed instead of building one (keeps the
 #                   sysext version stable → reinstall needs no reboot; for app-only Rust/JS changes)
 #   MAC_ARCH        macOS arch: arm64 (default) or x86_64. x86_64 → a separate Spark-x86_64.dmg.
@@ -115,6 +117,8 @@ fi
 
 # How long to wait for Apple to finish notarizing one artifact.
 NOTARY_TIMEOUT="${NOTARY_TIMEOUT:-1800}"
+# How many times to attempt the upload before giving up (transient connect timeouts are common).
+NOTARY_SUBMIT_TRIES="${NOTARY_SUBMIT_TRIES:-3}"
 
 # Submit `$1` for notarization and wait for a verdict — submitting and polling as SEPARATE steps.
 #
@@ -125,14 +129,24 @@ NOTARY_TIMEOUT="${NOTARY_TIMEOUT:-1800}"
 # already aborted and wiped its work dir. Polling separately means a crash costs a poll, not 8 minutes —
 # and on timeout we print the id so the wait can be resumed by hand instead of rebuilding.
 notarize() {
-  local path="$1" name id status deadline
+  local path="$1" name id status deadline tries=0
   name="$(basename "$path")"
-  id="$(xcrun notarytool submit "$path" "${NOTARY_ARGS[@]}" --no-wait --output-format json \
-        | plutil -extract id raw -o - - 2>/dev/null)" || true
-  if [[ -z "$id" || "$id" == "null" ]]; then
-    echo "notarytool submit produced no submission id for $name" >&2
-    return 1
-  fi
+  # Retry the SUBMIT too, not just the poll. Reaching Apple is the flaky part: within one day this hit
+  # `Bus error: 10` inside `--wait`'s polling AND `HTTPClientError.connectTimeout` on the upload. Both are
+  # transient, and neither deserves to lose an 8-minute build — a submit that never happened has no id to
+  # resume from, so if it is not retried here the whole build has to be re-run.
+  while :; do
+    id="$(xcrun notarytool submit "$path" "${NOTARY_ARGS[@]}" --no-wait --output-format json \
+          | plutil -extract id raw -o - - 2>/dev/null)" || true
+    [[ -n "$id" && "$id" != "null" ]] && break
+    tries=$((tries + 1))
+    if (( tries >= NOTARY_SUBMIT_TRIES )); then
+      echo "notarytool submit produced no submission id for $name after $tries attempt(s)" >&2
+      return 1
+    fi
+    echo "  submit attempt $tries for $name failed (transient?); retrying in 20s" >&2
+    sleep 20
+  done
   log "submitted $name → $id (polling, up to ${NOTARY_TIMEOUT}s)"
   deadline=$(( $(date +%s) + NOTARY_TIMEOUT ))
   while :; do
