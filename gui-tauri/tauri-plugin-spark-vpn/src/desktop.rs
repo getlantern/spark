@@ -318,6 +318,7 @@ mod ne_spike {
         routing_mode: Option<String>,
         app_bypass: Option<String>,
         ad_block: bool,
+        identity: Option<String>,
     ) -> Result<(), String> {
         // macOS system extension must be activated + user-approved before a provider can start. iOS
         // ships the NE as a bundled app-extension — no activation; the "Allow VPN configuration"
@@ -340,6 +341,12 @@ mod ne_spike {
         // providerConfiguration values are strings, so pre-format the bool as "true"/"false"
         // (the NE parses "false" → off). Owned so the closure can stay `Fn`.
         let ad_block_str = if ad_block { "true" } else { "false" }.to_owned();
+        // The app's own device + account identity, handed to the NE so it fetches config as THIS user
+        // instead of registering its own. Empty when the app hasn't fetched yet (identity is minted by
+        // its first config fetch): the NE then refuses to start with a clear error rather than quietly
+        // creating a second account — which is what it used to do, leaving every install with two
+        // Lantern users and entitlement stranded on the app's. See docs/identity-unification-design.md.
+        let identity_json = identity.unwrap_or_default();
         // NOTE: we deliberately do NOT pass a dataDir to the NE. The NE self-resolves its OWN
         // app-group container; the system-extension sandbox forbids the root NE from accessing the
         // *user's* group container (EPERM → self-fetch hangs → connect times out, confirmed
@@ -387,6 +394,9 @@ mod ne_spike {
                         .into_super();
                     let adb_val: Retained<AnyObject> =
                         NSString::from_str(&ad_block_str).into_super().into_super();
+                    let id_val: Retained<AnyObject> = NSString::from_str(&identity_json)
+                        .into_super()
+                        .into_super();
                     let dict = if let Some(ref c) = config {
                         let cfg_val: Retained<AnyObject> =
                             NSString::from_str(c).into_super().into_super();
@@ -397,8 +407,9 @@ mod ne_spike {
                                 ns_string!("routingMode"),
                                 ns_string!("appBypass"),
                                 ns_string!("adBlock"),
+                                ns_string!("identity"),
                             ],
-                            &[cfg_val, st_val, rm_val, ab_val, adb_val],
+                            &[cfg_val, st_val, rm_val, ab_val, adb_val, id_val],
                         )
                     } else {
                         NSDictionary::from_retained_objects(
@@ -407,8 +418,9 @@ mod ne_spike {
                                 ns_string!("routingMode"),
                                 ns_string!("appBypass"),
                                 ns_string!("adBlock"),
+                                ns_string!("identity"),
                             ],
-                            &[st_val, rm_val, ab_val, adb_val],
+                            &[st_val, rm_val, ab_val, adb_val, id_val],
                         )
                     };
                     proto.setProviderConfiguration(Some(&dict));
@@ -696,6 +708,33 @@ pub(crate) fn app_config_cache_dir(base: &std::path::Path) -> PathBuf {
     base.join("config")
 }
 
+/// The app's device + account identity as `{"device_id":…,"user_id":…,"pro_token":…}`, for handing to
+/// the NE in `providerConfiguration["identity"]`. `None` until the app's first config fetch has minted
+/// it (`device_id` is written locally, `user.json` comes from `/user-create`).
+///
+/// This is the *only* durable copy of identity: the NE receives it per start and persists nothing, so
+/// there is no second copy that can drift. Reads the files rather than re-deriving, because
+/// `fetch::device_id()` would CREATE one — and a second creator is exactly the bug being removed.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn identity_json(base: &std::path::Path) -> Option<String> {
+    let dir = app_config_cache_dir(base);
+    let device_id = std::fs::read_to_string(dir.join("device_id")).ok()?;
+    let user = std::fs::read_to_string(dir.join("user.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&user).ok()?;
+    let user_id = v.get("user_id")?.as_str()?;
+    let pro_token = v.get("pro_token")?.as_str()?;
+    let device_id = device_id.trim();
+    if device_id.is_empty() || user_id.is_empty() || user_id == "0" || pro_token.is_empty() {
+        return None; // a partial identity must not half-apply — the NE rejects it anyway
+    }
+    serde_json::to_string(&serde_json::json!({
+        "device_id": device_id,
+        "user_id": user_id,
+        "pro_token": pro_token,
+    }))
+    .ok()
+}
+
 /// Location list read from the app's own `config_raw.json` cache, or empty if there's no cache yet
 /// (never fetched) or it can't be read/parsed. Built via the core's exact `config_raw.json` → pool
 /// mapping ([`spark_core::config::lantern::from_config_raw_json`]) so the pre-connect list IS the
@@ -785,7 +824,16 @@ impl TunnelControl for AppleControl {
             }
         };
         let ad_block = crate::persist::load_ad_block_enabled(&self.base);
-        ne_spike::connect(config, split, mode, app_bypass, ad_block).map_err(crate::Error::Platform)
+        // Read here (the app owns the only durable copy) and hand it down; `ne_spike` has no base dir.
+        let identity = identity_json(&self.base);
+        if identity.is_none() {
+            tracing::warn!(
+                "no app identity yet (first config fetch hasn't minted one) — the tunnel will refuse \
+                 to start rather than register a second account"
+            );
+        }
+        ne_spike::connect(config, split, mode, app_bypass, ad_block, identity)
+            .map_err(crate::Error::Platform)
     }
 
     fn disconnect(&self) -> crate::Result<()> {

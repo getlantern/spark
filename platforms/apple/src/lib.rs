@@ -62,6 +62,7 @@ mod ffi {
         data_dir: *const c_char,
         split_tunnel: *const c_char,
         routing_mode: *const c_char,
+        identity: *const c_char,
     ) -> c_int {
         // Resolve the config string (a null pointer means "no explicit config"). A *non-null* pointer
         // that isn't valid UTF-8 is a caller error — an explicit config was provided but is garbage —
@@ -113,6 +114,33 @@ mod ffi {
             unsafe { CStr::from_ptr(routing_mode) }.to_str().ok()
         };
 
+        // Identity handed down by the controlling app in `providerConfiguration["identity"]`.
+        // SAFETY: caller contract — `identity` is null or a valid NUL-terminated C string.
+        let ident: Option<&str> = if identity.is_null() {
+            None
+        } else {
+            unsafe { CStr::from_ptr(identity) }.to_str().ok()
+        };
+
+        // Self-fetch REQUIRES a supplied identity, and refuses to start without one.
+        //
+        // The alternative — registering our own — is what produced two Lantern accounts per install:
+        // the app and this process each called `/user-create` because on macOS neither can read the
+        // other's container, and since this process is the one that fetches the proxy config, any
+        // entitlement bought against the app's account never reached the servers in use. Failing here
+        // makes a misconfigured host loud instead of silently minting a second account.
+        // (An explicit `config` is a dev override that does no fetching, so it needs no identity.)
+        let self_fetch = cfg.map(str::trim).unwrap_or("").is_empty()
+            || cfg.map(str::trim) == Some("lantern-api");
+        if self_fetch && spark_core::config::fetch::Identity::parse(ident.unwrap_or("")).is_none() {
+            tracing::error!(
+                "tunnel start refused: self-fetch requires providerConfiguration[\"identity\"] \
+                 ({{device_id,user_id,pro_token}}); refusing to register a second account"
+            );
+            spark_core::fd_tunnel::abandon_fd(fd);
+            return -1;
+        }
+
         // The shared, cross-platform policy home (the Apple C-ABI + Android JNI call it today; the
         // desktop service is a documented follow-up): direct / plain relay / full config / daemon
         // self-fetch, decided in core. The NE always owns a *userspace* utun (the kernel `system`
@@ -125,6 +153,7 @@ mod ffi {
             Config::default(),
             split,
             mode,
+            ident,
         )
     }
 

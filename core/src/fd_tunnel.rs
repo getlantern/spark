@@ -334,6 +334,11 @@ pub fn fd_config(addr: Ipv4Addr, prefix: u8, system_stack: bool) -> Config {
 ///   every flow through that **plain relay** (explicit override).
 /// - any other string → a full [`Config`] (native TOML or a Lantern `config_raw.json`, auto-detected
 ///   by [`Config::from_config_str`]); an unparseable string fails closed.
+#[allow(clippy::too_many_arguments)]
+// one plumbing hop from the platform FFI; each arg is distinct
+// `identity` is only consumed on the config-fetch slice (it exists to name the account a fetch runs
+// as); a build without that feature never fetches, so the parameter is legitimately unused there.
+#[cfg_attr(not(feature = "config-fetch"), allow(unused_variables))]
 pub fn run_fd_dispatch(
     fd: i32,
     mtu: u16,
@@ -342,9 +347,15 @@ pub fn run_fd_dispatch(
     tun_base: Config,
     split_tunnel: Option<&str>,
     routing_mode: Option<&str>,
+    identity: Option<&str>,
 ) -> i32 {
     // A null/absent config string is "no explicit config"; trim so " " / "\n" count as empty too.
     let cfg_str = config.map(str::trim).unwrap_or("");
+    // A malformed or partial blob parses to `None` and falls back to dir-backed identity — hosts that
+    // require the supplied one (the Apple NE) reject it before calling us, so this stays a fallback
+    // for Android/CLI rather than a silent downgrade on the path that matters.
+    #[cfg(feature = "config-fetch")]
+    let identity = identity.and_then(crate::config::fetch::Identity::parse);
 
     // On mobile, boring's default cert store finds no CA roots (Android/iOS keep them outside
     // OpenSSL's paths), so flint's fronted TLS — the rule-set (`.srs`) fetch and the fronted leg of
@@ -369,6 +380,7 @@ pub fn run_fd_dispatch(
                 tun_base,
                 split_tunnel,
                 routing_mode,
+                identity,
             ),
             None => {
                 // fetch mode needs a data dir to cache device_id + config; close the (transferred)
@@ -795,6 +807,7 @@ pub fn run_fd_lantern_api(
     tun_base: Config,
     split_tunnel: Option<&str>,
     routing_mode: Option<&str>,
+    identity: Option<crate::config::fetch::Identity>,
 ) -> i32 {
     use crate::config::fetch::{self, FetchEnv};
 
@@ -827,9 +840,19 @@ pub fn run_fd_lantern_api(
         // is deferred deliberately (separate rollout + battery/consent posture),
         // and the desktop service does its own capture-only wiring.
         #[cfg(all(feature = "config-fetch", target_os = "macos"))]
-        crate::diag::tunnel_host::init(&data_dir, env!("CARGO_PKG_VERSION"));
+        crate::diag::tunnel_host::init(
+            &data_dir,
+            env!("CARGO_PKG_VERSION"),
+            identity.as_ref().map(|i| i.device_id.as_str()),
+        );
 
-        let env = FetchEnv::from_env();
+        // Every fetch in this process — the connect fetch below and the refresh loop further down —
+        // runs as the supplied identity when the app handed one over, so the tunnel never registers a
+        // second account. Without one, the historical dir-backed behaviour stands (Android, CLI).
+        let env = match &identity {
+            Some(id) => FetchEnv::from_env().with_identity(id.clone()),
+            None => FetchEnv::from_env(),
+        };
         // Cold-start resilience (design §6): keep retrying until a config is obtained (cache or fetch)
         // or stop fires while we wait. `load_or_fetch` returns instantly on a warm cache.
         let mut attempt = 0u32;
@@ -892,8 +915,14 @@ pub fn run_fd_lantern_api(
         // A fetched config carries no `protect_interface`; reuse the one discovered at bringup so a
         // rebuilt pool pins its sockets identically (UDP/QUIC tunnel bypass, above).
         let reload_iface = config.transport.protect_interface.clone();
+        // Same identity as the connect fetch — a refresh that re-derived it would reintroduce exactly
+        // the second account this is removing.
+        let loop_identity = identity.clone();
         tokio::spawn(async move {
-            let env = FetchEnv::from_env();
+            let env = match loop_identity {
+                Some(id) => FetchEnv::from_env().with_identity(id),
+                None => FetchEnv::from_env(),
+            };
             let on_config = move |mut cfg: Config| {
                 cfg.transport.protect_interface = reload_iface.clone();
                 // No live pool (direct/tunnel/single-transport) → the refresh still warmed the
@@ -1056,7 +1085,7 @@ mod tests {
             let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
             assert!(fd >= 0, "open /dev/null for the dispatch fail-closed check");
             assert_eq!(
-                run_fd_dispatch(fd, 1500, None, None, Config::default(), None, None),
+                run_fd_dispatch(fd, 1500, None, None, Config::default(), None, None, None),
                 -1,
                 "self-fetch with no data_dir must fail closed"
             );

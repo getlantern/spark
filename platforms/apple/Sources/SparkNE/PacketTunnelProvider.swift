@@ -154,25 +154,40 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // the router exists — mirrors how the app pushes live updates through handleAppMessage.
             let adBlockEnabled = (provider?["adBlock"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "false"
+            // The device + account identity the app owns, as `{device_id,user_id,pro_token}` JSON.
+            // REQUIRED whenever the core self-fetches: without it the core used to mint its own via
+            // /user-create, which gave every install a second Lantern account — and because this
+            // process is the one that fetches the proxy config, entitlement bought against the app's
+            // account never reached the servers in use. The core refuses to start rather than
+            // register (see spark_tunnel_run). Carried in the saved VPN profile, so it is present on
+            // on-demand and at-boot starts with no app running.
+            let identity = (provider?["identity"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
             // `spark_tunnel_run` blocks until `spark_tunnel_stop`, so run it off the NE callback
             // thread. The core owns `fd` and closes it on stop. `withCString` keeps the C strings
             // alive for the whole blocking call (it returns only when the tunnel stops).
-            let worker = Thread { [mtu = self.mtu, log = self.log, config, dataDir, splitTunnel, routingMode] in
-                // Thread the optional data-dir, split-tunnel JSON, and routing mode through as the
-                // 4th/5th/6th C-ABI args (nil if absent). Nested helpers keep each optional's
-                // withCString scope live.
-                func runNative(_ cfg: UnsafePointer<CChar>?, _ st: UnsafePointer<CChar>?, _ rm: UnsafePointer<CChar>?) -> Int32 {
+            let worker = Thread { [mtu = self.mtu, log = self.log, config, dataDir, splitTunnel, routingMode, identity] in
+                // Thread the optional data-dir, split-tunnel JSON, routing mode, and identity through
+                // as the 4th/5th/6th/7th C-ABI args (nil if absent). Nested helpers keep each
+                // optional's withCString scope live for the whole blocking call.
+                func runNative(_ cfg: UnsafePointer<CChar>?, _ st: UnsafePointer<CChar>?, _ rm: UnsafePointer<CChar>?, _ id: UnsafePointer<CChar>?) -> Int32 {
                     if let dataDir {
-                        return dataDir.withCString { spark_tunnel_run(fd, Int32(mtu), cfg, $0, st, rm) }
+                        return dataDir.withCString { spark_tunnel_run(fd, Int32(mtu), cfg, $0, st, rm, id) }
                     }
-                    return spark_tunnel_run(fd, Int32(mtu), cfg, nil, st, rm)
+                    return spark_tunnel_run(fd, Int32(mtu), cfg, nil, st, rm, id)
+                }
+                func runWithIdentity(_ cfg: UnsafePointer<CChar>?, _ st: UnsafePointer<CChar>?, _ rm: UnsafePointer<CChar>?) -> Int32 {
+                    if let identity, !identity.isEmpty {
+                        return identity.withCString { runNative(cfg, st, rm, $0) }
+                    }
+                    return runNative(cfg, st, rm, nil)
                 }
                 func runWithRoutingMode(_ cfg: UnsafePointer<CChar>?, _ st: UnsafePointer<CChar>?) -> Int32 {
                     if let routingMode, !routingMode.isEmpty {
-                        return routingMode.withCString { runNative(cfg, st, $0) }
+                        return routingMode.withCString { runWithIdentity(cfg, st, $0) }
                     }
-                    return runNative(cfg, st, nil)
+                    return runWithIdentity(cfg, st, nil)
                 }
                 func runWithSplitTunnel(_ cfg: UnsafePointer<CChar>?) -> Int32 {
                     if let splitTunnel, !splitTunnel.isEmpty {
