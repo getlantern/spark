@@ -115,6 +115,12 @@ mod jni {
             tun_base,
             split.as_deref(),
             mode.as_deref(),
+            // No app-supplied identity on Android yet, so the core keeps its historical dir-backed
+            // behaviour (read-or-create `device_id`, cached-or-minted creds). Android has no container
+            // split — the VpnService and the UI share one data dir — so it never grew the
+            // duplicate-account problem the Apple path is fixing here. Passing identity down would
+            // additionally unify its telemetry device id; that's a follow-up, not this change.
+            None,
         )
     }
 
