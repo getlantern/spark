@@ -9,6 +9,8 @@
 #   NOTARY_PROFILE  notarytool keychain profile, OR
 #   AC_USERNAME + AC_PASSWORD  Apple-ID + app-specific password
 #   SKIP_NOTARIZE=1 build signed-but-not-notarized (fast local iteration)
+#   NOTARY_TIMEOUT  seconds to wait for each notarization verdict (default 1800). On timeout the
+#                   submission id is printed so the wait can be resumed without rebuilding.
 #   REUSE_SYSEXT    path to a prebuilt .systemextension to embed instead of building one (keeps the
 #                   sysext version stable → reinstall needs no reboot; for app-only Rust/JS changes)
 #   MAC_ARCH        macOS arch: arm64 (default) or x86_64. x86_64 → a separate Spark-x86_64.dmg.
@@ -111,6 +113,54 @@ if [[ "$SKIP_NOTARIZE" != "1" ]]; then
   fi
 fi
 
+# How long to wait for Apple to finish notarizing one artifact.
+NOTARY_TIMEOUT="${NOTARY_TIMEOUT:-1800}"
+
+# Submit `$1` for notarization and wait for a verdict — submitting and polling as SEPARATE steps.
+#
+# `notarytool submit --wait` does both in one process, so a crash in its polling loop takes the
+# submission id with it and forces a full rebuild even though Apple is still processing the upload
+# happily. That is not hypothetical: on 2026-07-28 it died with `Bus error: 10` *after* a successful
+# upload, and `notarytool history` showed the submission progressing server-side while the build had
+# already aborted and wiped its work dir. Polling separately means a crash costs a poll, not 8 minutes —
+# and on timeout we print the id so the wait can be resumed by hand instead of rebuilding.
+notarize() {
+  local path="$1" name id status deadline
+  name="$(basename "$path")"
+  id="$(xcrun notarytool submit "$path" "${NOTARY_ARGS[@]}" --no-wait --output-format json \
+        | plutil -extract id raw -o - - 2>/dev/null)" || true
+  if [[ -z "$id" || "$id" == "null" ]]; then
+    echo "notarytool submit produced no submission id for $name" >&2
+    return 1
+  fi
+  log "submitted $name → $id (polling, up to ${NOTARY_TIMEOUT}s)"
+  deadline=$(( $(date +%s) + NOTARY_TIMEOUT ))
+  while :; do
+    # `|| true` so a transient failure (or another crash) retries on the next tick rather than
+    # aborting the build — the whole point of splitting submit from poll.
+    status="$(xcrun notarytool info "$id" "${NOTARY_ARGS[@]}" --output-format json 2>/dev/null \
+              | plutil -extract status raw -o - - 2>/dev/null || true)"
+    case "$status" in
+      Accepted)
+        log "notarization accepted: $name ($id)"
+        return 0
+        ;;
+      Invalid | Rejected)
+        echo "notarization $status for $name ($id) — log follows:" >&2
+        xcrun notarytool log "$id" "${NOTARY_ARGS[@]}" >&2 || true
+        return 1
+        ;;
+    esac
+    if (( $(date +%s) >= deadline )); then
+      echo "notarization of $name still '${status:-unknown}' after ${NOTARY_TIMEOUT}s." >&2
+      echo "  It is probably still progressing — resume without rebuilding:" >&2
+      echo "  xcrun notarytool info $id ${NOTARY_ARGS[*]}" >&2
+      return 1
+    fi
+    sleep 15
+  done
+}
+
 # Locate the controlling-app provisioning profile (org.getlantern.spark) in the Xcode store,
 # PREFERRING one whose embedded cert matches the signing cert. Selecting purely by name/app-id can pick
 # a stale same-named profile carrying a different cert — which passes codesign/notarize but fails to
@@ -203,9 +253,9 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 
 # 5. Notarize + staple the app.
 if [[ "$SKIP_NOTARIZE" != "1" ]]; then
-  log "notarizing the app (notarytool submit --wait)"
+  log "notarizing the app"
   ditto -c -k --keepParent "$APP" "$WORK/app.zip"
-  xcrun notarytool submit "$WORK/app.zip" "${NOTARY_ARGS[@]}" --wait
+  notarize "$WORK/app.zip"
   xcrun stapler staple "$APP"
 fi
 
@@ -279,8 +329,8 @@ codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG"
 
 # 7. Notarize + staple the DMG.
 if [[ "$SKIP_NOTARIZE" != "1" ]]; then
-  log "notarizing the DMG (notarytool submit --wait)"
-  xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait
+  log "notarizing the DMG"
+  notarize "$DMG"
   xcrun stapler staple "$DMG"
 fi
 
