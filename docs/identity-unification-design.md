@@ -109,12 +109,31 @@ shared file and no publication mechanism.
 
 ## Verification
 
-1. `app user_id == tunnel-reported user_id`, one `device_id`, and no `user.json`/`device_id` written in
-   the tunnel container.
-2. Both `config_raw.json` files identical (same assignment-cache entry) — the original symptom.
-3. Telemetry shows one `client.device_id` per device, with `spark.component` still distinguishing
-   `app` from `tunnel`.
-4. Tunnel start with no identity supplied fails loudly instead of creating an account.
+The tunnel does not log its own identity, so the assertion is by **elimination** — and it is tight:
+
+1. Delete the tunnel container's `device_id` and `user.json`, leave the app's identity alone, connect.
+2. Neither file is recreated, **and** the log shows `config-fetch: fetched fresh config, cache
+   overwritten` (not an offline cache fallback).
+3. `config-new` requires a real `user_id` and a non-empty `pro_token`. The only ways to obtain them are
+   reading `user.json` — absent — or `/user-create`, which *writes* `user.json` — also absent. So the
+   credentials can only have come from the supplied identity.
+
+Leaving the app's identity in place is what makes this sharp: the tunnel has no way to invent that
+account number, so a successful fetch with no local identity files can only be the handed-down one.
+
+Also check that a start with no identity supplied fails loudly instead of creating an account, and that
+telemetry reports one `client.device_id` per device with `spark.component` still distinguishing `app`
+from `tunnel`.
+
+> **Do NOT verify by comparing the two `config_raw.json` files.** An earlier draft of this doc listed
+> that, on the assumption that `config-new` pins an assignment per `device_id`. It does not — the
+> assignment cache is short-lived and the bandit deliberately explores, so two fetches by the *same*
+> identity minutes apart return different server sets and different etags (measured: 76 s apart, sets
+> overlapping in 2 of 6). The lists converging is a *tendency* of this fix, not a postcondition, and
+> asserting it produces a red result for a reason unrelated to identity.
+
+Verified on macOS 2026-07-28 (sysext `0.1.0/1785250691`): both identity files stayed absent across a
+successful fresh fetch.
 
 ## Rollout
 
