@@ -394,9 +394,8 @@ mod ne_spike {
                         .into_super();
                     let adb_val: Retained<AnyObject> =
                         NSString::from_str(&ad_block_str).into_super().into_super();
-                    let id_val: Retained<AnyObject> = NSString::from_str(&identity_json)
-                        .into_super()
-                        .into_super();
+                    let id_val: Retained<AnyObject> =
+                        NSString::from_str(&identity_json).into_super().into_super();
                     let dict = if let Some(ref c) = config {
                         let cfg_val: Retained<AnyObject> =
                             NSString::from_str(c).into_super().into_super();
