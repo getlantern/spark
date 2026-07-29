@@ -50,13 +50,94 @@ SKIP_NOTARIZE="${SKIP_NOTARIZE:-0}"
 
 log() { echo "[build-tauri-dmg] $*" >&2; }
 
-# Pick the Developer ID Application identity for TEAM_ID (not just the first one — avoids the wrong
-# cert when multiple teams are in the keychain). Print the SHA-1 ($2), not the display name: several
-# certs can share the same name, so the name is ambiguous; a SHA-1 pins exactly one cert, which the
-# profile selection below matches against.
-SIGN_IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning \
-  | awk -v t="$TEAM_ID" '/Developer ID Application/ && $0 ~ t {print $2; exit}')}"
-[[ -n "$SIGN_IDENTITY" ]] || { echo "no Developer ID Application identity in the keychain" >&2; exit 1; }
+# ── Certs and profiles ───────────────────────────────────────────────────────
+# The signing cert must be embedded in the provisioning profile, or the result notarizes fine and then
+# refuses to launch (AMFI spawn error 163). The profiles name exactly which cert they accept, so the
+# identity is DERIVED from them below rather than guessed and validated after the fact.
+
+# Every cert SHA-1 (upper-case, no colons) embedded in provisioning profile $1, one per line.
+profile_certs() {
+  local pl c i=0
+  pl="$(security cms -D -i "$1" 2>/dev/null)" || return 0
+  while c="$(printf '%s' "$pl" | plutil -extract "DeveloperCertificates.$i" raw -o - - 2>/dev/null \
+      | base64 -d 2>/dev/null | openssl x509 -inform DER -noout -fingerprint -sha1 2>/dev/null \
+      | sed 's/.*=//; s/://g' | tr '[:lower:]' '[:upper:]')" && [[ -n "$c" ]]; do
+    echo "$c"
+    i=$((i + 1))
+  done
+}
+
+# True if provisioning profile $1 embeds the cert whose SHA-1 (upper-case, no colons) is $2.
+profile_has_cert() { profile_certs "$1" | grep -qx "$2"; }
+
+# Paths of the Xcode-store profiles whose app-id is exactly $1 (e.g. `org.getlantern.spark`), one per
+# line. The trailing quote in the match keeps `…spark` from also matching `…spark.tunnel`.
+profiles_for_appid() {
+  local d="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" f
+  for f in "$d"/*.provisionprofile; do
+    [[ -f "$f" ]] || continue
+    security cms -D -i "$f" 2>/dev/null | plutil -p - 2>/dev/null \
+      | grep -qF "$TEAM_ID.$1\"" && echo "$f"
+  done
+  return 0
+}
+
+# SHA-1s of the Developer ID Application certs for TEAM_ID that this keychain can actually sign with
+# (`find-identity -v` lists only identities holding a private key), in keychain order.
+keychain_dev_id_certs() {
+  security find-identity -v -p codesigning \
+    | awk -v t="$TEAM_ID" '/Developer ID Application/ && $0 ~ t {print $2}'
+}
+
+# Print the profile's name and its embedded certs, for a diagnosable error.
+describe_profile() {
+  local pl name
+  pl="$(security cms -D -i "$1" 2>/dev/null)" || { echo "         $1 (unreadable)" >&2; return 0; }
+  name="$(printf '%s' "$pl" | plutil -extract Name raw -o - - 2>/dev/null)"
+  echo "         $(basename "$1") \"$name\" accepts: $(profile_certs "$1" | tr '\n' ' ')" >&2
+}
+
+# Derive the signing identity from the profiles when the caller didn't pin one.
+#
+# Do NOT just take the first Developer ID Application cert in the keychain. Several certs routinely
+# share the identical display name `Developer ID Application: <org> (<TEAM_ID>)`, so "the first one"
+# is really "whichever the keychain happens to list first" — and adding an unrelated cert silently
+# changes which one a build picks. That is a build that was working yesterday failing today with a
+# profile-mismatch, for a reason nowhere in the diff.
+#
+# The profiles are the authority: each embeds the exact set of certs it accepts. Intersect that with
+# what the keychain can sign with and the answer is normally unique, with no guessing at all.
+derive_sign_identity() {
+  local app_certs tunnel_certs c both="" any=""
+  app_certs="$(while read -r p; do profile_certs "$p"; done < <(profiles_for_appid org.getlantern.spark) | sort -u)"
+  tunnel_certs="$(while read -r p; do profile_certs "$p"; done < <(profiles_for_appid org.getlantern.spark.tunnel) | sort -u)"
+  [[ -n "$app_certs" ]] || return 1
+  while read -r c; do
+    [[ -n "$c" ]] || continue
+    grep -qx "$c" <<<"$app_certs" || continue
+    any="${any:-$c}"
+    # Prefer a cert both the app and the sysext profiles accept — the sysext's own check happens only
+    # after a multi-minute xcodebuild archive, so catching a mismatch here is worth a lot. Preference,
+    # not a requirement: with no tunnel profile in the store there is nothing to intersect.
+    if [[ -n "$tunnel_certs" ]] && grep -qx "$c" <<<"$tunnel_certs"; then both="${both:-$c}"; fi
+  done < <(keychain_dev_id_certs)
+  [[ -n "${both:-$any}" ]] || return 1
+  echo "${both:-$any}"
+}
+
+if [[ -z "${SIGN_IDENTITY:-}" ]]; then
+  SIGN_IDENTITY="$(derive_sign_identity || true)"
+  if [[ -z "$SIGN_IDENTITY" ]]; then
+    echo "ERROR: no Developer ID Application cert for $TEAM_ID is both in this keychain and accepted" >&2
+    echo "       by a Spark provisioning profile. Signing with any other cert would notarize and then" >&2
+    echo "       fail to launch (AMFI spawn error 163). Pass SIGN_IDENTITY=<sha1> to override." >&2
+    echo "       keychain can sign with: $(keychain_dev_id_certs | tr '\n' ' ')" >&2
+    while read -r p; do describe_profile "$p"; done \
+      < <(profiles_for_appid org.getlantern.spark; profiles_for_appid org.getlantern.spark.tunnel)
+    exit 1
+  fi
+  log "signing identity derived from the provisioning profiles: $SIGN_IDENTITY"
+fi
 
 # Canonical SHA-1 (upper-case, no colons) of the signing cert, for matching against profile certs.
 # SIGN_IDENTITY is a SHA-1 when auto-detected above or passed as one — accept it with or without the
@@ -75,19 +156,6 @@ fi
 # Sign with the canonical SHA-1 from here on — not a possibly-ambiguous display name or colon-separated
 # form — so the cert actually used to sign is exactly the one validated against the profiles below.
 SIGN_IDENTITY="$SIGN_SHA1"
-
-# True if provisioning profile $1 embeds the cert whose SHA-1 (upper-case, no colons) is $2.
-profile_has_cert() {
-  local pl c i=0
-  pl="$(security cms -D -i "$1" 2>/dev/null)" || return 1
-  while c="$(printf '%s' "$pl" | plutil -extract "DeveloperCertificates.$i" raw -o - - 2>/dev/null \
-      | base64 -d 2>/dev/null | openssl x509 -inform DER -noout -fingerprint -sha1 2>/dev/null \
-      | sed 's/.*=//; s/://g' | tr '[:lower:]' '[:upper:]')" && [[ -n "$c" ]]; do
-    [[ "$c" == "$2" ]] && return 0
-    i=$((i + 1))
-  done
-  return 1
-}
 
 # Fail loud if a profile's embedded cert doesn't include the signing cert: the app/sysext would
 # notarize fine but AMFI refuses to spawn it (RBS "Launch failed", POSIX 163). An obvious build error
