@@ -541,8 +541,14 @@ impl SelectingTransport {
     /// `"{protocol} {addr}"` server identity); if the refreshed config dropped it, its `Member` is
     /// carried over as a fallback. That member is seeded first in the ranking with its last-good
     /// outcome so it stays "current" until the immediate re-probe re-ranks (hysteresis lets a clearly
-    /// better new server take over; an unhealthy carried member drops out on the next round). A
-    /// manual pin is preserved by identity only if that exact server survives the refresh.
+    /// better new server take over; an unhealthy carried member drops out on the next round).
+    ///
+    /// A **manual pin always survives**, also by identity: if the refreshed config drops the pinned
+    /// server, its `Member` is re-appended, so a user's choice is never silently downgraded to auto.
+    /// The pin then follows that server to its new index and can never land on a different one. This is
+    /// why indices are not stable across a reload, and why the UI must read `is_pinned` from
+    /// [`SelectingTransport::snapshot`] rather than remember the index it passed to
+    /// [`SelectingTransport::set_pin`].
     ///
     /// Gated on `multi-server` — the only place members are rebuilt from config
     /// ([`crate::transport::build_members`]) is that feature.

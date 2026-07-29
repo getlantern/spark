@@ -17,7 +17,10 @@ export interface SparkStatus {
 // Rust `MemberStatus` JSON (see core `snapshot_to_json`): optional location metadata, last-probe
 // latency, health, and whether new flows currently dial it.
 export interface ServerInfo {
-  /** Stable pool index — the handle passed back to selectServer(). */
+  /** The handle passed back to selectServer(). Stable only WITHIN one list: a config refresh reorders
+   *  the tunnel's pool, and the pre-connect list is built from a separate config fetch again. Never
+   *  cache it to mean "the server the user chose" — use `isPinned`, or `$lib/selection`, which records
+   *  the picked location so it can be resolved in whichever pool it is applied to. */
   index: number;
   name?: string | null;
   country?: string | null;
