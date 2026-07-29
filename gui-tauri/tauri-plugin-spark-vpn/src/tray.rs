@@ -523,6 +523,9 @@ fn read_state<R: Runtime>(
     let servers = ctl.servers().unwrap_or_default();
     let routing = ctl.get_routing_mode().unwrap_or_else(|_| "smart".into());
     let adblock = ctl.get_ad_block_enabled().unwrap_or(true);
+    // Resync before reading the pin: the tray calls the control directly rather than going through
+    // the `servers` command, so without this it would keep rendering ✓ against a stale index.
+    crate::commands::sync_pin_from_snapshot(app, &servers);
     let selected = *app
         .state::<crate::commands::SelectedServer>()
         .0
@@ -802,6 +805,7 @@ mod tests {
             latency_ms: None,
             healthy: true,
             is_current: false,
+            is_pinned: true,
         };
         let label = header_label(&status("connected"), &[s], Some(2));
         assert_eq!(label, "Connected · 🇺🇸 U.S.A. — Ashburn");

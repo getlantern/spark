@@ -498,6 +498,11 @@ impl SelectingTransport {
                     // it here is what made `healthy=5 pool=5` true while nothing could connect.
                     healthy: probe_healthy && !excluded.contains(&i) && !failing.contains(&i),
                     is_current: Some(i) == current,
+                    // Reported separately from `is_current` on purpose: those coincide while a pin is
+                    // set, but the UI needs to know WHY a member is current — "Selected Location" vs
+                    // "Smart Location" — and it must learn that from here rather than from an index it
+                    // remembered, which a config refresh silently repoints at another server.
+                    is_pinned: sel.pinned == Some(i),
                 }
             })
             .collect()
@@ -536,8 +541,14 @@ impl SelectingTransport {
     /// `"{protocol} {addr}"` server identity); if the refreshed config dropped it, its `Member` is
     /// carried over as a fallback. That member is seeded first in the ranking with its last-good
     /// outcome so it stays "current" until the immediate re-probe re-ranks (hysteresis lets a clearly
-    /// better new server take over; an unhealthy carried member drops out on the next round). A
-    /// manual pin is preserved by identity only if that exact server survives the refresh.
+    /// better new server take over; an unhealthy carried member drops out on the next round).
+    ///
+    /// A **manual pin always survives**, also by identity: if the refreshed config drops the pinned
+    /// server, its `Member` is re-appended, so a user's choice is never silently downgraded to auto.
+    /// The pin then follows that server to its new index and can never land on a different one. This is
+    /// why indices are not stable across a reload, and why the UI must read `is_pinned` from
+    /// [`SelectingTransport::snapshot`] rather than remember the index it passed to
+    /// [`SelectingTransport::set_pin`].
     ///
     /// Gated on `multi-server` — the only place members are rebuilt from config
     /// ([`crate::transport::build_members`]) is that feature.
@@ -567,12 +578,15 @@ impl SelectingTransport {
                 _ => None,
             }
         });
-        // The current manual pin's server identity, to re-apply if it survives the refresh.
-        let pinned_label = sel
+        // The current manual pin, captured by identity (`label`) so it can be re-applied afterwards —
+        // pool indices are reshuffled by every refresh (a carried member is appended, and `ranked` is
+        // rebuilt below), so an index is only meaningful within one generation.
+        let pinned_member = sel
             .pinned
             .and_then(|p| old.get(p))
-            .map(|m| m.label.clone())
-            .filter(|l| !l.is_empty());
+            .filter(|m| !m.label.is_empty())
+            .cloned();
+        let pinned_label = pinned_member.as_ref().map(|m| m.label.clone());
         // Carry the proven server over if the refreshed config no longer lists it.
         let mut carried: Option<(usize, ProbeOutcome)> = None;
         if let Some((m, oc)) = prior {
@@ -585,6 +599,20 @@ impl SelectingTransport {
                     new_members.push(m);
                     carried = Some((new_members.len() - 1, oc));
                 }
+            }
+        }
+        // Keep the manual pin alive across the refresh **unconditionally** — including when the pinned
+        // member is unhealthy, and when the refreshed config no longer lists it at all. The `prior`
+        // carry above is for auto-mode continuity and so requires health; a pin is a user decision, and
+        // dropping it reverts to auto with nothing saying so. That is the bug this fixes: the UI kept
+        // showing a manual selection the core had already discarded.
+        //
+        // Pinning a member the config dropped is bounded, not open-ended: the dial-failure breaker
+        // quarantines it after `dial_failure_count` failures and flows fail over, so a dead pin costs a
+        // few timeouts rather than the connection.
+        if let Some(m) = pinned_member {
+            if !new_members.iter().any(|nm| nm.label == m.label) {
+                new_members.push(m);
             }
         }
         let new_arc = Arc::new(new_members);
@@ -607,7 +635,8 @@ impl SelectingTransport {
         if let Some((ci, oc)) = carried {
             sel.latest[ci] = Some(oc);
         }
-        // Keep the manual pin only if that exact server survived the refresh.
+        // Re-resolve the pin to its INDEX in the new pool, by identity. The block above guarantees the
+        // member is present, so this only ever yields `None` when there was no pin to begin with.
         sel.pinned = pinned_label.and_then(|lbl| new_arc.iter().position(|m| m.label == lbl));
         drop(sel);
         // Reset health to all-Healthy OUTSIDE the selection-locked region (sel already dropped
@@ -1595,6 +1624,95 @@ mod tests {
 
     #[cfg(feature = "multi-server")]
     #[tokio::test]
+    async fn reload_keeps_a_manual_pin_the_new_config_dropped() {
+        // The reported bug: pick a server, a fresh config arrives without it, and the pin is silently
+        // discarded — the pool reverts to auto while the UI still shows the old selection. Deliberately
+        // give the pinned member NO probe outcome, so it is unhealthy and the `prior` continuity carry
+        // (which requires health) cannot be what saves it.
+        let t = selecting(
+            vec![
+                member_labeled(true, meta("picked", "SE"), "hysteria2 5.5.5.5:443"),
+                member_labeled(true, meta("other", "US"), "samizdat 6.6.6.6:443"),
+            ],
+            vec![0, 1],
+        );
+        assert!(t.set_pin(Some(0)), "pin the first member");
+
+        t.reload(vec![member_labeled(
+            true,
+            meta("brand-new", "JP"),
+            "hysteria2 7.7.7.7:443",
+        )]);
+
+        let snap = t.snapshot();
+        let pinned: Vec<_> = snap.iter().filter(|s| s.is_pinned).collect();
+        assert_eq!(pinned.len(), 1, "exactly one member stays pinned");
+        assert_eq!(
+            pinned[0].meta.name.as_deref(),
+            Some("picked"),
+            "and it is the server the user chose, not whatever now sits at its old index"
+        );
+        assert!(
+            pinned[0].is_current,
+            "a pin is dialed first, so it is also current"
+        );
+        assert!(
+            !snap
+                .iter()
+                .any(|s| s.meta.name.as_deref() == Some("brand-new") && s.is_pinned),
+            "the new config's server must not inherit the pin"
+        );
+    }
+
+    #[cfg(feature = "multi-server")]
+    #[tokio::test]
+    async fn reload_repoints_a_surviving_pin_at_its_new_index() {
+        // The other half: indices are reshuffled by a refresh, so the pin must follow the SERVER, not
+        // the slot. Here the picked server survives but moves from index 1 to index 0 — a UI that
+        // cached "1" would name the wrong row, which is what made "Selected Location" wrong.
+        let t = selecting(
+            vec![
+                member_labeled(true, meta("decoy", "US"), "samizdat 8.8.8.8:443"),
+                member_labeled(true, meta("picked", "SE"), "hysteria2 5.5.5.5:443"),
+            ],
+            vec![0, 1],
+        );
+        assert!(t.set_pin(Some(1)));
+
+        t.reload(vec![
+            member_labeled(true, meta("picked", "SE"), "hysteria2 5.5.5.5:443"),
+            member_labeled(true, meta("decoy", "US"), "samizdat 8.8.8.8:443"),
+        ]);
+
+        let snap = t.snapshot();
+        let pinned: Vec<_> = snap.iter().filter(|s| s.is_pinned).collect();
+        assert_eq!(pinned.len(), 1, "still exactly one pin");
+        assert_eq!(
+            pinned[0].meta.name.as_deref(),
+            Some("picked"),
+            "the pin followed the server across the index change"
+        );
+        assert_eq!(pinned[0].index, 0, "which now lives at index 0");
+    }
+
+    #[tokio::test]
+    async fn no_member_is_pinned_on_auto() {
+        let t = selecting(vec![member(true), member(true)], vec![0, 1]);
+        assert!(
+            !t.snapshot().iter().any(|s| s.is_pinned),
+            "auto means no manual pin, so the UI shows Smart Location"
+        );
+        assert!(t.set_pin(Some(1)));
+        assert!(t.snapshot()[1].is_pinned, "pinning reports on that member");
+        assert!(t.set_pin(None), "back to auto");
+        assert!(
+            !t.snapshot().iter().any(|s| s.is_pinned),
+            "clearing the pin clears the flag"
+        );
+    }
+
+    #[cfg(feature = "multi-server")]
+    #[tokio::test]
     async fn reload_dedups_retained_best_when_present() {
         // When the refreshed config still lists the prior best, don't duplicate it.
         let t = selecting(
@@ -1623,9 +1741,17 @@ mod tests {
     }
 
     #[cfg(feature = "multi-server")]
+    #[cfg(feature = "multi-server")]
     #[tokio::test]
-    async fn reload_drops_pin_when_server_gone() {
-        // A manual pin is preserved by identity only if that exact server survives the refresh.
+    async fn reload_carries_pin_to_its_own_server_never_to_another() {
+        // DELIBERATE CONTRACT CHANGE. This previously asserted the pin was DROPPED when the refreshed
+        // config omitted the pinned server. Dropping it reverts the pool to auto with nothing saying so,
+        // and the UI went on showing the old selection — the reported "Selected Location is wrong" bug.
+        // The pin is now carried across the refresh instead.
+        //
+        // What has NOT changed, and is the real invariant here: the pin follows the SERVER, never the
+        // slot. It must never land on a different server just because that server now occupies the old
+        // index.
         let t = selecting(
             vec![
                 member_labeled(true, meta("a", "US"), "samizdat 1.1.1.1:443"),
@@ -1634,14 +1760,26 @@ mod tests {
             vec![0, 1],
         );
         t.set_pin(Some(1)); // pin "b"
-                            // Refresh drops "b"; only "c" remains. The pin must not carry to a different server.
+                            // Refresh drops "b" and offers only "c".
         t.reload(vec![member_labeled(
             true,
             meta("c", "DE"),
             "shadowsocks 3.3.3.3:443",
         )]);
-        let sel = t.selection.lock().unwrap();
-        assert_eq!(sel.pinned, None, "pin dropped: the pinned server is gone");
+        let snap = t.snapshot();
+        let pinned: Vec<_> = snap.iter().filter(|s| s.is_pinned).collect();
+        assert_eq!(pinned.len(), 1, "the pin survives the refresh");
+        assert_eq!(
+            pinned[0].meta.name.as_deref(),
+            Some("b"),
+            "carried to the server the user picked"
+        );
+        assert!(
+            !snap
+                .iter()
+                .any(|s| s.meta.name.as_deref() == Some("c") && s.is_pinned),
+            "and NEVER to the unrelated server that replaced it"
+        );
     }
 
     #[cfg(feature = "multi-server")]

@@ -57,8 +57,8 @@ object SparkBridge {
     external fun nativeWaitReady(timeoutMs: Int): Int
 
     /** The live server pool as a JSON array (see native `servers_json`): one object per member with
-     *  index, location metadata, protocol, latencyMs, healthy, isCurrent. "[]" when no pool is
-     *  active. Safe to call any time; "[]" before connect. Nullable only for a catastrophic JVM
+     *  index, location metadata, protocol, latencyMs, healthy, isCurrent, isPinned. "[]" when no pool
+     *  is active. Safe to call any time; "[]" before connect. Nullable only for a catastrophic JVM
      *  string-allocation failure in JNI; callers should treat null as "[]". */
     external fun nativeServers(): String?
 

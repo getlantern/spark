@@ -135,8 +135,8 @@ mod jni {
 
     /// `SparkBridge.nativeServers()` — the live pool snapshot as a JSON array (see
     /// `spark_core::fd_tunnel::servers_json` / `snapshot_to_json`): one object per member with
-    /// index, location metadata, `protocol`, `latencyMs`, `healthy`, `isCurrent`. `[]` when no pool
-    /// is active (direct / single relay / not yet connected).
+    /// index, location metadata, `protocol`, `latencyMs`, `healthy`, `isCurrent`, `isPinned`. `[]`
+    /// when no pool is active (direct / single relay / not yet connected).
     #[no_mangle]
     pub extern "system" fn Java_org_getlantern_spark_SparkBridge_nativeServers<'local>(
         env: JNIEnv<'local>,

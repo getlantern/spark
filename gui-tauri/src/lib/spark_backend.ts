@@ -17,7 +17,10 @@ export interface SparkStatus {
 // Rust `MemberStatus` JSON (see core `snapshot_to_json`): optional location metadata, last-probe
 // latency, health, and whether new flows currently dial it.
 export interface ServerInfo {
-  /** Stable pool index — the handle passed back to selectServer(). */
+  /** The handle passed back to selectServer(). Stable only WITHIN one list: a config refresh reorders
+   *  the tunnel's pool, and the pre-connect list is built from a separate config fetch again. Never
+   *  cache it to mean "the server the user chose" — use `isPinned`, or `$lib/selection`, which records
+   *  the picked location so it can be resolved in whichever pool it is applied to. */
   index: number;
   name?: string | null;
   country?: string | null;
@@ -30,6 +33,10 @@ export interface ServerInfo {
   healthy: boolean;
   /** Whether new flows currently dial this member first (pinned, or the auto-ranked best). */
   isCurrent: boolean;
+  /** Whether this is the member the user manually pinned, as the tunnel sees it. Unlike `index`, this
+   *  survives a config refresh that reorders the pool — see `$lib/selection`. Always false in a
+   *  pre-connect list (no live snapshot to read a pin from). */
+  isPinned: boolean;
 }
 
 export interface SplitTunnel {
@@ -125,12 +132,12 @@ export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
   // fully usable at `npm run dev`; the TauriBackend reads the real pool over the NE channel.
   private readonly pool: ServerInfo[] = [
-    { index: 0, name: "sfo3", country: "United States", countryCode: "US", city: "San Francisco", protocol: "hysteria2", latencyMs: 19, healthy: true, isCurrent: false },
-    { index: 1, name: "nyc3", country: "United States", countryCode: "US", city: "New York", protocol: "samizdat", latencyMs: 71, healthy: true, isCurrent: false },
-    { index: 2, name: "lon1", country: "United Kingdom", countryCode: "GB", city: "London", protocol: "shadowsocks", latencyMs: 138, healthy: true, isCurrent: false },
-    { index: 3, name: "fra1", country: "Germany", countryCode: "DE", city: "Frankfurt", protocol: "hysteria2", latencyMs: 149, healthy: true, isCurrent: false },
-    { index: 4, name: "sgp1", country: "Singapore", countryCode: "SG", city: "Singapore", protocol: "samizdat", latencyMs: 189, healthy: true, isCurrent: false },
-    { index: 5, name: "blr1", country: "India", countryCode: "IN", city: "Bangalore", protocol: "anytls", latencyMs: 212, healthy: true, isCurrent: false },
+    { index: 0, name: "sfo3", country: "United States", countryCode: "US", city: "San Francisco", protocol: "hysteria2", latencyMs: 19, healthy: true, isCurrent: false, isPinned: false },
+    { index: 1, name: "nyc3", country: "United States", countryCode: "US", city: "New York", protocol: "samizdat", latencyMs: 71, healthy: true, isCurrent: false, isPinned: false },
+    { index: 2, name: "lon1", country: "United Kingdom", countryCode: "GB", city: "London", protocol: "shadowsocks", latencyMs: 138, healthy: true, isCurrent: false, isPinned: false },
+    { index: 3, name: "fra1", country: "Germany", countryCode: "DE", city: "Frankfurt", protocol: "hysteria2", latencyMs: 149, healthy: true, isCurrent: false, isPinned: false },
+    { index: 4, name: "sgp1", country: "Singapore", countryCode: "SG", city: "Singapore", protocol: "samizdat", latencyMs: 189, healthy: true, isCurrent: false, isPinned: false },
+    { index: 5, name: "blr1", country: "India", countryCode: "IN", city: "Bangalore", protocol: "anytls", latencyMs: 212, healthy: true, isCurrent: false, isPinned: false },
   ];
   // Manual pin (null = auto, fastest healthy member) lives in the shared mockState.
 
@@ -169,7 +176,11 @@ export class MockBackend implements SparkBackend {
       -1,
     );
     const current = mockState.pinned ?? fastest;
-    return this.pool.map((s) => ({ ...s, isCurrent: s.index === current }));
+    return this.pool.map((s) => ({
+      ...s,
+      isCurrent: s.index === current,
+      isPinned: s.index === mockState.pinned,
+    }));
   }
 
   async selectServer(index: number | null): Promise<void> {

@@ -36,7 +36,32 @@ pub(crate) async fn status<R: Runtime>(app: AppHandle<R>) -> crate::Result<Statu
 
 #[tauri::command]
 pub(crate) async fn servers<R: Runtime>(app: AppHandle<R>) -> crate::Result<Vec<ServerInfo>> {
-    app.state::<Ctl>().servers()
+    let list = app.state::<Ctl>().servers()?;
+    sync_pin_from_snapshot(&app, &list);
+    Ok(list)
+}
+
+/// Re-point [`SelectedServer`] at the pin's current index, from the tunnel's own snapshot.
+///
+/// The cache holds an INDEX, and an index only means anything within one config generation: a refresh
+/// can reorder members, after which the cached index names a *different* server — which is how the UI
+/// came to show a location the tunnel wasn't using. The tunnel tracks the pin by identity and carries it
+/// across a refresh, so `is_pinned` is where that server ended up.
+///
+/// Absence of a pin deliberately does NOT clear the cache — matching `$lib/selection`, which owns the
+/// same policy on the window side, so the tray and the window can't disagree. It is ambiguous (auto, or
+/// a pick the tunnel hasn't taken up yet, which the window re-pushes), and pre-connect lists never
+/// carry a pin at all.
+pub(crate) fn sync_pin_from_snapshot<R: Runtime>(app: &AppHandle<R>, servers: &[ServerInfo]) {
+    if let Some(pin) = pin_from_snapshot(servers) {
+        *app.state::<SelectedServer>().0.lock().expect("pin lock") = Some(pin);
+    }
+}
+
+/// The pin a snapshot implies, or `None` to leave the cache as it stands. Split out from
+/// [`sync_pin_from_snapshot`] so the leave-it-alone policy is testable without a Tauri app handle.
+fn pin_from_snapshot(servers: &[ServerInfo]) -> Option<usize> {
+    servers.iter().find(|s| s.is_pinned).map(|s| s.index)
 }
 
 #[tauri::command]
@@ -121,11 +146,48 @@ pub(crate) async fn set_excluded_apps<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::SelectedServer;
+    use super::{pin_from_snapshot, SelectedServer};
+    use crate::models::ServerInfo;
 
     #[test]
     fn selected_server_defaults_to_auto() {
         let s = SelectedServer::default();
         assert_eq!(*s.0.lock().unwrap(), None);
+    }
+
+    fn member(index: usize, is_current: bool, is_pinned: bool) -> ServerInfo {
+        ServerInfo {
+            index,
+            name: None,
+            country: None,
+            country_code: None,
+            city: None,
+            protocol: None,
+            latency_ms: None,
+            healthy: true,
+            is_current,
+            is_pinned,
+        }
+    }
+
+    #[test]
+    fn pin_follows_the_snapshot_to_its_new_index() {
+        // The whole point: the pinned server moved to index 2 after a config refresh, so the cached
+        // index must move with it rather than keep naming whatever now sits in the old slot.
+        let snap = [
+            member(0, false, false),
+            member(1, false, false),
+            member(2, true, true),
+        ];
+        assert_eq!(pin_from_snapshot(&snap), Some(2));
+    }
+
+    #[test]
+    fn no_pin_in_the_snapshot_leaves_the_cache_alone() {
+        // Both an auto tunnel and a pre-connect list look like this, and one of them (a pick the tunnel
+        // hasn't taken up yet) is an intent worth keeping — so this must not read as "clear the pin".
+        let live_on_auto = [member(0, true, false), member(1, false, false)];
+        assert_eq!(pin_from_snapshot(&live_on_auto), None);
+        assert_eq!(pin_from_snapshot(&[]), None);
     }
 }

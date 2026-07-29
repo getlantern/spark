@@ -3,7 +3,7 @@
   import { goto } from "$app/navigation";
   import { MockBackend, type SparkBackend, type ServerInfo } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
-  import { selectedIndex } from "$lib/selection";
+  import { selectedIndex, selectServer, syncFromSnapshot } from "$lib/selection";
   import { flagEmoji, serverLabel, latencyClass, protocolLabel } from "$lib/format";
   import { _ } from "$lib/i18n";
   import { listen } from "@tauri-apps/api/event";
@@ -51,6 +51,7 @@
     refreshing = true;
     try {
       servers = await backend.servers();
+      syncFromSnapshot(servers); // the tunnel owns the pin; the ✓ must follow it, not a stale index
       errorMsg = null;
     } catch (e) {
       // Disconnected / no pool: surface an empty state, not an error toast.
@@ -62,18 +63,15 @@
     }
   }
 
-  async function choose(index: number | null) {
+  async function choose(index: number | null, from?: ServerInfo) {
     if (busy) return;
     busy = true;
-    // Reflect the choice immediately and pop home (Lantern's popUntilRoot). The pin takes effect
-    // live when connected; when not, it's stored as the UI preference and applied on connect — so a
-    // failed live pin (disconnected / no pool yet) must not block the pick.
-    selectedIndex.set(index);
-    try {
-      await backend.selectServer(index);
-    } catch {
-      // best-effort: applied on the next connect
-    }
+    // Reflect the choice immediately and pop home (Lantern's popUntilRoot). `selectServer` echoes the
+    // pick locally before pushing it to the tunnel and holds off snapshot resync until it lands, so a
+    // poll already in flight can't bounce the selection back — and a failed live pin (disconnected /
+    // no pool yet) still doesn't block the pick: `from` records WHICH server it was, so it can be
+    // re-applied to the tunnel's pool, whose ordering this list's indices don't address.
+    await selectServer(index, from);
     goto("/");
   }
 
@@ -137,7 +135,7 @@
           {#if gi > 0}<div class="divider"></div>{/if}
           {#if g.members.length === 1}
             {@const s = g.members[0]}
-            <button class="row" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index)}>
+            <button class="row" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index, s)}>
               <span class="flag">{flagEmoji(s.countryCode)}</span>
               <div class="meta">
                 <div class="name">{serverLabel(s)}</div>
@@ -160,7 +158,7 @@
             </button>
             {#if expanded.has(g.country)}
               {#each g.members as s (s.index)}
-                <button class="row city" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index)}>
+                <button class="row city" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index, s)}>
                   <div class="meta">
                     <div class="name">{s.city || serverLabel(s)}</div>
                     {#if s.protocol}<div class="sub">{protocolLabel(s.protocol)}</div>{/if}

@@ -1011,6 +1011,14 @@ pub struct MemberStatus {
     /// Whether new flows currently dial this member first (the pinned member, or — on auto — the
     /// latency-ranked best).
     pub is_current: bool,
+    /// Whether this member is the user's **manual** pin, as opposed to an auto-ranked choice.
+    ///
+    /// The UI needs this from the core rather than remembering the index it passed to
+    /// [`PoolControl::set_pin`]: a config refresh reshuffles pool indices (the pin is re-resolved by
+    /// server identity, and a carried member is appended), so a cached index silently comes to name a
+    /// *different* server — which is exactly how "Selected Location" ended up naming a server the pool
+    /// was not using.
+    pub is_pinned: bool,
 }
 
 /// Runtime control surface for a configured server pool, exposed to the platform FFI so the UI can
@@ -1070,7 +1078,7 @@ pub fn snapshot_to_json(members: &[MemberStatus]) -> String {
         .iter()
         .map(|m| {
             format!(
-                "{{\"index\":{},\"name\":{},\"country\":{},\"countryCode\":{},\"city\":{},\"protocol\":\"{}\",\"latencyMs\":{},\"healthy\":{},\"isCurrent\":{}}}",
+                "{{\"index\":{},\"name\":{},\"country\":{},\"countryCode\":{},\"city\":{},\"protocol\":\"{}\",\"latencyMs\":{},\"healthy\":{},\"isCurrent\":{},\"isPinned\":{}}}",
                 m.index,
                 json_opt_str(&m.meta.name),
                 json_opt_str(&m.meta.country),
@@ -1082,6 +1090,7 @@ pub fn snapshot_to_json(members: &[MemberStatus]) -> String {
                     .unwrap_or_else(|| "null".to_string()),
                 m.healthy,
                 m.is_current,
+                m.is_pinned,
             )
         })
         .collect();
@@ -1285,6 +1294,7 @@ mod snapshot_json_tests {
                 latency_ms: Some(19),
                 healthy: true,
                 is_current: true,
+                is_pinned: true,
             },
             MemberStatus {
                 index: 1,
@@ -1293,12 +1303,13 @@ mod snapshot_json_tests {
                 latency_ms: None,
                 healthy: false,
                 is_current: false,
+                is_pinned: false,
             },
         ];
         assert_eq!(
             snapshot_to_json(&members),
-            "[{\"index\":0,\"name\":\"sfo3\",\"country\":\"United States\",\"countryCode\":\"US\",\"city\":\"San Francisco\",\"protocol\":\"hysteria2\",\"latencyMs\":19,\"healthy\":true,\"isCurrent\":true},\
-             {\"index\":1,\"name\":null,\"country\":null,\"countryCode\":null,\"city\":null,\"protocol\":\"samizdat\",\"latencyMs\":null,\"healthy\":false,\"isCurrent\":false}]"
+            "[{\"index\":0,\"name\":\"sfo3\",\"country\":\"United States\",\"countryCode\":\"US\",\"city\":\"San Francisco\",\"protocol\":\"hysteria2\",\"latencyMs\":19,\"healthy\":true,\"isCurrent\":true,\"isPinned\":true},\
+             {\"index\":1,\"name\":null,\"country\":null,\"countryCode\":null,\"city\":null,\"protocol\":\"samizdat\",\"latencyMs\":null,\"healthy\":false,\"isCurrent\":false,\"isPinned\":false}]"
         );
     }
 
@@ -1314,6 +1325,7 @@ mod snapshot_json_tests {
             latency_ms: None,
             healthy: false,
             is_current: false,
+            is_pinned: false,
         }];
         let json = snapshot_to_json(&members);
         assert!(json.contains(r#""city":"a\"b\\c""#), "got: {json}");
