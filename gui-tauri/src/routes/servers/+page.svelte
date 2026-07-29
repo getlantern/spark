@@ -63,14 +63,15 @@
     }
   }
 
-  async function choose(index: number | null) {
+  async function choose(index: number | null, from?: ServerInfo) {
     if (busy) return;
     busy = true;
     // Reflect the choice immediately and pop home (Lantern's popUntilRoot). `selectServer` echoes the
     // pick locally before pushing it to the tunnel and holds off snapshot resync until it lands, so a
     // poll already in flight can't bounce the selection back — and a failed live pin (disconnected /
-    // no pool yet) still doesn't block the pick.
-    await selectServer(index);
+    // no pool yet) still doesn't block the pick: `from` records WHICH server it was, so it can be
+    // re-applied to the tunnel's pool, whose ordering this list's indices don't address.
+    await selectServer(index, from);
     goto("/");
   }
 
@@ -134,7 +135,7 @@
           {#if gi > 0}<div class="divider"></div>{/if}
           {#if g.members.length === 1}
             {@const s = g.members[0]}
-            <button class="row" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index)}>
+            <button class="row" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index, s)}>
               <span class="flag">{flagEmoji(s.countryCode)}</span>
               <div class="meta">
                 <div class="name">{serverLabel(s)}</div>
@@ -157,7 +158,7 @@
             </button>
             {#if expanded.has(g.country)}
               {#each g.members as s (s.index)}
-                <button class="row city" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index)}>
+                <button class="row city" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index, s)}>
                   <div class="meta">
                     <div class="name">{s.city || serverLabel(s)}</div>
                     {#if s.protocol}<div class="sub">{protocolLabel(s.protocol)}</div>{/if}

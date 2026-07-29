@@ -37,11 +37,30 @@ export async function initSelectedIndex(): Promise<void> {
 // choice back for a whole poll interval. While this is non-zero the local echo wins.
 let picksInFlight = 0;
 
-/** Pin a pool index (or `null` for auto): echo it locally at once, so the ✓ moves under the user's
- *  finger, then hand it to the tunnel. A failed live apply (no pool yet) leaves the echo standing. */
-export async function selectServer(index: number | null): Promise<void> {
+// WHICH SERVER the user picked, described the way the UI showed it. An index is only a handle into one
+// particular list and cannot be re-applied to another: the pre-connect list is built from the app's own
+// `config_raw.json` (an independent `config-new` fetch from the tunnel's, so a different order — see
+// `AppleControl::servers`), and a refresh reorders the tunnel's pool too. Re-applying a bare index
+// across either boundary pins whatever server happens to occupy that slot, which is the very bug this
+// module exists to prevent — so `reapplyIfDropped` resolves this instead.
+//
+// A location is also the right granularity: the UI offers a flag and a country — city, so that is what
+// the user chose. Any member serving it satisfies the intent.
+type PickedLocation = { country?: string | null; city?: string | null; name?: string | null };
+let picked: PickedLocation | null = null;
+
+function sameLocation(s: ServerInfo, p: PickedLocation): boolean {
+  return s.country === p.country && s.city === p.city && s.name === p.name;
+}
+
+/** Pin a server (or `null` for auto): echo it locally at once, so the ✓ moves under the user's finger,
+ *  then hand it to the tunnel. A failed live apply (no pool yet) leaves the echo standing, and `from`
+ *  records which server it was so it can be re-applied to a pool this index doesn't address. */
+export async function selectServer(index: number | null, from?: ServerInfo): Promise<void> {
   picksInFlight++;
   selectedIndex.set(index);
+  picked =
+    index == null || !from ? null : { country: from.country, city: from.city, name: from.name };
   try {
     await newBackend().selectServer(index);
   } catch (err) {
@@ -62,25 +81,33 @@ export async function selectServer(index: number | null): Promise<void> {
 export function syncFromSnapshot(servers: ServerInfo[]): void {
   if (picksInFlight > 0) return;
   const pinned = servers.find((s) => s.isPinned);
-  if (pinned) selectedIndex.set(pinned.index);
+  if (!pinned) return;
+  selectedIndex.set(pinned.index);
+  // Track the identity too, so a pin adopted from the tunnel (rather than made here — a UI reload, or
+  // the tray) can still be re-applied later.
+  picked = { country: pinned.country, city: pinned.city, name: pinned.name };
 }
 
-/** Push the local pin to the tunnel when a live snapshot shows it isn't in effect. Picks made before
- *  there was a pool to pin (chosen while disconnected, or applied while the tunnel was still
- *  bootstrapping) fail at the time, and a fresh tunnel starts on auto — so without this the UI keeps an
- *  intent the tunnel never took up. Runs off the same poll that reads the snapshot, so it retries until
- *  the pool exists, and terminates: a pin the pool no longer contains drops to auto rather than
- *  retrying forever. */
+/** Push the local pin to the tunnel when a live snapshot shows it isn't in effect. A pick made before
+ *  there was a pool to pin fails at the time (chosen while disconnected, or applied while the tunnel was
+ *  still bootstrapping), and a fresh tunnel starts on auto — so without this the UI keeps an intent the
+ *  tunnel never took up. Runs off the same poll that reads the snapshot, so it retries until the pool
+ *  exists.
+ *
+ *  Resolves the picked LOCATION in this pool rather than re-using the stored index, which addresses a
+ *  different list (see `picked`). Terminates: an unresolvable pick drops to auto instead of retrying
+ *  forever, and so does one whose identity was never recorded, since pushing it would be a guess. */
 export async function reapplyIfDropped(servers: ServerInfo[]): Promise<void> {
   if (picksInFlight > 0) return;
-  const desired = get(selectedIndex);
-  if (desired == null) return; // auto — nothing to apply
+  if (get(selectedIndex) == null) return; // auto — nothing to apply
   // `isCurrent` marks a live snapshot: the tunnel always names exactly one current member, while the
   // pre-connect builders leave it false throughout. Pinning without a pool just fails.
   if (!servers.some((s) => s.isCurrent) || servers.some((s) => s.isPinned)) return;
-  if (!servers.some((s) => s.index === desired)) {
-    selectedIndex.set(null); // the pool dropped that member; auto is the honest reading
+  const match = picked && servers.find((s) => sameLocation(s, picked!));
+  if (!match) {
+    selectedIndex.set(null); // not on offer here (or never identified) — auto is the honest reading
+    picked = null;
     return;
   }
-  await selectServer(desired);
+  await selectServer(match.index, match);
 }
