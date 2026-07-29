@@ -10,8 +10,9 @@ pub struct Status {
     pub fail_open: bool,
 }
 
-/// One server for the selection UI. Mirrors `gui-tauri/src-tauri/src/config.rs::ServerInfo`
-/// (same serde field/rename shape verbatim, incl. camelCase `countryCode`/`latencyMs`/`isCurrent`).
+/// One server for the selection UI, in the camelCase shape the frontend's `ServerInfo` expects
+/// (`countryCode`/`latencyMs`/`isCurrent`/`isPinned`). Also the deserialize target for the tunnel's
+/// live snapshot, so it must stay field-compatible with `spark_core::transport::snapshot_to_json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub index: usize,
@@ -35,6 +36,12 @@ pub struct ServerInfo {
     pub healthy: bool,
     #[serde(rename = "isCurrent", default)]
     pub is_current: bool,
+    /// The member the user manually pinned, as the *tunnel* sees it. Distinct from `is_current` (which
+    /// also moves on its own when the pool re-ranks) and from the plugin's cached pin index, which goes
+    /// stale the moment a config refresh reorders the pool. `default` so a snapshot from an older
+    /// tunnel build still deserializes.
+    #[serde(rename = "isPinned", default)]
+    pub is_pinned: bool,
 }
 
 #[cfg(test)]

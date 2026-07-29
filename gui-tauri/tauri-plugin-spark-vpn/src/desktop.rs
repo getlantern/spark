@@ -689,6 +689,7 @@ fn servers_from_config() -> Vec<ServerInfo> {
             latency_ms: None,
             healthy: false,
             is_current: false,
+            is_pinned: false,
         })
         .collect()
 }
@@ -780,6 +781,7 @@ fn servers_from_pool(cfg: &spark_core::config::Config) -> Vec<ServerInfo> {
             latency_ms: None,
             healthy: false,
             is_current: false,
+            is_pinned: false,
         })
         .collect()
 }

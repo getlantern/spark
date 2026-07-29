@@ -3,7 +3,7 @@
   import { goto } from "$app/navigation";
   import { MockBackend, type SparkBackend, type SparkStatus, type ServerInfo } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
-  import { selectedIndex } from "$lib/selection";
+  import { selectedIndex, syncFromSnapshot, reapplyIfDropped } from "$lib/selection";
   import { flagEmoji, serverLabel } from "$lib/format";
   import { unboundedVisible } from "$lib/unbounded";
   import BottomTabs from "$lib/BottomTabs.svelte";
@@ -33,12 +33,14 @@
   $effect(() => {
     vpnState.connected = connected;
   });
-  // The server shown in the Smart-location tile: the user's pick if any, else the live current
-  // (the auto-ranked best, marked by the snapshot).
+  // The server shown in the Smart-location tile, in the tunnel's own terms: its pin if the user set
+  // one, else the member it currently dials. The cached index is the last resort, for the pre-connect
+  // list where there is no snapshot — it can't be trusted once a refresh has reordered the pool, which
+  // is what made this tile name a server the tunnel wasn't using.
   const current = $derived(
-    $selectedIndex != null
-      ? servers.find((s) => s.index === $selectedIndex)
-      : servers.find((s) => s.isCurrent),
+    servers.find((s) => s.isPinned) ??
+      servers.find((s) => s.isCurrent) ??
+      ($selectedIndex != null ? servers.find((s) => s.index === $selectedIndex) : undefined),
   );
 
   // Capitalized status value, matching the VpnStatus row (vpnStatus.name.capitalize).
@@ -62,6 +64,11 @@
       // fetch every tick — the Rust side only hits the NE channel when actually connected.
       try {
         servers = await backend.servers();
+        // The tunnel owns the pin: follow where it says the pinned server now sits (keeping the ✓
+        // honest across a config refresh), and re-push a pick it hasn't taken up. Home is where this
+        // lives because it's mounted whenever the tunnel is, so the retry keeps running.
+        syncFromSnapshot(servers);
+        void reapplyIfDropped(servers);
       } catch {
         servers = [];
       }
@@ -81,15 +88,9 @@
         await backend.disconnect();
       } else {
         await backend.connect();
-        // Apply the user's server pick (if any) now that the tunnel is up — so "pick offline →
-        // connect" actually routes through the chosen relay. Best-effort.
-        if ($selectedIndex != null) {
-          try {
-            await backend.selectServer($selectedIndex);
-          } catch {
-            /* pool may not be ready yet; the pick still shows in the UI */
-          }
-        }
+        // The user's offline pick is applied by `reapplyIfDropped` off the poll below, not here:
+        // `connect()` returns while the tunnel is still bootstrapping, so there is usually no pool to
+        // pin yet and a single attempt at this point would just fail and be lost.
       }
       await refresh();
     } catch (e) {

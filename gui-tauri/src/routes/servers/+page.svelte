@@ -3,7 +3,7 @@
   import { goto } from "$app/navigation";
   import { MockBackend, type SparkBackend, type ServerInfo } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
-  import { selectedIndex } from "$lib/selection";
+  import { selectedIndex, selectServer, syncFromSnapshot } from "$lib/selection";
   import { flagEmoji, serverLabel, latencyClass, protocolLabel } from "$lib/format";
   import { _ } from "$lib/i18n";
   import { listen } from "@tauri-apps/api/event";
@@ -51,6 +51,7 @@
     refreshing = true;
     try {
       servers = await backend.servers();
+      syncFromSnapshot(servers); // the tunnel owns the pin; the ✓ must follow it, not a stale index
       errorMsg = null;
     } catch (e) {
       // Disconnected / no pool: surface an empty state, not an error toast.
@@ -65,15 +66,11 @@
   async function choose(index: number | null) {
     if (busy) return;
     busy = true;
-    // Reflect the choice immediately and pop home (Lantern's popUntilRoot). The pin takes effect
-    // live when connected; when not, it's stored as the UI preference and applied on connect — so a
-    // failed live pin (disconnected / no pool yet) must not block the pick.
-    selectedIndex.set(index);
-    try {
-      await backend.selectServer(index);
-    } catch {
-      // best-effort: applied on the next connect
-    }
+    // Reflect the choice immediately and pop home (Lantern's popUntilRoot). `selectServer` echoes the
+    // pick locally before pushing it to the tunnel and holds off snapshot resync until it lands, so a
+    // poll already in flight can't bounce the selection back — and a failed live pin (disconnected /
+    // no pool yet) still doesn't block the pick.
+    await selectServer(index);
     goto("/");
   }
 
