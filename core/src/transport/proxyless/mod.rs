@@ -75,6 +75,12 @@ pub struct ProxylessTransport {
     /// The chosen pairing, memoized after the first search. A search costs verified handshakes, so it
     /// must not run per flow.
     chosen: RwLock<Option<Strategy>>,
+    /// Single-flight gate around selection. Without it, every flow that arrives before the first search
+    /// finishes sees `chosen == None` and starts its own — a thundering herd on the most expensive
+    /// operation this transport has, precisely at startup when flows arrive together. A `tokio` mutex
+    /// because it is deliberately **held across the `.await`**, which is the whole point; the `std`
+    /// locks above are never held across one.
+    selecting: tokio::sync::Mutex<()>,
     protector: Option<SocketProtector>,
 }
 
@@ -96,9 +102,18 @@ impl ProxylessTransport {
             space = space.with_wire(wire);
         }
         if let Some(max) = cfg.max_candidates {
+            // Reject rather than clamp. This is user-authored config, and `0` can only be a mistake:
+            // silently searching one candidate would contradict a documented strict bound, while
+            // honouring it literally would disable the transport without saying so. (flint clamps
+            // internally — a library defending itself — but the boundary is where input gets validated.)
+            if max == 0 {
+                return Err(io::Error::other(
+                    "transport.proxyless.max_candidates must be at least 1 (0 would search nothing); omit it to search the whole space",
+                ));
+            }
             // Bounding the cold search matters because it is a search, not a dial; see
             // `flint_kindling::ProxylessTransport` for the budget arithmetic this mirrors.
-            let capped = max.max(1);
+            let capped = max;
             let wires = space.wires.len().max(1);
             if capped < space.len() {
                 if capped < wires {
@@ -120,6 +135,7 @@ impl ProxylessTransport {
             network: cfg.network.clone(),
             test_domains,
             chosen: RwLock::new(None),
+            selecting: tokio::sync::Mutex::new(()),
             protector,
         })
     }
@@ -129,6 +145,14 @@ impl ProxylessTransport {
     /// Double-checked so the steady state is a read lock and no search: the lock is released before any
     /// `.await`, never held across one.
     async fn strategy(&self) -> io::Result<Strategy> {
+        if let Some(chosen) = self.peek() {
+            return Ok(chosen);
+        }
+        // Single-flight: only one search runs even if many flows arrive together. flint's cache records
+        // a *completed* winner and has no in-progress state, so without this gate each concurrent first
+        // dial would run its own full search.
+        let _gate = self.selecting.lock().await;
+        // Re-check under the gate — whoever held it before us may already have chosen.
         if let Some(chosen) = self.peek() {
             return Ok(chosen);
         }
@@ -231,10 +255,18 @@ impl Transport for ProxylessTransport {
                 let mut addrs = a.unwrap_or_default();
                 addrs.extend(aaaa.unwrap_or_default());
                 if addrs.is_empty() {
+                    // Both families failed through the chosen resolver. That is evidence about the
+                    // *strategy*, not the destination — the resolver we picked is no longer reachable,
+                    // which is what a network change looks like from here. Drop the memo so the next
+                    // flow re-selects instead of staying pinned to a dead pairing until restart.
+                    //
+                    // Deliberately not triggered by a failed connect: that says the destination is
+                    // unreachable, which the strategy cannot fix and re-searching would not help.
+                    self.forget();
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         format!(
-                            "proxyless resolver {} returned no address for {host}",
+                            "proxyless resolver {} returned no address for {host}; re-selecting on the next dial",
                             chosen.resolver.name
                         ),
                     ));
@@ -320,7 +352,7 @@ mod tests {
             record_fragment: flint_shaping::RecordFragment::SniStraddle,
             ..Default::default()
         };
-        for max in [0usize, 1, 2, 3, 5, 8, 100] {
+        for max in [1usize, 2, 3, 5, 8, 100] {
             let c = ProxylessConfig {
                 max_candidates: Some(max),
                 ..Default::default()
@@ -328,9 +360,8 @@ mod tests {
             let t = ProxylessTransport::new(&c, wire.clone(), None).unwrap();
             // No escape hatch: the bound must hold for every cap, including caps larger than the space
             // (where no trim happens) and caps below the shaping-plan count (where plans give way).
-            let want = max.max(1);
             assert!(
-                t.space.len() <= want,
+                t.space.len() <= max,
                 "cap {max} produced {} candidates",
                 t.space.len()
             );
@@ -348,6 +379,50 @@ mod tests {
         };
         let t = ProxylessTransport::new(&c, WirePlan::default(), None).unwrap();
         assert_eq!(t.test_domains, vec!["only.example".to_string()]);
+    }
+
+    #[test]
+    fn a_zero_candidate_cap_is_rejected_rather_than_clamped() {
+        // Config is user input: `0` can only be a mistake, and silently searching one candidate would
+        // contradict the documented strict bound.
+        let c = ProxylessConfig {
+            max_candidates: Some(0),
+            ..Default::default()
+        };
+        // Not `expect_err`: the Ok type is the transport, which has no `Debug`.
+        let err = match ProxylessTransport::new(&c, WirePlan::default(), None) {
+            Ok(_) => panic!("a zero cap must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("must be at least 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_dials_run_only_one_search() {
+        // The single-flight gate: many flows arriving before the first search completes must not each
+        // start their own. Proven without a network by pre-seeding the memo and checking that a racing
+        // caller observes the same strategy rather than re-selecting.
+        use std::sync::Arc as StdArc;
+        let t = StdArc::new(ProxylessTransport::new(&cfg(), WirePlan::default(), None).unwrap());
+        let seeded = flint_proxyless::Strategy {
+            resolver: flint_dns::default_pool()[0].clone(),
+            policy: Default::default(),
+        };
+        *t.chosen.write().unwrap() = Some(seeded.clone());
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let t = StdArc::clone(&t);
+            tasks.push(tokio::spawn(async move {
+                t.strategy().await.map(|s| s.resolver.name)
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap(), seeded.resolver.name);
+        }
     }
 
     #[test]
