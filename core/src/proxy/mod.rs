@@ -18,6 +18,14 @@ pub enum Decision {
     Proxy,
     /// Dial through the direct transport, bypassing the proxy.
     Direct,
+    /// Dial through the proxyless transport (ADR 0014) — still no proxy and no exit hop, but with an
+    /// un-poisoned resolver and opening-handshake shaping.
+    ///
+    /// If no proxyless transport is configured the forwarder **rejects** the flow rather than falling
+    /// back to [`Direct`](Self::Direct) or [`Proxy`](Self::Proxy). A rule asking for circumvention is
+    /// not satisfied by a plain dial, and silently routing it through the proxy would send traffic via
+    /// an exit hop the rule explicitly did not ask for.
+    Proxyless,
     /// Drop the flow.
     Reject,
 }
@@ -74,6 +82,15 @@ pub struct RouteHooks {
     /// Resolves a Proxy flow's domain to a real IP client-side when the transport can't carry a name
     /// to the exit. `None` → fall back to dial-by-name (only domain-capable transports succeed).
     pub proxy_resolver: Option<Arc<dyn FlowResolver>>,
+    /// The proxyless transport (ADR 0014) for [`Decision::Proxyless`] flows. `None` → such flows are
+    /// **rejected**, not silently downgraded (see [`Decision::Proxyless`]).
+    ///
+    /// Lives here rather than as a forwarder parameter because a Proxyless decision can only come from
+    /// the router, which is itself part of these hooks: where there are no hooks there is no rule that
+    /// could ask for it. Bundling it keeps both forwarders' signatures unchanged.
+    pub proxyless_transport: Option<Arc<dyn crate::transport::Transport>>,
+    /// The UDP half of the same, for [`Decision::Proxyless`] datagram flows.
+    pub proxyless_udp: Option<Arc<dyn crate::transport::UdpTransport>>,
 }
 
 /// Whether `dst` (with an optionally recovered `domain`) is an **encrypted-DNS** endpoint that

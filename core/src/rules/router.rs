@@ -150,7 +150,12 @@ impl Router {
             }
         }
         // 2. inline route.rules (IP/CIDR), grouped per action, above smart_routing.
-        for action in [RouteAction::Reject, RouteAction::Direct, RouteAction::Proxy] {
+        for action in [
+            RouteAction::Reject,
+            RouteAction::Direct,
+            RouteAction::Proxyless,
+            RouteAction::Proxy,
+        ] {
             let ip_cidr: Vec<IpCidr> = sr
                 .inline_ip_rules
                 .iter()
@@ -295,6 +300,7 @@ impl crate::proxy::FlowRouter for Router {
         match Router::decide(self, ip, domain, src, proto) {
             Action::Proxy => crate::proxy::Decision::Proxy,
             Action::Direct => crate::proxy::Decision::Direct,
+            Action::Proxyless => crate::proxy::Decision::Proxyless,
             Action::Reject => crate::proxy::Decision::Reject,
         }
     }
@@ -305,6 +311,7 @@ fn map_action(a: RouteAction) -> Action {
     match a {
         RouteAction::Proxy => Action::Proxy,
         RouteAction::Direct => Action::Direct,
+        RouteAction::Proxyless => Action::Proxyless,
         RouteAction::Reject => Action::Reject,
     }
 }

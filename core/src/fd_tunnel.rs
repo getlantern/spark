@@ -677,11 +677,17 @@ fn setup_routing_and_udp(
         let pool = dns::server::shared_pool(FAKEIP_TTL, FAKEIP_CAP);
         // Per-action resolvers from the config's `options.dns`: `dns_local` (direct, best-local) for
         // the Direct action, `dns_remote` + the resilient pool for the Proxy client-side fallback.
+        // The proxyless transport for `Action::Proxyless` flows (ADR 0014), built only when
+        // `[transport.proxyless]` is configured. `None` makes such flows reject rather than silently
+        // downgrade — see `proxy::Decision::Proxyless`.
+        let (proxyless_transport, proxyless_udp) = transport::proxyless_pair(config);
         let hooks = Arc::new(proxy::RouteHooks {
             router: router as Arc<dyn proxy::FlowRouter>,
             recoverer: Some(Arc::new(dns::server::FakeIpRecoverer::new(pool.clone()))),
             direct_resolver: dns::resolver::direct_resolver(&config.dns),
             proxy_resolver: dns::resolver::proxy_resolver(&config.dns),
+            proxyless_transport,
+            proxyless_udp,
         });
         let dns_server = Arc::new(
             dns::server::DnsServer::new(pool, DNS_ANSWER_TTL_SECS)

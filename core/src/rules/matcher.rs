@@ -264,11 +264,11 @@ impl DomainTrie {
         struct Frame {
             node: usize,
             // Best suffix rank per action seen strictly above this node.
-            covering: [Option<Rank>; 3],
+            covering: [Option<Rank>; ACTION_COUNT],
         }
         let mut stack = vec![Frame {
             node: 0,
-            covering: [None; 3],
+            covering: [None; ACTION_COUNT],
         }];
         while let Some(Frame { node, covering }) = stack.pop() {
             // A suffix at THIS node covering the same action at equal/higher precedence makes this
@@ -328,12 +328,20 @@ fn is_covered(cover: Option<Rank>, victim: Rank) -> bool {
     matches!(cover, Some(c) if c <= victim)
 }
 
+/// How many distinct [`Action`]s there are — the width of every per-action covering array below.
+///
+/// Kept beside [`action_index`] because the two must agree: an index past this bound would panic on
+/// the covering arrays, so adding an `Action` means updating both. Named rather than a bare `3`
+/// literal repeated at each array, which is how that agreement quietly rots.
+pub(crate) const ACTION_COUNT: usize = 4;
+
 /// Map an [`Action`] to a small dense index for the per-action covering arrays.
 fn action_index(a: Action) -> usize {
     match a {
         Action::Proxy => 0,
         Action::Direct => 1,
-        Action::Reject => 2,
+        Action::Proxyless => 2,
+        Action::Reject => 3,
     }
 }
 
@@ -477,11 +485,11 @@ impl BitTrie {
         }
         struct Frame {
             node: usize,
-            covering: [Option<Rank>; 3],
+            covering: [Option<Rank>; ACTION_COUNT],
         }
         let mut stack = vec![Frame {
             node: 0,
-            covering: [None; 3],
+            covering: [None; ACTION_COUNT],
         }];
         while let Some(Frame { node, covering }) = stack.pop() {
             if let Some(rank) = self.nodes[node].rank {

@@ -244,6 +244,13 @@ pub enum RouteAction {
     Proxy,
     /// Direct, bypassing the proxy.
     Direct,
+    /// Direct **with circumvention** (ADR 0014): an un-poisoned resolver plus opening-handshake
+    /// shaping, still with no proxy and no exit hop.
+    ///
+    /// Deliberately distinct from [`Direct`](Self::Direct), which means a plain connection with no
+    /// tricks. Folding these together would silently change what every existing `direct` rule does.
+    /// Requires `[transport.proxyless]` (and the `proxyless` build feature).
+    Proxyless,
     /// Drop the flow.
     Reject,
 }

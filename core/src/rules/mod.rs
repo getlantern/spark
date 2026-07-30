@@ -20,6 +20,12 @@ pub enum Action {
     Proxy,
     /// Dial directly on a protected socket, bypassing the proxy (unblocked traffic).
     Direct,
+    /// Dial directly **with circumvention** (ADR 0014): un-poisoned resolution plus
+    /// opening-handshake shaping, still with no proxy and no exit hop.
+    ///
+    /// Separate from [`Direct`](Self::Direct) on purpose — "direct" means a plain connection with no
+    /// tricks, and redefining it would change every existing rule's behaviour.
+    Proxyless,
     /// Drop the flow (`ad_block`: ads / malware / phishing).
     Reject,
 }
