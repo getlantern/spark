@@ -110,8 +110,19 @@ their traffic must not get this instead without asking for it.
   "direct" means a plain connection with no tricks, and silently changing that would alter the meaning of
   every existing rule. Touches `rules::Action`, `config::RouteAction`, `matcher::action_index`'s
   per-action covering arrays, `rules::router`, and the `lantern.rs` string mapping.
-- **Failure-driven re-selection** — wire `forget()` to the existing stall/flow-outcome machinery so a
-  strategy that stops working is replaced without a restart.
+- **Re-selection needs a signal this layer does not have.** `forget()` exists but nothing can currently
+  call it: `from_config` returns trait objects with no control handle. The obvious in-band trigger —
+  "resolution failed, so the resolver must be dead" — is **not usable**, because flint reports an
+  ordinary negative answer exactly like a dead resolver (`parse_response` turns a non-zero RCODE into
+  `Err`, and `validate_answers` errors on an empty set), so NXDOMAIN for a mistyped host is
+  indistinguishable from transport failure. Acting on it would evict a good strategy and force a full
+  verified search every time a user visits a domain that does not exist. Two ways out, both real work:
+  a control handle carrying an explicit network-change notification, or a flint API that separates
+  "resolver unreachable" from "name does not resolve".
+- **IPv6-only networks cannot complete strategy selection.** `flint_dns::default_pool()` is 23
+  IPv4-only entries and `flint-proxyless`'s probe resolves `TYPE_A` only, so selection fails before
+  `dial_addr`'s dual-stack support can help. Fixable only upstream: add IPv6 DoH endpoints to the pool
+  and race A/AAAA in the probe.
 - **`disorder`/TTL shaping** — the last outline primitive not yet ported (`x/disorder` + `x/sockopt`).
   Deprioritized: it is probabilistic (upstream acknowledges a flush race), topology-dependent (TTL=1 only
   desynchronizes a middlebox before the expiry point), and unverifiable in CI without packet capture.

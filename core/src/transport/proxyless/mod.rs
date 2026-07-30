@@ -255,18 +255,20 @@ impl Transport for ProxylessTransport {
                 let mut addrs = a.unwrap_or_default();
                 addrs.extend(aaaa.unwrap_or_default());
                 if addrs.is_empty() {
-                    // Both families failed through the chosen resolver. That is evidence about the
-                    // *strategy*, not the destination — the resolver we picked is no longer reachable,
-                    // which is what a network change looks like from here. Drop the memo so the next
-                    // flow re-selects instead of staying pinned to a dead pairing until restart.
+                    // Deliberately does *not* evict the chosen strategy. It is tempting to read "no
+                    // address" as "this resolver is dead, re-select" — but flint reports an ordinary
+                    // negative answer the same way it reports a dead resolver: `parse_response` turns a
+                    // non-zero RCODE into `Err(DnsError::Rcode)` and `validate_answers` errors on an
+                    // empty set, so NXDOMAIN for a typo'd host is indistinguishable from a transport
+                    // failure at this layer. Evicting here would throw away a perfectly good strategy —
+                    // and force a full verified search on the next flow — every time a user visits a
+                    // domain that does not exist.
                     //
-                    // Deliberately not triggered by a failed connect: that says the destination is
-                    // unreachable, which the strategy cannot fix and re-searching would not help.
-                    self.forget();
+                    // Re-selection therefore needs a signal this layer does not have; see ADR 0014.
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         format!(
-                            "proxyless resolver {} returned no address for {host}; re-selecting on the next dial",
+                            "proxyless resolver {} returned no address for {host}",
                             chosen.resolver.name
                         ),
                     ));
