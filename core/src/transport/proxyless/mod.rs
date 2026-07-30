@@ -149,23 +149,27 @@ impl ProxylessTransport {
             shaped = !chosen.policy.wire.is_noop(),
             "selected proxyless strategy"
         );
-        if let Ok(mut slot) = self.chosen.write() {
-            *slot = Some(chosen.clone());
-        }
+        *self.chosen.write().unwrap_or_else(|e| e.into_inner()) = Some(chosen.clone());
         Ok(chosen)
     }
 
     /// The memoized pairing, if a search has already succeeded. Clones out so the guard drops here.
+    ///
+    /// Poisoning is recovered rather than treated as a miss (spark's convention — see
+    /// [`crate::transport::fronted_meek`]). Treating it as a miss would be quietly expensive here: a
+    /// panic anywhere else holding this lock would send *every* subsequent flow back through a full
+    /// verified search, forever.
     fn peek(&self) -> Option<Strategy> {
-        self.chosen.read().ok()?.clone()
+        self.chosen
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Drop the memoized pairing so the next dial searches again — for a caller that has observed the
     /// current one failing.
     pub fn forget(&self) {
-        if let Ok(mut slot) = self.chosen.write() {
-            *slot = None;
-        }
+        *self.chosen.write().unwrap_or_else(|e| e.into_inner()) = None;
         self.cache.forget(&self.network);
     }
 
@@ -174,8 +178,12 @@ impl ProxylessTransport {
     async fn shaped_connect(&self, addr: SocketAddr, wire: &WirePlan) -> io::Result<BoxedStream> {
         let tcp = protected_tcp_connect(addr, self.protector.as_ref()).await?;
         if wire.tcp_nodelay {
-            // Each flushed segment should leave as its own packet, or the shaping is coalesced away.
-            let _ = tcp.set_nodelay(true);
+            // Each flushed segment should leave as its own packet, or the shaping is coalesced away —
+            // so a failure here silently weakens the evasion rather than breaking the connection, which
+            // is exactly the kind of thing worth a log line.
+            if let Err(e) = tcp.set_nodelay(true) {
+                tracing::warn!(peer = %addr, error = %e, "could not set TCP_NODELAY; shaped segments may coalesce");
+            }
         }
         // Record fragmentation (Layer B) outermost over segment shaping (Layer C), matching
         // `flint_dial`'s ordering: the ClientHello is re-framed into records, then those bytes are split
@@ -203,24 +211,49 @@ impl Transport for ProxylessTransport {
                 // The path where proxyless is fully itself: resolve through the chosen un-poisoned
                 // resolver rather than whatever the network would have answered.
                 let chosen = self.strategy().await?;
-                let addrs = flint_dns::resolve_one_with(
-                    &chosen.resolver,
-                    &host,
-                    flint_dns::TYPE_A,
-                    &chosen.policy,
-                )
-                .await?;
-                let ip = addrs.first().copied().ok_or_else(|| {
-                    io::Error::new(
+                // Both families, A first — asking only for A would strand a v6-only network, the same
+                // reason `crate::dns::DohResolver` queries both. Either query may legitimately fail
+                // (no AAAA record is normal), so only the empty union is an error.
+                let (a, aaaa) = tokio::join!(
+                    flint_dns::resolve_one_with(
+                        &chosen.resolver,
+                        &host,
+                        flint_dns::TYPE_A,
+                        &chosen.policy
+                    ),
+                    flint_dns::resolve_one_with(
+                        &chosen.resolver,
+                        &host,
+                        flint_dns::TYPE_AAAA,
+                        &chosen.policy
+                    ),
+                );
+                let mut addrs = a.unwrap_or_default();
+                addrs.extend(aaaa.unwrap_or_default());
+                if addrs.is_empty() {
+                    return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         format!(
                             "proxyless resolver {} returned no address for {host}",
                             chosen.resolver.name
                         ),
-                    )
-                })?;
-                self.shaped_connect(SocketAddr::new(ip, port), &chosen.policy.wire)
-                    .await
+                    ));
+                }
+                // Try each in order rather than committing to the first: on a single-stack network the
+                // wrong family is unreachable, and the resolver cannot know which stack this host has.
+                let mut last = None;
+                for ip in addrs {
+                    match self
+                        .shaped_connect(SocketAddr::new(ip, port), &chosen.policy.wire)
+                        .await
+                    {
+                        Ok(stream) => return Ok(stream),
+                        Err(e) => last = Some(e),
+                    }
+                }
+                Err(last.unwrap_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, format!("no address for {host}"))
+                }))
             }
         }
     }
