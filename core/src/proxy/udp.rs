@@ -289,6 +289,30 @@ async fn open_association(
             }
             None => dial_udp_or_log(direct, dst).await, // real-IP flow → direct as-is
         },
+        // Proxyless UDP is a plain protected socket (ADR 0014: datagrams have no segment or record
+        // framing to shape), so this differs from Direct only in *which* resolver supplied the
+        // address — and for a real-IP flow, not even that. With no proxyless transport, reject rather
+        // than downgrade: the rule declined an exit hop, so falling back to the proxy would defy it.
+        Decision::Proxyless => match h.proxyless_udp.clone() {
+            Some(px) => match domain.as_deref() {
+                Some(dom) => {
+                    if let Some(res) = h.direct_resolver.as_deref() {
+                        if let Ok(ips) = res.resolve(dom).await {
+                            if let Some(ip) = crate::proxy::tcp::pick_ip(&ips, dst.ip()) {
+                                return dial_udp_or_log(&px, SocketAddr::new(ip, dst.port())).await;
+                            }
+                        }
+                    }
+                    debug!(domain = %dom, "proxyless udp: could not resolve a real IP");
+                    None
+                }
+                None => dial_udp_or_log(&px, dst).await,
+            },
+            None => {
+                debug!(dst = %dst, "proxyless udp rule but no proxyless transport configured — rejecting");
+                None
+            }
+        },
         Decision::Proxy => match domain.as_deref() {
             Some(dom) => open_udp_proxy(proxy, h, dom, dst).await,
             None => dial_udp_or_log(proxy, dst).await, // real-IP flow → proxy by IP
@@ -614,6 +638,8 @@ mod tests {
             recoverer: None,
             direct_resolver: None,
             proxy_resolver: None,
+            proxyless_transport: None,
+            proxyless_udp: None,
         };
         let dst: SocketAddr = "1.2.3.4:853".parse().unwrap();
 
@@ -639,6 +665,8 @@ mod tests {
             recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
             direct_resolver: None,
             proxy_resolver: None,
+            proxyless_transport: None,
+            proxyless_udp: None,
         };
         // A fake IP (28.0.0.0/15) at :443 — not a DoH host, so not encrypted DNS.
         let dst: SocketAddr = "28.0.0.9:443".parse().unwrap();
@@ -676,6 +704,8 @@ mod tests {
             recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
             direct_resolver: None,
             proxy_resolver: Some(Arc::new(FixedResolver(resolved))),
+            proxyless_transport: None,
+            proxyless_udp: None,
         };
         let dst: SocketAddr = "28.0.0.9:443".parse().unwrap();
 
@@ -704,6 +734,8 @@ mod tests {
             recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
             direct_resolver: Some(Arc::new(FixedResolver(resolved))),
             proxy_resolver: None,
+            proxyless_transport: None,
+            proxyless_udp: None,
         };
         let dst: SocketAddr = "28.0.0.9:443".parse().unwrap();
 

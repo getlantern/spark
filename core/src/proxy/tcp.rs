@@ -124,6 +124,35 @@ async fn forward(
             )
             .await
         }
+        Decision::Proxyless => match hooks.and_then(|h| h.proxyless_transport.clone()) {
+            // Proxyless carries the domain itself: its transport resolves through the chosen
+            // un-poisoned resolver, so unlike Direct there is nothing to pre-resolve here — handing it
+            // the name is the whole point.
+            Some(px) => match domain.as_deref().and_then(|dom| {
+                Address::domain(dom, original_dst.port())
+                    .inspect_err(
+                        |e| debug!(domain = %dom, error = %e, "proxyless: unusable domain"),
+                    )
+                    .ok()
+            }) {
+                Some(addr) => match px.dial_addr(addr).await {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        warn!(error = %e, "proxyless dial-by-name failed");
+                        None
+                    }
+                },
+                // Real-IP flow (or an unusable name): dial the address. Shaping still applies; only
+                // the un-poisoned-resolution half is unavailable without a name.
+                None => dial_or_log(&px, original_dst).await,
+            },
+            None => {
+                // Fail closed. A rule asked for circumvention; a plain direct dial would not provide
+                // it, and the proxy would add the exit hop the rule declined. Neither is this rule.
+                debug!(dst = %original_dst, "proxyless rule but no proxyless transport configured — rejecting");
+                None
+            }
+        },
         Decision::Proxy => {
             dial_proxy(&proxy_transport, hooks, domain.as_deref(), original_dst).await
         }
@@ -357,6 +386,8 @@ mod tests {
             recoverer: None,
             direct_resolver: None,
             proxy_resolver: None,
+            proxyless_transport: None,
+            proxyless_udp: None,
         })
     }
 
@@ -589,6 +620,8 @@ mod tests {
             dialed_by_name: Arc::clone(&dialed_by_name),
         });
         let hooks = Arc::new(RouteHooks {
+            proxyless_transport: None,
+            proxyless_udp: None,
             router: Arc::new(StubRouter(Decision::Proxy)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
@@ -628,6 +661,8 @@ mod tests {
         let resolved = Arc::new(AtomicBool::new(false));
         let proxy = Arc::new(RecordingTransport::default());
         let hooks = Arc::new(RouteHooks {
+            proxyless_transport: None,
+            proxyless_udp: None,
             router: Arc::new(StubRouter(Decision::Direct)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: Some(Arc::new(StubResolver {
@@ -666,6 +701,8 @@ mod tests {
         let resolved = Arc::new(AtomicBool::new(false));
         let direct = Arc::new(RecordingTransport::default());
         let hooks = Arc::new(RouteHooks {
+            proxyless_transport: None,
+            proxyless_udp: None,
             router: Arc::new(StubRouter(Decision::Proxy)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
@@ -704,6 +741,8 @@ mod tests {
         let resolved = Arc::new(AtomicBool::new(false));
         let direct = Arc::new(RecordingTransport::default());
         let hooks = Arc::new(RouteHooks {
+            proxyless_transport: None,
+            proxyless_udp: None,
             router: Arc::new(StubRouter(Decision::Direct)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
@@ -743,6 +782,8 @@ mod tests {
         let direct = Arc::new(RecordingTransport::default()); // its dial always errors
         let resolved = Arc::new(AtomicBool::new(false));
         let hooks = Arc::new(RouteHooks {
+            proxyless_transport: None,
+            proxyless_udp: None,
             router: Arc::new(StubRouter(Decision::Direct)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: Some(Arc::new(StubResolver {
@@ -800,6 +841,8 @@ mod tests {
     async fn proxy_domain_dial_failure_fails_fast_without_client_resolution() {
         let resolved = Arc::new(AtomicBool::new(false));
         let hooks = Arc::new(RouteHooks {
+            proxyless_transport: None,
+            proxyless_udp: None,
             router: Arc::new(StubRouter(Decision::Proxy)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
@@ -900,6 +943,8 @@ mod tests {
         ) -> tokio::io::DuplexStream {
             let fake = answer_ip(&dns.handle(&a_query(domain)).expect("dns response"));
             let hooks = Arc::new(RouteHooks {
+                proxyless_transport: None,
+                proxyless_udp: None,
                 router,
                 recoverer: Some(Arc::new(FakeIpRecoverer::new(pool))),
                 direct_resolver: Some(to(echo.ip())),

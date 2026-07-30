@@ -304,10 +304,15 @@ fn parse_smart_routing(raw: &RawRoot) -> SmartRoutingConfig {
 }
 
 /// Resolve a sing-box outbound/category name to a spark [`RouteAction`]. `direct` bypasses the
-/// proxy; `reject`/`block` drops; anything else (a proxy outbound / `auto`) is proxied.
+/// proxy; `proxyless` bypasses it *with* circumvention (ADR 0014); `reject`/`block` drops; anything
+/// else (a proxy outbound / `auto`) is proxied.
+///
+/// `proxyless` is a spark extension — sing-box has no such outbound — so a config that never uses it
+/// maps exactly as before.
 fn route_action(category: &str, outbound: Option<&str>) -> RouteAction {
     match outbound.unwrap_or(category) {
         "direct" => RouteAction::Direct,
+        "proxyless" => RouteAction::Proxyless,
         "reject" | "block" => RouteAction::Reject,
         _ => RouteAction::Proxy,
     }

@@ -948,6 +948,49 @@ fn proxyless_transport(
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
 }
 
+/// The TCP and UDP halves of the proxyless transport, in the shape [`crate::proxy::RouteHooks`] holds
+/// them: `None` on either side means proxyless-routed flows of that protocol reject.
+// Only the smart-routing hooks construct this pair (`Action::Proxyless` is a routing decision), so
+// without that feature it would be dead code.
+#[cfg(feature = "smart-routing")]
+pub(crate) type ProxylessPair = (Option<Arc<dyn Transport>>, Option<Arc<dyn UdpTransport>>);
+
+/// The proxyless transport pair for `Action::Proxyless` flows, or `(None, None)` when
+/// `[transport.proxyless]` is absent or it cannot be built.
+///
+/// Builds its own [`SocketProtector`] from the same `protect_interface` the direct transport uses.
+/// **This is load-bearing, not incidental:** a proxyless dial goes to the real destination, so on a
+/// full-tunnel setup an unprotected socket would be captured by spark's own default routes and loop
+/// back into the TUN. It must bypass them exactly as a direct dial does.
+///
+/// A build failure degrades to `None` (logged) rather than failing the whole tunnel: proxyless is one
+/// routing action, and the flows that ask for it then reject — which is the same fail-closed behaviour
+/// as having no transport configured, and far better than refusing to start.
+#[cfg(feature = "smart-routing")]
+pub(crate) fn proxyless_pair(config: &Config) -> ProxylessPair {
+    let Some(cfg) = &config.transport.proxyless else {
+        return (None, None);
+    };
+    let protector = match config.transport.protect_interface.as_deref() {
+        Some(name) => match SocketProtector::for_interface(name) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(interface = %name, error = %e, "proxyless: could not pin to the egress interface; proxyless flows will reject");
+                return (None, None);
+            }
+        },
+        None => None,
+    };
+    let wire = wire_plan_from_config(&config.transport.shaping);
+    match proxyless_transport(cfg, protector, wire) {
+        Ok((tcp, udp)) => (Some(tcp), Some(udp)),
+        Err(e) => {
+            tracing::warn!(error = %e, "proxyless transport unavailable; proxyless-routed flows will reject");
+            (None, None)
+        }
+    }
+}
+
 /// Without the `proxyless` feature, a configured proxyless transport is a hard error (mirrors the
 /// others) rather than a silent fall-through to the proxy — the user asked for no exit hop, and quietly
 /// giving them one would misrepresent where their traffic goes.
