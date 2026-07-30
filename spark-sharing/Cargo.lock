@@ -755,7 +755,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "flint-shaping"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=f906915f3320a688aeb4d132c825a1742abd71ba#f906915f3320a688aeb4d132c825a1742abd71ba"
 dependencies = [
  "ring",
  "tokio",
@@ -764,7 +764,7 @@ dependencies = [
 [[package]]
 name = "flint-tls"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=f906915f3320a688aeb4d132c825a1742abd71ba#f906915f3320a688aeb4d132c825a1742abd71ba"
 dependencies = [
  "flint-shaping",
  "postcard",
