@@ -72,13 +72,15 @@ pub fn proxy_resolver(_dns: &DnsConfig) -> Option<Arc<dyn FlowResolver>> {
 fn endpoint_to_resolver(ep: &DohEndpoint) -> Option<flint_dns::Resolver> {
     let ip: IpAddr = ep.server.parse().ok()?;
     let sni = known_resolver_sni(ip)?;
-    Some(flint_dns::Resolver {
-        name: "config".to_string(),
-        target: std::net::SocketAddr::new(ip, ep.port),
-        sni: sni.to_string(),
-        host: sni.to_string(),
-        path: normalize_doh_path(&ep.path),
-    })
+    // The typed constructor rather than a struct literal: `Resolver` now carries a transport `kind`
+    // (DoH/DoT/plaintext/system), and `doh` is what pins this entry to DoH and its `host`/`path` fields.
+    Some(flint_dns::Resolver::doh(
+        "config",
+        std::net::SocketAddr::new(ip, ep.port),
+        sni,
+        sni,
+        normalize_doh_path(&ep.path),
+    ))
 }
 
 /// Ensure a DoH request path is a usable absolute path — flint sends it verbatim as the HTTP request

@@ -361,6 +361,14 @@ pub struct TransportConfig {
     /// no other config. Requires the `fronted-meek` build feature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fronted_meek: Option<FrontedMeekConfig>,
+    /// Proxyless transport (ADR 0014): reach destinations **directly** — no proxy, no exit hop — using
+    /// an un-poisoned resolver plus opening-handshake shaping that the local network does not block.
+    /// Requires the `proxyless` build feature.
+    ///
+    /// Unlike every other entry here it names no server, because there is none; it defeats *blocking*,
+    /// not *observation*, so it is a deliberate choice rather than a substitute for the proxy pool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxyless: Option<ProxylessConfig>,
     /// Opening-handshake shaping (ADR 0006 Phase 1): fragment the TLS ClientHello across TCP
     /// segments (e.g. at the SNI boundary) with optional inter-segment delay. Applies to the AnyTLS
     /// and Samizdat handshakes (both build their `WirePlan` from this). Default: no shaping.
@@ -455,6 +463,7 @@ impl Default for TransportConfig {
             hysteria2: None,
             dns_tunnel: None,
             fronted_meek: None,
+            proxyless: None,
             shaping: ShapingConfig::default(),
             servers: Vec::new(),
             callback_url: None,
@@ -555,6 +564,30 @@ pub struct FrontedMeekConfig {
     /// ALPN the edge negotiates (recommended). `"h1"` or `"h2"` force it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version: Option<String>,
+}
+
+/// Proxyless transport configuration (ADR 0014). Every field is optional: an empty
+/// `[transport.proxyless]` table searches flint's diverse DoH pool with the shared
+/// `[transport.shaping]` plan and verifies against built-in test domains.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxylessConfig {
+    /// Domains a candidate strategy must reach — **all** of them — before it is used. Empty → two
+    /// built-in domains on different operators. Requiring several is what stops one accidentally-open
+    /// path from vouching for a strategy on an otherwise hostile network.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_domains: Vec<String>,
+    /// Strict upper bound on candidates a cold search will try. Unset → the whole space.
+    ///
+    /// The first connection on a new network is a *search*, not a dial, so this bounds its worst-case
+    /// duration. Resolvers are trimmed before shaping plans, since the pool is deliberately redundant
+    /// while each plan is a distinct evasion strategy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_candidates: Option<usize>,
+    /// Fingerprint identifying "the same network" for the winning-strategy cache (gateway, SSID, …).
+    /// Empty is fine for a single-network deployment: it simply means one cache slot.
+    #[serde(default)]
+    pub network: String,
 }
 
 /// AnyTLS transport configuration (ADR 0001).
@@ -1061,6 +1094,7 @@ mod tests {
                     hysteria2: None,
                     dns_tunnel: None,
                     fronted_meek: None,
+                    proxyless: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
