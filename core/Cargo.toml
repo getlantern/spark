@@ -78,6 +78,11 @@ flint-fronted = { git = "https://github.com/getlantern/flint", rev = "f906915f33
 # with live-scanned edges so a fully-blocked front list self-heals. Only `config-fetch` pulls it; the
 # `boring` feature rides flint-fronted's Chrome dial path. Same rev as the other flint crates.
 flint-kindling = { git = "https://github.com/getlantern/flint", rev = "f906915f3320a688aeb4d132c825a1742abd71ba", optional = true, features = ["boring"] }
+# Proxyless: the `resolver × wire-shaping` strategy search (ADR 0014). `boring` because selecting a
+# strategy means proving it with a certificate-verified handshake, which needs the Chrome dial path.
+# Same rev as the other flint crates — a mixed rev would resolve to two checkouts and fail on type
+# identity.
+flint-proxyless = { git = "https://github.com/getlantern/flint", rev = "f906915f3320a688aeb4d132c825a1742abd71ba", optional = true, features = ["boring"] }
 blake3 = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
 chacha20 = { workspace = true, optional = true }
@@ -175,6 +180,12 @@ config-fetch = ["anytls", "multi-server", "dep:flint-fronted", "dep:flint-kindli
 # prefix sampling). Self-bootstrapping; needs no server address. See
 # docs/fronted-meek-design.md.
 fronted-meek = ["dep:flint-fronted"]
+# Proxyless transport (ADR 0014): reach destinations directly — no proxy, no exit hop — via an
+# un-poisoned resolver plus opening-handshake shaping the local network does not block. Pulls
+# flint-proxyless (the resolver × shaping search) and flint-dns (the resolver pool it searches over);
+# the `boring` feature rides flint-proxyless's dial path, which the strategy search needs to verify a
+# candidate's certificate. Off by default: it has no exit hop, so it must be opted into.
+proxyless = ["dep:flint-proxyless", "dep:flint-dns"]
 # Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with
 # deployed shadowsocks-rust servers. `ring` provides the AEADs; `blake3` derives session subkeys and
 # `aes` provides the raw block cipher for the UDP separate-header. Off by default so the base build

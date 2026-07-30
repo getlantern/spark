@@ -24,8 +24,8 @@ use socket2::SockRef;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
 use crate::config::{
-    AnytlsConfig, Config, DnsTunnelConfig, FrontedMeekConfig, Hysteria2Config, SamizdatConfig,
-    ShadowsocksConfig, WasmConfig,
+    AnytlsConfig, Config, DnsTunnelConfig, FrontedMeekConfig, Hysteria2Config, ProxylessConfig,
+    SamizdatConfig, ShadowsocksConfig, WasmConfig,
 };
 // Only the cipher-mapping helper (feature-gated) needs this; keep it out of the base build.
 #[cfg(feature = "dns-tunnel")]
@@ -86,6 +86,11 @@ pub mod fronted_meek;
 #[cfg(feature = "hysteria2")]
 pub mod hysteria2;
 pub mod probe;
+/// Proxyless transport (ADR 0014): reach the destination directly — no proxy, no exit hop — via an
+/// un-poisoned resolver plus opening-handshake shaping. Behind the `proxyless` feature so the base
+/// build pulls neither flint-proxyless nor its boring dial path.
+#[cfg(feature = "proxyless")]
+pub mod proxyless;
 /// Samizdat transport (ADR 0007): REALITY-style auth in the TLS `legacy_session_id` + H2 CONNECT
 /// mux, wire-interoperable with deployed lantern-box `"samizdat"` servers. Behind the `samizdat`
 /// feature so the base build pulls neither the boring TLS backend nor the `h2` dependency.
@@ -474,6 +479,14 @@ pub fn from_config_with_control(
     // (scans CDN edges from the user's own network), above the plain `server` tunnel.
     if let Some(fm) = &config.transport.fronted_meek {
         let (tcp, udp) = fronted_meek_transport(fm)?;
+        return Ok((tcp, udp, None));
+    }
+    // Proxyless (ADR 0014) — no proxy and no exit hop, so it sits last among the configured
+    // transports: everything above routes through *something*, and this deliberately does not.
+    // It reuses the shared `[transport.shaping]` plan as the second entry on its shaping axis.
+    if let Some(px) = &config.transport.proxyless {
+        let wire = wire_plan_from_config(&config.transport.shaping);
+        let (tcp, udp) = proxyless_transport(px, protector, wire)?;
         return Ok((tcp, udp, None));
     }
     let (tcp, udp) = match config.transport.server {
@@ -920,6 +933,32 @@ fn fronted_meek_transport(
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
     Err(io::Error::other(
         "transport.fronted_meek is configured but spark was built without the `fronted-meek` feature",
+    ))
+}
+
+/// Build the proxyless transport (feature `proxyless`) — TCP shaped per the searched strategy, UDP
+/// straight out. Takes the shared `[transport.shaping]` plan as the second entry on the shaping axis.
+#[cfg(feature = "proxyless")]
+fn proxyless_transport(
+    cfg: &ProxylessConfig,
+    protector: Option<SocketProtector>,
+    wire: WirePlan,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    let t = Arc::new(proxyless::ProxylessTransport::new(cfg, wire, protector)?);
+    Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Without the `proxyless` feature, a configured proxyless transport is a hard error (mirrors the
+/// others) rather than a silent fall-through to the proxy — the user asked for no exit hop, and quietly
+/// giving them one would misrepresent where their traffic goes.
+#[cfg(not(feature = "proxyless"))]
+fn proxyless_transport(
+    _cfg: &ProxylessConfig,
+    _protector: Option<SocketProtector>,
+    _wire: WirePlan,
+) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+    Err(io::Error::other(
+        "transport.proxyless is configured but spark was built without the `proxyless` feature",
     ))
 }
 
