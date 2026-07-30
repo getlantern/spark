@@ -950,9 +950,14 @@ fn proxyless_transport(
 
 /// The TCP and UDP halves of the proxyless transport, in the shape [`crate::proxy::RouteHooks`] holds
 /// them: `None` on either side means proxyless-routed flows of that protocol reject.
-// Only the smart-routing hooks construct this pair (`Action::Proxyless` is a routing decision), so
-// without that feature it would be dead code.
-#[cfg(feature = "smart-routing")]
+// Gated exactly like its only caller. `Action::Proxyless` is a routing decision, so the pair is built
+// by the smart-routing hooks — which live in `fd_tunnel`, and that module compiles only on
+// android/ios/macos (see `crate::lib`). On any other target this would be dead code, which the
+// Linux `cross-check`/`test` jobs catch even though a macOS build cannot.
+#[cfg(all(
+    feature = "smart-routing",
+    any(target_os = "android", target_os = "ios", target_os = "macos")
+))]
 pub(crate) type ProxylessPair = (Option<Arc<dyn Transport>>, Option<Arc<dyn UdpTransport>>);
 
 /// The proxyless transport pair for `Action::Proxyless` flows, or `(None, None)` when
@@ -966,7 +971,10 @@ pub(crate) type ProxylessPair = (Option<Arc<dyn Transport>>, Option<Arc<dyn UdpT
 /// A build failure degrades to `None` (logged) rather than failing the whole tunnel: proxyless is one
 /// routing action, and the flows that ask for it then reject — which is the same fail-closed behaviour
 /// as having no transport configured, and far better than refusing to start.
-#[cfg(feature = "smart-routing")]
+#[cfg(all(
+    feature = "smart-routing",
+    any(target_os = "android", target_os = "ios", target_os = "macos")
+))]
 pub(crate) fn proxyless_pair(config: &Config) -> ProxylessPair {
     let Some(cfg) = &config.transport.proxyless else {
         return (None, None);
