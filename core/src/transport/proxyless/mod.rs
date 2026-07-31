@@ -238,8 +238,12 @@ impl ProxylessTransport {
                 _ => return,
             }
         }
-        // The per-network cache is cleared after the guard drops, so the two locks are never nested.
-        self.cache.forget(&self.network);
+        // Deliberately does NOT clear the per-network cache. `find_cached` already re-verifies the
+        // cached winner on its next call and forgets it only if *that* entry actually fails, so
+        // clearing here would be redundant — and worse than redundant, because our clear is
+        // unconditional: a concurrent search that had just recorded a fresh winner would lose it, the
+        // same evict-on-stale-evidence flaw this method exists to avoid one level up. Dropping the memo
+        // is enough to force the re-selection, and flint self-heals its own cache.
         tracing::debug!(
             resolver = %chosen.resolver.name,
             error = %err,
