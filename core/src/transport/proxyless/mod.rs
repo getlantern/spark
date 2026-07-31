@@ -59,6 +59,20 @@ use crate::config::ProxylessConfig;
 use crate::net::SocketProtector;
 use crate::BoxedStream;
 
+/// Whether `next` should replace `prev` as the reported resolution failure.
+///
+/// A and AAAA fail independently, and taking whichever finished last loses information: if one family
+/// times out while the other merely has no record, reporting the no-record error would say "no such
+/// name" *and* skip eviction — hiding a resolver that genuinely failed behind an ordinary negative
+/// answer for the other family. An indicting failure therefore outranks a non-indicting one, and once
+/// one is held it is never downgraded.
+fn outranks(prev: Option<&io::Error>, next: &io::Error) -> bool {
+    match prev {
+        None => true,
+        Some(p) => !flint_dns::indicts_resolver(p) && flint_dns::indicts_resolver(next),
+    }
+}
+
 /// Test domains a strategy must reach before it is trusted, when the config names none.
 ///
 /// Two, on different operators and jurisdictions, because `find_cached` requires **all** of them: one
@@ -206,6 +220,16 @@ impl ProxylessTransport {
         if !flint_dns::indicts_resolver(err) {
             return;
         }
+        // Only evict the strategy that actually failed. Flows run concurrently, so a slow one can
+        // arrive here holding a strategy that has already been replaced — dropping the *current* one
+        // on that stale evidence would discard a working strategy and start another search, the churn
+        // this eviction exists to avoid. Compared by resolver name because that is the identity the
+        // failure is about (and the one `StrategyCache` keys on): a different resolver is simply not
+        // what was indicted.
+        match self.peek() {
+            Some(current) if current.resolver.name == chosen.resolver.name => {}
+            _ => return,
+        }
         tracing::debug!(
             resolver = %chosen.resolver.name,
             error = %err,
@@ -279,11 +303,15 @@ impl Transport for ProxylessTransport {
                 // Keep the failures rather than discarding them: whether they indict the *resolver*
                 // or merely say the *name* does not resolve is what decides re-selection below.
                 let mut addrs = Vec::new();
-                let mut failure = None;
+                let mut failure: Option<io::Error> = None;
                 for result in [a, aaaa] {
                     match result {
                         Ok(found) => addrs.extend(found),
-                        Err(e) => failure = Some(e),
+                        Err(e) => {
+                            if outranks(failure.as_ref(), &e) {
+                                failure = Some(e);
+                            }
+                        }
                     }
                 }
                 if addrs.is_empty() {
@@ -494,6 +522,52 @@ mod tests {
                 "{kind:?} should drop the strategy and force a re-select"
             );
         }
+    }
+
+    #[test]
+    fn a_stale_failure_does_not_evict_a_newly_chosen_strategy() {
+        // Flows run concurrently, so a slow one can arrive holding a strategy that has already been
+        // replaced. Evicting on that stale evidence would discard a *working* strategy and start
+        // another search — the churn this eviction exists to avoid.
+        let (t, stale) = with_chosen();
+        let current = flint_proxyless::Strategy {
+            resolver: flint_dns::default_pool()[1].clone(),
+            policy: Default::default(),
+        };
+        assert_ne!(stale.resolver.name, current.resolver.name);
+        *t.chosen.write().unwrap() = Some(current);
+
+        t.note_resolution_failure(
+            &stale,
+            &io::Error::new(io::ErrorKind::TimedOut, "old resolver"),
+        );
+        assert!(
+            t.peek().is_some(),
+            "a failure from a superseded strategy must not evict the current one"
+        );
+    }
+
+    #[test]
+    fn an_indicting_failure_outranks_a_merely_absent_record() {
+        let timeout = io::Error::new(io::ErrorKind::TimedOut, "resolver gone");
+        let nxdomain = io::Error::new(io::ErrorKind::NotFound, "no AAAA");
+
+        // Whichever family finishes last must not decide: an indicting failure wins either way.
+        assert!(
+            outranks(None, &nxdomain),
+            "the first failure is always kept"
+        );
+        assert!(
+            outranks(Some(&nxdomain), &timeout),
+            "a timeout must replace a no-record answer"
+        );
+        assert!(
+            !outranks(Some(&timeout), &nxdomain),
+            "a no-record answer must not mask a timeout"
+        );
+        // Never downgrade, and never churn between two of equal rank.
+        assert!(!outranks(Some(&timeout), &timeout));
+        assert!(!outranks(Some(&nxdomain), &nxdomain));
     }
 
     #[test]
