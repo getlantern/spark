@@ -226,16 +226,25 @@ impl ProxylessTransport {
         // this eviction exists to avoid. Compared by resolver name because that is the identity the
         // failure is about (and the one `StrategyCache` keys on): a different resolver is simply not
         // what was indicted.
-        match self.peek() {
-            Some(current) if current.resolver.name == chosen.resolver.name => {}
-            _ => return,
+        // Compare and clear under a **single** write lock. Checking with `peek()` and then calling
+        // `forget()` leaves a window between the read unlock and the write lock in which another flow
+        // can install a fresh strategy — which this call would then wipe on evidence about the old one.
+        // That is a narrower instance of the very race the comparison exists to prevent, so it has to
+        // be atomic rather than merely unlikely. No `.await` here, so holding the lock is safe.
+        {
+            let mut current = self.chosen.write().unwrap_or_else(|e| e.into_inner());
+            match current.as_ref() {
+                Some(s) if s.resolver.name == chosen.resolver.name => *current = None,
+                _ => return,
+            }
         }
+        // The per-network cache is cleared after the guard drops, so the two locks are never nested.
+        self.cache.forget(&self.network);
         tracing::debug!(
             resolver = %chosen.resolver.name,
             error = %err,
             "proxyless resolver failed; dropping the strategy so the next flow re-selects"
         );
-        self.forget();
     }
 
     /// Drop the memoized pairing so the next dial searches again — for a caller that has observed the
