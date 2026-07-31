@@ -190,6 +190,30 @@ impl ProxylessTransport {
             .clone()
     }
 
+    /// Record a resolution failure against the chosen strategy, dropping it only if the error indicts
+    /// the **resolver** rather than the name.
+    ///
+    /// This gate is the whole reason the transport can self-heal at all. An earlier version evicted on
+    /// any empty result and had to be reverted: flint reported NXDOMAIN and a dead resolver
+    /// identically, so a user visiting a domain that does not exist would have discarded a working
+    /// strategy and forced a full verified search on the next flow. `flint_dns::indicts_resolver` now
+    /// separates the two, so only genuine resolver failure — unreachable, timed out, or an answer that
+    /// cannot be believed — triggers re-selection.
+    ///
+    /// Deliberately not called for a failed *connect*: an unreachable destination says nothing about
+    /// the strategy, and re-searching cannot fix it.
+    fn note_resolution_failure(&self, chosen: &Strategy, err: &io::Error) {
+        if !flint_dns::indicts_resolver(err) {
+            return;
+        }
+        tracing::debug!(
+            resolver = %chosen.resolver.name,
+            error = %err,
+            "proxyless resolver failed; dropping the strategy so the next flow re-selects"
+        );
+        self.forget();
+    }
+
     /// Drop the memoized pairing so the next dial searches again — for a caller that has observed the
     /// current one failing.
     pub fn forget(&self) {
@@ -252,26 +276,28 @@ impl Transport for ProxylessTransport {
                         &chosen.policy
                     ),
                 );
-                let mut addrs = a.unwrap_or_default();
-                addrs.extend(aaaa.unwrap_or_default());
+                // Keep the failures rather than discarding them: whether they indict the *resolver*
+                // or merely say the *name* does not resolve is what decides re-selection below.
+                let mut addrs = Vec::new();
+                let mut failure = None;
+                for result in [a, aaaa] {
+                    match result {
+                        Ok(found) => addrs.extend(found),
+                        Err(e) => failure = Some(e),
+                    }
+                }
                 if addrs.is_empty() {
-                    // Deliberately does *not* evict the chosen strategy. It is tempting to read "no
-                    // address" as "this resolver is dead, re-select" — but flint reports an ordinary
-                    // negative answer the same way it reports a dead resolver: `parse_response` turns a
-                    // non-zero RCODE into `Err(DnsError::Rcode)` and `validate_answers` errors on an
-                    // empty set, so NXDOMAIN for a typo'd host is indistinguishable from a transport
-                    // failure at this layer. Evicting here would throw away a perfectly good strategy —
-                    // and force a full verified search on the next flow — every time a user visits a
-                    // domain that does not exist.
-                    //
-                    // Re-selection therefore needs a signal this layer does not have; see ADR 0014.
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "proxyless resolver {} returned no address for {host}",
-                            chosen.resolver.name
-                        ),
-                    ));
+                    let err = failure.unwrap_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!(
+                                "proxyless resolver {} returned no address for {host}",
+                                chosen.resolver.name
+                            ),
+                        )
+                    });
+                    self.note_resolution_failure(&chosen, &err);
+                    return Err(err);
                 }
                 // Try each in order rather than committing to the first: on a single-stack network the
                 // wrong family is unreachable, and the resolver cannot know which stack this host has.
@@ -425,6 +451,61 @@ mod tests {
         for task in tasks {
             assert_eq!(task.await.unwrap().unwrap(), seeded.resolver.name);
         }
+    }
+
+    /// A transport with a strategy already chosen, so eviction is observable.
+    fn with_chosen() -> (ProxylessTransport, flint_proxyless::Strategy) {
+        let t = ProxylessTransport::new(&cfg(), WirePlan::default(), None).unwrap();
+        let chosen = flint_proxyless::Strategy {
+            resolver: flint_dns::default_pool()[0].clone(),
+            policy: Default::default(),
+        };
+        *t.chosen.write().unwrap() = Some(chosen.clone());
+        (t, chosen)
+    }
+
+    #[test]
+    fn a_name_that_does_not_resolve_keeps_the_strategy() {
+        // The regression that forced this eviction to be reverted once: a user visiting a domain that
+        // does not exist must not cost a working strategy, because the next flow would then pay for a
+        // full verified search.
+        let (t, chosen) = with_chosen();
+        t.note_resolution_failure(
+            &chosen,
+            &io::Error::new(io::ErrorKind::NotFound, "NXDOMAIN"),
+        );
+        assert!(
+            t.peek().is_some(),
+            "a nonexistent domain must not evict the strategy"
+        );
+    }
+
+    #[test]
+    fn a_failing_resolver_drops_the_strategy_so_the_next_flow_reselects() {
+        for kind in [
+            io::ErrorKind::TimedOut,          // blackholed
+            io::ErrorKind::ConnectionRefused, // actively refused
+            io::ErrorKind::InvalidData,       // answered, but unbelievably (SERVFAIL, bogons, …)
+        ] {
+            let (t, chosen) = with_chosen();
+            t.note_resolution_failure(&chosen, &io::Error::new(kind, "resolver is gone"));
+            assert!(
+                t.peek().is_none(),
+                "{kind:?} should drop the strategy and force a re-select"
+            );
+        }
+    }
+
+    #[test]
+    fn our_own_bad_input_does_not_evict_either() {
+        // `InvalidInput` means the query was never sent, so no resolver was involved — evicting would
+        // churn selection over a caller error.
+        let (t, chosen) = with_chosen();
+        t.note_resolution_failure(
+            &chosen,
+            &io::Error::new(io::ErrorKind::InvalidInput, "unencodable name"),
+        );
+        assert!(t.peek().is_some(), "a caller-input error blames nobody");
     }
 
     #[test]
