@@ -110,15 +110,15 @@ their traffic must not get this instead without asking for it.
   "direct" means a plain connection with no tricks, and silently changing that would alter the meaning of
   every existing rule. Touches `rules::Action`, `config::RouteAction`, `matcher::action_index`'s
   per-action covering arrays, `rules::router`, and the `lantern.rs` string mapping.
-- **Re-selection needs a signal this layer does not have.** `forget()` exists but nothing can currently
-  call it: `from_config` returns trait objects with no control handle. The obvious in-band trigger —
-  "resolution failed, so the resolver must be dead" — is **not usable**, because flint reports an
-  ordinary negative answer exactly like a dead resolver (`parse_response` turns a non-zero RCODE into
-  `Err`, and `validate_answers` errors on an empty set), so NXDOMAIN for a mistyped host is
-  indistinguishable from transport failure. Acting on it would evict a good strategy and force a full
-  verified search every time a user visits a domain that does not exist. Two ways out, both real work:
-  a control handle carrying an explicit network-change notification, or a flint API that separates
-  "resolver unreachable" from "name does not resolve".
+- ~~**Re-selection needs a signal this layer does not have.**~~ **Partly done.** flint#18 added
+  `indicts_resolver`, separating "the resolver failed" from "the name does not resolve", so the
+  transport now self-heals in-band: a resolver that is unreachable, times out, or answers unbelievably
+  drops the strategy, while NXDOMAIN for a mistyped host does not. That is what made the eviction
+  reverted during this PR's review safe to reinstate.
+  **Still open: proactive re-selection.** The in-band signal only fires once a flow has already
+  failed, so the first flow after a network change still pays for a dead strategy. A control handle
+  carrying an explicit network-change notification would re-select before that, and remains worth doing
+  on its own merits — `from_config` returning trait objects with no handle is the obstacle.
 - **IPv6-only networks cannot complete strategy selection.** `flint_dns::default_pool()` is 23
   IPv4-only entries and `flint-proxyless`'s probe resolves `TYPE_A` only, so selection fails before
   `dial_addr`'s dual-stack support can help. Fixable only upstream: add IPv6 DoH endpoints to the pool
