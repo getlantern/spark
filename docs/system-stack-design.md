@@ -338,6 +338,28 @@ If the system stack fails its smoke test on macOS, the first suspect is packet r
 packets arrive on the TUN destined to a *local* address, which on Linux required `rp_filter=0`. macOS
 has no `rp_filter`, so this is genuinely unknown territory rather than a known fix.
 
+### The staged default (`stack = "auto"`, 2026-08-01)
+
+`StackKind::Auto` is now the default, and `netstack::resolve_stack` is the single place the staging
+lives. The intent is that the kernel stack becomes the default everywhere it works — it removes the
+collapse, and sing-box already defaults to kernel TCP on every platform it supports. It is staged
+rather than flipped because each platform has a *different* open gate, and a data path that has never
+executed somewhere does not degrade the product there, it breaks it.
+
+Today `auto` resolves to userspace on every platform. What each is waiting on:
+
+| Platform | Gate |
+|---|---|
+| **Linux** | The netns A/B passed — but it ran with `rp_filter=0`. Redirected packets re-enter the TUN destined to a *local* address, which strict reverse-path filtering drops, and most distributions ship `rp_filter` on. Flipping needs spark to relax it for the redirected path or detect that it already is. **This gate was missed until the staging work; the netns result alone does not license a default flip.** |
+| **macOS** | Never executed. `bench/macos-throughput.sh --smoke` exists and has not been run. |
+| **Android** | Never executed on a device. The runbook exists and the on-device switch now does too (`<filesDir>/system_stack.txt`). |
+| **Windows** | Needs its own code path (§7), not a flag flip. |
+| **iOS** | Permanent — no kernel tun to redirect to. |
+
+Without the `system-stack` feature, `auto` resolves to userspace. That is not the silent fallback the
+codebase forbids: nobody requested the kernel stack, so there is no request to fail. Selecting
+`system` *explicitly* without the feature remains a hard startup error.
+
 ## 10. Tradeoffs & alternatives
 
 **For:** kernel TCP maturity/CPU; smaller in-binary attack surface; the trait makes it a drop-in
@@ -365,7 +387,10 @@ rests on CPU + attack-surface + congestion control alone — still real, but no 
    we control both ends?).
 2. Do we want true `"mixed"` semantics, or is "system TCP + our existing UDP" sufficient (probably
    yes)?
-3. Windows: worth the separate code path, or desktop = Linux/macOS only at first?
+3. Windows: worth the separate code path, or desktop = Linux/macOS only at first? **Still open, and
+   now load-bearing** — Windows is a priority platform, and §7 says sing-tun keeps a separate
+   `stack_system_windows.go` because bind/socket semantics differ. So Windows is not a flag flip like
+   macOS/Android; it is its own implementation. Until someone writes it, `auto` stays userspace there.
 4. Where does this sit relative to the remaining M11 transport work and the deferred per-stream
    flow-control item?
 

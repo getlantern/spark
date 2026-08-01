@@ -31,6 +31,24 @@ With `systemStack = 1`:
 4. **Stable under churn** — sustained transfer + many short connections (exercises FIN/RST NAT
    removal); no crash, no unbounded memory/port growth, no leaked flows in logcat.
 
+## 1b. Selecting the stack on device (added 2026-08-01)
+
+`systemStack` is no longer hardcoded. `SparkVpnService` reads
+`<filesDir>/system_stack.txt`: `1` selects the kernel stack, anything else (including a missing or
+unreadable file) selects userspace. That default is deliberate — a corrupted file degrades to the
+shipping path, not to one that has never run on a device.
+
+So the §5 A/B needs no rebuild between arms:
+
+```bash
+adb shell "run-as org.getlantern.spark sh -c 'echo 1 > files/system_stack.txt'"
+# restart the tunnel from the UI, then measure
+adb shell "run-as org.getlantern.spark sh -c 'echo 0 > files/system_stack.txt'"
+# restart, measure again, compare
+```
+
+Confirm which arm is live from logcat — the `tunnel established` line now carries `systemStack=`.
+
 ## 2. Build the native library
 
 The `system-stack` feature is target-gated **on** for Android, so a normal Android build includes it

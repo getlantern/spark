@@ -129,13 +129,60 @@ pub fn build(
     tun: Arc<Tun>,
     config: &crate::config::Config,
 ) -> io::Result<(Box<dyn Netstack>, Option<UdpSurface>)> {
-    match config.tun.stack {
-        crate::config::StackKind::Userspace => {
+    match resolve_stack(config.tun.stack) {
+        Resolved::Userspace => {
             let mut ns = SmoltcpNetstack::new(tun)?;
             let udp = ns.take_udp();
             Ok((Box::new(ns), udp))
         }
-        crate::config::StackKind::System => build_system(tun, config),
+        Resolved::System => build_system(tun, config),
+    }
+}
+
+/// What [`StackKind::Auto`](crate::config::StackKind::Auto) resolves to, once the platform staging
+/// has been applied. Only ever `Userspace` or `System` — `Auto` is a request, not an outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved {
+    Userspace,
+    System,
+}
+
+/// Apply the per-platform staging for `auto`, leaving an explicit choice untouched.
+///
+/// The kernel stack is meant to become the default — it removes the concurrent-download collapse
+/// (userspace craters to 0.13 Gb/s at two parallel downloads while system holds ~1.09), and sing-box
+/// already defaults to kernel TCP on every platform it supports. It is staged rather than flipped at
+/// once because **every platform still has a distinct open gate**, and shipping a data path that has
+/// never executed somewhere does not degrade the product there, it breaks it.
+///
+/// What is gating each platform, so flipping one is a one-line change here plus a test:
+///
+/// - **Linux** — the only platform with a live gate (netns A/B), but that gate ran with
+///   `rp_filter=0`. The redirect re-injects packets on the TUN destined to a *local* address, which
+///   strict reverse-path filtering drops, and most distributions ship `rp_filter` enabled. Flipping
+///   needs spark to either relax it for the redirected path or detect that it is already relaxed —
+///   auto-selecting today would break the tunnel on a default install.
+/// - **macOS** — never executed. `bench/macos-throughput.sh --smoke` is the gate; it exists and has
+///   not been run.
+/// - **Android** — compiled in and never executed on a device. `docs/android-system-stack-gate.md`
+///   is the runbook; the host app now passes the flag through, so the A/B is runnable.
+/// - **Windows** — not merely unverified: sing-tun keeps a *separate* `stack_system_windows.go`
+///   because bind/socket semantics differ, so this likely needs its own code path rather than a
+///   flag flip (`docs/system-stack-design.md` §7).
+/// - **iOS** — permanent. `NEPacketTunnelFlow` is not a kernel tun, so redirect-to-a-local-listener
+///   has nothing to redirect to. sing-box runs gVisor there for the same reason.
+///
+/// Without the `system-stack` feature compiled in, `auto` resolves to userspace. That is not the
+/// silent fallback the codebase forbids: nobody asked for the kernel stack, so there is no request
+/// to fail. Asking for it *explicitly* without the feature remains a hard startup error.
+pub fn resolve_stack(kind: crate::config::StackKind) -> Resolved {
+    use crate::config::StackKind;
+    match kind {
+        StackKind::Userspace => Resolved::Userspace,
+        StackKind::System => Resolved::System,
+        // Every platform is still gated; see the list above. Flip one by returning `System` here
+        // under its `cfg`, once its gate has actually passed.
+        StackKind::Auto => Resolved::Userspace,
     }
 }
 
@@ -378,5 +425,39 @@ mod tests {
         // domain, so deliverable by name.
         assert!(allow_flow_dst(&ip("3000:2018::17")));
         assert!(allow_flow_dst(&IpAddr::V6(crate::dns::fakeip::V6_BASE)));
+    }
+
+    #[test]
+    fn an_explicit_choice_is_never_overridden_by_staging() {
+        use super::{resolve_stack, Resolved};
+        // Choosing a stack by hand is how you test ahead of a gate, so `resolve_stack` must pass it
+        // through untouched no matter what the staging says for this platform.
+        use crate::config::StackKind;
+        assert_eq!(resolve_stack(StackKind::System), Resolved::System);
+        assert_eq!(resolve_stack(StackKind::Userspace), Resolved::Userspace);
+    }
+
+    #[test]
+    fn auto_is_conservative_until_this_platform_has_a_passing_gate() {
+        use super::{resolve_stack, Resolved};
+        // Deliberately asserts the *current* staging rather than a general property: this test is the
+        // tripwire that makes flipping a platform a conscious edit. When a gate passes and
+        // `resolve_stack` starts returning `System` here, this assertion is supposed to fail and be
+        // updated in the same commit — with the gate result cited in the message.
+        use crate::config::StackKind;
+        assert_eq!(
+            resolve_stack(StackKind::Auto),
+            Resolved::Userspace,
+            "auto still resolves conservatively on this platform; see resolve_stack's gate list"
+        );
+    }
+
+    #[test]
+    fn auto_is_the_default_so_an_omitted_stack_key_is_staged() {
+        // The whole mechanism only bites if configs that say nothing about `stack` get `Auto`.
+        assert_eq!(
+            crate::config::StackKind::default(),
+            crate::config::StackKind::Auto
+        );
     }
 }
