@@ -304,6 +304,40 @@ peak is therefore **syscall batching**:
 Caveats confirmed live: needs `rp_filter=0` on the redirected path; NAT cleanup now handles FIN/RST;
 UDP/DNS work via the mixed stack.
 
+### Benchmarking on macOS (`bench/macos-throughput.sh`, added 2026-08-01)
+
+**Not yet run — the system stack has never been exercised on macOS at all.** Every live gate so far
+was Linux netns. The Rust has no platform gating and this module claims Linux/macOS/Android, but
+"compiles" is not "works": use `--smoke` first, which stops after a 2s transfer, before trusting any
+number.
+
+The harness exists because the netns trick has no macOS equivalent. **A single-box tunnel benchmark
+is impossible here**: the kernel hairpins traffic addressed to a local IP straight to `lo0` *before*
+consulting the route table, so a route pointing that address at the TUN never fires. The peer must be
+a genuinely different host — a LAN machine, a VM with its own routable IP (Lima/UTM; **not** Docker
+Desktop, whose containers aren't routable from the host), or a cloud box. The script refuses to start
+if `--peer` is an address configured on this Mac, because that mistake does not fail loudly — it
+quietly measures loopback and reports plausible numbers.
+
+```bash
+# on the peer:  iperf3 -s -p 5201
+sudo ./bench/macos-throughput.sh --peer <ip> --stack system --smoke      # does it work at all?
+sudo ./bench/macos-throughput.sh --peer <ip> --stack userspace --streams 2
+sudo ./bench/macos-throughput.sh --peer <ip> --stack system    --streams 2
+```
+
+What it can and cannot answer:
+- **Can**: whether the concurrent-download collapse reproduces on macOS and whether the system stack
+  fixes it. The collapse takes userspace to ~0.13 Gb/s, so it is visible on any link above roughly
+  200 Mb/s — a WAN peer is good enough for this, which is the metric that matters.
+- **Cannot**: peak throughput, if the link saturates first. Baseline and tunnel both pinned at line
+  rate means the run is link-bound; the script says so in its output rather than letting the numbers
+  be over-read.
+
+If the system stack fails its smoke test on macOS, the first suspect is packet re-entry: redirected
+packets arrive on the TUN destined to a *local* address, which on Linux required `rp_filter=0`. macOS
+has no `rp_filter`, so this is genuinely unknown territory rather than a known fix.
+
 ## 10. Tradeoffs & alternatives
 
 **For:** kernel TCP maturity/CPU; smaller in-binary attack surface; the trait makes it a drop-in

@@ -283,9 +283,13 @@ pub enum StackKind {
     #[default]
     Userspace,
     /// Kernel-TCP "system" stack: a NAT redirect gateway to a local kernel listener (sing-box's
-    /// `system`). Desktop-only (Linux/macOS) and requires the `system-stack` build feature; the
-    /// build errors at startup if it's selected without the feature. See
-    /// `docs/system-stack-design.md`.
+    /// `system`). Works wherever there is a kernel tun fd — Linux, macOS, and **Android** via
+    /// `VpnService`, which is how sing-box ships it there too; **not iOS**, which has no kernel tun
+    /// (`NEPacketTunnelFlow`). Requires the `system-stack` build feature; startup errors if it is
+    /// selected without it.
+    ///
+    /// Live-gated on Linux only so far — see `docs/system-stack-design.md` for the measurements and
+    /// for the macOS harness (`bench/macos-throughput.sh`), which has not been run yet.
     System,
 }
 
