@@ -755,7 +755,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "flint-shaping"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=29a00467e73c8f5585507b4e71c91ab3a0f87ae3#29a00467e73c8f5585507b4e71c91ab3a0f87ae3"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "ring",
  "tokio",
@@ -764,7 +764,7 @@ dependencies = [
 [[package]]
 name = "flint-tls"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=29a00467e73c8f5585507b4e71c91ab3a0f87ae3#29a00467e73c8f5585507b4e71c91ab3a0f87ae3"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "flint-shaping",
  "postcard",
@@ -1794,7 +1794,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1832,7 +1832,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
