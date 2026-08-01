@@ -1,6 +1,14 @@
 # On-device gate: the system (kernel-TCP) netstack on Android
 
-- **Status:** Scoped runbook — not yet executed (needs a physical device + a `VpnService` host app).
+- **Status:** Scoped runbook — not yet executed. **The host-app blocker is gone** (updated
+  2026-08-01): §3 below was written when no `VpnService` host existed, but the Tauri Android plugin
+  now ships a complete one —
+  `gui-tauri/tauri-plugin-spark-vpn/android/src/main/java/org/getlantern/spark/SparkVpnService.kt`
+  establishes the fd, gates on readiness, handles split tunnel + routing mode, watches for network
+  changes, and already passes `systemStack` across JNI. It passes a hardcoded `0`, with a comment
+  saying production "may pass 1". So what remains is making that flag configurable and running the
+  §5 A/B on a device — not building an app. (§3's `nativeRun` snippet is also stale: the real
+  signature now carries config, dataDir, splitTunnel and routingMode too.)
 - **Goal:** prove spark's `stack = system` works on a real Android device, and that it **fixes the
   concurrent-download collapse** there (the mobile payoff of `docs/system-stack-design.md`).
 - **Prereqs in-tree:** the system stack is built + feature-enabled for Android and the aarch64 build
