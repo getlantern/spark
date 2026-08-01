@@ -14,10 +14,10 @@ the end of the decisions log for the design decisions and the API facts not to r
 constraint: **spark must not terminate TLS**, so the transport returns shaped TCP and selects strategies
 out of band. flint is pinned at `ecfe49b`.
 
-Open on this track: **proactive re-selection** (the in-band signal only fires after a flow already
-failed; blocked on `from_config` returning trait objects with no control handle), **live IPv6-only
-verification** (blocked — no v6 egress on any machine here), and `disorder`/TTL shaping (deliberately
-deprioritized: probabilistic, topology-dependent, unverifiable in CI without packet capture).
+Open on this track: a **network-change push signal** (optional — the pull path landed 2026-08-01; see
+"Next chunk" for why the previously recorded obstacle was false), **live IPv6-only verification**
+(blocked — no v6 egress on any machine here), and `disorder`/TTL shaping (deliberately deprioritized:
+probabilistic, topology-dependent, unverifiable in CI without packet capture).
 
 The 2026-06-19 entry below remains accurate for the AnyTLS/GUI product state; the sections it points at
 are unchanged.
@@ -1600,17 +1600,24 @@ API facts: rustls 0.23.41
 
 ## Next chunk (exactly what the next session should do)
 
-**(P) Proactive re-selection for proxyless — the one open item on the just-finished track.** Today the
-transport only re-selects *after* a flow has failed (`note_resolution_failure`, gated on
-`flint_dns::indicts_resolver`), so the first flow after a network change still pays for a dead
-strategy. What's needed is an explicit network-change signal reaching `ProxylessTransport` before that
-flow. **The obstacle is structural, and is the actual design work:** `transport::from_config` returns
-boxed trait objects with no handle, so there is nowhere to send such a signal. Decide whether to
-return a control handle alongside the transport, or register interested transports with a
-process-wide notifier. Do not start by editing the transport — settle the handle question first.
+**(P) Network-change push signal for proxyless — optional, and weigh it before building it.**
 
-Lower-cost items on the same track, if a bounded chunk is wanted instead: nothing blocks them, but
-neither is load-bearing.
+The expensive half of this is **already done** (2026-08-01): the chosen strategy now carries the
+network key it was proven on, and an unset `[transport.proxyless] network` is measured per dial from
+the host's egress, so a stale memo self-invalidates on the next dial rather than after a failed flow.
+
+What remains is *push* rather than *pull*: re-selection currently begins during the first dial on the
+new network instead of before it. Before building it, note two things the earlier framing got wrong:
+
+- **The recorded obstacle was false.** `from_config_with_control` already returns
+  `Option<Arc<dyn PoolControl>>` and `fd_tunnel` already registers it for the server-selection UI.
+  There is an established handle precedent to extend; nothing structural is blocking.
+- **Android already covers most of it.** `SparkVpnService.kt` restarts the tunnel on an
+  underlying-network change, which rebuilds transports outright. Apple has no path-change handling
+  (`reasserting` is only a UI status string) and desktop has no watcher at all, so the real exposure is
+  those two — and the fix there may be a platform watcher rather than anything in the transport.
+
+So treat this as "measure whether the pull path is sufficient first", not as queued work.
 
 Blocked, do not attempt here: **live IPv6-only verification** of the dual-stack pool needs v6 egress
 this machine does not have.
@@ -3194,3 +3201,30 @@ called as a **post-condition** after install so the misconfiguration is logged l
 masquerading as a blocked network. Also note: the hashed-anchor directory check is a *proxy* —
 BoringSSL never lists that directory, it builds `<dir>/<subject-hash>.<n>` and opens it directly
 (`by_dir.c:321`).
+
+**2026-08-01 — Proxyless re-selects on a network change, and the recorded obstacle turned out to be
+false.** Re-reading the code to answer "what is proactive re-selection exactly" showed the ADR had it
+as one missing signal when it was really **three separate gaps**, and the two cheap ones carried the
+weight. (1) `ProxylessTransport::chosen` was a process-lifetime memo with no network awareness, and
+`strategy()` checked it and returned *before* ever calling `find_cached` — which is network-aware. The
+memo above it hid that for the life of the process. (2) `[transport.proxyless] network` was a **static
+config string**, so the "per-network cache" had exactly one slot and nothing computed a runtime
+fingerprint; there was no way to notice a change even with a signal in hand. (3) No signal reached the
+transport — the only gap the ADR named. Closed (1) and (2): the memo is now a `Chosen { network,
+strategy }` so the pair is atomic, `peek(key)` refuses a memo proven on another network, and an unset
+`network` is measured per dial by `net::egress_fingerprint`. **The fingerprint recipe, worth keeping:**
+`connect` an unbound UDP socket to an RFC 5737 / RFC 3849 documentation address and read back
+`local_addr` — UDP `connect` transmits nothing, it only runs route lookup and source selection, so this
+is a few syscalls, no packets, no privileges, no new dependency. One probe per family, joined as
+`v4=… v6=…`, because a network offering v6 is not the same network as one that does not. Apply the
+existing `SocketProtector` first or a full tunnel reports the TUN's own address. `None` means "cannot
+tell" and deliberately does **not** invalidate: treating ignorance as change would discard a good
+strategy on every connectivity blip. Known-bounded failure modes: two networks handing out the same
+DHCP address collide (no worse than having no fingerprint), and a DHCP renewal onto a new address costs
+one unnecessary re-selection. Verified live on this host — `v4=192.168.4.23 v6=-`, matching
+`ipconfig getifaddr en0`, stable across calls. **Correction to the prior entry and to ADR 0014:** the
+recorded blocker "`from_config` returns trait objects with no control handle" is wrong —
+`from_config_with_control` already returns `Option<Arc<dyn PoolControl>>` and `fd_tunnel` registers it
+for the server-selection UI, so a push signal would extend an existing precedent. Also note Android
+already restarts the tunnel on an underlying-network change (`SparkVpnService.kt`), so the remaining
+push-signal exposure is Apple and desktop, neither of which watches the network at all.

@@ -591,8 +591,13 @@ pub struct ProxylessConfig {
     /// while each plan is a distinct evasion strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_candidates: Option<usize>,
-    /// Fingerprint identifying "the same network" for the winning-strategy cache (gateway, SSID, …).
-    /// Empty is fine for a single-network deployment: it simply means one cache slot.
+    /// Override the fingerprint identifying "the same network" for the winning-strategy cache.
+    ///
+    /// **Leave this empty** unless you have a reason not to: empty means the fingerprint is measured
+    /// from the host's actual egress on every dial ([`crate::net::egress_fingerprint`]), so moving
+    /// between networks invalidates a strategy that was only ever proven on the old one. Setting it
+    /// pins every network to one cache slot, which is what a fixed-location deployment wants and what a
+    /// roaming client does not.
     #[serde(default)]
     pub network: String,
 }
