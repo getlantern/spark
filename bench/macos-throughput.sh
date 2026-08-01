@@ -67,7 +67,7 @@ while [[ $# -gt 0 ]]; do
     --egress)   EGRESS="$2";    shift 2 ;;
     --port)     PORT="$2";      shift 2 ;;
     --smoke)    SMOKE=1;        shift   ;;
-    -h|--help)  sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,44p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -110,6 +110,12 @@ echo "==> peer=$PEER:$PORT egress=$EGRESS stack=$STACK streams=$STREAMS duration
 SPARK_PID=""
 ROUTE_ADDED=0
 LOG=/tmp/spark-macos-bench.log
+# One directory for every iperf3 JSON capture, removed wholesale on exit — success, failure, and
+# Ctrl-C alike — so repeated runs don't litter /tmp. A directory rather than a list of tracked files
+# because the natural `f=$(new_tmp)` form runs in a subshell, where any append to a tracking variable
+# is discarded in the parent and nothing would actually get cleaned. Named files also make a failed
+# run inspectable before the trap fires.
+WORKDIR=$(mktemp -d)
 
 cleanup() {
   # Order matters: drop the /32 first. A host route pointing at a utun that is about to disappear
@@ -124,6 +130,9 @@ cleanup() {
     kill -9 "$SPARK_PID" 2>/dev/null || true
   fi
   rm -f /tmp/spark-macos-bench.toml
+  # An `if` rather than `[[ ]] &&`: this is the last statement of an EXIT trap, and a false `&&` list
+  # would return non-zero from the trap.
+  if [[ -n "${WORKDIR:-}" ]]; then rm -rf "$WORKDIR"; fi
 }
 trap cleanup EXIT INT TERM
 
@@ -140,9 +149,16 @@ gbps() { awk -v b="$1" 'BEGIN{printf "%.3f", b/1e9}'; }
 run_iperf() {  # $1=outfile  $2=extra-args (e.g. -R for download)
   # Guarded: a stalled direction must not hang the run. The userspace download path is exactly what
   # can stall here (§9), and an empty JSON reads back as 0 — i.e. "stalled" — so the run continues.
-  local guard=()
-  [[ -n "$TIMEOUT" ]] && guard=("$TIMEOUT" "$((DURATION + 25))s")
-  "${guard[@]}" iperf3 -c "$PEER" -p "$PORT" -t "$DURATION" -P "$STREAMS" -J ${2:-} > "$1" 2>/dev/null \
+  #
+  # Built up in the positional parameters rather than an array, because stock macOS is bash 3.2 where
+  # expanding an EMPTY array under `set -u` aborts with "unbound variable". That is not hypothetical
+  # here: `timeout` is a GNU tool absent from a stock macOS, so the no-coreutils machine — the most
+  # likely one to run this — is exactly the case that would have an empty guard.
+  local out="$1" extra="${2:-}"
+  set -- iperf3 -c "$PEER" -p "$PORT" -t "$DURATION" -P "$STREAMS" -J
+  [[ -n "$extra" ]] && set -- "$@" "$extra"
+  [[ -n "$TIMEOUT" ]] && set -- "$TIMEOUT" "$((DURATION + 25))s" "$@"
+  "$@" > "$out" 2>/dev/null \
     || echo "    (iperf timed out or errored — treating as stalled)" >&2
 }
 
@@ -160,7 +176,7 @@ declare -a RESULTS=()   # "label|gbps_up|gbps_down|cpu_pct"
 # cannot discriminate between stacks on peak throughput — but the concurrency collapse still shows.
 if [[ "$SMOKE" == 0 ]]; then
   echo "==> baseline (direct, no tunnel): up + down, ${DURATION}s x ${STREAMS} stream(s)"
-  B_UP=$(mktemp); B_DN=$(mktemp)
+  B_UP="$WORKDIR/base-up.json"; B_DN="$WORKDIR/base-down.json"
   run_iperf "$B_UP"
   run_iperf "$B_DN" "-R"
   RESULTS+=("direct-baseline|$(gbps "$(bps_received "$B_UP")")|$(gbps "$(bps_received "$B_DN")")|n/a")
@@ -207,7 +223,7 @@ ROUTE_ADDED=1
 
 # ---- sanity: traffic must actually traverse the tunnel ----------------------
 echo "==> sanity check: 2s transfer through the tunnel"
-S=$(mktemp)
+S="$WORKDIR/sanity.json"
 if ! iperf3 -c "$PEER" -p "$PORT" -t 2 -J > "$S" 2>/dev/null; then
   echo "tunnel transfer FAILED — spark log:" >&2; cat "$LOG" >&2
   [[ "$STACK" == system ]] && cat >&2 <<'HINT'
@@ -231,7 +247,7 @@ fi
 
 # ---- measure ----------------------------------------------------------------
 echo "==> tunnel ($LABEL): up + down, ${DURATION}s x ${STREAMS} stream(s)"
-T_UP=$(mktemp); T_DN=$(mktemp)
+T_UP="$WORKDIR/tunnel-up.json"; T_DN="$WORKDIR/tunnel-down.json"
 # Normalize CPU against the ACTUAL wall time spanned, not an assumed DURATION*2: a stalled transfer
 # runs long, and a fixed divisor then reports nonsense.
 c0=$(cpu_secs); w0=$(date +%s)
