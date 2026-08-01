@@ -5,7 +5,24 @@
 
 ## Current position
 
-**2026-06-19 — PICK UP HERE. The macOS AnyTLS product works end-to-end, with a Lantern-style GUI.**
+**2026-08-01 — PICK UP HERE. The proxyless transport arc is complete end to end; tree green, all
+merged.** Proxyless (ADR 0014) reaches destinations with **no proxy and no exit hop** by searching a
+(DNS resolver × TLS wire shaping) space for a pair the local censor doesn't break, verifying each
+candidate against the one thing a censor cannot forge — a valid certificate for the destination.
+Shipped across flint#13–#19 and spark#137–#140 plus the CA-anchor work; see the four dated entries at
+the end of the decisions log for the design decisions and the API facts not to re-derive. Load-bearing
+constraint: **spark must not terminate TLS**, so the transport returns shaped TCP and selects strategies
+out of band. flint is pinned at `ecfe49b`.
+
+Open on this track: **proactive re-selection** (the in-band signal only fires after a flow already
+failed; blocked on `from_config` returning trait objects with no control handle), **live IPv6-only
+verification** (blocked — no v6 egress on any machine here), and `disorder`/TTL shaping (deliberately
+deprioritized: probabilistic, topology-dependent, unverifiable in CI without packet capture).
+
+The 2026-06-19 entry below remains accurate for the AnyTLS/GUI product state; the sections it points at
+are unchanged.
+
+**2026-06-19 — The macOS AnyTLS product works end-to-end, with a Lantern-style GUI.**
 
 What's DONE (this and prior sessions; all on `main`, pushed):
 - **Full desktop stack** M1–M7 (TUN → netstack → transports → IPC service), **Android** M9, **Apple**
@@ -1583,6 +1600,25 @@ API facts: rustls 0.23.41
 
 ## Next chunk (exactly what the next session should do)
 
+**(P) Proactive re-selection for proxyless — the one open item on the just-finished track.** Today the
+transport only re-selects *after* a flow has failed (`note_resolution_failure`, gated on
+`flint_dns::indicts_resolver`), so the first flow after a network change still pays for a dead
+strategy. What's needed is an explicit network-change signal reaching `ProxylessTransport` before that
+flow. **The obstacle is structural, and is the actual design work:** `transport::from_config` returns
+boxed trait objects with no handle, so there is nowhere to send such a signal. Decide whether to
+return a control handle alongside the transport, or register interested transports with a
+process-wide notifier. Do not start by editing the transport — settle the handle question first.
+
+Lower-cost items on the same track, if a bounded chunk is wanted instead: nothing blocks them, but
+neither is load-bearing.
+
+Blocked, do not attempt here: **live IPv6-only verification** of the dual-stack pool needs v6 egress
+this machine does not have.
+
+---
+
+The tracks below predate the proxyless work and remain valid.
+
 **(C) Connection sharing — one unprivileged frontend integration.** Wire `FreddieSignaler` plus the
 sharing handle into a single unprivileged frontend behind an explicit compile-time feature and
 runtime opt-in config. The frontend must own start/stop, surface slot lifecycle status without logging
@@ -3090,3 +3126,71 @@ constructors ARE the §C5 allowlist (signatures over macro); `otel.traces` alone
 gate everything); unparseable spool lines drop by design (anti-poison; diag.log retains). Remaining:
 `otel.logs` const in getlantern/common + one-line lantern-cloud emission condition (Task 14), the
 `#[ignore]`d live SigNoz upload verify (needs the staging otel endpoint/key), and a DMG smoke build.
+
+**2026-07-29 — Proxyless transport: outline-sdk's `newProxylessDialer` ported to Rust, across flint and
+spark (ADR 0014).** "Proxyless" = reach the real destination with **no proxy and no exit hop**, by
+finding a (DNS resolver × TLS wire shaping) pair the local censor doesn't break. Upstream
+(`x/smart/stream_dialer.go:401`) it is `findDNS × findTLS`; the port keeps those as **two orthogonal
+axes** — `flint_dns::pool::Kind` (Doh/Dot/Tcp/Udp/System) × `flint_shaping::WirePlan`
+(RecordFragment/SegmentSplit/DelaySpec) — whose product a search enumerates. Most primitives already
+existed in flint (split/tlsfrag/racer/DoH), so **the real port was the search harness**, not the
+shaping. **The certificate is the oracle:** a censor can block plaintext DNS or answer it with
+anything, but cannot produce a valid cert for the destination, so "this strategy works" == a
+*verified* TLS handshake to the resolved address. flint#13 (resolver axis) → #14 (`flint-proxyless`:
+`Space{resolvers, wires, roots}` enumerated wire-major, `find`/`find_cached`/`connect_cached`,
+`PROBE_WINDOW=4`, deadline-not-duration budgeting so phases compose) → #15 (authenticate the resolver
+dial: verify chain + hostname, identity = **the SNI**, which is uniform across addressing forms —
+`sni == host` verifies the resolver, a fronted entry authenticates the front whose cert actually
+arrives) → #16 (kindling: proxyless as a raced bootstrap transport for config fetches). spark#137 wired
+`ProxylessTransport`. **Key constraint, recorded because it shapes everything:
+spark must NOT terminate TLS** — `Transport::dial` returns a raw byte stream the app's own TLS splices
+into, so terminating it would break E2E TLS and make spark a MITM of its own user. Hence the transport
+returns *shaped TCP* and selects strategies **out of band** via `find_cached` (single-flight behind a
+`tokio::sync::Mutex`, cached per network fingerprint), rather than verifying inline. UDP goes straight
+out unshaped; a missing feature is an error, not a silent fallback.
+
+**2026-07-30 — Proxyless routing action + IPv6 (spark#138, flint#17/spark#139).** `rules::Action::
+Proxyless` is a **distinct** action, not an upgrade of `Action::Direct` — in spark "direct" means a
+plain connection with no tricks, and redefining it would change the meaning of every existing rule.
+Landed across `rules::Action`, `config::RouteAction`, `matcher::action_index`'s per-action covering
+arrays, `rules::router` (incl. `Action → proxy::Decision`), and the `lantern.rs` string mapping. Then
+flint#17 closed the IPv6 gap: the pool was 23 IPv4-only entries and the probe resolved `TYPE_A` only,
+so on a v6-only network selection failed *before* `dial_addr`'s dual-stack support could help. Pool
+entries now carry `v6()` and the probe races A/AAAA. **Gotcha worth keeping:** Quad9's v6 entry is the
+*service* address `2620:fe::10`, **not** the hostname's AAAA `2620:fe::fe` — the latter is the
+"no-block" variant and answers differently. Addresses are `dig`-verified; **live v6-only verification
+is still outstanding** (no v6 egress on any machine here).
+
+**2026-07-31 — Proxyless self-heals in-band (flint#18 + spark#140).** Re-selection had been reverted
+during #137's review for a real reason: a failed resolution could not be attributed. flint#18 added
+`flint_dns::indicts_resolver`, which separates "**this resolver** failed" from "**this name** does not
+resolve" via meaningful `io::ErrorKind`s (NXDOMAIN → `NotFound`, bad name → `InvalidInput`, everything
+else indicts). That made eviction safe to reinstate: a resolver that is unreachable, times out, or
+answers unbelievably drops the chosen strategy, while NXDOMAIN for a typo'd host does not. Deliberately
+does **not** clear the per-network cache — `find_cached` re-verifies. Also in #18: a **TC-flag check**
+in the codec, placed *after* the RCODE so a truncated NXDOMAIN still reports the more specific
+NXDOMAIN. **Still open: proactive re-selection** — the in-band signal only fires after a flow has
+already failed, so the first flow after a network change still pays for a dead strategy. The obstacle
+is that `from_config` returns trait objects with no control handle to carry a network-change signal.
+
+**2026-08-01 — A missing CA trust store looked exactly like censorship; now it names itself
+(flint#19 + spark PR on `fisk/ca-roots-anchor-check`).** With no explicit roots, boring falls back to
+OpenSSL's default paths, which on Android/iOS point at nothing. Every verified dial then fails
+`unable to get local issuer certificate` — and **the proxyless search reads those failures as evidence
+about strategies**, so it exhausts the entire resolver × wire space and reports a network that blocks
+everything. Error inspection cannot fix this (a single `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` is genuinely
+ambiguous between "no anchors" and "a MITM we can't chain"); only a check that runs *before* any dial
+can. flint#19 added `flint_tls::trust_store::check_default_trust_anchors()`, which asks **BoringSSL**
+for its own paths and env-var names (`X509_get_default_cert_file`/`_dir`/`_env`) instead of hardcoding
+them. **Verified API fact — do not re-derive:** BoringSSL's override rule is `getenv() != NULL`, **not**
+"non-empty" (`by_file.c:88`, `by_dir.c:119`; `add_cert_dir` rejects `!*dir` at `:187`). So
+`SSL_CERT_FILE=""` *wins over* the compiled-in default and then fails to load — an empty value
+**suppresses** the built-in path rather than deferring to it. The compiled-in defaults themselves can
+never be empty (`#define X509_CERT_DIR OPENSSLDIR "/certs"`, `x509_def.c:68`). That rule exposed a
+latent spark bug: `ca_roots.rs` honored `SSL_CERT_FILE=""` as an operator override via `is_some()` and
+skipped installing its bundle — the one value guaranteeing zero anchors, on the two platforms with no
+system store to fall back to. Now gated on a non-empty value, with `check_default_trust_anchors()`
+called as a **post-condition** after install so the misconfiguration is logged loudly instead of
+masquerading as a blocked network. Also note: the hashed-anchor directory check is a *proxy* —
+BoringSSL never lists that directory, it builds `<dir>/<subject-hash>.<n>` and opens it directly
+(`by_dir.c:321`).

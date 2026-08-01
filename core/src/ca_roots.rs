@@ -18,8 +18,8 @@
 /// and leaves fronted verification to fail as before, rather than aborting the connect.
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) fn install_bundled_roots(data_dir: &std::path::Path) {
-    // Respect an explicit operator/test override.
-    if std::env::var_os("SSL_CERT_FILE").is_some() {
+    // Respect an explicit operator/test override — but only one that names something.
+    if usable_override(std::env::var_os("SSL_CERT_FILE")) {
         return;
     }
     let path = data_dir.join("ca-roots.pem");
@@ -38,6 +38,51 @@ pub(crate) fn install_bundled_roots(data_dir: &std::path::Path) {
         Err(e) => tracing::warn!(
             error = %e,
             "could not install bundled CA roots; fronted rule-set/config fetch may fail cert verification"
+        ),
+    }
+    report_trust_anchors();
+}
+
+/// Whether `SSL_CERT_FILE` holds an override worth deferring to.
+///
+/// Presence alone is not enough. BoringSSL branches on `getenv() != NULL`, so a present-but-empty
+/// value *is* the override: it takes that branch, fails to load, and does **not** fall back to the
+/// compiled-in default (`by_file.c:88`). On mobile that default is empty anyway, so honoring an empty
+/// override would leave the process with zero anchors — precisely the failure this module exists to
+/// prevent, and one that surfaces as `unable to get local issuer certificate` on every fronted dial,
+/// indistinguishable from a censored network.
+///
+/// A non-empty override that points somewhere useless is still honored: that is a real operator
+/// intent, and [`report_trust_anchors`] is what tells them it is broken.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn usable_override(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
+/// Log whether boring can actually find trust anchors now that install has run.
+///
+/// A post-condition, not a gate: by this point either the bundle is installed or an override is in
+/// force, and if neither yields anchors then *every* certificate-verified dial will fail. Saying so
+/// here — with the paths named — is the difference between a one-line diagnosis and chasing a
+/// phantom censorship event, because the proxyless strategy search reads those failures as evidence
+/// about strategies and will exhaust the whole search space before giving up.
+///
+/// Deliberately non-fatal, matching the rest of this module: a failure leaves verification to fail as
+/// it would have anyway rather than aborting the connect.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn report_trust_anchors() {
+    match flint_tls::check_default_trust_anchors() {
+        Ok(sources) => tracing::debug!(
+            file = %sources.file.path.display(),
+            file_usable = sources.file.usable,
+            dir = %sources.dir.path.display(),
+            dir_usable = sources.dir.usable,
+            "boring trust anchors present"
+        ),
+        Err(e) => tracing::error!(
+            error = %e,
+            "no usable TLS trust anchors: every certificate-verified dial will fail, and will look \
+             like a blocked network rather than a local misconfiguration"
         ),
     }
 }
@@ -81,3 +126,26 @@ fn write_bundle(path: &std::path::Path) -> std::io::Result<()> {
 /// Off-mobile the system trust store works, so there is nothing to install.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn install_bundled_roots(_data_dir: &std::path::Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug this replaced: `is_some()` honored `SSL_CERT_FILE=""` as an override and skipped the
+    /// install, leaving boring to take the env branch, fail to load, and never fall back — zero
+    /// anchors on exactly the platforms with no system store to fall back to.
+    #[test]
+    fn an_empty_ssl_cert_file_is_not_an_override_worth_honoring() {
+        use std::ffi::OsString;
+
+        assert!(
+            !usable_override(Some(OsString::from(""))),
+            "an empty value names nothing, so the bundle must still be installed"
+        );
+        assert!(!usable_override(None), "unset is not an override");
+        assert!(
+            usable_override(Some(OsString::from("/etc/ssl/cert.pem"))),
+            "a real path is the operator's call, broken or not"
+        );
+    }
+}

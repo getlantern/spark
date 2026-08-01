@@ -1178,7 +1178,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1461,7 +1461,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1557,7 +1557,7 @@ dependencies = [
 [[package]]
 name = "flint-dial"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "flint-shaping",
  "flint-tls",
@@ -1569,7 +1569,7 @@ dependencies = [
 [[package]]
 name = "flint-dns"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "bytes",
  "flint-dial",
@@ -1578,6 +1578,7 @@ dependencies = [
  "h2",
  "http",
  "postcard",
+ "ring",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -1586,7 +1587,7 @@ dependencies = [
 [[package]]
 name = "flint-fronted"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1609,17 +1610,30 @@ dependencies = [
 [[package]]
 name = "flint-kindling"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
+ "async-trait",
  "flint-fronted",
+ "flint-proxyless",
  "flint-transport",
+ "tokio",
+]
+
+[[package]]
+name = "flint-proxyless"
+version = "0.0.0"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
+dependencies = [
+ "flint-dial",
+ "flint-dns",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
 name = "flint-shaping"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "ring",
  "tokio",
@@ -1628,7 +1642,7 @@ dependencies = [
 [[package]]
 name = "flint-tls"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "boring-sys2",
  "boring2",
@@ -1646,7 +1660,7 @@ dependencies = [
 [[package]]
 name = "flint-transport"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "async-trait",
  "futures",
@@ -1657,7 +1671,7 @@ dependencies = [
 [[package]]
 name = "flint-verify"
 version = "0.0.0"
-source = "git+https://github.com/getlantern/flint?rev=80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949#80e40d0eed07f2b818f6f4d7bb8cc46cf3ea3949"
+source = "git+https://github.com/getlantern/flint?rev=ecfe49b05fa92f3391b14de18e6e28eebfb85da5#ecfe49b05fa92f3391b14de18e6e28eebfb85da5"
 dependencies = [
  "ring",
  "thiserror 2.0.18",
@@ -2382,7 +2396,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3990,7 +4004,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4028,9 +4042,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4406,7 +4420,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5498,10 +5512,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6619,7 +6633,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6998,7 +7012,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

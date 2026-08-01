@@ -105,11 +105,12 @@ their traffic must not get this instead without asking for it.
 
 ## Follow-ups
 
-- **`rules::Action::Proxyless`** — a distinct routing action, so a ruleset can send chosen flows
-  proxyless while the rest use the pool. Deliberately *not* an upgrade of `Action::Direct`: in spark
-  "direct" means a plain connection with no tricks, and silently changing that would alter the meaning of
-  every existing rule. Touches `rules::Action`, `config::RouteAction`, `matcher::action_index`'s
-  per-action covering arrays, `rules::router`, and the `lantern.rs` string mapping.
+- ~~**`rules::Action::Proxyless`**~~ **Done** (spark#138) — a distinct routing action, so a ruleset can
+  send chosen flows proxyless while the rest use the pool. Deliberately *not* an upgrade of
+  `Action::Direct`: in spark "direct" means a plain connection with no tricks, and silently changing
+  that would alter the meaning of every existing rule. Landed across `rules::Action`,
+  `config::RouteAction`, `matcher::action_index`'s per-action covering arrays, `rules::router`
+  (including the `Action → proxy::Decision` mapping), and the `lantern.rs` string mapping.
 - ~~**Re-selection needs a signal this layer does not have.**~~ **Partly done.** flint#18 added
   `indicts_resolver`, separating "the resolver failed" from "the name does not resolve", so the
   transport now self-heals in-band: a resolver that is unreachable, times out, or answers unbelievably
@@ -119,10 +120,22 @@ their traffic must not get this instead without asking for it.
   failed, so the first flow after a network change still pays for a dead strategy. A control handle
   carrying an explicit network-change notification would re-select before that, and remains worth doing
   on its own merits — `from_config` returning trait objects with no handle is the obstacle.
-- **IPv6-only networks cannot complete strategy selection.** `flint_dns::default_pool()` is 23
-  IPv4-only entries and `flint-proxyless`'s probe resolves `TYPE_A` only, so selection fails before
-  `dial_addr`'s dual-stack support can help. Fixable only upstream: add IPv6 DoH endpoints to the pool
-  and race A/AAAA in the probe.
+- ~~**IPv6-only networks cannot complete strategy selection.**~~ **Done upstream** (flint#17). The pool
+  entries carry `v6()` addresses and the probe races A/AAAA, so selection completes where only IPv6
+  egress exists. One caveat worth keeping: for Quad9 the v6 entry is the *service* address
+  `2620:fe::10`, not the resolver hostname's AAAA `2620:fe::fe` — the latter is the "no-block" variant
+  and answers differently. Addresses are `dig`-verified only; **live verification on a v6-only network
+  is still outstanding**, as no machine here has v6 egress.
+- ~~**A missing trust store is indistinguishable from a blocked network.**~~ **Done.** The search reads
+  dial failures as evidence *about strategies*, so a process with no CA anchors does not merely fail —
+  it drives the search to exhaust every resolver × wire combination, each failing for a reason that has
+  nothing to do with any of them, and reports a network that blocks everything. flint#19 added
+  `flint_tls::check_default_trust_anchors()`, and `ca_roots.rs` now calls it as a post-condition after
+  installing the bundled roots on Android/iOS, so the misconfiguration names itself instead of
+  masquerading as censorship. The same work fixed a latent bug here: `ca_roots` honored
+  `SSL_CERT_FILE=""` as an operator override and skipped its install, which is the one value that
+  guarantees zero anchors — boring treats a present-but-empty variable as the override and never falls
+  back to the compiled-in default, which on mobile is empty regardless.
 - **`disorder`/TTL shaping** — the last outline primitive not yet ported (`x/disorder` + `x/sockopt`).
   Deprioritized: it is probabilistic (upstream acknowledges a flush race), topology-dependent (TTL=1 only
   desynchronizes a middlebox before the expiry point), and unverifiable in CI without packet capture.
