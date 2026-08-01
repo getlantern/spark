@@ -109,13 +109,23 @@ echo "==> peer=$PEER:$PORT egress=$EGRESS stack=$STACK streams=$STREAMS duration
 # ---- cleanup ----------------------------------------------------------------
 SPARK_PID=""
 ROUTE_ADDED=0
-LOG=/tmp/spark-macos-bench.log
-# One directory for every iperf3 JSON capture, removed wholesale on exit — success, failure, and
-# Ctrl-C alike — so repeated runs don't litter /tmp. A directory rather than a list of tracked files
-# because the natural `f=$(new_tmp)` form runs in a subshell, where any append to a tracking variable
-# is discarded in the parent and nothing would actually get cleaned. Named files also make a failed
-# run inspectable before the trap fires.
+
+# One private directory for every artifact this run creates, removed wholesale on exit — success,
+# failure, and Ctrl-C alike — so repeated runs don't litter and concurrent runs can't collide.
+#
+# `mktemp -d` rather than fixed /tmp paths because this script runs as ROOT. /tmp is world-writable,
+# so any unprivileged user can pre-create a symlink at a predictable name and root's `>` will follow
+# it — an arbitrary-file-write as root. mktemp -d gives a 0700 directory with an unguessable name,
+# which closes that off for everything below.
+#
+# A directory rather than a list of tracked files because the natural `f=$(new_tmp)` form runs in a
+# subshell, where an append to a tracking variable is discarded in the parent and nothing would
+# actually get cleaned. Named files also make a failed run inspectable before the trap fires.
 WORKDIR=$(mktemp -d)
+# The spark log lives here too. Every failure path below dumps it to stderr before exiting, so the
+# trap removing it costs nothing diagnostically.
+LOG="$WORKDIR/spark.log"
+CONFIG="$WORKDIR/spark.toml"
 
 cleanup() {
   # Order matters: drop the /32 first. A host route pointing at a utun that is about to disappear
@@ -129,7 +139,6 @@ cleanup() {
     for _ in $(seq 1 20); do kill -0 "$SPARK_PID" 2>/dev/null || break; sleep 0.1; done
     kill -9 "$SPARK_PID" 2>/dev/null || true
   fi
-  rm -f /tmp/spark-macos-bench.toml
   # An `if` rather than `[[ ]] &&`: this is the last statement of an EXIT trap, and a false `&&` list
   # would return non-zero from the trap.
   if [[ -n "${WORKDIR:-}" ]]; then rm -rf "$WORKDIR"; fi
@@ -186,7 +195,6 @@ fi
 echo "==> starting spark ($STACK stack, TUN $TUN_ADDR, dials pinned to $EGRESS)"
 if [[ "$STACK" == system ]]; then
   LABEL="spark-system"
-  CONFIG=/tmp/spark-macos-bench.toml
   # `run`'s bare flags always select the userspace stack; `system` is reachable only via config.
   cat > "$CONFIG" <<TOML
 [tun]
