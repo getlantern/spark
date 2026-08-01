@@ -19,27 +19,31 @@
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub(crate) fn install_bundled_roots(data_dir: &std::path::Path) {
     // Respect an explicit operator/test override — but only one that names something.
-    if usable_override(std::env::var_os("SSL_CERT_FILE")) {
-        return;
-    }
-    let path = data_dir.join("ca-roots.pem");
-    match write_bundle(&path) {
-        Ok(()) => {
-            // Set as early as possible in tunnel setup, before the fetch/TLS tasks that read it spawn.
-            // NOTE: process-env mutation isn't guaranteed thread-safe on every platform if another
-            // thread reads the environment concurrently; the cleaner long-term fix is to install this
-            // bundle directly on the SSL context (flint/boring) rather than via SSL_CERT_FILE.
-            std::env::set_var("SSL_CERT_FILE", &path);
-            tracing::info!(
-                count = webpki_root_certs::TLS_SERVER_ROOT_CERTS.len(),
-                "installed bundled CA roots for fronted TLS (SSL_CERT_FILE)"
-            );
+    if !usable_override(std::env::var_os("SSL_CERT_FILE")) {
+        let path = data_dir.join("ca-roots.pem");
+        match write_bundle(&path) {
+            Ok(()) => {
+                // Set as early as possible in tunnel setup, before the fetch/TLS tasks that read it
+                // spawn. NOTE: process-env mutation isn't guaranteed thread-safe on every platform if
+                // another thread reads the environment concurrently; the cleaner long-term fix is to
+                // install this bundle directly on the SSL context (flint/boring) rather than via
+                // SSL_CERT_FILE.
+                std::env::set_var("SSL_CERT_FILE", &path);
+                tracing::info!(
+                    count = webpki_root_certs::TLS_SERVER_ROOT_CERTS.len(),
+                    "installed bundled CA roots for fronted TLS (SSL_CERT_FILE)"
+                );
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not install bundled CA roots; fronted rule-set/config fetch may fail cert verification"
+            ),
         }
-        Err(e) => tracing::warn!(
-            error = %e,
-            "could not install bundled CA roots; fronted rule-set/config fetch may fail cert verification"
-        ),
     }
+    // Deliberately on both paths, not just the install one. The override path is where this matters
+    // most: we deferred to the operator and did nothing, so a broken override is a failure we cannot
+    // fix and can only report. Returning early here would skip the check in exactly the case it was
+    // added for.
     report_trust_anchors();
 }
 
