@@ -172,22 +172,27 @@ impl ProxylessTransport {
     /// Double-checked so the steady state is a read lock and no search: the lock is released before any
     /// `.await`, never held across one.
     async fn strategy(&self) -> io::Result<Strategy> {
-        // Computed once and threaded through, so the memo check, the cache lookup, and what gets stored
-        // all describe the same network. Recomputing at each step could straddle a network change and
-        // file a strategy under a key it was not proven on.
-        let key = self.network_key();
-        if let Some(chosen) = self.peek(key.as_deref()) {
+        if let Some(chosen) = self.peek(self.network_key().as_deref()) {
             return Ok(chosen);
         }
         // Single-flight: only one search runs even if many flows arrive together. flint's cache records
         // a *completed* winner and has no in-progress state, so without this gate each concurrent first
         // dial would run its own full search.
         let _gate = self.selecting.lock().await;
+        // Re-sample rather than reuse the key from before the gate. Waiting here can take as long as a
+        // full verified search — seconds — and a network change during that wait would otherwise make us
+        // search on the *new* network but file the winner under the *old* key, which is exactly the
+        // cross-network reuse this whole mechanism exists to prevent.
+        //
+        // From here the key is threaded through unchanged, so the memo check, the cache lookup, and what
+        // gets stored all describe one network. A change after this point still races, but benignly: the
+        // entry is filed under the network it was proven on, and the next dial re-samples and rejects it.
+        let key = self.network_key();
         // Re-check under the gate — whoever held it before us may already have chosen.
         if let Some(chosen) = self.peek(key.as_deref()) {
             return Ok(chosen);
         }
-        let cache_key = key.clone().unwrap_or_default();
+        let cache_key = key.unwrap_or_default();
         let chosen =
             flint_proxyless::find_cached(&self.space, &self.test_domains, &self.cache, &cache_key)
                 .await
@@ -526,12 +531,19 @@ mod tests {
         // start their own. Proven without a network by pre-seeding the memo and checking that a racing
         // caller observes the same strategy rather than re-selecting.
         use std::sync::Arc as StdArc;
-        let t = StdArc::new(ProxylessTransport::new(&cfg(), WirePlan::default(), None).unwrap());
+        // Pinned, so `network_key()` is deterministic and matches what the memo is seeded under.
+        // Without this the transport measures the *test host's* network, rejects the seed as belonging
+        // to another network, and every task falls through to a real search.
+        let t =
+            StdArc::new(ProxylessTransport::new(&pinned_cfg(), WirePlan::default(), None).unwrap());
         let seeded = flint_proxyless::Strategy {
             resolver: flint_dns::default_pool()[0].clone(),
             policy: Default::default(),
         };
-        *t.chosen.write().unwrap() = Some(seeded.clone());
+        *t.chosen.write().unwrap() = Some(Chosen {
+            network: TEST_NETWORK.to_string(),
+            strategy: seeded.clone(),
+        });
 
         let mut tasks = Vec::new();
         for _ in 0..8 {
@@ -549,9 +561,18 @@ mod tests {
     /// assertions name it explicitly rather than depending on whatever network the test host is on.
     const TEST_NETWORK: &str = "v4=198.51.100.7 v6=-";
 
+    /// A config pinned to [`TEST_NETWORK`], so `network_key()` is deterministic instead of measuring
+    /// whatever network the test host happens to be attached to.
+    fn pinned_cfg() -> ProxylessConfig {
+        ProxylessConfig {
+            network: TEST_NETWORK.to_string(),
+            ..cfg()
+        }
+    }
+
     /// A transport with a strategy already chosen on [`TEST_NETWORK`], so eviction is observable.
     fn with_chosen() -> (ProxylessTransport, flint_proxyless::Strategy) {
-        let t = ProxylessTransport::new(&cfg(), WirePlan::default(), None).unwrap();
+        let t = ProxylessTransport::new(&pinned_cfg(), WirePlan::default(), None).unwrap();
         let strategy = flint_proxyless::Strategy {
             resolver: flint_dns::default_pool()[0].clone(),
             policy: Default::default(),
@@ -606,7 +627,10 @@ mod tests {
             policy: Default::default(),
         };
         assert_ne!(stale.resolver.name, current.resolver.name);
-        *t.chosen.write().unwrap() = Some(current);
+        *t.chosen.write().unwrap() = Some(Chosen {
+            network: TEST_NETWORK.to_string(),
+            strategy: current,
+        });
 
         t.note_resolution_failure(
             &stale,
