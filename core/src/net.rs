@@ -47,6 +47,71 @@ impl SocketProtector {
     }
 }
 
+/// A cheap identifier for "the network this host is currently attached to", for caches whose entries
+/// are only valid on one network — the proxyless transport's chosen strategy above all. (Not an
+/// intra-doc link: that module is behind the `proxyless` feature while this one is always compiled.)
+///
+/// It is the **source address the kernel would pick for off-link traffic**, one per family. Obtained
+/// by `connect`ing an unbound UDP socket to a reserved destination and reading back the local address:
+/// UDP `connect` transmits nothing, it only runs route lookup and source selection, so this costs a
+/// few syscalls and touches no network. The destinations are documentation prefixes (RFC 5737 /
+/// RFC 3849) precisely so that nothing is reachable there even in principle.
+///
+/// `None` means "cannot tell" — no route, or no usable socket. Callers should treat that as *no
+/// information* rather than as a changed network, or an offline moment would invalidate a perfectly
+/// good cache entry.
+///
+/// # What it does and does not distinguish
+///
+/// Switching Wi-Fi networks, moving between Wi-Fi and cellular, or gaining/losing IPv6 all change this
+/// string. Two different networks that both hand out the same DHCP address (`192.168.1.x` is not rare)
+/// collide, and the caller keeps a stale entry — no worse than having no fingerprint at all, which is
+/// the alternative. A DHCP renewal onto a different address on the *same* network looks like a change
+/// and costs one unnecessary re-selection. Both failure modes are bounded and one-sided.
+///
+/// Pass the `protector` a caller uses for its real dials. Under a full tunnel the default route points
+/// into the TUN, so an unprotected probe reports the TUN's address — constant across networks, which
+/// silently disables change detection rather than breaking it.
+pub fn egress_fingerprint(protector: Option<&SocketProtector>) -> Option<String> {
+    // Reserved-for-documentation destinations: route lookup succeeds via the default route, and the
+    // address is guaranteed not to belong to anyone. Port is arbitrary (discard).
+    const PROBE_V4: &str = "192.0.2.1:9";
+    const PROBE_V6: &str = "[2001:db8::1]:9";
+
+    let v4 = egress_source_addr(PROBE_V4, true, protector);
+    let v6 = egress_source_addr(PROBE_V6, false, protector);
+    if v4.is_none() && v6.is_none() {
+        return None;
+    }
+    // Both families in one key: a network offering IPv6 is not the same network as one that does not,
+    // even when the v4 address happens to match.
+    Some(format!(
+        "v4={} v6={}",
+        v4.as_deref().unwrap_or("-"),
+        v6.as_deref().unwrap_or("-")
+    ))
+}
+
+/// The local address the kernel selects for `dst`, or `None` if it cannot route there.
+fn egress_source_addr(
+    dst: &str,
+    ipv4: bool,
+    protector: Option<&SocketProtector>,
+) -> Option<String> {
+    use socket2::{Domain, Protocol, SockRef, Socket, Type};
+
+    let dst: std::net::SocketAddr = dst.parse().ok()?;
+    let domain = if ipv4 { Domain::IPV4 } else { Domain::IPV6 };
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).ok()?;
+    // Bind to the physical interface first, so under a full tunnel the route lookup below resolves
+    // against the real egress rather than our own TUN.
+    if let Some(p) = protector {
+        p.protect(SockRef::from(&sock), ipv4).ok()?;
+    }
+    sock.connect(&dst.into()).ok()?;
+    Some(sock.local_addr().ok()?.as_socket()?.ip().to_string())
+}
+
 /// Best-effort discovery of the host's physical egress interface (e.g. `en0`), for pinning the
 /// proxy's own sockets so they bypass our tunnel.
 ///
@@ -298,6 +363,44 @@ mod tests {
             err.kind(),
             io::ErrorKind::NotFound | io::ErrorKind::Unsupported
         ));
+    }
+
+    #[test]
+    fn the_egress_fingerprint_is_stable_across_calls() {
+        // The property the strategy cache depends on: two calls with the network unchanged must agree,
+        // or every dial would look like a network change and re-run a verified search. Deliberately not
+        // asserting a value — that would hardcode whatever this host is attached to, and would fail in
+        // a network-less CI container for a reason unrelated to the code.
+        assert_eq!(egress_fingerprint(None), egress_fingerprint(None));
+    }
+
+    #[test]
+    fn the_fingerprint_names_both_families_when_it_reports_anything() {
+        // `None` (no route at all) is legitimate — a sandboxed runner has no egress — but a `Some` must
+        // be well-formed, because it is used as a cache key and a mangled one would silently partition
+        // the cache.
+        if let Some(fp) = egress_fingerprint(None) {
+            assert!(fp.starts_with("v4="), "{fp}");
+            assert!(fp.contains(" v6="), "{fp}");
+            assert!(
+                fp != "v4=- v6=-",
+                "an all-absent fingerprint should have been None, not a key: {fp}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_probe_sends_nothing_and_needs_no_reachable_peer() {
+        // The destinations are RFC 5737 / RFC 3849 documentation prefixes that route nowhere. If this
+        // ever blocked or errored on unreachability, the fingerprint would be unusable on exactly the
+        // restricted networks that matter most — so pin that a probe to one returns promptly either
+        // way. (UDP connect only does route lookup; it transmits nothing.)
+        let started = std::time::Instant::now();
+        let _ = egress_source_addr("192.0.2.1:9", true, None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "route lookup must not wait on the network"
+        );
     }
 
     #[cfg(unix)]

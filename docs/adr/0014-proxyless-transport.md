@@ -116,10 +116,26 @@ their traffic must not get this instead without asking for it.
   transport now self-heals in-band: a resolver that is unreachable, times out, or answers unbelievably
   drops the strategy, while NXDOMAIN for a mistyped host does not. That is what made the eviction
   reverted during this PR's review safe to reinstate.
-  **Still open: proactive re-selection.** The in-band signal only fires once a flow has already
-  failed, so the first flow after a network change still pays for a dead strategy. A control handle
-  carrying an explicit network-change notification would re-select before that, and remains worth doing
-  on its own merits — `from_config` returning trait objects with no handle is the obstacle.
+  **Then: the memo outlived the network it was proven on.** Re-reading the code turned up that this was
+  never one missing signal but three separate gaps, and the two cheap ones were the load-bearing ones:
+  `chosen` was a process-lifetime memo with no network awareness, short-circuiting *before*
+  `find_cached` (which is network-aware) ever ran; and `[transport.proxyless] network` was a static
+  config string, so the "per-network cache" had exactly one slot and nothing could have noticed a change
+  even if told. Both are now closed: the memo carries the key it was selected under, and an unset
+  `network` is measured per dial from the host's egress (`net::egress_fingerprint` — the source address
+  the kernel picks for off-link traffic, per family, via a UDP `connect` that transmits nothing). A
+  stale memo now self-invalidates on the next dial instead of after a failed flow. Setting `network`
+  explicitly still pins one slot, for fixed-location deployments.
+
+  **Still open: the push signal.** The above is still *pull* — it costs one comparison rather than one
+  failed flow, but re-selection begins during the first dial on the new network rather than before it.
+  An explicit network-change notification would start it earlier. Note the previously recorded obstacle
+  ("`from_config` returns trait objects with no handle") is **not** accurate:
+  `from_config_with_control` already returns an `Option<Arc<dyn PoolControl>>` that `fd_tunnel`
+  registers for the server-selection UI, so this is extending an established precedent rather than
+  inventing a mechanism. Worth weighing against what it buys: Android already restarts the tunnel on an
+  underlying-network change (`SparkVpnService.kt`), which rebuilds transports anyway, so the real
+  exposure is Apple and desktop, neither of which has a network watcher today.
 - ~~**IPv6-only networks cannot complete strategy selection.**~~ **Done upstream** (flint#17). The pool
   entries carry `v6()` addresses and the probe races A/AAAA, so selection completes where only IPv6
   egress exists. One caveat worth keeping: for Quad9 the v6 entry is the *service* address

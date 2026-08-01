@@ -80,6 +80,14 @@ fn outranks(prev: Option<&io::Error>, next: &io::Error) -> bool {
 /// success would then vouch for a strategy that does not work.
 const DEFAULT_TEST_DOMAINS: [&str; 2] = ["example.com", "www.wikipedia.org"];
 
+/// A memoized strategy together with the network key it was selected under.
+struct Chosen {
+    /// The value [`ProxylessTransport::network_key`] returned when this was chosen. A later dial that
+    /// computes a different key is on a different network, and this pairing no longer vouches for it.
+    network: String,
+    strategy: Strategy,
+}
+
 /// Reaches destinations directly using a searched-for `(resolver, shaping)` pairing.
 pub struct ProxylessTransport {
     space: Space,
@@ -88,7 +96,12 @@ pub struct ProxylessTransport {
     test_domains: Vec<String>,
     /// The chosen pairing, memoized after the first search. A search costs verified handshakes, so it
     /// must not run per flow.
-    chosen: RwLock<Option<Strategy>>,
+    ///
+    /// Stored **with the network it was chosen on**, because a strategy is only meaningful for one
+    /// network: the resolver that worked at home may be blocked at a café, and the shaping that was
+    /// required there may be unnecessary here. Keeping the two together in one `Option` makes the pair
+    /// atomic — as separate fields they could be read half-updated.
+    chosen: RwLock<Option<Chosen>>,
     /// Single-flight gate around selection. Without it, every flow that arrives before the first search
     /// finishes sees `chosen == None` and starts its own — a thundering herd on the most expensive
     /// operation this transport has, precisely at startup when flows arrive together. A `tokio` mutex
@@ -159,7 +172,11 @@ impl ProxylessTransport {
     /// Double-checked so the steady state is a read lock and no search: the lock is released before any
     /// `.await`, never held across one.
     async fn strategy(&self) -> io::Result<Strategy> {
-        if let Some(chosen) = self.peek() {
+        // Computed once and threaded through, so the memo check, the cache lookup, and what gets stored
+        // all describe the same network. Recomputing at each step could straddle a network change and
+        // file a strategy under a key it was not proven on.
+        let key = self.network_key();
+        if let Some(chosen) = self.peek(key.as_deref()) {
             return Ok(chosen);
         }
         // Single-flight: only one search runs even if many flows arrive together. flint's cache records
@@ -167,41 +184,65 @@ impl ProxylessTransport {
         // dial would run its own full search.
         let _gate = self.selecting.lock().await;
         // Re-check under the gate — whoever held it before us may already have chosen.
-        if let Some(chosen) = self.peek() {
+        if let Some(chosen) = self.peek(key.as_deref()) {
             return Ok(chosen);
         }
-        let chosen = flint_proxyless::find_cached(
-            &self.space,
-            &self.test_domains,
-            &self.cache,
-            &self.network,
-        )
-        .await
-        .map_err(|e| {
-            io::Error::other(format!(
-                "no proxyless strategy reaches the test domains: {e}"
-            ))
-        })?;
+        let cache_key = key.clone().unwrap_or_default();
+        let chosen =
+            flint_proxyless::find_cached(&self.space, &self.test_domains, &self.cache, &cache_key)
+                .await
+                .map_err(|e| {
+                    io::Error::other(format!(
+                        "no proxyless strategy reaches the test domains: {e}"
+                    ))
+                })?;
         tracing::info!(
             resolver = %chosen.resolver.name,
             shaped = !chosen.policy.wire.is_noop(),
+            network = %cache_key,
             "selected proxyless strategy"
         );
-        *self.chosen.write().unwrap_or_else(|e| e.into_inner()) = Some(chosen.clone());
+        *self.chosen.write().unwrap_or_else(|e| e.into_inner()) = Some(Chosen {
+            network: cache_key,
+            strategy: chosen.clone(),
+        });
         Ok(chosen)
     }
 
-    /// The memoized pairing, if a search has already succeeded. Clones out so the guard drops here.
+    /// The key identifying the current network, for both the memo and flint's per-network cache.
+    ///
+    /// An explicit `[transport.proxyless] network` wins: a deployment that pins it is asserting the
+    /// network identity itself, and probing would only second-guess it. Otherwise this is measured
+    /// from the host's current egress ([`crate::net::egress_fingerprint`]).
+    ///
+    /// `None` means the probe could not tell — no route, typically because the host is momentarily
+    /// offline. That is deliberately *not* the same as "a new network": treating ignorance as change
+    /// would throw away a good strategy every time connectivity blipped, and the next dial is going to
+    /// fail on its own merits anyway.
+    fn network_key(&self) -> Option<String> {
+        if !self.network.is_empty() {
+            return Some(self.network.clone());
+        }
+        crate::net::egress_fingerprint(self.protector.as_ref())
+    }
+
+    /// The memoized pairing, if a search has already succeeded **on the network `key` names**. Clones
+    /// out so the guard drops here.
+    ///
+    /// A `key` of `None` means the network could not be determined, and the memo is returned unchanged:
+    /// see [`Self::network_key`] for why ignorance must not count as change.
     ///
     /// Poisoning is recovered rather than treated as a miss (spark's convention — see
     /// [`crate::transport::fronted_meek`]). Treating it as a miss would be quietly expensive here: a
     /// panic anywhere else holding this lock would send *every* subsequent flow back through a full
     /// verified search, forever.
-    fn peek(&self) -> Option<Strategy> {
-        self.chosen
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+    fn peek(&self, key: Option<&str>) -> Option<Strategy> {
+        let guard = self.chosen.read().unwrap_or_else(|e| e.into_inner());
+        let chosen = guard.as_ref()?;
+        match key {
+            Some(k) if k != chosen.network => None,
+            _ => Some(chosen.strategy.clone()),
+        }
     }
 
     /// Record a resolution failure against the chosen strategy, dropping it only if the error indicts
@@ -234,7 +275,7 @@ impl ProxylessTransport {
         {
             let mut current = self.chosen.write().unwrap_or_else(|e| e.into_inner());
             match current.as_ref() {
-                Some(s) if s.resolver.name == chosen.resolver.name => *current = None,
+                Some(c) if c.strategy.resolver.name == chosen.resolver.name => *current = None,
                 _ => return,
             }
         }
@@ -254,8 +295,18 @@ impl ProxylessTransport {
     /// Drop the memoized pairing so the next dial searches again — for a caller that has observed the
     /// current one failing.
     pub fn forget(&self) {
+        // Forget the cache entry for whichever network the memo was actually filed under, not for
+        // whatever the probe reports now — after a network change those differ, and clearing by the
+        // current key would evict an innocent entry while leaving the failing one in place. Falls back
+        // to the current key when there is no memo to read the network from.
+        let key = {
+            let guard = self.chosen.read().unwrap_or_else(|e| e.into_inner());
+            guard.as_ref().map(|c| c.network.clone())
+        };
         *self.chosen.write().unwrap_or_else(|e| e.into_inner()) = None;
-        self.cache.forget(&self.network);
+        if let Some(key) = key.or_else(|| self.network_key()) {
+            self.cache.forget(&key);
+        }
     }
 
     /// Connect to `addr` and shape the opening write. The application's own bytes — its ClientHello
@@ -494,15 +545,22 @@ mod tests {
         }
     }
 
-    /// A transport with a strategy already chosen, so eviction is observable.
+    /// The network the test memo is filed under. Any fixed string works; what matters is that the
+    /// assertions name it explicitly rather than depending on whatever network the test host is on.
+    const TEST_NETWORK: &str = "v4=198.51.100.7 v6=-";
+
+    /// A transport with a strategy already chosen on [`TEST_NETWORK`], so eviction is observable.
     fn with_chosen() -> (ProxylessTransport, flint_proxyless::Strategy) {
         let t = ProxylessTransport::new(&cfg(), WirePlan::default(), None).unwrap();
-        let chosen = flint_proxyless::Strategy {
+        let strategy = flint_proxyless::Strategy {
             resolver: flint_dns::default_pool()[0].clone(),
             policy: Default::default(),
         };
-        *t.chosen.write().unwrap() = Some(chosen.clone());
-        (t, chosen)
+        *t.chosen.write().unwrap() = Some(Chosen {
+            network: TEST_NETWORK.to_string(),
+            strategy: strategy.clone(),
+        });
+        (t, strategy)
     }
 
     #[test]
@@ -516,7 +574,7 @@ mod tests {
             &io::Error::new(io::ErrorKind::NotFound, "NXDOMAIN"),
         );
         assert!(
-            t.peek().is_some(),
+            t.peek(Some(TEST_NETWORK)).is_some(),
             "a nonexistent domain must not evict the strategy"
         );
     }
@@ -531,7 +589,7 @@ mod tests {
             let (t, chosen) = with_chosen();
             t.note_resolution_failure(&chosen, &io::Error::new(kind, "resolver is gone"));
             assert!(
-                t.peek().is_none(),
+                t.peek(Some(TEST_NETWORK)).is_none(),
                 "{kind:?} should drop the strategy and force a re-select"
             );
         }
@@ -555,7 +613,7 @@ mod tests {
             &io::Error::new(io::ErrorKind::TimedOut, "old resolver"),
         );
         assert!(
-            t.peek().is_some(),
+            t.peek(Some(TEST_NETWORK)).is_some(),
             "a failure from a superseded strategy must not evict the current one"
         );
     }
@@ -592,14 +650,73 @@ mod tests {
             &chosen,
             &io::Error::new(io::ErrorKind::InvalidInput, "unencodable name"),
         );
-        assert!(t.peek().is_some(), "a caller-input error blames nobody");
+        assert!(
+            t.peek(Some(TEST_NETWORK)).is_some(),
+            "a caller-input error blames nobody"
+        );
     }
 
     #[test]
     fn forget_clears_the_memoized_strategy() {
         let t = ProxylessTransport::new(&cfg(), WirePlan::default(), None).unwrap();
-        assert!(t.peek().is_none(), "nothing chosen before the first dial");
+        assert!(
+            t.peek(Some(TEST_NETWORK)).is_none(),
+            "nothing chosen before the first dial"
+        );
+
+        // Actually install one, or this asserts None before and None after and proves nothing about
+        // `forget` at all.
+        let (t, _) = with_chosen();
+        assert!(t.peek(Some(TEST_NETWORK)).is_some());
         t.forget();
-        assert!(t.peek().is_none());
+        assert!(
+            t.peek(Some(TEST_NETWORK)).is_none(),
+            "forget must drop the memo"
+        );
+    }
+
+    #[test]
+    fn a_strategy_proven_on_one_network_is_not_reused_on_another() {
+        // The whole point of carrying the network with the memo. Before this, the pairing chosen on
+        // home wifi was handed to every flow on the café network for the life of the process — the
+        // resolver may be blocked there, and the shaping may be wrong for its DPI.
+        let (t, _) = with_chosen();
+        assert!(t.peek(Some(TEST_NETWORK)).is_some(), "same network reuses");
+        assert!(
+            t.peek(Some("v4=203.0.113.9 v6=-")).is_none(),
+            "a different network must force a fresh search"
+        );
+    }
+
+    #[test]
+    fn an_undeterminable_network_keeps_the_strategy_rather_than_discarding_it() {
+        // `None` is "cannot tell", which happens when the host is momentarily offline. Treating that as
+        // a change would throw away a good strategy on every connectivity blip — and the dial that
+        // follows is going to fail on its own merits regardless, so nothing is gained by re-searching.
+        let (t, _) = with_chosen();
+        assert!(
+            t.peek(None).is_some(),
+            "ignorance is not evidence of change"
+        );
+    }
+
+    #[test]
+    fn an_explicit_network_setting_overrides_the_probe() {
+        // A deployment that pins `network` is asserting the identity itself; probing would second-guess
+        // it, and on a host with no route the probe would return `None` and silently disable the
+        // pinning. Also the hook tests use to get a deterministic key.
+        let mut c = cfg();
+        c.network = "pinned-slot".to_string();
+        let t = ProxylessTransport::new(&c, WirePlan::default(), None).unwrap();
+        assert_eq!(t.network_key().as_deref(), Some("pinned-slot"));
+    }
+
+    #[test]
+    fn with_no_explicit_setting_the_key_is_measured_from_the_host() {
+        // Not asserting a specific value — that would just re-hardcode whatever this machine happens to
+        // be on. The contract is that an unset `network` stops meaning "one global slot" and starts
+        // meaning "whatever egress we actually have", including `None` on a host with no route.
+        let t = ProxylessTransport::new(&cfg(), WirePlan::default(), None).unwrap();
+        assert_eq!(t.network_key(), crate::net::egress_fingerprint(None));
     }
 }
