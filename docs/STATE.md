@@ -3255,3 +3255,24 @@ userspace 6%) is the *only* apples-to-apples number in the set, because only the
 identical byte counts; one point at 1% granularity is suggestive, not conclusive. Harness gained a
 `--udp` mode for this (`.end.sum`, not `.end.sum_received`; asserts datagrams *received* because UDP is
 open-loop and a rate check passes into a void).
+
+**2026-08-02 — The collapse is CPU-bound, which inverts where the kernel stack is worth shipping.**
+A second macOS run used a **LAN peer** (mini, ~250 Mb/s Wi-Fi) specifically to reach the
+concurrent-download regime the ~90 Mb/s droplet could not. **It did not reproduce.** Userspace held
+**0.268 Gb/s at 4 concurrent streams** — twice the 0.13 Gb/s floor measured on the droplet — with no
+degradation, and its tunnel numbers exceeded its own baseline, so the run was still link-bound. That
+bounds the floor **above 268 Mb/s on Apple silicon**. The reasoning that matters: the collapse is a
+single-dispatch-task pathology (one task running `iface.poll()` + per-socket shuffling for every
+flow), so it is **CPU-bound**, and the original 0.13 figure came from a **2-vCPU droplet**. Severity
+therefore scales inversely with CPU speed, and **the case for the kernel stack is strongest where CPUs
+are weakest** — which inverts the intuition that desktop ships first. **Android** (weak CPU,
+battery-sensitive, closest to the droplet profile) is the higher-value target and its A/B is already
+unblocked; **desktop** may never enter the regime at real link speeds, two macOS attempts having now
+failed to find it at 90 and 250 Mb/s. This does *not* say the kernel stack is worse — its CPU is
+marginally better in every comparison so far (25% vs 28% here, 5% vs 6% on UDP), and CPU is what
+matters on battery. It says **throughput is the wrong argument for a desktop flip**. Demonstrating the
+collapse on macOS would need 2.5G/10G ethernet, and may show nothing. **Also:** the harness now asserts
+`route -n get <peer>` resolves to the tun before measuring — `route add` succeeds even when something
+more specific wins, and a same-subnet LAN peer has a connected route competing with our /32, so
+without it a run could measure the direct path and label it "tunnel". It confirmed correctly on both
+LAN runs (`routing 192.168.4.25 via utun14 (confirmed)`).

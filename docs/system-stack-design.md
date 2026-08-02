@@ -379,6 +379,42 @@ the 0.0x% spread is measurement floor. CPU (5% system vs 6% userspace) is the on
 comparison in the set, because only the UDP runs moved identical byte counts; one point at 1%
 granularity is suggestive at best.
 
+### The collapse is CPU-bound, which inverts where the kernel stack is worth shipping (2026-08-02)
+
+A second macOS run used a **LAN peer** (~250 Mb/s Wi-Fi) specifically to reach the concurrent-download
+collapse regime that the ~90 Mb/s WAN droplet could not. It did not reproduce:
+
+| | baseline ↑ | baseline ↓ | tunnel ↑ | tunnel ↓ | CPU |
+|---|---|---|---|---|---|
+| userspace | 0.210 | 0.257 | 0.230 | **0.268** | 28% |
+| system | 0.228 | 0.262 | 0.219 | 0.259 | 25% |
+
+Userspace held **0.268 Gb/s at 4 concurrent streams** — twice the 0.13 Gb/s floor measured on the
+droplet — with no degradation, and its tunnel figures exceeded its own baseline, so the run was still
+link-bound. Inconclusive on whether the collapse exists on macOS, but it **bounds the floor above
+268 Mb/s on Apple silicon**.
+
+**The strategic consequence.** The collapse is a single-dispatch-task pathology: one task runs
+`iface.poll()` plus per-socket buffer shuffling for every flow, degrading super-linearly. That is
+**CPU-bound**, so its severity scales inversely with CPU speed — and the original 0.13 Gb/s figure came
+from a **2-vCPU droplet**. A fast desktop may never enter the regime at any link speed its users have.
+
+So the case for the kernel stack is **strongest where CPUs are weakest and weakest where they are
+strongest**, which inverts the intuition that desktop is where to ship it first:
+
+- **Android** — weak CPUs, battery-sensitive, closest to the droplet's profile. Highest expected
+  payoff, and its A/B is already unblocked.
+- **Desktop (macOS/Linux/Windows)** — the pathology may be unreachable in practice. Two macOS attempts
+  have now failed to find it, at 90 Mb/s and at 250 Mb/s.
+
+This does not argue the kernel stack is worse. Its CPU numbers are marginally *better* in every
+comparison so far (25% vs 28% here, 5% vs 6% on UDP), and CPU is what matters on battery. It argues
+that **throughput is the wrong reason to ship it on desktop**, and that the Android gate should be
+prioritised over any desktop default flip.
+
+Demonstrating the collapse on macOS would need a path faster than Wi-Fi — 2.5G/10G ethernet between
+two hosts. Worth doing before any desktop flip, and worth accepting it may show nothing.
+
 ### The staged default (`stack = "auto"`, 2026-08-01)
 
 `StackKind::Auto` is now the default, and `netstack::resolve_stack` is the single place the staging
