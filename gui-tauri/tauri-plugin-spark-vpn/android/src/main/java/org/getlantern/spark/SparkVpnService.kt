@@ -260,6 +260,11 @@ class SparkVpnService : VpnService() {
      * Read the persisted routing mode from `<filesDir>/routing_mode.txt` (written by SparkVpnPlugin).
      * Returns "smart"/"full" when valid, else null (native uses its default routing mode).
      */
+    private fun loadRoutingMode(): String? =
+        runCatching { File(filesDir, "routing_mode.txt").readText().trim() }
+            .getOrNull()
+            ?.takeIf { it == "smart" || it == "full" }
+
     /**
      * Which netstack terminates TCP: 1 = the kernel "system" stack, 0 = userspace (smoltcp).
      *
@@ -274,11 +279,6 @@ class SparkVpnService : VpnService() {
             .getOrNull()
             ?.let { if (it == "1") 1 else 0 }
             ?: 0
-
-    private fun loadRoutingMode(): String? =
-        runCatching { File(filesDir, "routing_mode.txt").readText().trim() }
-            .getOrNull()
-            ?.takeIf { it == "smart" || it == "full" }
 
     /** Read persisted excluded-app packages (`<filesDir>/excluded_apps.json`); empty on any error. */
     private fun loadExcludedApps(): List<String> =
@@ -382,12 +382,6 @@ class SparkVpnService : VpnService() {
         return Handler(t.looper)
     }
 
-    /**
-     * Tear down the current data path and re-establish it with the last config. Runs on the
-     * ConnectivityManager callback thread; the worker is a different thread, so the bounded join
-     * can't deadlock. Clearing `worker` BEFORE calling startTunnel is what lets the restart past
-     * startTunnel's `if (worker != null) return` guard.
-     */
     /** Rebuild the tunnel with the freshly-persisted exclusion set. Reuses restartTunnel's machinery
      *  (nativeStop → new establish() → nativeRun), so the VpnService stays authorized — no re-consent,
      *  no VPN-off flicker; only in-flight connections reset. Runs off the main thread. */
@@ -412,6 +406,12 @@ class SparkVpnService : VpnService() {
         h.postDelayed(applyRunnable, APPLY_DEBOUNCE_MS)
     }
 
+    /**
+     * Tear down the current data path and re-establish it with the last config. Runs on the
+     * ConnectivityManager callback thread; the worker is a different thread, so the bounded join
+     * can't deadlock. Clearing `worker` BEFORE calling startTunnel is what lets the restart past
+     * startTunnel's `if (worker != null) return` guard.
+     */
     @Synchronized
     private fun restartTunnel() {
         // A network callback can be queued/in-flight when the service stops (quitSafely() drains the
