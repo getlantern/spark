@@ -35,8 +35,16 @@
 #                                    [--egress IFNAME] [--port N] [--smoke]
 #
 #   --smoke   run only the preflight + a 2s transfer, then exit. Use this FIRST for --stack system:
-#             the system stack has never been exercised on macOS (its only live gate was Linux
-#             netns), so prove it carries traffic at all before trusting any numbers.
+#             prove it carries traffic at all before trusting any numbers.
+#
+#   --udp     measure the UDP datagram path instead of TCP (--udp-rate, default 20M).
+#             Worth its own mode because the two stacks handle UDP differently: the kernel "system"
+#             stack terminates TCP in the kernel but keeps UDP in userspace (sing-box calls this
+#             combination "mixed"), so a TCP-only run can pass on a build whose datagram path is
+#             entirely dead. DNS rides that path, and a tunnel that resolves nothing is useless
+#             however healthy TCP looks. Reports rate AND loss: either alone misleads.
+#             Note UDP is open-loop — iperf3 sends at --udp-rate no matter what arrives — so keep
+#             the rate under the link or you measure the wire saturating, not the stack.
 #
 # Peer setup: `iperf3 -s -p 5201` on the peer, reachable from this Mac.
 #
@@ -54,6 +62,11 @@ PEER="${PEER:-}"
 PORT="${PORT:-5201}"
 EGRESS="${EGRESS:-}"
 SMOKE=0
+UDP=0
+# UDP is an open-loop send: iperf3 blasts at this rate regardless of what gets through, so loss is
+# only meaningful when the rate sits comfortably under the link. Above it, you measure the wire
+# saturating and every stack looks broken.
+UDP_RATE="${UDP_RATE:-20M}"
 TUN_ADDR="10.7.7.1"
 TUN_PREFIX=24
 
@@ -67,7 +80,12 @@ while [[ $# -gt 0 ]]; do
     --egress)   EGRESS="$2";    shift 2 ;;
     --port)     PORT="$2";      shift 2 ;;
     --smoke)    SMOKE=1;        shift   ;;
-    -h|--help)  sed -n '2,44p' "$0"; exit 0 ;;
+    --udp)      UDP=1;          shift   ;;
+    --udp-rate) UDP_RATE="$2";  shift 2 ;;
+    # Prints the header block by *shape* rather than by line number: this range has silently
+    # drifted twice as the header grew, truncating --help mid-sentence with nothing to catch it.
+    # Emit from line 2 until the first line that is not a comment.
+    -h|--help)  awk 'NR>1 && !/^#/{exit} NR>1' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -155,6 +173,33 @@ except Exception: print(0)' "$1" 2>/dev/null || echo 0; fi
 }
 gbps() { awk -v b="$1" 'BEGIN{printf "%.3f", b/1e9}'; }
 
+# UDP's numbers live in `.end.sum`, not `.end.sum_received` — and the field that matters is
+# `lost_percent`, which has no TCP equivalent. A datagram path can be "fast" and still be useless.
+# Echoes "<mbits>|<loss%>|<jitter_ms>|<packets>"; all zeros on unreadable JSON (a stalled run).
+udp_stats() {
+  if [[ -n "$JQ" ]]; then
+    # The fallback lives in awk's END, not in a `|| echo`: when jq fails it prints nothing and exits
+    # non-zero, but awk then reads empty input and exits *0*, so the `||` never fires and the
+    # function returns an empty string instead of the zeros it promises.
+    jq -r '[((.end.sum.bits_per_second // 0)/1e6), (.end.sum.lost_percent // 0), (.end.sum.jitter_ms // 0), (.end.sum.packets // 0)] | @tsv' "$1" 2>/dev/null \
+      | awk -F'\t' '{printf "%.1f|%.2f|%.2f|%d", $1, $2, $3, $4; seen=1}
+                     END{ if (!seen) printf "0.0|0.00|0.00|0" }'
+  else
+    "$PY" -c 'import json,sys
+try:
+    s=json.load(open(sys.argv[1]))["end"]["sum"]
+    print("%.1f|%.2f|%.2f|%d" % (s.get("bits_per_second",0)/1e6, s.get("lost_percent",0), s.get("jitter_ms",0), s.get("packets",0)))
+except Exception: print("0.0|0.00|0.00|0")' "$1" 2>/dev/null || echo "0.0|0.00|0.00|0"
+  fi
+}
+
+# "<mbits> / <loss>%" — rate and loss together, because either alone misleads: a path can carry
+# the full rate while dropping a third of it, and a path can drop nothing while carrying nothing.
+udp_cell() {
+  IFS='|' read -r mb loss _ pkts <<<"$(udp_stats "$1")"
+  if [[ "${pkts:-0}" == 0 ]]; then echo "no datagrams"; else echo "$mb / $loss%"; fi
+}
+
 run_iperf() {  # $1=outfile  $2=extra-args (e.g. -R for download)
   # Guarded: a stalled direction must not hang the run. The userspace download path is exactly what
   # can stall here (§9), and an empty JSON reads back as 0 — i.e. "stalled" — so the run continues.
@@ -165,6 +210,8 @@ run_iperf() {  # $1=outfile  $2=extra-args (e.g. -R for download)
   # likely one to run this — is exactly the case that would have an empty guard.
   local out="$1" extra="${2:-}"
   set -- iperf3 -c "$PEER" -p "$PORT" -t "$DURATION" -P "$STREAMS" -J
+  # -u needs an explicit -b: iperf3's UDP default is 1 Mbit/s, which would "pass" on a dead path.
+  [[ "$UDP" == 1 ]] && set -- "$@" -u -b "$UDP_RATE"
   [[ -n "$extra" ]] && set -- "$@" "$extra"
   [[ -n "$TIMEOUT" ]] && set -- "$TIMEOUT" "$((DURATION + 25))s" "$@"
   "$@" > "$out" 2>/dev/null \
@@ -188,7 +235,11 @@ if [[ "$SMOKE" == 0 ]]; then
   B_UP="$WORKDIR/base-up.json"; B_DN="$WORKDIR/base-down.json"
   run_iperf "$B_UP"
   run_iperf "$B_DN" "-R"
-  RESULTS+=("direct-baseline|$(gbps "$(bps_received "$B_UP")")|$(gbps "$(bps_received "$B_DN")")|n/a")
+  if [[ "$UDP" == 1 ]]; then
+    RESULTS+=("direct-baseline|$(udp_cell "$B_UP")|$(udp_cell "$B_DN")|n/a")
+  else
+    RESULTS+=("direct-baseline|$(gbps "$(bps_received "$B_UP")")|$(gbps "$(bps_received "$B_DN")")|n/a")
+  fi
 fi
 
 # ---- start spark ------------------------------------------------------------
@@ -230,9 +281,13 @@ route -n add -host "$PEER" -interface "$TUN_IF" >/dev/null || die "could not add
 ROUTE_ADDED=1
 
 # ---- sanity: traffic must actually traverse the tunnel ----------------------
-echo "==> sanity check: 2s transfer through the tunnel"
+echo "==> sanity check: 2s $( [[ "$UDP" == 1 ]] && echo UDP || echo TCP ) transfer through the tunnel"
 S="$WORKDIR/sanity.json"
-if ! iperf3 -c "$PEER" -p "$PORT" -t 2 -J > "$S" 2>/dev/null; then
+# Speaks whichever protocol is under test. A TCP sanity check would report "ok" on a tunnel whose
+# datagram path is completely dead, which is the exact failure this mode exists to find.
+sanity_args=""
+[[ "$UDP" == 1 ]] && sanity_args="-u -b $UDP_RATE"
+if ! iperf3 -c "$PEER" -p "$PORT" -t 2 -J $sanity_args > "$S" 2>/dev/null; then
   echo "tunnel transfer FAILED — spark log:" >&2; cat "$LOG" >&2
   [[ "$STACK" == system ]] && cat >&2 <<'HINT'
 
@@ -244,8 +299,16 @@ system-stack: without it, selecting stack="system" fails at startup and the log 
 HINT
   exit 1
 fi
-awk -v b="$(bps_received "$S")" 'BEGIN{ if (b+0 <= 0) { print "tunnel carried 0 bits — aborting"; exit 1 } }'
-echo "    ok — $(gbps "$(bps_received "$S")") Gb/s over 2s"
+if [[ "$UDP" == 1 ]]; then
+  IFS='|' read -r s_mb s_loss s_jit s_pkts <<<"$(udp_stats "$S")"
+  # Datagrams *received* is the assertion. Rate alone would pass on a path that sends into a void,
+  # since UDP is open-loop and iperf3 will happily report its own send rate.
+  awk -v p="${s_pkts:-0}" 'BEGIN{ if (p+0 <= 0) { print "tunnel carried no datagrams — aborting"; exit 1 } }'
+  echo "    ok — ${s_mb} Mb/s, ${s_loss}% loss, ${s_jit} ms jitter, ${s_pkts} datagrams over 2s"
+else
+  awk -v b="$(bps_received "$S")" 'BEGIN{ if (b+0 <= 0) { print "tunnel carried 0 bits — aborting"; exit 1 } }'
+  echo "    ok — $(gbps "$(bps_received "$S")") Gb/s over 2s"
+fi
 
 if [[ "$SMOKE" == 1 ]]; then
   echo
@@ -263,13 +326,23 @@ run_iperf "$T_UP"; run_iperf "$T_DN" "-R"
 w1=$(date +%s); c1=$(cpu_secs)
 CPU=$(awk -v a="${c0:-0}" -v b="${c1:-0}" -v w0="$w0" -v w1="$w1" \
       'BEGIN{ d=w1-w0; if (d<=0) { print "n/a"; exit } printf "%.0f%%", (b-a)/d*100 }')
-RESULTS+=("$LABEL|$(gbps "$(bps_received "$T_UP")")|$(gbps "$(bps_received "$T_DN")")|$CPU")
+if [[ "$UDP" == 1 ]]; then
+  RESULTS+=("$LABEL|$(udp_cell "$T_UP")|$(udp_cell "$T_DN")|$CPU")
+else
+  RESULTS+=("$LABEL|$(gbps "$(bps_received "$T_UP")")|$(gbps "$(bps_received "$T_DN")")|$CPU")
+fi
 
 # ---- report -----------------------------------------------------------------
 echo
-printf "%-18s %12s %12s %10s\n" "config" "up (Gb/s)" "down (Gb/s)" "spark CPU"
-printf "%-18s %12s %12s %10s\n" "------------------" "------------" "------------" "----------"
-for r in "${RESULTS[@]}"; do IFS='|' read -r l u d c <<<"$r"; printf "%-18s %12s %12s %10s\n" "$l" "$u" "$d" "$c"; done
+if [[ "$UDP" == 1 ]]; then
+  printf "%-18s %20s %20s %10s\n" "config" "up (Mb/s / loss)" "down (Mb/s / loss)" "spark CPU"
+  printf "%-18s %20s %20s %10s\n" "------------------" "--------------------" "--------------------" "----------"
+  for r in "${RESULTS[@]}"; do IFS='|' read -r l u d c <<<"$r"; printf "%-18s %20s %20s %10s\n" "$l" "$u" "$d" "$c"; done
+else
+  printf "%-18s %12s %12s %10s\n" "config" "up (Gb/s)" "down (Gb/s)" "spark CPU"
+  printf "%-18s %12s %12s %10s\n" "------------------" "------------" "------------" "----------"
+  for r in "${RESULTS[@]}"; do IFS='|' read -r l u d c <<<"$r"; printf "%-18s %12s %12s %10s\n" "$l" "$u" "$d" "$c"; done
+fi
 echo
 cat <<'NOTE'
 Reading this:
