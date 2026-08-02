@@ -280,6 +280,17 @@ echo "    spark TUN = $TUN_IF (pid $SPARK_PID)"
 route -n add -host "$PEER" -interface "$TUN_IF" >/dev/null || die "could not add the host route"
 ROUTE_ADDED=1
 
+# Assert the kernel actually forwards the peer through the TUN. Adding a route reports success even
+# when something more specific already wins, and a peer on this machine's own subnet has a connected
+# route competing with our /32 — so without this check a run can measure the DIRECT path and label
+# the numbers "tunnel". That is the same class of silent-wrong-answer as the hairpin guard: not a
+# crash, just plausible figures for the wrong thing.
+VIA=$(route -n get "$PEER" 2>/dev/null | awk '/interface:/{print $2}')
+[[ "$VIA" == "$TUN_IF" ]] || die "the peer still routes via '${VIA:-unknown}', not $TUN_IF — every
+       number below would be the direct path wearing a tunnel label. A peer on this machine's own
+       subnet is the usual cause; try one that is off-subnet."
+echo "    routing $PEER via $TUN_IF (confirmed)"
+
 # ---- sanity: traffic must actually traverse the tunnel ----------------------
 echo "==> sanity check: 2s $( [[ "$UDP" == 1 ]] && echo UDP || echo TCP ) transfer through the tunnel"
 S="$WORKDIR/sanity.json"
