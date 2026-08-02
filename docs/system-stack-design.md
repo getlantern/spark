@@ -172,7 +172,7 @@ stack:
 | Platform | Feasibility | Notes |
 |---|---|---|
 | **Linux** | Good | The userspace-NAT approach needs no `TPROXY`/iptables (sing-tun does the rewrite itself). Runs in the privileged tunnel process. |
-| **macOS** | Good | utun + userspace NAT; runs in the M10 system extension that owns the utun. |
+| **macOS** | **Verified working 2026-08-02** | utun + userspace NAT; runs in the M10 system extension that owns the utun. TCP and UDP both carry traffic (see §9). Default still userspace: the collapse advantage is unmeasured there, not disproven. |
 | **Windows** | More work | sing-tun keeps a *separate* `stack_system_windows.go` — bind/socket semantics differ. |
 | **Android** | **Viable** (corrected 2026-06-17) | Android's `VpnService` hands the app a **Linux tun fd**; sing-tun adopts it (`tun_linux.go New()`, `FileDescriptor != 0` branch) with no platform restriction, and **sing-box runs `stack: system` on Android** this way. spark's android build just doesn't *enable* the `system-stack` feature yet — a choice, not a limit. Android-specific plumbing: use `VpnService.protect()` for upstream-socket protection (vs. `IP_UNICAST_IF`). This means the collapse fix could reach Android, not only desktop. |
 | **iOS** | Keep userspace | `NEPacketTunnelFlow` (Network framework), **not** a Linux tun fd and no kernel tun — the redirect-to-local-listener mechanism doesn't apply. sing-box runs gVisor on iOS with shrunken TCP buffers (`stack_gvisor_tcpbuf_ios.go`). smoltcp stays the iOS path. |
@@ -337,6 +337,47 @@ What it can and cannot answer:
 If the system stack fails its smoke test on macOS, the first suspect is packet re-entry: redirected
 packets arrive on the TUN destined to a *local* address, which on Linux required `rp_filter=0`. macOS
 has no `rp_filter`, so this is genuinely unknown territory rather than a known fix.
+
+### macOS: first execution, and what it did and did not settle (2026-08-02)
+
+The system stack ran on macOS for the first time, against a disposable DigitalOcean peer over a
+~90 Mb/s WAN link (`bench/macos-throughput.sh`). Userspace was run first in every case as a control,
+so a system-arm failure could be attributed to the stack rather than the harness.
+
+| run | result |
+|---|---|
+| TCP smoke, both stacks | pass |
+| TCP, 4 streams x 20 s each direction | stable, no stalls, no zeros; tunnel held 93–95% of its own baseline |
+| UDP smoke, system | 20.0 Mb/s, 0.03% loss, 3457 datagrams |
+| UDP, 2 streams x 15 s each direction | both stacks carried the full 40.0 Mb/s; loss 0.01–0.03% everywhere, including the direct baselines |
+
+**Settled.** The stack functions on macOS. The feared failure — redirected packets re-entering the TUN
+destined to a *local* address, the analogue of the Linux `rp_filter` problem — did not occur. The
+mixed stack's datagram path works: the pump handles UDP correctly alongside its TCP rewriting, which
+is the surface DNS rides on. Teardown was clean on every run.
+
+**Not settled, and this is the part that matters for the default.** The link is ~90 Mb/s; the
+concurrent-download collapse takes userspace to ~130 Mb/s. **The wire is slower than the pathology**,
+so userspace looked perfectly healthy at 4 streams here — not because the collapse is absent on macOS,
+but because this setup cannot reach the regime where it appears. We have therefore shown that both
+stacks work on macOS and *not* that the system stack is better there.
+
+That is the precise reason the macOS default stays userspace: not that the kernel stack is
+unproven-broken, but that its **advantage is unmeasured on this platform**. Flipping now would trade a
+working default for another working default with no demonstrated benefit. Closing it needs a peer fast
+enough to enter the collapse regime — a LAN host or a colocated high-bandwidth path, not a WAN droplet.
+
+Also unexercised: multi-hour soak, sleep/wake, and mid-session network change — the failure modes that
+actually bite a VPN and that no iperf3 run reaches.
+
+Caveats on the numbers themselves. The TCP runs carry a ~20% noise floor: the two baselines disagreed
+by that much, and userspace's tunnel upload (0.103 Gb/s) *exceeded* its own baseline (0.088), which is
+impossible and is the cleanest proof the link rather than the stack was the constraint. The UDP runs
+are far better controlled — open-loop at a fixed sub-link rate, so the send rate is identical by
+construction — but even there the system tunnel's downlink loss came in *below* its own baseline, so
+the 0.0x% spread is measurement floor. CPU (5% system vs 6% userspace) is the only apples-to-apples
+comparison in the set, because only the UDP runs moved identical byte counts; one point at 1%
+granularity is suggestive at best.
 
 ### The staged default (`stack = "auto"`, 2026-08-01)
 
