@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use spark_core::caps;
-use spark_core::config::{Config, StackKind};
+use spark_core::config::Config;
 use spark_ipc::{
     negotiate, Capabilities, Details, ErrorCode, KillSwitchMode, LogLine, NetStack,
     ProtocolVersion, Push, Request, RequestPayload, Response, ResponsePayload, TransportKind,
@@ -79,10 +79,16 @@ pub(crate) fn selected_transport(config: &Config) -> TransportKind {
 }
 
 /// Which netstack the config selects.
+///
+/// Reports the **resolved** stack, not the configured one: with `stack = "auto"` the answer depends
+/// on per-platform staging, and a status surface that echoed the request would tell an operator
+/// "auto" while something specific was actually running. Shares
+/// [`resolve_stack`](spark_core::netstack::resolve_stack) with the build path so the two cannot drift.
 pub(crate) fn netstack_of(config: &Config) -> NetStack {
-    match config.tun.stack {
-        StackKind::System => NetStack::System,
-        StackKind::Userspace => NetStack::Userspace,
+    use spark_core::netstack::{resolve_stack, Resolved};
+    match resolve_stack(config.tun.stack) {
+        Resolved::System => NetStack::System,
+        Resolved::Userspace => NetStack::Userspace,
     }
 }
 

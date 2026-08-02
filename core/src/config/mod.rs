@@ -279,8 +279,19 @@ pub struct KillSwitchConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StackKind {
-    /// Userspace smoltcp stack — cross-platform, the default.
+    /// Let spark pick the best stack this platform has been *proven* on — the default.
+    ///
+    /// The intent is that the kernel stack becomes the default everywhere it works, since it removes
+    /// the concurrent-download collapse (`docs/system-stack-design.md` §9) and is what sing-box
+    /// defaults to on every platform. Getting there is staged per platform rather than flipped at
+    /// once, because each one has a distinct open gate; [`crate::netstack::resolve_stack`] is the
+    /// single place that records which, and flipping one is a one-line change there.
+    ///
+    /// Today this resolves to [`Userspace`](Self::Userspace) on every platform. Choosing `system`
+    /// explicitly still works and is how you test ahead of a gate.
     #[default]
+    Auto,
+    /// Userspace smoltcp stack — cross-platform, and what `auto` currently selects.
     Userspace,
     /// Kernel-TCP "system" stack: a NAT redirect gateway to a local kernel listener (sing-box's
     /// `system`). Works wherever there is a kernel tun fd — Linux, macOS, and **Android** via

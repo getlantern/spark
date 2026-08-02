@@ -200,16 +200,19 @@ class SparkVpnService : VpnService() {
         // the user's saved split-tunnel + routing mode; null means "no override" (leniently handled).
         val splitTunnel = loadSplitTunnel()
         val routingMode = loadRoutingMode()
+        val systemStack = loadSystemStack()
         // The "lantern-api" sentinel is non-empty but still means self-fetch (like null/empty).
         val mode = if (config.isNullOrEmpty() || config == "lantern-api") "self-fetch" else "explicit-config"
-        Log.i(TAG, "tunnel established; handing fd=$fd to native (mtu=$MTU, mode=$mode, routing=$routingMode)")
+        Log.i(TAG, "tunnel established; handing fd=$fd to native (mtu=$MTU, mode=$mode, routing=$routingMode, systemStack=$systemStack)")
         // Mark connecting BEFORE starting the worker so the readiness waiter below can't observe a
         // stale ready/down state from a prior connect.
         SparkBridge.nativeMarkConnecting()
         worker = thread(name = "spark-tunnel") {
-            // systemStack = 0 (userspace): the cross-platform default, with no kernel-redirect/gateway
-            // setup; production Android may pass 1 to use the kernel "system" stack for throughput.
-            val rc = SparkBridge.nativeRun(fd, MTU, addr, TUN_PREFIX, 0, config, dataDir, splitTunnel, routingMode)
+            // systemStack: 0 = userspace (smoltcp), 1 = the kernel-TCP "system" stack. Defaults to 0
+            // because the system stack has never been exercised on a real device — see
+            // docs/android-system-stack-gate.md, which is the A/B this switch exists to make runnable.
+            // The payoff is removing the concurrent-download collapse; the gate is proving it here.
+            val rc = SparkBridge.nativeRun(fd, MTU, addr, TUN_PREFIX, systemStack, config, dataDir, splitTunnel, routingMode)
             Log.i(TAG, "nativeRun returned $rc")
         }
         // Readiness gate (the Android analog of the Apple NE's). A VpnService has no completion
@@ -261,6 +264,21 @@ class SparkVpnService : VpnService() {
         runCatching { File(filesDir, "routing_mode.txt").readText().trim() }
             .getOrNull()
             ?.takeIf { it == "smart" || it == "full" }
+
+    /**
+     * Which netstack terminates TCP: 1 = the kernel "system" stack, 0 = userspace (smoltcp).
+     *
+     * Read from `<filesDir>/system_stack.txt` so the on-device A/B in
+     * docs/android-system-stack-gate.md can be run without rebuilding the app — write "1", restart
+     * the tunnel, measure, write "0", compare. Absent, unreadable, or anything other than "1" means
+     * userspace, so a corrupted file degrades to the shipping default rather than to a data path
+     * that has never run on a device.
+     */
+    private fun loadSystemStack(): Int =
+        runCatching { File(filesDir, "system_stack.txt").readText().trim() }
+            .getOrNull()
+            ?.let { if (it == "1") 1 else 0 }
+            ?: 0
 
     /** Read persisted excluded-app packages (`<filesDir>/excluded_apps.json`); empty on any error. */
     private fun loadExcludedApps(): List<String> =
@@ -364,12 +382,6 @@ class SparkVpnService : VpnService() {
         return Handler(t.looper)
     }
 
-    /**
-     * Tear down the current data path and re-establish it with the last config. Runs on the
-     * ConnectivityManager callback thread; the worker is a different thread, so the bounded join
-     * can't deadlock. Clearing `worker` BEFORE calling startTunnel is what lets the restart past
-     * startTunnel's `if (worker != null) return` guard.
-     */
     /** Rebuild the tunnel with the freshly-persisted exclusion set. Reuses restartTunnel's machinery
      *  (nativeStop → new establish() → nativeRun), so the VpnService stays authorized — no re-consent,
      *  no VPN-off flicker; only in-flight connections reset. Runs off the main thread. */
@@ -394,6 +406,12 @@ class SparkVpnService : VpnService() {
         h.postDelayed(applyRunnable, APPLY_DEBOUNCE_MS)
     }
 
+    /**
+     * Tear down the current data path and re-establish it with the last config. Runs on the
+     * ConnectivityManager callback thread; the worker is a different thread, so the bounded join
+     * can't deadlock. Clearing `worker` BEFORE calling startTunnel is what lets the restart past
+     * startTunnel's `if (worker != null) return` guard.
+     */
     @Synchronized
     private fun restartTunnel() {
         // A network callback can be queued/in-flight when the service stops (quitSafely() drains the
