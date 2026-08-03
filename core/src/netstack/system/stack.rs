@@ -90,6 +90,14 @@ impl SystemNetstack {
             ));
         }
 
+        // Log the redirect's coordinates at startup. Without this a failure is indistinguishable
+        // from "the stack never ran" — which is exactly how the Android gate presented.
+        if let Some((ip, port)) = v4 {
+            debug!(server = %ip, gateway = %crate::netstack::system::pump::next_addr(IpAddr::V4(ip)), listener_port = port, "system stack: v4 redirect ready");
+        }
+        if let Some((ip, port)) = v6 {
+            debug!(server = %ip, listener_port = port, "system stack: v6 redirect ready");
+        }
         let gateway = Arc::new(Mutex::new(Gateway::new(v4, v6)));
         // UDP surface: the pump extracts inbound datagrams into `udp_in_tx` (proxy reads
         // `udp_in_rx`); the proxy's replies arrive on `udp_reply_rx` for the pump to inject.
@@ -171,6 +179,10 @@ async fn pump_loop(
 ) {
     let mut buf = vec![0u8; mtu.max(1500)];
     let mut reply_buf = Vec::with_capacity(mtu.max(1500));
+    // Trace the opening packets only: enough to locate a blackhole, bounded so a working tunnel does
+    // not spam. Counts every branch, so "no TCP seen" and "TCP seen but never written" look different.
+    let mut traced = 0u32;
+    const TRACE_FIRST: u32 = 20;
     loop {
         tokio::select! {
             r = tun.recv(&mut buf) => {
@@ -182,13 +194,24 @@ async fn pump_loop(
                         break;
                     }
                 };
-                match rewrite::ip_protocol(&buf[..n]) {
+                let proto = rewrite::ip_protocol(&buf[..n]);
+                if traced < TRACE_FIRST {
+                    traced += 1;
+                    debug!(n = traced, len = n, proto = ?proto, "system stack: rx packet");
+                }
+                match proto {
                     Some(6) => {
                         let action = lock(&gateway).process_tcp(&mut buf[..n], Instant::now());
+                        if traced <= TRACE_FIRST {
+                            debug!(action = ?action, "system stack: tcp rewrite decision");
+                        }
                         if action == PumpAction::WriteBack {
                             if let Err(e) = tun.send(&buf[..n]).await {
                                 warn!(error = %e, "system stack: TUN send failed; stopping pump");
                                 break;
+                            }
+                            if traced <= TRACE_FIRST {
+                                debug!("system stack: wrote rewritten packet back to TUN");
                             }
                         }
                     }
@@ -243,6 +266,7 @@ async fn accept_loop(
                 break;
             }
         };
+        debug!(%peer, "system stack: kernel listener accepted a redirected connection");
         let resolved = lock(&gateway).resolve_accept(peer, Instant::now());
         match resolved {
             Some((client, target)) => {

@@ -171,8 +171,13 @@ pub enum Resolved {
 ///   floor. The collapse is CPU-bound (one dispatch task for every flow), so a fast desktop may never
 ///   reach the regime — which makes throughput the wrong argument for flipping *any* desktop default,
 ///   and makes Android the higher-value target. See `docs/system-stack-design.md`.
-/// - **Android** — compiled in and never executed on a device. `docs/android-system-stack-gate.md`
-///   is the runbook; the host app now passes the flag through, so the A/B is runnable.
+/// - **Android** — **executed 2026-08-03, and it does not work**: the stack initializes cleanly (arm
+///   confirmed in logcat, zero smoltcp lines, no panic, `tun0` up) and then forwards nothing — 100%
+///   packet loss, while userspace on the same device and peer carried 58–62 Mb/s minutes earlier.
+///   `rp_filter` is already `0` on every interface there, so the documented Linux precondition is
+///   **not** the cause, and an unprivileged app cannot change it regardless. This is a real bug in
+///   the redirect mechanism on Android, not a gate awaiting a measurement. See
+///   `docs/android-system-stack-gate.md` §0a.
 /// - **Windows** — not merely unverified: sing-tun keeps a *separate* `stack_system_windows.go`
 ///   because bind/socket semantics differ, so this likely needs its own code path rather than a
 ///   flag flip (`docs/system-stack-design.md` §7).

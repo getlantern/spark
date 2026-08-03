@@ -14,6 +14,92 @@
 - **Prereqs in-tree:** the system stack is built + feature-enabled for Android and the aarch64 build
   is verified (`cargo ndk … check/clippy` clean). What's missing is the host app + on-device run.
 
+## 0a. EXECUTED 2026-08-03 — the stack initializes and does not forward
+
+**Result: the system stack is non-functional on Android.** It comes up cleanly, claims the tunnel, and
+silently drops every packet. Run on a Xiaomi 25078RA3EA (HyperOS 2.0 / MIUI V816, Android 15,
+arm64-v8a), against a public iperf3 peer, with the app built debuggable so `run-as` could set the
+switch.
+
+| observation | reading |
+|---|---|
+| `systemStack=1` in the `tunnel established` line | the requested arm actually started |
+| **zero** `smoltcp` log lines | userspace genuinely was not running — this was the kernel path |
+| `tun0` up with `10.0.0.2/24` | the interface came up |
+| **zero** panics, no spark error | it did not crash and did not fall back |
+| `ping 1.1.1.1` → 100% loss; all TCP timed out | nothing crosses the data path |
+| `pool re-probed healthy=4 failing=0` | spark's control plane is fine — its own sockets bypass the tunnel |
+
+The userspace arm on the same device, same peer, minutes earlier: 58.7 Mb/s down single-stream,
+62.3 Mb/s at 4 streams, UDP 19.8 Mb/s at 0.043% loss. So the device, the peer and the harness were all
+working; only the kernel arm is dead.
+
+**`rp_filter` is NOT the cause.** The obvious suspect — the documented Linux precondition, where
+redirected packets re-enter the TUN destined to a *local* address and strict reverse-path filtering
+drops them — is already satisfied: `rp_filter` reads `0` on `all`, `default`, `tun0` and `wlan0`. An
+unprivileged app cannot write it anyway (`Permission denied`), so that lever would not have been
+available had it been the cause. Something else about Android's networking breaks the
+redirect-to-local-listener mechanism.
+
+**This downgrades §0's claim below.** That section argued the approach was "known-good on Android"
+because sing-box ships `stack: system` there, so the gate was "validating our implementation, not
+whether the technique is possible". The technique may well be possible; **our implementation does not
+work**, and the analogy did not predict that. Treat Android as *unvalidated and currently broken*
+rather than *viable*.
+
+Probable side effect worth knowing: while the kernel arm was selected the app's UI froze and the
+server-locations list came up empty. Unproven, but a data path that accepts the tun fd and then
+blackholes everything would starve the config fetch and produce exactly that.
+
+## 0b. Root cause localized (2026-08-03) — netfilter drops the redirected packet
+
+Instrumenting the pump narrowed the failure to one stage. Every step of *our* mechanism works; the
+kernel simply never hands the packet to the listener.
+
+```
+system stack: v4 redirect ready  server=10.0.0.2 gateway=10.0.0.3 listener_port=33207   ✅
+system stack: rx packet          20 packets read from the tun fd                         ✅
+system stack: tcp rewrite decision  action=WriteBack  (x60)                              ✅
+system stack: wrote rewritten packet back to TUN     (x52, later 131)                    ✅
+system stack: kernel listener accepted …             0                                   ❌
+```
+
+What is *not* the cause, each ruled out by measurement:
+
+- **The listener.** It is bound (`tcp 10.0.0.2:33207 … LISTEN`) and works: connecting to it from the
+  device shell succeeded and produced an accept. (That test proves only the listener, not the path —
+  a locally-originated connection routes over `lo` and never touches `tun0`.)
+- **Our writes not reaching the kernel.** `tun0`'s *Receive* counter in `/proc/net/dev` climbs with
+  every write, so the packets are entering the stack.
+- **Routing.** `ip route get 10.0.0.2 from 10.0.0.3 iif tun0` returns
+  `local 10.0.0.2 … dev lo table local` — the kernel would deliver locally. `10.0.0.2` is in the local
+  table as expected.
+- **Reverse-path filtering.** `rp_filter` is `0` on `all`, `default`, `tun0`, `wlan0`.
+  `accept_local`, `route_localnet` and `log_martians` are all `0` and none applies (our source
+  `10.0.0.3` is not a local address).
+- **IP-layer discards.** `InDiscards=0`, `InHdrErrors=0`, `InUnknownProtos=0`; `InAddrErrors` moved by
+  2 across the whole session, far short of the 131 writes.
+- **TCP-layer rejection.** `PassiveOpens`, `InErrs`, `ListenDrops`, `ListenOverflows` and
+  `TCPBacklogDrop` were all flat across a traffic drive. The packets never reach TCP input at all.
+
+Enter the kernel, route to local delivery, never arrive at TCP, and increment no IP or TCP drop
+counter — that signature points at **netfilter**, whose drops are invisible to those counters. Android's
+`netd` installs extensive `INPUT` chains, including VPN-specific ones. The rules cannot be read on a
+production device (`iptables -L` requires root), so the exact rule is unconfirmed.
+
+### Candidate fixes, none yet tried
+
+1. **Bind the listener into the VPN network.** Spark is the VPN app, so by default its sockets are
+   marked to *bypass* the tunnel — which it needs, to reach exit servers. A listener meant to receive
+   traffic *arriving on* the tunnel may need the opposite marking. Android exposes this through
+   `Network.bindSocket` / `ConnectivityManager.setNetworkForSocket`, i.e. Java-side plumbing the Rust
+   listener does not currently have.
+2. **Redirect to a non-tun local address** (e.g. the Wi-Fi address) instead of the tun's own address,
+   in case the drop is specific to traffic addressed to the VPN interface.
+3. **Check what sing-tun actually does on Android.** §0 assumed the technique is known-good there
+   because sing-box ships `stack: system`. That assumption has now cost a full gate; it should be
+   verified by reading sing-tun's Android path rather than inferred.
+
 ## 0. Why this is lower-risk than it looks
 
 sing-box ships `stack: system` on Android using the *same* redirect-to-local-listener mechanism (it
