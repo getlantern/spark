@@ -286,6 +286,9 @@ approve sysext, Connect → IP changes. (No standing infra remains on the Lanter
   0.19s; `https://example.com` → HTTP 200 — curl → utun → netstack → direct forwarder → upstream.
   Diagnostic file-trace scaffolding removed from `SparkApp.swift` after the gate (clean source
   rebuilds green). **M10 macOS is DONE; iOS device gate still pending (NE doesn't run on the sim).**
+  **[SUPERSEDED 2026-08-03 — iOS ships on TestFlight and is in regular real-world use; see the
+  2026-07-23 entry. The "device gate" referred to a formal on-device verification step, not to
+  whether the platform works. Do not read this line as current iOS status.]**
 - **M11 (additional transports) STARTED 2026-06-16 — TLS-backend decision + AnyTLS chunk 1.**
   After a deep TLS-backend investigation (rustls can't mimic Chrome — maintainers refuse + no
   SessionID API; budget relaxed to ~10 MB; evaluated rustls/boring/Cronet/OS-native/curl-impersonate;
@@ -2748,12 +2751,14 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   for `aarch64-linux-android` + `Tun::from_fd`; `libspark_android.so` (cdylib) + `core::android`;
   `platforms/android/demo` `SparkVpnService` app — `adb shell` HTTP→204 through tun0→spark, VPN
   CONNECTED+VALIDATED, core forwarding in logcat)
-- [~] M10 (Apple — **s1–s2 done: architecture decided (fd-trick + packet-object fallback, C ABI,
-  unified provider); `core::fd_tunnel` shared with Android; `platforms/apple` staticlib +
-  `SparkCore.xcframework`; unified Swift `PacketTunnelProvider` + `FdResolver` compile-verified
-  (`swift build`).** Live gate BLOCKED on provisioning — needs a team-`ACZRKC3LQ9` profile for the
-  NE entitlement [human step]; macOS app-extension path + iOS device gate pending.)
-  [ ] M11 (transports)
+- [x] M10 (Apple — **DONE. macOS ships signed + notarised; iOS ships on TestFlight and is in
+  regular use (confirmed 2026-08-03).** Architecture: fd-trick + packet-object fallback, C ABI,
+  unified provider; `core::fd_tunnel` shared with Android; `platforms/apple` staticlib +
+  `SparkCore.xcframework`; unified Swift `PacketTunnelProvider` + `FdResolver`. The provisioning
+  blocker and the "iOS device gate pending" note recorded earlier are both resolved.)
+- [x] M11 (transports — **DONE.** AnyTLS (Chrome fingerprint profile, JA4-verified in CI),
+  Shadowsocks, Hysteria2, DNS tunnel, fronted meek, samizdat, BIP324 and the WASM dynamic-transport
+  slot are all built and behind the `Transport` trait, dialled through the scoring pool.)
 
 ---
 
