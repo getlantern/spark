@@ -3276,3 +3276,57 @@ collapse on macOS would need 2.5G/10G ethernet, and may show nothing. **Also:** 
 more specific wins, and a same-subnet LAN peer has a connected route competing with our /32, so
 without it a run could measure the direct path and label it "tunnel". It confirmed correctly on both
 LAN runs (`routing 192.168.4.25 via utun14 (confirmed)`).
+
+**2026-08-03 — Android gate EXECUTED: the system stack initializes and forwards nothing.** First
+on-device run, and it is a negative result worth more than the throughput number we went looking for.
+Device: Xiaomi 25078RA3EA, HyperOS 2.0 / MIUI V816, Android 15, arm64-v8a. **Evidence the kernel arm
+really was live:** `systemStack=1` in the `tunnel established` line, **zero** `smoltcp` log lines (the
+userspace stack logs `smoltcp::socket::tcp` continuously and did so on the other arm), `tun0` up with
+`10.0.0.2/24`, zero panics. **Evidence it forwards nothing:** `ping 1.1.1.1` 100% loss, every TCP
+connect timed out. **Evidence the rest was healthy:** spark's control plane kept working the whole time
+(`pool re-probed healthy=4 failing=0`) because its own sockets bypass the tunnel, and the userspace arm
+on the same device and peer minutes earlier did 58.7 Mb/s down single / 62.3 at 4 streams / UDP 19.8 at
+0.043% loss. **`rp_filter` is NOT the cause** — it reads `0` on `all`, `default`, `tun0`, `wlan0`, and
+an unprivileged app gets `Permission denied` writing it anyway. So the documented Linux precondition is
+already satisfied and something else in the redirect-to-local-listener mechanism breaks on Android.
+**This downgrades the runbook's central assumption:** §0 argued the approach was "known-good on
+Android" because sing-box ships `stack: system` there, so the gate was only "validating our
+implementation". The technique may be fine; **our implementation is broken**, and the analogy did not
+predict it. Probable side effect: the app UI froze and the locations list emptied while the kernel arm
+was selected — consistent with a data path that accepts the tun fd then blackholes everything, starving
+the config fetch. **Getting here required four environmental workarounds worth not rediscovering:**
+HyperOS refuses every adb install path (`INSTALL_FAILED_USER_RESTRICTED`) and its "Install via USB"
+toggle demands a SIM — sideloading from the device's own file manager bypasses it; the device has no
+eSIM stack (`android.hardware.telephony.euicc` absent) so that is not a way around the SIM; a debuggable
+build is mandatory (`run-as` is the only way to write `<filesDir>/system_stack.txt`) and
+`tauri android build` produces release-only, while `gradlew assembleDebug` cannot work standalone
+because the Rust task calls `android-studio-script`, which needs a live CLI dev-session WebSocket — the
+way through is `tauri android build` with `isDebuggable = true` temporarily set on the release
+buildType, then signing the unsigned output with the debug keystore via `apksigner`; and the VPN routes
+`default dev tun0` with **no LAN exception**, so a LAN peer is unreachable while tunnelled and the test
+must use a public peer. Also: the Kotlin log tag is `SparkVpn`, not `SparkVpnService`.
+
+**2026-08-03 — FIXED: the Android system stack forwards. It was a missing device binding.** Root
+cause: spark bound the redirect listener to the tun's **address** but never to the tun **device**.
+sing-tun binds both (`stack_system.go`, `ForwarderBindInterface` → `SO_BINDTOIFINDEX` falling back to
+`SO_BINDTODEVICE`); every other part of its redirect matches ours exactly — same `inet4NextAddress` as
+synthetic gateway, same rewrite to `inet4Address:tcpPort`. Address-only binding is sufficient on macOS,
+which is why this only ever showed on Android: the packets reached the kernel and routed to local
+delivery, and the socket simply did not match them. **The fix must use `SO_BINDTODEVICE`
+(socket2 `bind_device`), NOT the `IP_UNICAST_IF` that `SocketProtector` uses** — the latter only steers
+*outbound* packets, so using it here would be a silent no-op. The device is located by matching the
+configured address against `getifaddrs`, because `VpnService` supplies a bare fd with no queryable
+name (`getifaddrs` was already in the graph via tun-rs; only its target gate was widened). **Settled in
+passing: an unprivileged Android app CAN set `SO_BINDTODEVICE`** — flagged beforehand as a risk that
+might have made the fix impossible. Result on the same device/peer: `listener accepted` 0 → 8, TCP
+53.3 Mb/s where every connection previously timed out. **New open defect the fix exposed:** UDP loss is
+**13%** (1373/10361 datagrams) against userspace's **0.043%** on the identical path — ~300×, and
+invisible until TCP started working. Both arms hand UDP to the proxy's datagram path, so the difference
+is in how the system stack's single pump extracts and injects datagrams alongside its TCP rewriting.
+**This should block any Android default flip.** TCP itself is comparable (system 53.3/58.1 vs userspace
+58.7/62.3, single/4-stream), and the collapse question stays unanswered on Android for the same reason
+as macOS — the WAN path caps near 60 Mb/s, below the ~130 Mb/s collapse floor, and userspace's 4-stream
+figure again beat its own single-stream. **Method note worth keeping:** the pump tracing added for this
+(`redirect ready` → `rx packet` → `tcp rewrite decision` → `wrote rewritten packet` → `listener
+accepted`) is what turned "it forwards nothing" into a one-stage diagnosis in a single run; silent
+success at every stage is what made it unattributable for a day.

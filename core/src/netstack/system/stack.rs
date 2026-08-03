@@ -90,6 +90,14 @@ impl SystemNetstack {
             ));
         }
 
+        // Log the redirect's coordinates at startup. Without this a failure is indistinguishable
+        // from "the stack never ran" — which is exactly how the Android gate presented.
+        if let Some((ip, port)) = v4 {
+            debug!(server = %ip, gateway = %crate::netstack::system::pump::next_addr(IpAddr::V4(ip)), listener_port = port, "system stack: v4 redirect ready");
+        }
+        if let Some((ip, port)) = v6 {
+            debug!(server = %ip, listener_port = port, "system stack: v6 redirect ready");
+        }
         let gateway = Arc::new(Mutex::new(Gateway::new(v4, v6)));
         // UDP surface: the pump extracts inbound datagrams into `udp_in_tx` (proxy reads
         // `udp_in_rx`); the proxy's replies arrive on `udp_reply_rx` for the pump to inject.
@@ -148,6 +156,37 @@ impl Netstack for SystemNetstack {
 fn bind_listener(ip: IpAddr) -> io::Result<(TcpListener, u16)> {
     let std = std::net::TcpListener::bind(SocketAddr::new(ip, 0))?;
     std.set_nonblocking(true)?;
+    // Associate the listener with the TUN device itself, not just its address.
+    //
+    // Binding to the address alone is enough on macOS, where the Android gate showed it is not:
+    // packets the pump injected reached the kernel and routed to local delivery, yet never arrived
+    // at this socket. sing-tun binds its equivalent forwarder to the tun (`ForwarderBindInterface`
+    // → `SO_BINDTOIFINDEX`, falling back to `SO_BINDTODEVICE`), which we did not.
+    //
+    // `SO_BINDTODEVICE`, not the `IP_UNICAST_IF` that `SocketProtector` uses: that one only steers
+    // outbound packets, and what this socket needs is to match *inbound* ones.
+    //
+    // Best-effort on purpose. It may be refused where the process lacks the capability, and the
+    // stack is no worse off than before if it is — so log the outcome and carry on rather than
+    // failing a tunnel over a hardening step.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        match crate::net::interface_name_for_addr(ip) {
+            Some(name) => {
+                match crate::net::bind_socket_to_device(socket2::SockRef::from(&std), &name) {
+                    Ok(()) => {
+                        debug!(interface = %name, %ip, "system stack: listener bound to the TUN device")
+                    }
+                    Err(e) => {
+                        warn!(interface = %name, %ip, error = %e, "system stack: could not bind the listener to the TUN device; inbound redirect may not be delivered")
+                    }
+                }
+            }
+            None => {
+                warn!(%ip, "system stack: no interface found holding the listener address; cannot bind to device")
+            }
+        }
+    }
     let port = std.local_addr()?.port();
     Ok((TcpListener::from_std(std)?, port))
 }
@@ -171,6 +210,10 @@ async fn pump_loop(
 ) {
     let mut buf = vec![0u8; mtu.max(1500)];
     let mut reply_buf = Vec::with_capacity(mtu.max(1500));
+    // Trace the opening packets only: enough to locate a blackhole, bounded so a working tunnel does
+    // not spam. Counts every branch, so "no TCP seen" and "TCP seen but never written" look different.
+    let mut traced = 0u32;
+    const TRACE_FIRST: u32 = 20;
     loop {
         tokio::select! {
             r = tun.recv(&mut buf) => {
@@ -182,13 +225,29 @@ async fn pump_loop(
                         break;
                     }
                 };
-                match rewrite::ip_protocol(&buf[..n]) {
+                let proto = rewrite::ip_protocol(&buf[..n]);
+                // One decision per packet, shared by every trace below. Testing `traced` again
+                // further down does not work: it stops incrementing at the cap, so a `<=` there
+                // stays true forever and the later traces never quiet down — which is exactly what
+                // happened, visible as 737 rewrite lines against 40 rx lines in the first capture.
+                let tracing_this = traced < TRACE_FIRST;
+                if tracing_this {
+                    traced += 1;
+                    debug!(n = traced, len = n, proto = ?proto, "system stack: rx packet");
+                }
+                match proto {
                     Some(6) => {
                         let action = lock(&gateway).process_tcp(&mut buf[..n], Instant::now());
+                        if tracing_this {
+                            debug!(action = ?action, "system stack: tcp rewrite decision");
+                        }
                         if action == PumpAction::WriteBack {
                             if let Err(e) = tun.send(&buf[..n]).await {
                                 warn!(error = %e, "system stack: TUN send failed; stopping pump");
                                 break;
+                            }
+                            if tracing_this {
+                                debug!("system stack: wrote rewritten packet back to TUN");
                             }
                         }
                     }
@@ -243,6 +302,7 @@ async fn accept_loop(
                 break;
             }
         };
+        debug!(%peer, "system stack: kernel listener accepted a redirected connection");
         let resolved = lock(&gateway).resolve_accept(peer, Instant::now());
         match resolved {
             Some((client, target)) => {

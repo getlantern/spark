@@ -182,7 +182,7 @@ impl Gateway {
 }
 
 /// The next address (`ip + 1`), wrapping within the family. The gateway address is `server + 1`.
-fn next_addr(ip: IpAddr) -> IpAddr {
+pub(super) fn next_addr(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(a) => IpAddr::V4(Ipv4Addr::from(u32::from(a).wrapping_add(1))),
         IpAddr::V6(a) => IpAddr::V6(Ipv6Addr::from(u128::from(a).wrapping_add(1))),
