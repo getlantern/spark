@@ -226,14 +226,19 @@ async fn pump_loop(
                     }
                 };
                 let proto = rewrite::ip_protocol(&buf[..n]);
-                if traced < TRACE_FIRST {
+                // One decision per packet, shared by every trace below. Testing `traced` again
+                // further down does not work: it stops incrementing at the cap, so a `<=` there
+                // stays true forever and the later traces never quiet down — which is exactly what
+                // happened, visible as 737 rewrite lines against 40 rx lines in the first capture.
+                let tracing_this = traced < TRACE_FIRST;
+                if tracing_this {
                     traced += 1;
                     debug!(n = traced, len = n, proto = ?proto, "system stack: rx packet");
                 }
                 match proto {
                     Some(6) => {
                         let action = lock(&gateway).process_tcp(&mut buf[..n], Instant::now());
-                        if traced <= TRACE_FIRST {
+                        if tracing_this {
                             debug!(action = ?action, "system stack: tcp rewrite decision");
                         }
                         if action == PumpAction::WriteBack {
@@ -241,7 +246,7 @@ async fn pump_loop(
                                 warn!(error = %e, "system stack: TUN send failed; stopping pump");
                                 break;
                             }
-                            if traced <= TRACE_FIRST {
+                            if tracing_this {
                                 debug!("system stack: wrote rewritten packet back to TUN");
                             }
                         }
