@@ -112,6 +112,36 @@ fn egress_source_addr(
     Some(sock.local_addr().ok()?.as_socket()?.ip().to_string())
 }
 
+/// The interface that holds `addr`, by name. Used to bind the system stack's redirect listener to
+/// the TUN itself.
+///
+/// Linux/Android only, because that is where it is needed and where `SO_BINDTODEVICE` exists. On
+/// Android the TUN comes from `VpnService` as a bare fd with no queryable name, so the only way to
+/// identify it is to find whichever interface carries the address we were told to use.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn interface_name_for_addr(addr: std::net::IpAddr) -> Option<String> {
+    use getifaddrs::Address;
+    getifaddrs::getifaddrs()
+        .ok()?
+        .find(|i| match (&i.address, addr) {
+            (Address::V4(a), std::net::IpAddr::V4(want)) => a.address == want,
+            (Address::V6(a), std::net::IpAddr::V6(want)) => a.address == want,
+            _ => false,
+        })
+        .map(|i| i.name)
+}
+
+/// Bind `sock` to `interface` for **both** directions (`SO_BINDTODEVICE`).
+///
+/// Deliberately not [`SocketProtector::protect`], which uses `IP_UNICAST_IF` and only steers
+/// *outbound* packets. A listener needs the socket associated with the device so that packets
+/// *arriving* on it match — the distinction that matters for the system stack's redirect, where the
+/// whole point is receiving traffic the pump injected into the TUN.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn bind_socket_to_device(sock: socket2::SockRef<'_>, interface: &str) -> io::Result<()> {
+    sock.bind_device(Some(interface.as_bytes()))
+}
+
 /// Best-effort discovery of the host's physical egress interface (e.g. `en0`), for pinning the
 /// proxy's own sockets so they bypass our tunnel.
 ///

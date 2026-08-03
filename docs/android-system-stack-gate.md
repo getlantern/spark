@@ -16,7 +16,7 @@
 
 ## 0a. EXECUTED 2026-08-03 — the stack initializes and does not forward
 
-**Result: the system stack is non-functional on Android.** It comes up cleanly, claims the tunnel, and
+**Result (superseded by §0c — since FIXED): the system stack was non-functional on Android.** It comes up cleanly, claims the tunnel, and
 silently drops every packet. Run on a Xiaomi 25078RA3EA (HyperOS 2.0 / MIUI V816, Android 15,
 arm64-v8a), against a public iperf3 peer, with the app built debuggable so `run-as` could set the
 switch.
@@ -50,6 +50,55 @@ rather than *viable*.
 Probable side effect worth knowing: while the kernel arm was selected the app's UI froze and the
 server-locations list came up empty. Unproven, but a data path that accepts the tun fd and then
 blackholes everything would starve the config fetch and produce exactly that.
+
+## 0c. FIXED 2026-08-03 — the listener was never bound to the TUN device
+
+**Root cause: spark bound the redirect listener to the tun's *address* but not to the tun *device*.**
+
+sing-tun binds both (`stack_system.go`, `ForwarderBindInterface` → `control.BindToInterface0` →
+`SO_BINDTOIFINDEX`, falling back to `SO_BINDTODEVICE`). Everything else in its redirect matches ours
+exactly — same `inet4NextAddress` as the synthetic gateway, same rewrite to `inet4Address:tcpPort`.
+The device binding was the only difference, and on Android it is load-bearing: packets reached the
+kernel and routed to local delivery, but the socket did not match them until it was associated with
+`tun0`.
+
+Address-only binding is sufficient on macOS, which is why this never showed up there.
+
+The fix uses `SO_BINDTODEVICE` (socket2's `bind_device`), **not** the `IP_UNICAST_IF` that
+`SocketProtector` uses — that one only steers *outbound* packets, while a listener needs the socket
+associated with the device so *inbound* packets match. Getting that backwards would be a silent no-op.
+The device is found by address, because `VpnService` hands over a bare fd with no queryable name.
+
+Result on the same device and peer:
+
+```
+system stack: listener bound to the TUN device  interface=tun0 ip=10.0.0.2
+listener accepted   8            (was 0)
+TCP through tunnel  53.3 Mb/s    (was: every connection timed out)
+```
+
+Settled in passing: **an unprivileged Android app can set `SO_BINDTODEVICE`** — flagged beforehand as
+a risk that might make the fix impossible. It is permitted here (HyperOS 2.0, Android 15).
+
+### Measurements, kernel arm vs userspace (same device, same peer, WAN-capped ~60 Mb/s)
+
+| | userspace | system |
+|---|---|---|
+| TCP, 1 stream ↓ | 58.7 Mb/s | 53.3 Mb/s |
+| TCP, 4 streams ↓ | 62.3 Mb/s | 58.1 Mb/s |
+| UDP 20 Mb/s offered | 19.8 Mb/s, **0.043%** loss | 17.0 Mb/s, **13%** loss |
+| pump errors / stalls | — | none |
+
+TCP is comparable within the noise of a WAN path through a proxy exit. **UDP is not: 13% loss against
+0.043% is a ~300× difference**, 1373 datagrams of 10361. That is a new defect, not a measurement
+artifact to wave away — and it was invisible until the TCP path started working. The mixed stack hands
+UDP to the proxy's datagram path in both arms, so the difference is in how the system stack's single
+pump extracts and injects datagrams alongside its TCP rewriting. **Open, and it should block any
+Android default flip.**
+
+The collapse question remains unanswered here for the same reason as macOS: the WAN path caps at
+~60 Mb/s, below the ~130 Mb/s collapse floor. Userspace at 4 streams (62.3) beat its own single-stream
+(58.7), the usual signature of being capped by something other than the stack.
 
 ## 0b. Root cause localized (2026-08-03) — netfilter drops the redirected packet
 

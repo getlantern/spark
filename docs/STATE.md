@@ -3305,3 +3305,28 @@ way through is `tauri android build` with `isDebuggable = true` temporarily set 
 buildType, then signing the unsigned output with the debug keystore via `apksigner`; and the VPN routes
 `default dev tun0` with **no LAN exception**, so a LAN peer is unreachable while tunnelled and the test
 must use a public peer. Also: the Kotlin log tag is `SparkVpn`, not `SparkVpnService`.
+
+**2026-08-03 — FIXED: the Android system stack forwards. It was a missing device binding.** Root
+cause: spark bound the redirect listener to the tun's **address** but never to the tun **device**.
+sing-tun binds both (`stack_system.go`, `ForwarderBindInterface` → `SO_BINDTOIFINDEX` falling back to
+`SO_BINDTODEVICE`); every other part of its redirect matches ours exactly — same `inet4NextAddress` as
+synthetic gateway, same rewrite to `inet4Address:tcpPort`. Address-only binding is sufficient on macOS,
+which is why this only ever showed on Android: the packets reached the kernel and routed to local
+delivery, and the socket simply did not match them. **The fix must use `SO_BINDTODEVICE`
+(socket2 `bind_device`), NOT the `IP_UNICAST_IF` that `SocketProtector` uses** — the latter only steers
+*outbound* packets, so using it here would be a silent no-op. The device is located by matching the
+configured address against `getifaddrs`, because `VpnService` supplies a bare fd with no queryable
+name (`getifaddrs` was already in the graph via tun-rs; only its target gate was widened). **Settled in
+passing: an unprivileged Android app CAN set `SO_BINDTODEVICE`** — flagged beforehand as a risk that
+might have made the fix impossible. Result on the same device/peer: `listener accepted` 0 → 8, TCP
+53.3 Mb/s where every connection previously timed out. **New open defect the fix exposed:** UDP loss is
+**13%** (1373/10361 datagrams) against userspace's **0.043%** on the identical path — ~300×, and
+invisible until TCP started working. Both arms hand UDP to the proxy's datagram path, so the difference
+is in how the system stack's single pump extracts and injects datagrams alongside its TCP rewriting.
+**This should block any Android default flip.** TCP itself is comparable (system 53.3/58.1 vs userspace
+58.7/62.3, single/4-stream), and the collapse question stays unanswered on Android for the same reason
+as macOS — the WAN path caps near 60 Mb/s, below the ~130 Mb/s collapse floor, and userspace's 4-stream
+figure again beat its own single-stream. **Method note worth keeping:** the pump tracing added for this
+(`redirect ready` → `rx packet` → `tcp rewrite decision` → `wrote rewritten packet` → `listener
+accepted`) is what turned "it forwards nothing" into a one-stage diagnosis in a single run; silent
+success at every stage is what made it unattributable for a day.

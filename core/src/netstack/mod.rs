@@ -176,8 +176,10 @@ pub enum Resolved {
 ///   packet loss, while userspace on the same device and peer carried 58–62 Mb/s minutes earlier.
 ///   `rp_filter` is already `0` on every interface there, so the documented Linux precondition is
 ///   **not** the cause, and an unprivileged app cannot change it regardless. This is a real bug in
-///   the redirect mechanism on Android, not a gate awaiting a measurement. See
-///   `docs/android-system-stack-gate.md` §0a.
+///   the redirect mechanism on Android — **since fixed**: the listener was bound to the tun's
+///   address but not the tun *device*, which macOS tolerates and Android does not. TCP now carries
+///   traffic there. Still not flipped: UDP loss measured 13% against userspace's 0.043%, an open
+///   defect. See `docs/android-system-stack-gate.md` §0c.
 /// - **Windows** — not merely unverified: sing-tun keeps a *separate* `stack_system_windows.go`
 ///   because bind/socket semantics differ, so this likely needs its own code path rather than a
 ///   flag flip (`docs/system-stack-design.md` §7).

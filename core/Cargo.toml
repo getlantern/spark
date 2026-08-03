@@ -110,6 +110,14 @@ dns-tunnel-core = { path = "../dns-tunnel-core", optional = true }
 windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 getifaddrs = "0.6"
 
+# Same crate, now also on Linux/Android: the system stack must find which interface holds the TUN
+# address so it can bind its redirect listener to that device. On Android the TUN arrives from
+# VpnService as a bare fd with no queryable name, so matching by address is the only handle. Not a
+# new dependency — it is already in the graph via tun-rs and used on Windows above; this only links
+# it for another target, in preference to hand-rolling the `libc::getifaddrs` FFI a third time.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+getifaddrs = "0.6"
+
 [dev-dependencies]
 # Assembles the inline WebAssembly-text fixture for the wasm-transport round-trip tests.
 wat.workspace = true

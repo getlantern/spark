@@ -156,6 +156,37 @@ impl Netstack for SystemNetstack {
 fn bind_listener(ip: IpAddr) -> io::Result<(TcpListener, u16)> {
     let std = std::net::TcpListener::bind(SocketAddr::new(ip, 0))?;
     std.set_nonblocking(true)?;
+    // Associate the listener with the TUN device itself, not just its address.
+    //
+    // Binding to the address alone is enough on macOS, where the Android gate showed it is not:
+    // packets the pump injected reached the kernel and routed to local delivery, yet never arrived
+    // at this socket. sing-tun binds its equivalent forwarder to the tun (`ForwarderBindInterface`
+    // → `SO_BINDTOIFINDEX`, falling back to `SO_BINDTODEVICE`), which we did not.
+    //
+    // `SO_BINDTODEVICE`, not the `IP_UNICAST_IF` that `SocketProtector` uses: that one only steers
+    // outbound packets, and what this socket needs is to match *inbound* ones.
+    //
+    // Best-effort on purpose. It may be refused where the process lacks the capability, and the
+    // stack is no worse off than before if it is — so log the outcome and carry on rather than
+    // failing a tunnel over a hardening step.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        match crate::net::interface_name_for_addr(ip) {
+            Some(name) => {
+                match crate::net::bind_socket_to_device(socket2::SockRef::from(&std), &name) {
+                    Ok(()) => {
+                        debug!(interface = %name, %ip, "system stack: listener bound to the TUN device")
+                    }
+                    Err(e) => {
+                        warn!(interface = %name, %ip, error = %e, "system stack: could not bind the listener to the TUN device; inbound redirect may not be delivered")
+                    }
+                }
+            }
+            None => {
+                warn!(%ip, "system stack: no interface found holding the listener address; cannot bind to device")
+            }
+        }
+    }
     let port = std.local_addr()?.port();
     Ok((TcpListener::from_std(std)?, port))
 }
