@@ -3228,3 +3228,51 @@ recorded blocker "`from_config` returns trait objects with no control handle" is
 for the server-selection UI, so a push signal would extend an existing precedent. Also note Android
 already restarts the tunnel on an underlying-network change (`SparkVpnService.kt`), so the remaining
 push-signal exposure is Apple and desktop, neither of which watches the network at all.
+
+**2026-08-02 — The system stack runs on macOS. First execution ever; the default does not move.**
+Ran `bench/macos-throughput.sh` against a disposable DigitalOcean peer (~90 Mb/s WAN), userspace first
+as a control in every case so a system-arm failure would be attributable to the stack and not the
+harness. **TCP:** smoke passed both stacks; 4 streams × 20 s each direction stayed stable with no
+stalls, tunnel holding 93–95% of its own baseline. **UDP:** smoke 20.0 Mb/s / 0.03% loss / 3457
+datagrams; 2 streams × 15 s each direction carried the full 40.0 Mb/s on both stacks with 0.01–0.03%
+loss *including the direct baselines*. The feared macOS failure — redirected packets re-entering the
+TUN destined to a local address, the analogue of Linux `rp_filter` — **did not occur**, and teardown
+was clean every run. The UDP result matters specifically because the system stack is *mixed* (kernel
+TCP, userspace UDP): it proves the pump handles datagrams correctly alongside its TCP rewriting, which
+is the surface DNS rides on. **Why the default still does not move, and it is not the reason the other
+platforms have:** the collapse takes userspace to ~130 Mb/s and this link tops out near 90, so the wire
+is slower than the pathology. Userspace looked healthy at 4 streams because the setup cannot reach the
+regime where it fails. So we have shown both stacks *work* on macOS and **not** that the kernel stack is
+*better* there — flipping would swap a working default for another working default with no measured
+benefit. Closing it needs a peer fast enough to enter the collapse regime: a LAN host, not a WAN
+droplet. Also untouched by any of this: multi-hour soak, sleep/wake, mid-session network change.
+**Measurement caveats worth not re-deriving.** TCP runs carry a ~20% noise floor — the two baselines
+disagreed by that much, and userspace's tunnel upload (0.103 Gb/s) *exceeded* its own baseline (0.088),
+which is impossible and proves the link was the constraint. UDP is far better controlled (open-loop at
+a fixed sub-link rate, identical send rate by construction), but even there the system tunnel's
+downlink loss came in below its own baseline, so 0.0x% is measurement floor. CPU (system 5% vs
+userspace 6%) is the *only* apples-to-apples number in the set, because only the UDP runs moved
+identical byte counts; one point at 1% granularity is suggestive, not conclusive. Harness gained a
+`--udp` mode for this (`.end.sum`, not `.end.sum_received`; asserts datagrams *received* because UDP is
+open-loop and a rate check passes into a void).
+
+**2026-08-02 — The collapse is CPU-bound, which inverts where the kernel stack is worth shipping.**
+A second macOS run used a **LAN peer** (mini, ~250 Mb/s Wi-Fi) specifically to reach the
+concurrent-download regime the ~90 Mb/s droplet could not. **It did not reproduce.** Userspace held
+**0.268 Gb/s at 4 concurrent streams** — twice the 0.13 Gb/s floor measured on the droplet — with no
+degradation, and its tunnel numbers exceeded its own baseline, so the run was still link-bound. That
+bounds the floor **above 268 Mb/s on Apple silicon**. The reasoning that matters: the collapse is a
+single-dispatch-task pathology (one task running `iface.poll()` + per-socket shuffling for every
+flow), so it is **CPU-bound**, and the original 0.13 figure came from a **2-vCPU droplet**. Severity
+therefore scales inversely with CPU speed, and **the case for the kernel stack is strongest where CPUs
+are weakest** — which inverts the intuition that desktop ships first. **Android** (weak CPU,
+battery-sensitive, closest to the droplet profile) is the higher-value target and its A/B is already
+unblocked; **desktop** may never enter the regime at real link speeds, two macOS attempts having now
+failed to find it at 90 and 250 Mb/s. This does *not* say the kernel stack is worse — its CPU is
+marginally better in every comparison so far (25% vs 28% here, 5% vs 6% on UDP), and CPU is what
+matters on battery. It says **throughput is the wrong argument for a desktop flip**. Demonstrating the
+collapse on macOS would need 2.5G/10G ethernet, and may show nothing. **Also:** the harness now asserts
+`route -n get <peer>` resolves to the tun before measuring — `route add` succeeds even when something
+more specific wins, and a same-subnet LAN peer has a connected route competing with our /32, so
+without it a run could measure the direct path and label it "tunnel". It confirmed correctly on both
+LAN runs (`routing 192.168.4.25 via utun14 (confirmed)`).

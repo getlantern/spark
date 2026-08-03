@@ -162,8 +162,15 @@ pub enum Resolved {
 ///   strict reverse-path filtering drops, and most distributions ship `rp_filter` enabled. Flipping
 ///   needs spark to either relax it for the redirected path or detect that it is already relaxed —
 ///   auto-selecting today would break the tunnel on a default install.
-/// - **macOS** — never executed. `bench/macos-throughput.sh --smoke` is the gate; it exists and has
-///   not been run.
+/// - **macOS** — **runs correctly** (verified 2026-08-02: TCP and UDP, smoke and sustained
+///   multi-flow, against a WAN peer). Still userspace by default for a different reason than the
+///   others: the link was ~90 Mb/s and the collapse takes userspace to ~130 Mb/s, so the wire was
+///   slower than the pathology. Both stacks therefore looked equally healthy, and the kernel stack's
+///   *advantage* is unmeasured on macOS rather than disproven. A second run over a ~250 Mb/s LAN peer
+///   still did not reproduce it: userspace held 0.268 Gb/s at 4 streams, twice the droplet's 0.13
+///   floor. The collapse is CPU-bound (one dispatch task for every flow), so a fast desktop may never
+///   reach the regime — which makes throughput the wrong argument for flipping *any* desktop default,
+///   and makes Android the higher-value target. See `docs/system-stack-design.md`.
 /// - **Android** — compiled in and never executed on a device. `docs/android-system-stack-gate.md`
 ///   is the runbook; the host app now passes the flag through, so the A/B is runnable.
 /// - **Windows** — not merely unverified: sing-tun keeps a *separate* `stack_system_windows.go`

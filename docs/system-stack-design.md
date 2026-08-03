@@ -172,7 +172,7 @@ stack:
 | Platform | Feasibility | Notes |
 |---|---|---|
 | **Linux** | Good | The userspace-NAT approach needs no `TPROXY`/iptables (sing-tun does the rewrite itself). Runs in the privileged tunnel process. |
-| **macOS** | Good | utun + userspace NAT; runs in the M10 system extension that owns the utun. |
+| **macOS** | **Verified working 2026-08-02** | utun + userspace NAT; runs in the M10 system extension that owns the utun. TCP and UDP both carry traffic (see §9). Default still userspace: the collapse advantage is unmeasured there, not disproven. |
 | **Windows** | More work | sing-tun keeps a *separate* `stack_system_windows.go` — bind/socket semantics differ. |
 | **Android** | **Viable** (corrected 2026-06-17) | Android's `VpnService` hands the app a **Linux tun fd**; sing-tun adopts it (`tun_linux.go New()`, `FileDescriptor != 0` branch) with no platform restriction, and **sing-box runs `stack: system` on Android** this way. spark's android build just doesn't *enable* the `system-stack` feature yet — a choice, not a limit. Android-specific plumbing: use `VpnService.protect()` for upstream-socket protection (vs. `IP_UNICAST_IF`). This means the collapse fix could reach Android, not only desktop. |
 | **iOS** | Keep userspace | `NEPacketTunnelFlow` (Network framework), **not** a Linux tun fd and no kernel tun — the redirect-to-local-listener mechanism doesn't apply. sing-box runs gVisor on iOS with shrunken TCP buffers (`stack_gvisor_tcpbuf_ios.go`). smoltcp stays the iOS path. |
@@ -338,6 +338,83 @@ If the system stack fails its smoke test on macOS, the first suspect is packet r
 packets arrive on the TUN destined to a *local* address, which on Linux required `rp_filter=0`. macOS
 has no `rp_filter`, so this is genuinely unknown territory rather than a known fix.
 
+### macOS: first execution, and what it did and did not settle (2026-08-02)
+
+The system stack ran on macOS for the first time, against a disposable DigitalOcean peer over a
+~90 Mb/s WAN link (`bench/macos-throughput.sh`). Userspace was run first in every case as a control,
+so a system-arm failure could be attributed to the stack rather than the harness.
+
+| run | result |
+|---|---|
+| TCP smoke, both stacks | pass |
+| TCP, 4 streams x 20 s each direction | stable, no stalls, no zeros; tunnel held 93–95% of its own baseline |
+| UDP smoke, system | 20.0 Mb/s, 0.03% loss, 3457 datagrams |
+| UDP, 2 streams x 15 s each direction | both stacks carried the full 40.0 Mb/s; loss 0.01–0.03% everywhere, including the direct baselines |
+
+**Settled.** The stack functions on macOS. The feared failure — redirected packets re-entering the TUN
+destined to a *local* address, the analogue of the Linux `rp_filter` problem — did not occur. The
+mixed stack's datagram path works: the pump handles UDP correctly alongside its TCP rewriting, which
+is the surface DNS rides on. Teardown was clean on every run.
+
+**Not settled, and this is the part that matters for the default.** The link is ~90 Mb/s; the
+concurrent-download collapse takes userspace to ~130 Mb/s. **The wire is slower than the pathology**,
+so userspace looked perfectly healthy at 4 streams here — not because the collapse is absent on macOS,
+but because this setup cannot reach the regime where it appears. We have therefore shown that both
+stacks work on macOS and *not* that the system stack is better there.
+
+That is the precise reason the macOS default stays userspace: not that the kernel stack is
+unproven-broken, but that its **advantage is unmeasured on this platform**. Flipping now would trade a
+working default for another working default with no demonstrated benefit. Closing it needs a peer fast
+enough to enter the collapse regime — a LAN host or a colocated high-bandwidth path, not a WAN droplet.
+
+Also unexercised: multi-hour soak, sleep/wake, and mid-session network change — the failure modes that
+actually bite a VPN and that no iperf3 run reaches.
+
+Caveats on the numbers themselves. The TCP runs carry a ~20% noise floor: the two baselines disagreed
+by that much, and userspace's tunnel upload (0.103 Gb/s) *exceeded* its own baseline (0.088), which is
+impossible and is the cleanest proof the link rather than the stack was the constraint. The UDP runs
+are far better controlled — open-loop at a fixed sub-link rate, so the send rate is identical by
+construction — but even there the system tunnel's downlink loss came in *below* its own baseline, so
+the 0.0x% spread is measurement floor. CPU (5% system vs 6% userspace) is the only apples-to-apples
+comparison in the set, because only the UDP runs moved identical byte counts; one point at 1%
+granularity is suggestive at best.
+
+### The collapse is CPU-bound, which inverts where the kernel stack is worth shipping (2026-08-02)
+
+A second macOS run used a **LAN peer** (~250 Mb/s Wi-Fi) specifically to reach the concurrent-download
+collapse regime that the ~90 Mb/s WAN droplet could not. It did not reproduce:
+
+| | baseline ↑ | baseline ↓ | tunnel ↑ | tunnel ↓ | CPU |
+|---|---|---|---|---|---|
+| userspace | 0.210 | 0.257 | 0.230 | **0.268** | 28% |
+| system | 0.228 | 0.262 | 0.219 | 0.259 | 25% |
+
+Userspace held **0.268 Gb/s at 4 concurrent streams** — twice the 0.13 Gb/s floor measured on the
+droplet — with no degradation, and its tunnel figures exceeded its own baseline, so the run was still
+link-bound. Inconclusive on whether the collapse exists on macOS, but it **bounds the floor above
+268 Mb/s on Apple silicon**.
+
+**The strategic consequence.** The collapse is a single-dispatch-task pathology: one task runs
+`iface.poll()` plus per-socket buffer shuffling for every flow, degrading super-linearly. That is
+**CPU-bound**, so its severity scales inversely with CPU speed — and the original 0.13 Gb/s figure came
+from a **2-vCPU droplet**. A fast desktop may never enter the regime at any link speed its users have.
+
+So the case for the kernel stack is **strongest where CPUs are weakest and weakest where they are
+strongest**, which inverts the intuition that desktop is where to ship it first:
+
+- **Android** — weak CPUs, battery-sensitive, closest to the droplet's profile. Highest expected
+  payoff, and its A/B is already unblocked.
+- **Desktop (macOS/Linux/Windows)** — the pathology may be unreachable in practice. Two macOS attempts
+  have now failed to find it, at 90 Mb/s and at 250 Mb/s.
+
+This does not argue the kernel stack is worse. Its CPU numbers are marginally *better* in every
+comparison so far (25% vs 28% here, 5% vs 6% on UDP), and CPU is what matters on battery. It argues
+that **throughput is the wrong reason to ship it on desktop**, and that the Android gate should be
+prioritised over any desktop default flip.
+
+Demonstrating the collapse on macOS would need a path faster than Wi-Fi — 2.5G/10G ethernet between
+two hosts. Worth doing before any desktop flip, and worth accepting it may show nothing.
+
 ### The staged default (`stack = "auto"`, 2026-08-01)
 
 `StackKind::Auto` is now the default, and `netstack::resolve_stack` is the single place the staging
@@ -351,7 +428,7 @@ Today `auto` resolves to userspace on every platform. What each is waiting on:
 | Platform | Gate |
 |---|---|
 | **Linux** | The netns A/B passed — but it ran with `rp_filter=0`. Redirected packets re-enter the TUN destined to a *local* address, which strict reverse-path filtering drops, and most distributions ship `rp_filter` on. Flipping needs spark to relax it for the redirected path or detect that it already is. **This gate was missed until the staging work; the netns result alone does not license a default flip.** |
-| **macOS** | Never executed. `bench/macos-throughput.sh --smoke` exists and has not been run. |
+| **macOS** | **Runs correctly** (2026-08-02: TCP and UDP, smoke and sustained multi-flow). Held for a different reason than the others — its *advantage* is unmeasured, not its correctness: two attempts at 90 and 250 Mb/s never reached the collapse regime. See the two macOS sections in §9. |
 | **Android** | Never executed on a device. The runbook exists and the on-device switch now does too (`<filesDir>/system_stack.txt`). |
 | **Windows** | Needs its own code path (§7), not a flag flip. |
 | **iOS** | Permanent — no kernel tun to redirect to. |
