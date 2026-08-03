@@ -181,7 +181,13 @@ udp_stats() {
     # The fallback lives in awk's END, not in a `|| echo`: when jq fails it prints nothing and exits
     # non-zero, but awk then reads empty input and exits *0*, so the `||` never fires and the
     # function returns an empty string instead of the zeros it promises.
-    jq -r '[((.end.sum.bits_per_second // 0)/1e6), (.end.sum.lost_percent // 0), (.end.sum.jitter_ms // 0), (.end.sum.packets // 0)] | @tsv' "$1" 2>/dev/null \
+    # `|| true` inside the group, not after the pipeline: with `pipefail` a failing jq makes the
+    # whole pipeline non-zero even though awk succeeded, and this function is documented to return
+    # zeros rather than fail. Today's callers happen to survive that (a here-string takes `read`'s
+    # status, an array append takes the append's), but a plain `x=$(udp_stats f)` takes the
+    # substitution's and aborts the run under `set -e`. Masking here makes the contract true in
+    # every call form instead of only the ones currently used.
+    { jq -r '[((.end.sum.bits_per_second // 0)/1e6), (.end.sum.lost_percent // 0), (.end.sum.jitter_ms // 0), (.end.sum.packets // 0)] | @tsv' "$1" 2>/dev/null || true; } \
       | awk -F'\t' '{printf "%.1f|%.2f|%.2f|%d", $1, $2, $3, $4; seen=1}
                      END{ if (!seen) printf "0.0|0.00|0.00|0" }'
   else
@@ -296,9 +302,12 @@ echo "==> sanity check: 2s $( [[ "$UDP" == 1 ]] && echo UDP || echo TCP ) transf
 S="$WORKDIR/sanity.json"
 # Speaks whichever protocol is under test. A TCP sanity check would report "ok" on a tunnel whose
 # datagram path is completely dead, which is the exact failure this mode exists to find.
-sanity_args=""
-[[ "$UDP" == 1 ]] && sanity_args="-u -b $UDP_RATE"
-if ! iperf3 -c "$PEER" -p "$PORT" -t 2 -J $sanity_args > "$S" 2>/dev/null; then
+# Positional parameters rather than a string spliced in unquoted — same reason as run_iperf. An
+# unquoted expansion would word-split, so a --udp-rate containing a space would silently become
+# extra iperf3 flags instead of one bad argument.
+set -- iperf3 -c "$PEER" -p "$PORT" -t 2 -J
+[[ "$UDP" == 1 ]] && set -- "$@" -u -b "$UDP_RATE"
+if ! "$@" > "$S" 2>/dev/null; then
   echo "tunnel transfer FAILED — spark log:" >&2; cat "$LOG" >&2
   [[ "$STACK" == system ]] && cat >&2 <<'HINT'
 

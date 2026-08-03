@@ -428,7 +428,7 @@ Today `auto` resolves to userspace on every platform. What each is waiting on:
 | Platform | Gate |
 |---|---|
 | **Linux** | The netns A/B passed — but it ran with `rp_filter=0`. Redirected packets re-enter the TUN destined to a *local* address, which strict reverse-path filtering drops, and most distributions ship `rp_filter` on. Flipping needs spark to relax it for the redirected path or detect that it already is. **This gate was missed until the staging work; the netns result alone does not license a default flip.** |
-| **macOS** | Never executed. `bench/macos-throughput.sh --smoke` exists and has not been run. |
+| **macOS** | **Runs correctly** (2026-08-02: TCP and UDP, smoke and sustained multi-flow). Held for a different reason than the others — its *advantage* is unmeasured, not its correctness: two attempts at 90 and 250 Mb/s never reached the collapse regime. See the two macOS sections in §9. |
 | **Android** | Never executed on a device. The runbook exists and the on-device switch now does too (`<filesDir>/system_stack.txt`). |
 | **Windows** | Needs its own code path (§7), not a flag flip. |
 | **iOS** | Permanent — no kernel tun to redirect to. |
