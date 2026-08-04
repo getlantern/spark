@@ -536,8 +536,23 @@ impl Default for ShapingConfig {
 pub struct WasmConfig {
     /// The spark server address to tunnel through.
     pub server: SocketAddr,
-    /// Path to the signed module artifact (delivered out of band; see `wasm::ModuleVerifier`).
-    pub module: PathBuf,
+    /// Path to a signed module artifact that already exists locally.
+    ///
+    /// Optional because it is no longer the only way to name a module: set `engine` instead to resolve
+    /// a signed **bundle** from the local store by name, which is what lets a server introduce a
+    /// transport without the artifact having been provisioned by some other means first. Exactly one
+    /// of `module` or `engine` must be set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<PathBuf>,
+    /// Engine name to resolve from the bundle store (see `engine::BundleStore`), instead of `module`.
+    ///
+    /// The name must be the one the bundle was **signed** as; the store enforces that, so naming an
+    /// engine here cannot load an artifact signed for anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Directory holding installed bundles. Required when `engine` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_dir: Option<PathBuf>,
     /// Anti-rollback floor — reject a module whose version is below this. Default `0`.
     #[serde(default)]
     pub min_version: u32,
@@ -1137,7 +1152,9 @@ mod tests {
                     proxyless: None,
                     wasm: Some(WasmConfig {
                         server: "192.0.2.9:443".parse().unwrap(),
-                        module: PathBuf::from("/etc/spark/obfs.spkw"),
+                        module: Some(PathBuf::from("/etc/spark/obfs.spkw")),
+                        engine: None,
+                        bundle_dir: None,
                         min_version: 7,
                         init_config: Some("deadbeef".into()),
                         genome: None,
@@ -1208,10 +1225,34 @@ mod tests {
         .unwrap();
         let wasm = c.transport.wasm.expect("wasm config");
         assert_eq!(wasm.server, "192.0.2.1:443".parse().unwrap());
-        assert_eq!(wasm.module, PathBuf::from("/etc/spark/obfs.spkw"));
+        assert_eq!(wasm.module, Some(PathBuf::from("/etc/spark/obfs.spkw")));
         assert_eq!(wasm.min_version, 9);
         assert_eq!(wasm.init_config, None);
         assert_eq!(wasm.floor_path, None);
+        assert_eq!(wasm.engine, None, "the path form names no engine");
+    }
+
+    /// The delivered form: name an engine and where bundles live, with no module path and no
+    /// hand-written `init` hex. This is the config a server-pushed transport produces.
+    #[test]
+    fn parses_a_wasm_transport_configured_by_engine_name() {
+        let c = Config::from_toml_str(
+            r#"
+            [transport.wasm]
+            server = "192.0.2.1:8333"
+            engine = "bip324"
+            bundle_dir = "/var/lib/spark/bundles"
+        "#,
+        )
+        .expect("the engine form must parse");
+        let wasm = c.transport.wasm.expect("wasm config");
+        assert_eq!(wasm.module, None, "no artifact path is needed");
+        assert_eq!(wasm.engine.as_deref(), Some("bip324"));
+        assert_eq!(
+            wasm.bundle_dir,
+            Some(PathBuf::from("/var/lib/spark/bundles"))
+        );
+        assert_eq!(wasm.genome, None, "the plan comes from the bundle");
     }
 
     #[test]

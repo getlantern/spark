@@ -35,6 +35,11 @@ pub mod bundle;
 pub use bundle::{Bundle, BundleVerifier, VerifiedBundle};
 
 #[cfg(feature = "wasm-transport")]
+pub mod store;
+#[cfg(feature = "wasm-transport")]
+pub use store::BundleStore;
+
+#[cfg(feature = "wasm-transport")]
 pub mod module;
 #[cfg(feature = "wasm-transport")]
 pub use module::ModuleEngine;
