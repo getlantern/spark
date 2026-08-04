@@ -185,6 +185,15 @@ impl ModuleVerifier {
         Self::new(SPARK_MODULE_PUBKEY)
     }
 
+    /// The public key this verifier trusts.
+    ///
+    /// Exposed crate-internally so signed **transport bundles** verify against the very same pinned
+    /// key as modules, rather than re-deriving it and risking two sources of truth for what this build
+    /// trusts. It is a public key: revealing it discloses nothing.
+    pub(crate) fn key(&self) -> [u8; PUBKEY_LEN] {
+        self.public_key
+    }
+
     /// Verify, parse, and compile a signed module `artifact`.
     ///
     /// `min_version` is the anti-rollback floor — the highest module version installed so far; an

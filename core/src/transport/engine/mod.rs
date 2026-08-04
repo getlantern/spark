@@ -30,6 +30,11 @@ pub use genome::Genome;
 pub mod tls;
 
 #[cfg(feature = "wasm-transport")]
+pub mod bundle;
+#[cfg(feature = "wasm-transport")]
+pub use bundle::{Bundle, BundleVerifier, VerifiedBundle};
+
+#[cfg(feature = "wasm-transport")]
 pub mod module;
 #[cfg(feature = "wasm-transport")]
 pub use module::ModuleEngine;
