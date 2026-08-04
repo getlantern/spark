@@ -692,7 +692,27 @@ fn wasm_transport(
         wasm_floor::bump(path, signed.name(), signed.version())?;
     }
 
-    let mut t = wasm::WasmTransport::new(cfg.server, signed.into_module()).with_config(init_config);
+    // Name the engine with the artifact's **own signed name**, so a genome cannot select this module
+    // under a name nobody signed, and register it so a genome delivered later can name it at all.
+    let engine_name = signed.name().to_owned();
+    let engine = std::sync::Arc::new(crate::transport::engine::ModuleEngine::new(
+        engine_name,
+        signed.into_module(),
+    ));
+    crate::transport::engine::register(engine.clone());
+
+    // A configured genome is the dynamic plan; `init_config` is the always-realizable fallback. Both
+    // end up as this engine's params — one concept, two spellings, the second kept for compatibility.
+    let genome = match &cfg.genome {
+        Some(hex) => {
+            decode_hex(hex).ok_or_else(|| io::Error::other("transport.wasm.genome invalid hex"))?
+        }
+        None => Vec::new(),
+    };
+
+    let mut t = wasm::WasmTransport::with_engine(cfg.server, engine)
+        .with_config(init_config)
+        .with_genome(genome);
     if let Some(p) = protector {
         t = t.with_socket_protection(p);
     }
@@ -1476,6 +1496,7 @@ mod wasm_config_tests {
             module,
             min_version,
             init_config: None,
+            genome: None,
             floor_path: None,
         }
     }

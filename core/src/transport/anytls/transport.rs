@@ -153,7 +153,7 @@ impl Inner {
         // plan's engine id via `upgrade_to`, the engine decodes the opaque dynamic params (or the
         // static fallback) and drives the boring handshake.
         let plan = crate::transport::engine::OpeningPlan {
-            engine: crate::transport::engine::TLS,
+            engine: std::borrow::Cow::Borrowed(crate::transport::engine::TLS),
             sni: self.sni.clone(),
             params: self.compute_params(),
             fallback: self.static_params.clone(),

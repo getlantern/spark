@@ -542,8 +542,21 @@ pub struct WasmConfig {
     #[serde(default)]
     pub min_version: u32,
     /// Optional hex-encoded configuration bytes delivered to the module's `init` export.
+    ///
+    /// These bytes are the module's protocol parameters. `genome` below is the same knob expressed
+    /// the way the rest of the system expresses opening plans; when both are set, `genome` is
+    /// attempted first and this is the fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init_config: Option<String>,
+    /// Optional hex-encoded postcard `Genome` — this transport's opening plan, whose opaque
+    /// `engine_params` become the module's `init` bytes.
+    ///
+    /// Why carry a genome rather than only raw `init` bytes: a genome is addressed to a named engine
+    /// (checked against the artifact's own signed name, so params can't be fed to the wrong module),
+    /// it is versioned, and it is the form discovery produces and a server can deliver. `init_config`
+    /// cannot be any of those things. See ADR 0013 §7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genome: Option<String>,
     /// Optional path to a persisted per-name version floor (a TOML `name = version` map). When set,
     /// the loaded version must also clear the persisted floor, and a successful load bumps it —
     /// anti-rollback that survives restarts.
@@ -1127,6 +1140,7 @@ mod tests {
                         module: PathBuf::from("/etc/spark/obfs.spkw"),
                         min_version: 7,
                         init_config: Some("deadbeef".into()),
+                        genome: None,
                         floor_path: Some(PathBuf::from("/var/lib/spark/floors.toml")),
                     }),
                     shaping: ShapingConfig {

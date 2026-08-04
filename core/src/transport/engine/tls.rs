@@ -8,14 +8,11 @@ use async_trait::async_trait;
 use flint_tls::gambit::Gambit;
 use flint_tls::Profile;
 
-use super::{EngineId, Genome, OpeningEngine, OpeningPlan};
+use super::{Genome, OpeningEngine, OpeningPlan};
 use crate::BoxedStream;
 
-/// The TLS engine (ZST). Registered under [`super::TLS`].
+/// The TLS engine (ZST). Registered under [`super::TLS`]; the registry hands out a cached `Arc`.
 pub struct TlsEngine;
-
-/// The shared static instance the registry hands out.
-pub static ENGINE: &TlsEngine = &TlsEngine;
 
 impl TlsEngine {
     /// Per-connection context bytes for a `compute_gambit` module: the host-controlled wall clock,
@@ -92,7 +89,7 @@ impl TlsEngine {
 
 #[async_trait]
 impl OpeningEngine for TlsEngine {
-    fn id(&self) -> EngineId {
+    fn id(&self) -> &str {
         super::TLS
     }
 
