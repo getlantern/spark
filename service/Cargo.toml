@@ -17,6 +17,9 @@ path = "src/main.rs"
 # AnyTLS transport (ADR 0001): enable spark-core's `anytls` so the service can run an AnyTLS profile.
 # Off by default — the base service stays rustls/ring-only with no C/cmake BoringSSL build.
 anytls = ["spark-core/anytls"]
+# Shadowsocks 2022 (ADR 0009). Forwarded for the same reason as in spark-cli: the release build needs
+# the transport set the mobile slices already carry, and the feature was previously unreachable here.
+shadowsocks = ["spark-core/shadowsocks"]
 bootstrap-dns = ["spark-core/bootstrap-dns"]
 multi-server = ["spark-core/multi-server"]
 # Dynamic-transport runtime (ADR 0013 §7): the wasmi host for signed byte-transform modules, and

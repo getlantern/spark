@@ -21,6 +21,10 @@ bytes.workspace = true
 
 [features]
 anytls = ["spark-core/anytls"]
+# Shadowsocks 2022 (ADR 0009). Forwarded so a release build can carry the same transport set the
+# Apple and Android slices already bake in — without this the feature is unreachable from the binary
+# and a shadowsocks outbound hard-fails at build-transport time.
+shadowsocks = ["spark-core/shadowsocks"]
 system-stack = ["spark-core/system-stack"]
 bootstrap-dns = ["spark-core/bootstrap-dns"]
 multi-server = ["spark-core/multi-server"]
