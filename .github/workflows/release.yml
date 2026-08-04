@@ -1,15 +1,33 @@
-# Release: on a v* tag, build release binaries for the three desktop targets on their native
-# runners, enforce the size budget, package each platform's artifact, and publish them to the
-# GitHub Release. Packaging definitions live under packaging/.
+# Release: build the desktop binaries on their native runners, enforce the size budget, package each
+# platform's artifact, and publish. Two paths through the same build:
+#
+#   v* tag        -> the real release: every package format, the notarized macOS DMG, a versioned
+#                    GitHub Release.
+#   push to main  -> a rolling `nightly` prerelease carrying just the binaries, so the latest main is
+#                    always installable without waiting for a tag. Installer formats (.deb, .msi) and
+#                    the notarized DMG are deliberately tag-only — their version fields carry ordering
+#                    semantics a rolling build cannot state honestly (a Debian version must start with
+#                    a digit, an MSI version must be numeric x.y.z, and an installer that always
+#                    claims the same synthetic version breaks upgrade detection).
+#
+# Packaging definitions live under packaging/.
 name: Release
 
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch: # manual dry run (uses the branch name as the version)
+    branches: [main]
+  workflow_dispatch: # manual dry run (versioned as main-<sha>)
 
 permissions:
   contents: write # create the Release + upload assets
+
+# One nightly at a time: two merges in quick succession would otherwise race to move the same tag,
+# and the loser could publish older binaries over newer ones. Tag releases are never cancelled —
+# interrupting a publish part-way through uploading assets is far worse than queueing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,12 +51,24 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
+      # Derived once and reused by every packaging step below. Each step previously re-derived it
+      # from `github.ref_name`, which only produces a sensible answer for a tag — on a branch it
+      # would have named the artifacts after the branch.
+      - name: Derive the version
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=main-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          fi
+
       - name: Build release
-        # `anytls` + `shadowsocks` are the transports a production pool actually dials, so desktop
-        # carries them the same way the Apple (build-xcframework.sh) and Android
-        # (platforms/android/Cargo.toml) slices already bake them in. Without the matching feature a
-        # config naming that outbound hard-fails at build-transport time — the desktop release was
-        # shipping without either, and `shadowsocks` was not even forwarded by the binary crates.
+        # `prod` is the canonical feature set, defined once in cli/Cargo.toml + service/Cargo.toml so
+        # this workflow cannot drift from what a real binary is supposed to do. Naming individual
+        # transports here is what let desktop ship without anytls/shadowsocks while the Apple and
+        # Android slices carried them; a config naming a missing transport hard-fails at
+        # transport-build time, by design.
         #
         # bip324 (ADR 0013 §7) is baked in on top when the module-signing PUBLIC key is configured
         # (vars.SPARK_MODULE_PUBKEY_HEX). Only the public key lives in CI — a release build with
@@ -48,22 +78,29 @@ jobs:
         env:
           SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
         run: |
-          features=anytls,shadowsocks
+          features=prod
           if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then features="$features,bip324"; fi
           cargo build --release --target ${{ matrix.target }} \
             -p spark-cli -p spark-service --features "$features"
 
-      # Untrusted-input hygiene: the tag name reaches shells only via $REF_NAME, never inlined.
+      # Untrusted-input hygiene: a ref name can contain shell metacharacters, so it reaches shells
+      # only through the runner's own $GITHUB_REF_NAME (and the $VERSION derived from it above),
+      # never interpolated into a script by the expression syntax.
       - name: Size budget
         if: matrix.os != 'windows'
         env:
           SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
         run: |
-          # Both budgets now cover anytls (BoringSSL, ~+2.4 MiB) + shadowsocks, which the release
-          # build carries. Measured on macOS arm64, largest binary of the pair (spark-service):
-          # 5.35 MiB without bip324, 7.05 MiB with it (wasmi + secp256k1). Budgets keep ~30% headroom
-          # so this still catches gross bloat rather than rubber-stamping it.
-          if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then budget=$((9 * 1024 * 1024)); else budget=$((7 * 1024 * 1024)); fi
+          # Budgets track the `prod` feature set the build above produces, sized for the *Linux* ELF —
+          # the fattest thing we build, at a measured 30% over the macOS Mach-O (opt-level = 3).
+          #
+          # spark-service, largest of the pair:
+          #   prod            8.24 MiB macOS  /  10.75 MiB Linux (both measured)  -> 12 MiB, 89%
+          #   prod + bip324   9.90 MiB macOS  /  ~12.9 MiB Linux (projected)      -> 16 MiB, 80%
+          #
+          # The bip324 branch only builds when a module-signing key is configured, so its Linux size
+          # has never been measured — hence the wider margin on a number that is still an estimate.
+          if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then budget=$((16 * 1024 * 1024)); else budget=$((12 * 1024 * 1024)); fi
           status=0
           for b in spark spark-service; do
             f="target/${{ matrix.target }}/release/$b"
@@ -83,47 +120,45 @@ jobs:
       - name: Package tarball (macOS / Linux)
         if: matrix.os != 'windows'
         env:
-          REF_NAME: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
         run: |
-          ver="${REF_NAME#v}"
+          ver="$VERSION"
           bindir="target/$TARGET/release"
           mkdir -p dist
           tarball="spark-$ver-$TARGET.tar.gz"
           tar -C "$bindir" -czf "dist/$tarball" spark spark-service
           ( cd dist && shasum -a 256 "$tarball" > "$tarball.sha256" )
 
+      # Tag-only: a Debian version must start with a digit, which `main-<sha>` does not.
       - name: Package .deb (Linux)
-        if: matrix.os == 'linux'
+        if: matrix.os == 'linux' && github.ref_type == 'tag'
         env:
-          REF_NAME: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
         run: |
-          ver="${REF_NAME#v}"
-          packaging/debian/build-deb.sh "$ver" amd64 "target/$TARGET/release" dist
+          packaging/debian/build-deb.sh "$VERSION" amd64 "target/$TARGET/release" dist
 
       - name: Package zip (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
         env:
-          REF_NAME: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
         run: |
-          $ver = $env:REF_NAME -replace '^v',''
+          $ver = $env:VERSION
           $bindir = "target/$env:TARGET/release"
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item packaging/config.example.toml "$bindir/config.example.toml"
           $items = @("$bindir/spark.exe", "$bindir/spark-service.exe", "$bindir/config.example.toml")
           Compress-Archive -Path $items -DestinationPath "dist/spark-$ver-$env:TARGET.zip"
 
+      # Tag-only: WiX requires a numeric x.y.z version, and Windows Installer uses it for upgrade
+      # ordering — a nightly that always claimed the same synthetic version would break upgrades.
       - name: Build MSI (Windows)
-        if: matrix.os == 'windows'
+        if: matrix.os == 'windows' && github.ref_type == 'tag'
         shell: pwsh
         env:
-          REF_NAME: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
         run: |
-          $ver = $env:REF_NAME -replace '^v',''
+          $ver = $env:VERSION
           $bindir = "target/$env:TARGET/release"
           New-Item -ItemType Directory -Force dist | Out-Null
           # WiX v5 (uses the v4 schema). ServiceInstall is core, so no extension is needed.
@@ -150,7 +185,9 @@ jobs:
   #   AC_USERNAME / AC_PASSWORD                  Apple ID + app-specific password for notarytool (team ACZRKC3LQ9)
   package-macos-app:
     name: package macOS app (DMG)
-    if: ${{ vars.MACOS_APP_PACKAGING == 'true' }}
+    # Tag-only as well as gated on the signing vars: notarization is a slow round-trip to Apple, and
+    # a rolling prerelease has no version for the app bundle to carry.
+    if: ${{ vars.MACOS_APP_PACKAGING == 'true' && github.ref_type == 'tag' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -206,6 +243,51 @@ jobs:
         with:
           name: spark-macos-app
           path: dist/*.dmg
+
+  nightly:
+    name: publish nightly prerelease
+    needs: build
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Delete-and-recreate rather than edit-in-place. It is the only way to move the tag to this
+      # commit, and it guarantees the release holds exactly what this build produced: an edit would
+      # leave behind any asset a previous build uploaded that this one no longer makes. The brief gap
+      # where no `nightly` exists is acceptable for a prerelease; a stale mixed set of binaries is not.
+      - name: Move the nightly prerelease to this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse --short HEAD)
+          subject=$(git log -1 --pretty=%s)
+          gh release delete nightly --yes --cleanup-tag || true
+          # Written to a file rather than passed inline: a commit subject is untrusted text, and the
+          # angle brackets and ampersands are stripped so it cannot inject markup into the notes.
+          {
+          cat <<'MD'
+          Automatic build of `main` — **not a stable release**.
+
+          MD
+          printf 'Commit: %s\n' "$GITHUB_SHA"
+          printf 'Subject: %s\n\n' "$(printf '%s' "$subject" | tr -d '<>&')"
+          cat <<'MD'
+          Binaries only (`spark` + `spark-service`) for macOS arm64/x64, Linux x64 and Windows x64.
+          Installer formats — `.deb`, `.msi` and the notarized macOS DMG — ship only on tagged
+          releases, because their version fields carry upgrade-ordering semantics a rolling build
+          cannot state honestly.
+          MD
+          } > notes.md
+          gh release create nightly dist/* \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "main @ $sha" \
+            --notes-file notes.md
 
   publish:
     name: publish release
