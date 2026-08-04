@@ -665,34 +665,107 @@ fn wasm_transport(
             .ok_or_else(|| io::Error::other("transport.wasm.init_config invalid hex"))?,
         None => Vec::new(),
     };
-    let artifact = std::fs::read(&cfg.module).map_err(|e| {
-        io::Error::other(format!(
-            "transport.wasm: reading module {}: {e}",
-            cfg.module.display()
-        ))
-    })?;
+    // Two ways to name the module, and exactly one must be given:
+    //
+    //   `module = "/path/to.spkw"` — an artifact already on disk. Verified against the pinned key plus
+    //                               the config and persisted floors, as it always was.
+    //   `engine = "bip324"`        — resolved from the bundle store by the name it was **signed** as.
+    //                               This is the delivered path: nothing outside the system needs to
+    //                               have put a file somewhere first, which is what makes a
+    //                               server-introduced transport possible with no app upgrade.
+    //
+    // Both arrive at the same pair — a named engine and an opening plan — so everything downstream is
+    // identical and neither path is privileged.
+    let (engine_name, module, bundle_genome) = match (&cfg.module, &cfg.engine) {
+        (Some(path), None) => {
+            let artifact = std::fs::read(path).map_err(|e| {
+                io::Error::other(format!(
+                    "transport.wasm: reading module {}: {e}",
+                    path.display()
+                ))
+            })?;
 
-    // Verify against the key pinned in the binary (not config), authenticating before the module
-    // name is trusted; this also enforces the config anti-rollback floor.
-    let signed = wasm::ModuleVerifier::pinned()
-        .verify(&artifact, cfg.min_version)
-        .map_err(|e| io::Error::other(format!("transport.wasm: {e}")))?;
+            // Verify against the key pinned in the binary (not config), authenticating before the
+            // module name is trusted; this also enforces the config anti-rollback floor.
+            let signed = wasm::ModuleVerifier::pinned()
+                .verify(&artifact, cfg.min_version)
+                .map_err(|e| io::Error::other(format!("transport.wasm: {e}")))?;
 
-    // Persisted per-name floor: a second anti-rollback gate that survives restarts.
-    if let Some(path) = &cfg.floor_path {
-        let floor = wasm_floor::get(path, signed.name())?;
-        if signed.version() < floor {
-            return Err(io::Error::other(format!(
-                "transport.wasm: module `{}` v{} is below the persisted floor v{}",
-                signed.name(),
-                signed.version(),
-                floor
-            )));
+            // Persisted per-name floor: a second anti-rollback gate that survives restarts.
+            if let Some(floor_path) = &cfg.floor_path {
+                let floor = wasm_floor::get(floor_path, signed.name())?;
+                if signed.version() < floor {
+                    return Err(io::Error::other(format!(
+                        "transport.wasm: module `{}` v{} is below the persisted floor v{}",
+                        signed.name(),
+                        signed.version(),
+                        floor
+                    )));
+                }
+                wasm_floor::bump(floor_path, signed.name(), signed.version())?;
+            }
+            (signed.name().to_owned(), signed.into_module(), None)
         }
-        wasm_floor::bump(path, signed.name(), signed.version())?;
-    }
+        (None, Some(engine)) => {
+            let dir = cfg.bundle_dir.as_ref().ok_or_else(|| {
+                io::Error::other("transport.wasm.engine requires transport.wasm.bundle_dir")
+            })?;
+            // The store re-verifies the artifact and enforces both persisted floors (bundle and
+            // genome), so a tampered or replayed file on disk is refused here, not at dial time.
+            let verified = crate::transport::engine::BundleStore::new(dir)
+                .load(engine)
+                .map_err(|e| io::Error::other(format!("transport.wasm: {e}")))?;
+            let wasm_bytes = verified.wasm.as_deref().ok_or_else(|| {
+                io::Error::other(format!(
+                    "transport.wasm: bundle for engine `{engine}` carries no module"
+                ))
+            })?;
+            let module = wasm::TransformModule::load(wasm_bytes)
+                .map_err(|e| io::Error::other(format!("transport.wasm: {e}")))?;
+            // The bundle's first genome is its preferred plan, re-encoded because that is the form the
+            // engine seam consumes.
+            let genome = verified
+                .genomes
+                .first()
+                .map(|g| g.encode())
+                .transpose()
+                .map_err(|e| {
+                    io::Error::other(format!("transport.wasm: re-encoding genome: {e}"))
+                })?;
+            (verified.engine.clone(), module, genome)
+        }
+        (Some(_), Some(_)) => {
+            return Err(io::Error::other(
+                "transport.wasm: set either module or engine, not both",
+            ))
+        }
+        (None, None) => {
+            return Err(io::Error::other(
+                "transport.wasm: one of module (a local artifact) or engine (a stored bundle) is required",
+            ))
+        }
+    };
 
-    let mut t = wasm::WasmTransport::new(cfg.server, signed.into_module()).with_config(init_config);
+    // Name the engine with the artifact's **own signed name**, so a genome cannot select this module
+    // under a name nobody signed, and register it so a genome delivered later can name it at all.
+    let engine = std::sync::Arc::new(crate::transport::engine::ModuleEngine::new(
+        engine_name,
+        module,
+    ));
+    crate::transport::engine::register(engine.clone());
+
+    // Precedence: an explicitly configured genome, else the one the bundle delivered. `init_config`
+    // stays the always-realizable fallback beneath both.
+    let genome = match &cfg.genome {
+        Some(hex) => {
+            decode_hex(hex).ok_or_else(|| io::Error::other("transport.wasm.genome invalid hex"))?
+        }
+        None => bundle_genome.unwrap_or_default(),
+    };
+
+    let mut t = wasm::WasmTransport::with_engine(cfg.server, engine)
+        .with_config(init_config)
+        .with_genome(genome);
     if let Some(p) = protector {
         t = t.with_socket_protection(p);
     }
@@ -1470,12 +1543,89 @@ mod wasm_config_tests {
         }
     }
 
+    /// Step 5, and the point of all five: a transport built from an engine **name**, with no module
+    /// path in the config at all. This is the shape a server-delivered transport takes — install a
+    /// signed bundle, then refer to its engine.
+    #[test]
+    fn from_config_builds_a_transport_from_a_stored_bundle_by_name() {
+        use crate::transport::engine::bundle::{self, Bundle};
+        use crate::transport::engine::{BundleStore, Genome};
+
+        const ENGINE: &str = "obfs-bundled";
+        let dir = temp_path("bundle-store");
+        std::fs::create_dir_all(&dir).expect("create store dir");
+
+        // A bundle carrying the module *and* its opening plan, signed as the engine name.
+        let wasm_bytes = wat::parse_str(wasm::testutil::XOR_WAT).expect("assemble fixture");
+        let genome = Genome::new("plan", ENGINE, Default::default(), Vec::new())
+            .encode()
+            .expect("encode genome");
+        let b = Bundle::new(ENGINE, vec![genome], Some(wasm_bytes));
+        let kp = dev_keypair();
+        let sig = kp.sign(&bundle::signing_payload(ENGINE, 1, &b).expect("payload"));
+        let mut s = [0u8; 64];
+        s.copy_from_slice(sig.as_ref());
+        let artifact = bundle::build_artifact(ENGINE, 1, &b, &s).expect("artifact");
+
+        BundleStore::new(&dir).install(&artifact).expect("install");
+
+        // Note what is absent: `module`. Only a name and where to look.
+        let cfg = config_with(WasmConfig {
+            server: "192.0.2.1:443".parse().unwrap(),
+            module: None,
+            engine: Some(ENGINE.to_owned()),
+            bundle_dir: Some(dir.clone()),
+            min_version: 0,
+            init_config: None,
+            genome: None,
+            floor_path: None,
+        });
+        from_config(&cfg).expect("a stored bundle resolves by name into a transport");
+
+        // Naming an engine with nothing installed must fail loud rather than silently do nothing.
+        let missing = config_with(WasmConfig {
+            server: "192.0.2.1:443".parse().unwrap(),
+            module: None,
+            engine: Some("not-installed".to_owned()),
+            bundle_dir: Some(dir.clone()),
+            min_version: 0,
+            init_config: None,
+            genome: None,
+            floor_path: None,
+        });
+        let err = from_config(&missing)
+            .map(|_| ())
+            .expect_err("a cache miss must fail");
+        assert!(
+            err.to_string().contains("no bundle installed"),
+            "the error should say what was missing, got: {err}"
+        );
+
+        // Neither knob set is a configuration error, not a silent no-op.
+        let neither = config_with(WasmConfig {
+            server: "192.0.2.1:443".parse().unwrap(),
+            module: None,
+            engine: None,
+            bundle_dir: None,
+            min_version: 0,
+            init_config: None,
+            genome: None,
+            floor_path: None,
+        });
+        assert!(from_config(&neither).is_err(), "neither module nor engine");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn base_cfg(module: std::path::PathBuf, min_version: u32) -> WasmConfig {
         WasmConfig {
             server: "192.0.2.1:443".parse().unwrap(),
-            module,
+            module: Some(module),
+            engine: None,
+            bundle_dir: None,
             min_version,
             init_config: None,
+            genome: None,
             floor_path: None,
         }
     }

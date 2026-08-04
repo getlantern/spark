@@ -10,8 +10,6 @@
 use flint_tls::gambit::Wire;
 use serde::{Deserialize, Serialize};
 
-use super::EngineId;
-
 /// A protocol-neutral opening plan: generic header + wire + an opaque engine-params blob.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Genome {
@@ -42,7 +40,7 @@ impl Genome {
     /// to 1, anti-rollback not yet enforced).
     pub fn new(
         id: impl Into<String>,
-        engine: EngineId,
+        engine: impl Into<String>,
         wire: Wire,
         engine_params: Vec<u8>,
     ) -> Self {
@@ -50,7 +48,7 @@ impl Genome {
             genome_version: Self::SCHEMA_VERSION,
             version: 1,
             id: id.into(),
-            engine: engine.to_owned(),
+            engine: engine.into(),
             wire,
             engine_params,
         }

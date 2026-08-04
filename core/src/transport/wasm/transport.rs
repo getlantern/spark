@@ -23,6 +23,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::{Transform, TransformModule, TransformStream};
 use crate::net::SocketProtector;
+use crate::transport::engine::{Genome, ModuleEngine, OpeningEngine};
 use crate::transport::tcp_tunnel::header::Address;
 use crate::transport::tcp_tunnel::stream::read_header;
 use crate::transport::tcp_tunnel::udp::udp_associate_sentinel;
@@ -47,26 +48,72 @@ const UDP_READ_SCRATCH: usize = 16 * 1024;
 /// [`with_socket_protection`]: WasmTransport::with_socket_protection
 pub struct WasmTransport {
     server: SocketAddr,
-    module: TransformModule,
-    config: Vec<u8>,
+    /// The module as an opening engine, so the TCP dial realizes its opening through the same seam a
+    /// genome-selected engine does (ADR 0013 §7) rather than through a second, parallel code path.
+    engine: Arc<ModuleEngine>,
+    /// Dynamic opening plan for this transport (a postcard [`Genome`]); empty ⇒ use `fallback`.
+    params: Vec<u8>,
+    /// Always-realizable static plan (a postcard [`Genome`]), so connectivity never depends on a
+    /// dynamic plan being usable.
+    fallback: Vec<u8>,
     protector: Option<SocketProtector>,
 }
 
 impl WasmTransport {
     /// Create a client that tunnels through `server`, obfuscating each connection with `module`.
+    ///
+    /// The module is left **unnamed** as an engine, which is right for a locally configured module
+    /// (nothing needs to look it up by name). Use [`with_engine`](Self::with_engine) when the name
+    /// matters — production does, because a genome selects its engine *by* name.
     pub fn new(server: SocketAddr, module: TransformModule) -> Self {
+        Self::with_engine(server, Arc::new(ModuleEngine::new(String::new(), module)))
+    }
+
+    /// Create a client whose opening is realized by an already-named [`ModuleEngine`].
+    ///
+    /// The name should be the one the signed artifact gives itself, so a genome cannot select this
+    /// engine under a name nobody signed.
+    pub fn with_engine(server: SocketAddr, engine: Arc<ModuleEngine>) -> Self {
         Self {
             server,
-            module,
-            config: Vec::new(),
+            engine,
+            params: Vec::new(),
+            fallback: Vec::new(),
             protector: None,
         }
     }
 
+    /// Set the dynamic opening plan: a postcard [`Genome`] whose opaque `engine_params` become the
+    /// module's `init` bytes. Falls back to [`with_config`](Self::with_config) if it is unusable.
+    pub fn with_genome(mut self, genome: Vec<u8>) -> Self {
+        self.params = genome;
+        self
+    }
+
     /// Set the per-deployment configuration delivered to the module's `init` export on each dial
     /// (e.g. a key or seed). Empty by default.
+    ///
+    /// These bytes *are* engine params; this wraps them in a genome addressed to this engine so the
+    /// module sees exactly one kind of input. Kept because a locally configured module is a real use
+    /// case, but it is now the **fallback** — a delivered genome supersedes it.
     pub fn with_config(mut self, config: Vec<u8>) -> Self {
-        self.config = config;
+        // A builder cannot return an error, and encoding this genome should never fail — it is an
+        // in-memory postcard encode of a struct with no unsupported types. But an empty fallback is
+        // indistinguishable from "no fallback configured", so a silent failure here would surface
+        // much later as a module trapping on empty `init`. Say so instead of swallowing it.
+        self.fallback = match Genome::new("static", self.engine.id(), Default::default(), config)
+            .encode()
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    engine = %self.engine.id(),
+                    "encoding the static fallback genome failed; this transport has no fallback plan"
+                );
+                Vec::new()
+            }
+        };
         self
     }
 
@@ -81,18 +128,27 @@ impl WasmTransport {
     /// Connect, wrap in the transform, and announce `target` (an IP or a domain the exit resolves) in
     /// the address header. Shared by [`dial`]/[`dial_addr`].
     async fn dial_target(&self, target: Address) -> io::Result<BoxedStream> {
-        let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
-        let mut transform = self
-            .module
-            .instantiate_with_config(&self.config)
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        // If the module has an interactive opening (e.g. BIP324), run it on the raw connection as the
-        // initiator before any steady-state bytes; the derived keys stay in the module for the
-        // transform that follows. Transform-only modules skip this (protocol-blind).
-        if transform.drives_handshake() {
-            transform.run_handshake(&mut conn).await?;
+        let conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        // Resolve the opening plan once and use it for both jobs below — one postcard decode per
+        // dial, not two, and no chance of the socket being tuned for a different plan than the one
+        // the module runs.
+        let (init, wire) = self.engine.plan(&self.params, &self.fallback);
+        // `TCP_NODELAY` has to be set on the concrete socket — flint's shaper is generic over the
+        // stream and only guarantees a flush per segment — so without this the segments a genome
+        // asks for can still be coalesced into one packet by Nagle. It must happen here, while the
+        // socket is still concrete: past this point the stream is boxed away behind the seam. A
+        // failure to set it only forfeits the optimization, so it must not fail the dial.
+        if wire.tcp_nodelay {
+            let _ = conn.set_nodelay(true);
         }
-        let mut wrapped = TransformStream::new(conn, transform);
+        // Realize the opening through the engine: it instantiates the module with these engine
+        // params, shapes the opening, and runs the interactive handshake if the module drives one
+        // (e.g. BIP324). Identical to what a genome-selected engine does — it is the same code,
+        // entered one step lower because the plan is already in hand.
+        let mut wrapped = self
+            .engine
+            .realize_resolved(Box::new(conn), init, wire)
+            .await?;
 
         // The address header is the first thing through the transform; the server reads it back
         // after applying the inverse, then relays the obfuscated stream that follows.
@@ -100,7 +156,9 @@ impl WasmTransport {
         target.encode(&mut header);
         wrapped.write_all(&header).await?;
 
-        Ok(Box::new(wrapped))
+        // `realize` already returns a `BoxedStream`; re-boxing would put a second pointer hop on
+        // every read and write for the life of the connection.
+        Ok(wrapped)
     }
 }
 
@@ -179,9 +237,14 @@ impl UdpTransport for WasmTransport {
         target: Address,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         let mut conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        // Not through `realize`: that seam consumes a stream and returns a stream, while this path
+        // needs the `Transform` itself (one instance shared between the split halves below). The
+        // `init` bytes come from the same place the TCP path gets them, so the two cannot diverge on
+        // what this transport's protocol parameters are.
         let mut transform = self
-            .module
-            .instantiate_with_config(&self.config)
+            .engine
+            .module()
+            .instantiate_with_config(&self.engine.init_bytes(&self.params, &self.fallback))
             .map_err(|e| io::Error::other(e.to_string()))?;
         // Run the interactive opening (as initiator) before steady state, mirroring the TCP dial path.
         // The server runs the responder handshake in `WasmServer::accept` for every connection — the
@@ -445,6 +508,119 @@ mod tests {
         let mut got = vec![0u8; message.len()];
         stream.read_exact(&mut got).await.expect("read");
         assert_eq!(got.as_slice(), &message[..]);
+    }
+
+    /// Step 2: the module's `init` bytes come from a **genome**, not from `init_config`.
+    ///
+    /// Two cases in one harness, because the second is only meaningful against the first:
+    ///   - a genome addressed to this engine supplies the params, and the tunnel works;
+    ///   - a genome addressed to *another* engine is refused and the transport falls back to
+    ///     `init_config`, so a misaddressed plan degrades to the static config instead of feeding
+    ///     foreign bytes to `init` (which the guest answers by trapping).
+    ///
+    /// The fallback case is the one worth guarding: it is the difference between "a bad plan costs
+    /// nothing" and "a bad plan takes the transport down".
+    #[cfg(feature = "bip324")]
+    #[tokio::test]
+    async fn a_genome_supplies_init_bytes_and_a_misaddressed_one_falls_back() {
+        use crate::transport::engine::{Genome, ModuleEngine};
+        use crate::transport::wasm::ModuleVerifier;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm/bip324.spkw");
+        let artifact = std::fs::read(&path).expect("read bip324.spkw");
+        let module = ModuleVerifier::pinned()
+            .verify(&artifact, 0)
+            .expect("verify bip324 module")
+            .into_module();
+
+        const MAGIC: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+        let init = |role: u8| {
+            let mut c = vec![role];
+            c.extend_from_slice(&MAGIC);
+            c.extend_from_slice(&[0, 0]); // k_srv_len = 0
+            c
+        };
+        const ENGINE: &str = "bip324-genome-test";
+        let genome_for = |engine: &str, role: u8| {
+            Genome::new("dynamic", engine, Default::default(), init(role))
+                .encode()
+                .expect("encode genome")
+        };
+
+        // One echo target and one tunnel server serve both dials.
+        let echo = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
+        let echo_addr = echo.local_addr().expect("echo addr");
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 256];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let server_addr = listener.local_addr().expect("server addr");
+        // `Arc` because one server serves both dials from separate tasks (`WasmServer` isn't `Clone`).
+        let server = Arc::new(WasmServer::new(module.clone()).with_config(init(1)));
+        tokio::spawn(async move {
+            // Two connections: one per client dial below.
+            for _ in 0..2 {
+                let (conn, _) = listener.accept().await.expect("accept");
+                let server = Arc::clone(&server);
+                tokio::spawn(async move {
+                    let (target, leftover, mut wrapped) =
+                        server.accept(conn).await.expect("accept + handshake");
+                    let mut upstream = match target {
+                        Address::Ip(sa) => TcpStream::connect(sa).await.expect("connect target"),
+                        Address::Domain { .. } => panic!("test announces an IP target"),
+                    };
+                    if !leftover.is_empty() {
+                        upstream.write_all(&leftover).await.expect("leftover");
+                    }
+                    let _ = copy_bidirectional(&mut wrapped, &mut upstream).await;
+                });
+            }
+        });
+
+        let engine = Arc::new(ModuleEngine::new(ENGINE, module));
+
+        // 1) A genome addressed to this engine drives the handshake. No `init_config` is set at all,
+        //    so if the genome were ignored the module would get empty config and trap.
+        let via_genome = WasmTransport::with_engine(server_addr, engine.clone())
+            .with_genome(genome_for(ENGINE, 0));
+        let mut stream = via_genome.dial(echo_addr).await.expect("dial via genome");
+        let msg = b"driven by a genome";
+        stream.write_all(msg).await.expect("write");
+        let mut got = vec![0u8; msg.len()];
+        stream.read_exact(&mut got).await.expect("read");
+        assert_eq!(
+            got.as_slice(),
+            &msg[..],
+            "the genome supplied the init bytes"
+        );
+
+        // 2) A genome for a different engine must be refused, leaving `init_config` to carry the dial.
+        let via_fallback = WasmTransport::with_engine(server_addr, engine)
+            .with_config(init(0))
+            .with_genome(genome_for("some-other-engine", 0));
+        let mut stream = via_fallback
+            .dial(echo_addr)
+            .await
+            .expect("dial via fallback");
+        stream.write_all(msg).await.expect("write");
+        let mut got = vec![0u8; msg.len()];
+        stream.read_exact(&mut got).await.expect("read");
+        assert_eq!(
+            got.as_slice(),
+            &msg[..],
+            "a misaddressed genome degrades to init_config rather than breaking the dial"
+        );
     }
 
     /// Regression for the coalesced handshake→steady-state boundary. Over a real stream the initiator's
