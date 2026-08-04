@@ -34,11 +34,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release
-        # `anytls` + `shadowsocks` are the transports a production pool actually dials, so desktop
-        # carries them the same way the Apple (build-xcframework.sh) and Android
-        # (platforms/android/Cargo.toml) slices already bake them in. Without the matching feature a
-        # config naming that outbound hard-fails at build-transport time — the desktop release was
-        # shipping without either, and `shadowsocks` was not even forwarded by the binary crates.
+        # `prod` is the canonical feature set, defined once in cli/Cargo.toml + service/Cargo.toml so
+        # this workflow cannot drift from what a real binary is supposed to do. Naming individual
+        # transports here is what let desktop ship without anytls/shadowsocks while the Apple and
+        # Android slices carried them; a config naming a missing transport hard-fails at
+        # transport-build time, by design.
         #
         # bip324 (ADR 0013 §7) is baked in on top when the module-signing PUBLIC key is configured
         # (vars.SPARK_MODULE_PUBKEY_HEX). Only the public key lives in CI — a release build with
@@ -48,7 +48,7 @@ jobs:
         env:
           SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
         run: |
-          features=anytls,shadowsocks
+          features=prod
           if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then features="$features,bip324"; fi
           cargo build --release --target ${{ matrix.target }} \
             -p spark-cli -p spark-service --features "$features"
@@ -59,11 +59,12 @@ jobs:
         env:
           SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
         run: |
-          # Both budgets now cover anytls (BoringSSL, ~+2.4 MiB) + shadowsocks, which the release
-          # build carries. Measured on macOS arm64, largest binary of the pair (spark-service):
-          # 5.35 MiB without bip324, 7.05 MiB with it (wasmi + secp256k1). Budgets keep ~30% headroom
-          # so this still catches gross bloat rather than rubber-stamping it.
-          if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then budget=$((9 * 1024 * 1024)); else budget=$((7 * 1024 * 1024)); fi
+          # Budgets track the `prod` feature set the build above produces, sized for the *Linux* ELF
+          # rather than the macOS Mach-O measured here: historically the Linux binary runs ~20% fatter
+          # (opt-level = 3 — see scripts/size-budget.sh). Measured on macOS arm64, largest of the pair
+          # (spark-service): 8.24 MiB without bip324, 9.90 MiB with it; the ~20% projection puts Linux
+          # near 9.9 and 11.9. Budgets leave ~18% on top of that.
+          if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then budget=$((14 * 1024 * 1024)); else budget=$((12 * 1024 * 1024)); fi
           status=0
           for b in spark spark-service; do
             f="target/${{ matrix.target }}/release/$b"

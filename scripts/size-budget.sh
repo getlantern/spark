@@ -12,11 +12,27 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BUDGET=$(((4 * 1024 + 256) * 1024))   # 4.25 MiB
+# Gate the binaries we actually ship, not a default build nobody releases. This script measured
+# `--bin spark --bin spark-service` with default features while release.yml shipped a much larger
+# feature set, so the tripwire could not see the thing it was guarding: a regression behind any
+# release-only feature was invisible until a tag was cut. It now builds the same `prod` set the
+# release workflow does. (`bip324` is excluded, as it is in a release without a pinned module-signing
+# key — it adds ~1.7 MiB and release.yml gates that branch separately.)
+#
+# The cost is honest: this pulls BoringSSL and a QUIC stack, so the job is slower than it was.
+# A gate that measures the wrong binary is worse than a slow one.
+#
+# Budget headroom is sized for the *Linux* ELF, not the macOS Mach-O measured below. This script's
+# own history records why: at the 4 MiB scale the Linux binary ran ~20% fatter (opt-level = 3), which
+# is what forced 4 -> 4.25 MiB. Applying that ratio to the measured 8.24 MiB macOS spark-service puts
+# Linux near 9.9 MiB, so a 10 MiB budget would sit at ~99% and fail on the first innocent change.
+# 12 MiB leaves ~18% on the fattest expected binary.
+FEATURES=${FEATURES:-prod}
+BUDGET=${BUDGET:-$((12 * 1024 * 1024))}   # 12 MiB; measured 8.24 MiB spark-service on macOS arm64
 BINS=(spark spark-service)
 
-echo "building release binaries..." >&2
-cargo build --release --locked --bin spark --bin spark-service >&2
+echo "building release binaries (features: $FEATURES)..." >&2
+cargo build --release --locked -p spark-cli -p spark-service --features "$FEATURES" >&2
 
 status=0
 for bin in "${BINS[@]}"; do

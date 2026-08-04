@@ -70,6 +70,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check (warnings as errors)
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+
+      # The check above uses default features, so a feature that does not compile on this target was
+      # invisible until a release was cut. `prod` is what release.yml ships, so it is what has to be
+      # portable — this is the only place a Windows/Linux breakage in a release-only feature (a
+      # transport, the kernel-TCP stack) gets caught before a tag.
+      - name: Cross-check the shipped feature set
+        run: >
+          cargo check -p spark-cli -p spark-service --all-targets
+          --features prod --target ${{ matrix.target }}
         env:
           RUSTFLAGS: "-D warnings"
 
