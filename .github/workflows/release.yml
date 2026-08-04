@@ -91,12 +91,16 @@ jobs:
         env:
           SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
         run: |
-          # Budgets track the `prod` feature set the build above produces, sized for the *Linux* ELF
-          # rather than the macOS Mach-O measured here: historically the Linux binary runs ~20% fatter
-          # (opt-level = 3 — see scripts/size-budget.sh). Measured on macOS arm64, largest of the pair
-          # (spark-service): 8.24 MiB without bip324, 9.90 MiB with it; the ~20% projection puts Linux
-          # near 9.9 and 11.9. Budgets leave ~18% on top of that.
-          if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then budget=$((14 * 1024 * 1024)); else budget=$((12 * 1024 * 1024)); fi
+          # Budgets track the `prod` feature set the build above produces, sized for the *Linux* ELF —
+          # the fattest thing we build, at a measured 30% over the macOS Mach-O (opt-level = 3).
+          #
+          # spark-service, largest of the pair:
+          #   prod            8.24 MiB macOS  /  10.75 MiB Linux (both measured)  -> 12 MiB, 89%
+          #   prod + bip324   9.90 MiB macOS  /  ~12.9 MiB Linux (projected)      -> 16 MiB, 80%
+          #
+          # The bip324 branch only builds when a module-signing key is configured, so its Linux size
+          # has never been measured — hence the wider margin on a number that is still an estimate.
+          if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then budget=$((16 * 1024 * 1024)); else budget=$((12 * 1024 * 1024)); fi
           status=0
           for b in spark spark-service; do
             f="target/${{ matrix.target }}/release/$b"

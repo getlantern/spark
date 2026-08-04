@@ -22,13 +22,13 @@ cd "$(dirname "$0")/.."
 # The cost is honest: this pulls BoringSSL and a QUIC stack, so the job is slower than it was.
 # A gate that measures the wrong binary is worse than a slow one.
 #
-# Budget headroom is sized for the *Linux* ELF, not the macOS Mach-O measured below. This script's
-# own history records why: at the 4 MiB scale the Linux binary ran ~20% fatter (opt-level = 3), which
-# is what forced 4 -> 4.25 MiB. Applying that ratio to the measured 8.24 MiB macOS spark-service puts
-# Linux near 9.9 MiB, so a 10 MiB budget would sit at ~99% and fail on the first innocent change.
-# 12 MiB leaves ~18% on the fattest expected binary.
+# Budget headroom is sized for the *Linux* ELF, which is the fattest thing we build. Both numbers
+# below are measured, not projected: spark-service is 8.24 MiB on macOS arm64 and 10.75 MiB on
+# x86_64 Linux — a 30% inflation from opt-level = 3, larger than the ~20% this script's older
+# history implied. (A 10 MiB budget would have failed outright, which is how the real ratio was
+# found.) 12 MiB leaves ~11% on the fattest measured binary.
 FEATURES=${FEATURES:-prod}
-BUDGET=${BUDGET:-$((12 * 1024 * 1024))}   # 12 MiB; measured 8.24 MiB spark-service on macOS arm64
+BUDGET=${BUDGET:-$((12 * 1024 * 1024))}   # 12 MiB; measured 10.75 MiB spark-service on x86_64 Linux
 BINS=(spark spark-service)
 
 echo "building release binaries (features: $FEATURES)..." >&2
