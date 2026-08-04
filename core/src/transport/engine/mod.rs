@@ -148,11 +148,19 @@ pub fn get(id: &str) -> Option<Arc<dyn OpeningEngine>> {
 /// returning the wrapped stream — the mid-stream **composition seam** (ADR 0013 §7 step 3). A
 /// composing engine (e.g. a STARTTLS-shaped one) calls this from inside its own `realize`, after
 /// writing a cleartext prelude, to upgrade the live connection to a sub-engine (typically the TLS
-/// engine) named + parameterized by its own `engine_params`. Fails **loud** if that engine isn't
-/// compiled in — never silently degrades. Also the canonical entry the transport layer uses.
+/// engine) named + parameterized by its own `engine_params`. Fails **loud** if nothing answers to
+/// that name — never silently degrades. Also the canonical entry the transport layer uses.
 pub async fn upgrade_to(stream: BoxedStream, plan: &OpeningPlan) -> io::Result<BoxedStream> {
-    let engine = get(&plan.engine)
-        .ok_or_else(|| io::Error::other(format!("engine '{}' not compiled", plan.engine)))?;
+    // Three different situations reach this arm now that engines can be delivered: a compiled-in
+    // engine whose feature is off, a module that was never registered, and a plain typo in a
+    // genome's `engine`. The message names the id and the two live possibilities rather than
+    // asserting "not compiled", which is only one of them.
+    let engine = get(&plan.engine).ok_or_else(|| {
+        io::Error::other(format!(
+            "no opening engine named '{}' (not compiled in, or no such module registered)",
+            plan.engine
+        ))
+    })?;
     engine.realize(stream, plan).await
 }
 

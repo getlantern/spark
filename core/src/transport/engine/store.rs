@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -101,12 +102,7 @@ impl BundleStore {
 
         let engine = verified.engine.clone();
         let path = self.artifact_path(&engine)?;
-        std::fs::create_dir_all(&self.dir)?;
-        // Temp-then-rename so a crash mid-write cannot leave a truncated artifact that would fail
-        // verification on the next load and strand the transport.
-        let tmp = path.with_extension(format!("{BUNDLE_EXT}.tmp"));
-        std::fs::write(&tmp, artifact)?;
-        std::fs::rename(&tmp, &path)?;
+        write_atomic(&self.dir, &path, artifact)?;
 
         self.bump(
             &engine,
@@ -164,8 +160,10 @@ impl BundleStore {
         entry.bundle = entry.bundle.max(floor.bundle);
         entry.genome = entry.genome.max(floor.genome);
         let toml = toml::to_string(&floors).map_err(io::Error::other)?;
-        std::fs::create_dir_all(&self.dir)?;
-        std::fs::write(self.dir.join(FLOORS_FILE), toml)
+        // Atomic for the same reason the artifact is: a half-written floors file does not parse, and
+        // since `floors()` propagates that error, a crash mid-write would break every later load and
+        // install for *every* engine — losing the anti-rollback state this file exists to keep.
+        write_atomic(&self.dir, &self.dir.join(FLOORS_FILE), toml.as_bytes())
     }
 
     /// The artifact path for `engine`, after validating the name is a safe path component.
@@ -175,6 +173,43 @@ impl BundleStore {
         }
         Ok(self.dir.join(format!("{engine}.{BUNDLE_EXT}")))
     }
+}
+
+/// Write `bytes` to `path` via a temp file in the same directory, then rename over the target.
+///
+/// Two properties matter here:
+///
+/// - **A crash never leaves a partial file.** `rename` is atomic within a filesystem, so a reader
+///   sees either the old contents or the new ones — never a truncated artifact that would fail
+///   verification, or a floors file that no longer parses.
+/// - **Concurrent writers do not collide.** The temp name carries the process id and a counter, so
+///   two installs of the same engine cannot interleave into one shared scratch path. A fixed
+///   `<name>.tmp` would let them write over each other and rename whichever finished last, which
+///   could publish a mixture of two artifacts.
+///
+/// `std::fs::rename` replaces an existing file on every platform we build for, Windows included
+/// (`MoveFileExW` / `SetFileInformationByHandle`); the documented Windows caveat is about renaming
+/// *onto a directory*, and these targets are always files. So there is deliberately no
+/// remove-then-rename fallback — it would open a window where the bundle is simply absent.
+fn write_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::fs::create_dir_all(dir)?;
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    // Best-effort cleanup: leaving a stray temp file behind on a failed rename is untidy but
+    // harmless (a unique name is never read back), while failing to report the real error is not.
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Whether `name` is safe to use as a single path component.
@@ -337,6 +372,45 @@ mod tests {
         );
         let floor = store.floors().expect("floors")[ENGINE];
         assert_eq!((floor.bundle, floor.genome), (5, 5), "floors did not move");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Concurrent installs of the same engine must not interleave through a shared scratch file.
+    /// With a fixed `<name>.tmp` two writers race on one path and the rename can publish a mixture;
+    /// with per-write temp names whichever lands last wins cleanly, and the result always verifies.
+    #[test]
+    fn concurrent_installs_of_one_engine_do_not_corrupt_the_artifact() {
+        let dir = temp_dir("concurrent");
+        let kp = dev_keypair();
+        // Same bundle version from every thread, so none is a rollback against the others and they
+        // genuinely contend on the write rather than being rejected by the floor.
+        let artifacts: Vec<Vec<u8>> = (0..8).map(|_| artifact(&kp, ENGINE, 1, 1)).collect();
+
+        std::thread::scope(|s| {
+            for a in &artifacts {
+                let dir = dir.clone();
+                s.spawn(move || {
+                    // A rejected install is fine here (floors advance under contention); a corrupt
+                    // one is not, which is what the load below checks.
+                    let _ = BundleStore::new(&dir).install(a);
+                });
+            }
+        });
+
+        let loaded = BundleStore::new(&dir)
+            .load(ENGINE)
+            .expect("the installed artifact verifies after concurrent writes");
+        assert_eq!(loaded.engine, ENGINE);
+        assert_eq!(loaded.genomes.len(), 1);
+
+        // No scratch files survive a successful run.
+        let strays: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read store dir")
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert!(strays.is_empty(), "temp files left behind: {strays:?}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -23,7 +23,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::{Transform, TransformModule, TransformStream};
 use crate::net::SocketProtector;
-use crate::transport::engine::{Genome, ModuleEngine, OpeningEngine, OpeningPlan};
+use crate::transport::engine::{Genome, ModuleEngine, OpeningEngine};
 use crate::transport::tcp_tunnel::header::Address;
 use crate::transport::tcp_tunnel::stream::read_header;
 use crate::transport::tcp_tunnel::udp::udp_associate_sentinel;
@@ -97,9 +97,23 @@ impl WasmTransport {
     /// module sees exactly one kind of input. Kept because a locally configured module is a real use
     /// case, but it is now the **fallback** — a delivered genome supersedes it.
     pub fn with_config(mut self, config: Vec<u8>) -> Self {
-        self.fallback = Genome::new("static", self.engine.id(), Default::default(), config)
+        // A builder cannot return an error, and encoding this genome should never fail — it is an
+        // in-memory postcard encode of a struct with no unsupported types. But an empty fallback is
+        // indistinguishable from "no fallback configured", so a silent failure here would surface
+        // much later as a module trapping on empty `init`. Say so instead of swallowing it.
+        self.fallback = match Genome::new("static", self.engine.id(), Default::default(), config)
             .encode()
-            .unwrap_or_default();
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    engine = %self.engine.id(),
+                    "encoding the static fallback genome failed; this transport has no fallback plan"
+                );
+                Vec::new()
+            }
+        };
         self
     }
 
@@ -115,26 +129,26 @@ impl WasmTransport {
     /// the address header. Shared by [`dial`]/[`dial_addr`].
     async fn dial_target(&self, target: Address) -> io::Result<BoxedStream> {
         let conn = protected_tcp_connect(self.server, self.protector.as_ref()).await?;
+        // Resolve the opening plan once and use it for both jobs below — one postcard decode per
+        // dial, not two, and no chance of the socket being tuned for a different plan than the one
+        // the module runs.
+        let (init, wire) = self.engine.plan(&self.params, &self.fallback);
         // `TCP_NODELAY` has to be set on the concrete socket — flint's shaper is generic over the
-        // stream and only guarantees a flush per segment — so without this the segments a genome asks
-        // for can still be coalesced into one packet by Nagle. Costs a second decode of the genome
-        // (once here, once inside `realize`); a postcard decode per connection is not worth
-        // restructuring the seam to avoid. A failure to set it only forfeits the optimization, so it
-        // must not fail the dial.
-        if self.engine.plan(&self.params, &self.fallback).1.tcp_nodelay {
+        // stream and only guarantees a flush per segment — so without this the segments a genome
+        // asks for can still be coalesced into one packet by Nagle. It must happen here, while the
+        // socket is still concrete: past this point the stream is boxed away behind the seam. A
+        // failure to set it only forfeits the optimization, so it must not fail the dial.
+        if wire.tcp_nodelay {
             let _ = conn.set_nodelay(true);
         }
-        // Realize the opening through the engine seam: it instantiates the module with this
-        // transport's engine params, runs the interactive handshake if the module drives one (e.g.
-        // BIP324), and hands back the steady-state stream. Identical to what a genome-selected
-        // engine does, because it is the same code.
-        let plan = OpeningPlan {
-            engine: std::borrow::Cow::Owned(self.engine.id().to_owned()),
-            sni: String::new(),
-            params: self.params.clone(),
-            fallback: self.fallback.clone(),
-        };
-        let mut wrapped = self.engine.realize(Box::new(conn), &plan).await?;
+        // Realize the opening through the engine: it instantiates the module with these engine
+        // params, shapes the opening, and runs the interactive handshake if the module drives one
+        // (e.g. BIP324). Identical to what a genome-selected engine does — it is the same code,
+        // entered one step lower because the plan is already in hand.
+        let mut wrapped = self
+            .engine
+            .realize_resolved(Box::new(conn), init, wire)
+            .await?;
 
         // The address header is the first thing through the transform; the server reads it back
         // after applying the inverse, then relays the obfuscated stream that follows.

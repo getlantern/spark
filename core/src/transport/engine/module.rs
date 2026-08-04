@@ -140,6 +140,23 @@ impl OpeningEngine for ModuleEngine {
 
     async fn realize(&self, stream: BoxedStream, plan: &OpeningPlan) -> io::Result<BoxedStream> {
         let (init, wire) = self.plan(&plan.params, &plan.fallback);
+        self.realize_resolved(stream, init, wire).await
+    }
+}
+
+impl ModuleEngine {
+    /// Realize an opening from an **already-resolved** plan.
+    ///
+    /// Split out so a caller that had to resolve the plan for its own reasons does not pay for a
+    /// second decode. The TCP dial path is exactly that case: it needs `tcp_nodelay` from the wire
+    /// plan while it still holds the concrete socket, before the stream is boxed away behind this
+    /// seam — so it resolves once and hands the result straight through.
+    pub async fn realize_resolved(
+        &self,
+        stream: BoxedStream,
+        init: Vec<u8>,
+        wire: WirePlan,
+    ) -> io::Result<BoxedStream> {
         let mut transform = self
             .module
             .instantiate_with_config(&init)
@@ -154,12 +171,11 @@ impl OpeningEngine for ModuleEngine {
         // rather than pay an indirection for nothing. `tcp_nodelay` is deliberately not handled here:
         // it needs the concrete socket, which this seam has already boxed away, so the dial path
         // applies it.
-        let stream: BoxedStream = if wire.is_noop() {
+        let mut stream: BoxedStream = if wire.is_noop() {
             stream
         } else {
             Box::new(SegmentShapingStream::new(stream, wire))
         };
-        let mut stream = stream;
         // An interactive opening (BIP324 and anything else that negotiates) runs on the raw stream
         // before any steady-state bytes; the keys it derives stay inside the guest for the transform
         // that follows. A transform-only module reports false and is passed straight through, which
