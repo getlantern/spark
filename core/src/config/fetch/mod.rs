@@ -665,7 +665,7 @@ where
                     // failed fetch (design §7): don't cache, keep last-good, and back off — so a server
                     // serving a broken config isn't re-polled at the fast steady-state cadence.
                     fail = fail.saturating_add(1);
-                    sleep_or_stop(backoff(fail), &should_stop).await;
+                    sleep_or_stop(crate::backoff::with_jitter(fail), &should_stop).await;
                 }
             },
             Ok(FetchOutcome::NotModified) => {
@@ -675,17 +675,11 @@ where
             Err(e) => {
                 tracing::debug!(err = %e, "config-fetch: fetch failed, backing off");
                 fail = fail.saturating_add(1);
-                sleep_or_stop(backoff(fail), &should_stop).await;
+                sleep_or_stop(crate::backoff::with_jitter(fail), &should_stop).await;
             }
         }
     }
     tracing::debug!("config-fetch: refresh loop stopped");
-}
-
-/// Quadratic backoff (10ms·n²) capped at 2 minutes — matches radiance's `common.NewBackoff`.
-fn backoff(n: u32) -> Duration {
-    let ms = (10u64).saturating_mul((n as u64).saturating_mul(n as u64));
-    Duration::from_millis(ms.min(120_000))
 }
 
 /// Sleep `d`, but wake early (return) if `should_stop` flips. Polls the stop flag each second.
@@ -784,11 +778,15 @@ mod tests {
         assert_eq!(outcome_label(&Err(std::io::Error::other("x"))), "error");
     }
 
+    /// The refresh loop's pacing lives in [`crate::backoff`] (jittered, shared with the diagnostics
+    /// uploader) — its curve is asserted there. This only pins the wiring: the delay a failure
+    /// produces must stay inside that module's bounds.
     #[test]
-    fn backoff_is_quadratic_and_capped() {
-        assert_eq!(backoff(1), Duration::from_millis(10));
-        assert_eq!(backoff(2), Duration::from_millis(40));
-        assert_eq!(backoff(10_000), Duration::from_millis(120_000)); // capped 2min
+    fn failure_delay_comes_from_the_shared_jittered_backoff() {
+        for fail in [1u32, 5, 99] {
+            let (lo, hi) = crate::backoff::bounds(fail);
+            assert!((lo..=hi).contains(&crate::backoff::with_jitter(fail)));
+        }
     }
 
     /// Live: hits real staging. Run:
