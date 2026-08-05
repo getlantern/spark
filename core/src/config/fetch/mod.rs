@@ -386,18 +386,29 @@ fn map_response(status: u16, etag: Option<String>, body: Vec<u8>) -> std::io::Re
 /// Unlike a plain `select!`, an early *failure* doesn't end the race — the remaining attempts still
 /// run, so a censored direct dial doesn't pre-empt the fronted ones (and vice versa).
 async fn first_ok(mut attempts: Vec<FetchAttempt<'_>>) -> std::io::Result<FetchOutcome> {
-    let mut last_err = std::io::Error::other("no config-new fetch attempt ran");
+    if attempts.is_empty() {
+        return Err(std::io::Error::other("no config-new fetch attempt ran"));
+    }
+    // Every avenue's error, not just the last. A censored cold start is the case where this report is
+    // the only evidence available, and "the last future to finish said connection refused" describes
+    // whichever attempt happened to lose the race rather than why the fetch failed. `with_outcome`
+    // has already tagged each error with its avenue, so the joined message names all four.
+    let mut errors: Vec<String> = Vec::with_capacity(attempts.len());
     while !attempts.is_empty() {
         let (result, _idx, remaining) = futures::future::select_all(attempts).await;
         match result {
             Ok(outcome) => return Ok(outcome),
             Err(e) => {
-                last_err = e;
+                errors.push(e.to_string());
                 attempts = remaining;
             }
         }
     }
-    Err(last_err)
+    Err(std::io::Error::other(format!(
+        "all {} config-new fetch avenues failed: {}",
+        errors.len(),
+        errors.join("; ")
+    )))
 }
 
 /// Build the fronted dialer from the embedded `domainfront/fronted.yaml.gz` (aliyun/akamai/cloudfront).
@@ -768,6 +779,44 @@ mod tests {
         );
     }
 
+    /// A failed cold start must report *every* avenue, not whichever future finished last. This is
+    /// the case where the error message is the only evidence anyone gets, so losing three quarters of
+    /// it is the difference between a diagnosable failure and a shrug.
+    #[tokio::test]
+    async fn a_total_failure_reports_every_avenue() {
+        let attempt = |name: &'static str| -> FetchAttempt<'static> {
+            Box::pin(with_outcome(
+                name,
+                Box::pin(async { Err(std::io::Error::other("blocked")) }),
+            ))
+        };
+        let err = first_ok(vec![
+            attempt("direct"),
+            attempt("fronted"),
+            attempt("scanned"),
+            attempt("proxyless"),
+        ])
+        .await
+        .map(|_| ())
+        .expect_err("every avenue failed");
+        let msg = err.to_string();
+        for avenue in ["direct", "fronted", "scanned", "proxyless"] {
+            assert!(msg.contains(avenue), "the report must name {avenue}: {msg}");
+        }
+        assert!(msg.contains("all 4"), "and how many failed: {msg}");
+    }
+
+    /// An empty attempt list is a programming error, not a network failure — it must not be reported
+    /// as "all 0 avenues failed", which would read like a blocked network.
+    #[tokio::test]
+    async fn no_attempts_is_distinguishable_from_every_attempt_failing() {
+        let err = first_ok(Vec::new())
+            .await
+            .map(|_| ())
+            .expect_err("an empty race cannot succeed");
+        assert!(err.to_string().contains("no config-new fetch attempt ran"));
+    }
+
     /// The proxyless member must be *bounded*. A cold search is a search, not a dial, and this race
     /// gives every avenue 30s — an unbounded space would spend the whole budget and lose, making the
     /// avenue useless rather than absent, which is worse because it looks like it is covered.
@@ -825,6 +874,57 @@ mod tests {
             }
             FetchOutcome::NotModified => panic!("unexpected 304 on unconditional proxyless fetch"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Design probe, not a regression test.** Answers the one question that decides whether the
+    /// whole fetch can move onto `Kindling`: is a fronted TLS *connection* usable for config-new with
+    /// plain HTTP/1.1 over it?
+    ///
+    /// Today the fronted avenue is an h2 **one-shot** (`FrontedTlsDialer::request`), whose success
+    /// criterion is a complete HTTP response. A kindling race wins on *connect*, so moving fronting
+    /// into it means speaking HTTP/1.1 over `ConnectionTransport::connect` and validating afterwards.
+    /// That is only sound if the edge accepts HTTP/1.1 and routes it to the origin by `Host`.
+    ///
+    /// If this passes, the fronted avenue can become a uniform kindling member and the whole race
+    /// collapses into one. If it fails, fronting stays a one-shot and only the connection-shaped
+    /// members (direct, proxyless, later dns-tunnel) move. Run:
+    /// `cargo test -p spark-core --features prod -- --ignored fronted_connection_speaks_http1`
+    #[tokio::test]
+    #[ignore = "live: design probe, needs network + reachable fronting edges"]
+    async fn fronted_connection_speaks_http1() {
+        use flint_kindling::ConnectionTransport as _;
+
+        let dialer = fronted_dialer().expect("embedded fronted config parses");
+        let env = FetchEnv::prod();
+        let dir = std::env::temp_dir().join("spark-probe-fronted-conn");
+        let _ = std::fs::remove_dir_all(&dir);
+        let did = device_id(&dir).unwrap();
+        let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
+            .await
+            .expect("user-create");
+        let mut req = ConfigRequest::new(did);
+        req.user_id = creds.user_id.clone();
+        req.pro_token = creds.pro_token.clone();
+
+        // The connection path, not the one-shot path.
+        let stream = dialer
+            .connect(&env.host)
+            .await
+            .expect("fronted edge accepts a connection");
+        let bytes = build_request_bytes(&env.host, &env.path, &req, &Conditional::default())
+            .expect("request bytes");
+        let resp = post_collect(stream, &bytes, 4 * 1024 * 1024)
+            .await
+            .expect("HTTP/1.1 over the fronted connection");
+        assert_eq!(
+            resp.status, 200,
+            "the edge routed HTTP/1.1 to the origin by Host (status {})",
+            resp.status
+        );
+        let raw = String::from_utf8(resp.body).expect("utf-8 body");
+        let cfg = Config::from_config_str(&raw).expect("adapt config from the fronted connection");
+        assert!(!cfg.transport.servers.is_empty(), "should return a pool");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
