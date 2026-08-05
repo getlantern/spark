@@ -236,10 +236,13 @@ async fn with_outcome<'a>(
         avenue,
         latency_ms,
     ));
-    // Tag the error with its avenue. `first_ok` keeps only the last error, so without this a failed
-    // cold start reports something like "connection refused" with no way to tell which of four paths
-    // produced it — precisely the case where that matters most. The `ErrorKind` is preserved because
-    // callers match on it (`load_or_fetch` distinguishes a real failure from an offline fallback).
+    // Tag the error with its avenue, so the aggregate `first_ok` builds names which path produced
+    // each failure rather than reporting an anonymous "connection refused".
+    //
+    // The `ErrorKind` is carried through rather than flattened. No caller matches on it today —
+    // `cached_or_err` decides on whether a cache exists, not on the kind — so this is about not
+    // destroying information on the way past, not about a contract anyone relies on. An earlier
+    // version of this comment claimed `load_or_fetch` matched on it, which was simply untrue.
     result.map_err(|e| std::io::Error::new(e.kind(), format!("{avenue}: {e}")))
 }
 
@@ -420,7 +423,13 @@ fn map_response(status: u16, etag: Option<String>, body: Vec<u8>) -> std::io::Re
     }
 }
 
-/// Race several fetch attempts, returning the first that succeeds; if all fail, return the last error.
+/// Race several fetch attempts, returning the first that succeeds.
+///
+/// If all of them fail, the error names **every** avenue and how each died, not just whichever
+/// attempt happened to finish last — on a censored network that report is the only evidence anyone
+/// gets. The `ErrorKind` is kept when all avenues agreed on one, since "they all timed out" and "they
+/// failed four different ways" are different diagnoses. An empty attempt list is reported distinctly:
+/// it is a programming error, and calling it "all 0 avenues failed" would read like a blocked network.
 /// Unlike a plain `select!`, an early *failure* doesn't end the race — the remaining attempts still
 /// run, so a censored direct dial doesn't pre-empt the fronted ones (and vice versa).
 async fn first_ok(mut attempts: Vec<FetchAttempt<'_>>) -> std::io::Result<FetchOutcome> {
@@ -432,21 +441,33 @@ async fn first_ok(mut attempts: Vec<FetchAttempt<'_>>) -> std::io::Result<FetchO
     // whichever attempt happened to lose the race rather than why the fetch failed. `with_outcome`
     // has already tagged each error with its avenue, so the joined message names all four.
     let mut errors: Vec<String> = Vec::with_capacity(attempts.len());
+    let mut kinds: Vec<std::io::ErrorKind> = Vec::with_capacity(attempts.len());
     while !attempts.is_empty() {
         let (result, _idx, remaining) = futures::future::select_all(attempts).await;
         match result {
             Ok(outcome) => return Ok(outcome),
             Err(e) => {
+                kinds.push(e.kind());
                 errors.push(e.to_string());
                 attempts = remaining;
             }
         }
     }
-    Err(std::io::Error::other(format!(
-        "all {} config-new fetch avenues failed: {}",
-        errors.len(),
-        errors.join("; ")
-    )))
+    // Keep the `ErrorKind` when every avenue agreed on one — "they all timed out" is a materially
+    // different diagnosis from "they failed in four different ways", and flattening the aggregate to
+    // `Other` would throw away the per-avenue kinds that `with_outcome` deliberately preserved.
+    let kind = match kinds.split_first() {
+        Some((first, rest)) if rest.iter().all(|k| k == first) => *first,
+        _ => std::io::ErrorKind::Other,
+    };
+    Err(std::io::Error::new(
+        kind,
+        format!(
+            "all {} config-new fetch avenues failed: {}",
+            errors.len(),
+            errors.join("; ")
+        ),
+    ))
 }
 
 /// Build the fronted dialer from the embedded `domainfront/fronted.yaml.gz` (aliyun/akamai/cloudfront).
@@ -822,17 +843,18 @@ mod tests {
     /// it is the difference between a diagnosable failure and a shrug.
     #[tokio::test]
     async fn a_total_failure_reports_every_avenue() {
-        let attempt = |name: &'static str| -> FetchAttempt<'static> {
+        let attempt = |name: &'static str, kind: std::io::ErrorKind| -> FetchAttempt<'static> {
             Box::pin(with_outcome(
                 name,
-                Box::pin(async { Err(std::io::Error::other("blocked")) }),
+                Box::pin(async move { Err(std::io::Error::new(kind, "blocked")) }),
             ))
         };
+        let timed_out = std::io::ErrorKind::TimedOut;
         let err = first_ok(vec![
-            attempt("direct"),
-            attempt("fronted"),
-            attempt("scanned"),
-            attempt("proxyless"),
+            attempt("direct", timed_out),
+            attempt("fronted", timed_out),
+            attempt("scanned", timed_out),
+            attempt("proxyless", timed_out),
         ])
         .await
         .map(|_| ())
@@ -842,6 +864,21 @@ mod tests {
             assert!(msg.contains(avenue), "the report must name {avenue}: {msg}");
         }
         assert!(msg.contains("all 4"), "and how many failed: {msg}");
+        assert_eq!(
+            err.kind(),
+            timed_out,
+            "a unanimous kind survives — 'they all timed out' is its own diagnosis"
+        );
+
+        // Mixed kinds cannot honestly be summarised as any one of them.
+        let err = first_ok(vec![
+            attempt("direct", std::io::ErrorKind::TimedOut),
+            attempt("fronted", std::io::ErrorKind::ConnectionRefused),
+        ])
+        .await
+        .map(|_| ())
+        .expect_err("both failed");
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 
     /// An empty attempt list is a programming error, not a network failure — it must not be reported
