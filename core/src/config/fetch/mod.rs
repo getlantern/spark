@@ -180,7 +180,7 @@ async fn fetch_once(
     cond: &Conditional,
     fronted: Option<&FrontedTlsDialer<FlintDnsResolver>>,
     bootstrap: Option<&FrontedBootstrap>,
-    #[cfg(feature = "proxyless")] proxyless: Option<&flint_kindling::ProxylessTransport>,
+    #[cfg(feature = "proxyless")] proxyless: &flint_kindling::ProxylessTransport,
 ) -> std::io::Result<FetchOutcome> {
     const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -206,12 +206,16 @@ async fn fetch_once(
         )));
     }
     #[cfg(feature = "proxyless")]
-    if let Some(p) = proxyless {
-        attempts.push(Box::pin(with_outcome(
-            "proxyless",
-            Box::pin(fetch_once_proxyless(env, &req, cond, p, ATTEMPT_TIMEOUT)),
-        )));
-    }
+    attempts.push(Box::pin(with_outcome(
+        "proxyless",
+        Box::pin(fetch_once_proxyless(
+            env,
+            &req,
+            cond,
+            proxyless,
+            ATTEMPT_TIMEOUT,
+        )),
+    )));
     first_ok(attempts).await
 }
 
@@ -232,7 +236,11 @@ async fn with_outcome<'a>(
         avenue,
         latency_ms,
     ));
-    result
+    // Tag the error with its avenue. `first_ok` keeps only the last error, so without this a failed
+    // cold start reports something like "connection refused" with no way to tell which of four paths
+    // produced it — precisely the case where that matters most. The `ErrorKind` is preserved because
+    // callers match on it (`load_or_fetch` distinguishes a real failure from an offline fallback).
+    result.map_err(|e| std::io::Error::new(e.kind(), format!("{avenue}: {e}")))
 }
 
 /// The `result` label for a §C6 `config.fetch_outcome` event.
@@ -305,7 +313,7 @@ async fn fetch_once_proxyless(
 #[cfg(feature = "proxyless")]
 const PROXYLESS_MAX_CANDIDATES: usize = 8;
 
-/// Build the proxyless race member, or `None` when the feature is off.
+/// Build the proxyless race member.
 ///
 /// **Bounded on purpose.** The first connection on a new network is a *search*, not a dial — flint's
 /// own docs flag the interaction with an attempt timeout — and this race gives every avenue 30s. An
@@ -314,15 +322,13 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 /// once by the caller and reused, so its `StrategyCache` keeps the winning strategy for later fetches
 /// (the same reason the fronted dialer and the scanner are hoisted out of the refresh loop).
 #[cfg(feature = "proxyless")]
-fn proxyless_transport(env: &FetchEnv) -> Option<flint_kindling::ProxylessTransport> {
-    Some(
-        flint_kindling::ProxylessTransport::new(
-            flint_kindling::Space::new(flint_dns::default_pool()),
-            "config-fetch",
-        )
-        .with_port(env.port)
-        .with_max_candidates(PROXYLESS_MAX_CANDIDATES),
+fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
+    flint_kindling::ProxylessTransport::new(
+        flint_kindling::Space::new(flint_dns::default_pool()),
+        "config-fetch",
     )
+    .with_port(env.port)
+    .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
 }
 
 /// The fronted path: run the config-new request as a one-shot h2 request over `dialer` (the fronting
@@ -490,7 +496,7 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
         fronted.as_ref(),
         Some(&bootstrap),
         #[cfg(feature = "proxyless")]
-        proxyless.as_ref(),
+        &proxyless,
     )
     .await
     {
@@ -592,7 +598,7 @@ where
             fronted.as_ref(),
             Some(&bootstrap),
             #[cfg(feature = "proxyless")]
-            proxyless.as_ref(),
+            &proxyless,
         )
         .await
         {
@@ -779,8 +785,6 @@ mod tests {
             "the cap ({PROXYLESS_MAX_CANDIDATES}) must actually restrict the {full}-candidate space"
         );
         // (No `> 0` assertion: it is constant-true, and flint's `with_max_candidates` floors at 1.)
-        // The member is built when the feature is on — the wiring this bound protects.
-        assert!(proxyless_transport(&FetchEnv::prod()).is_some());
     }
 
     /// Live: fetch prod config-new strictly through the **proxyless** avenue — no proxy, no exit hop,
@@ -792,7 +796,7 @@ mod tests {
     #[ignore = "live: needs network"]
     async fn live_proxyless_fetch() {
         let env = FetchEnv::prod();
-        let transport = proxyless_transport(&env).expect("proxyless member");
+        let transport = proxyless_transport(&env);
         let dir = std::env::temp_dir().join("spark-live-proxyless");
         let _ = std::fs::remove_dir_all(&dir);
         let did = device_id(&dir).unwrap();
