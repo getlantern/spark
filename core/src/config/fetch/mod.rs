@@ -276,15 +276,21 @@ async fn fetch_once_direct(
 /// The proxyless path: reach config-new with **no proxy and no exit hop**, by searching for an
 /// un-poisoned resolver plus opening-handshake shaping this network does not block (ADR 0014).
 ///
-/// Why it belongs in this race rather than being a nice-to-have: the other three avenues are all
-/// TLS-over-TCP/443 to a CDN or origin — two of them are the same technique with different edge
-/// lists — so they share a failure mode. A network that poisons DNS or classifies the ClientHello
-/// takes out all three at once. Proxyless is the only member that brings its own resolver *and* its
-/// own wire shaping, so it fails independently of the others. It also costs no infrastructure and
-/// burns no fronting domains, which makes it free to lose on an open network where `direct` wins.
+/// Why it belongs in this race: the other three avenues are all TLS-over-TCP/443 to a CDN or origin —
+/// two of them the same technique with different edge lists — so they share a failure mode. A network
+/// that poisons DNS or classifies the ClientHello takes out all three at once. Proxyless is the only
+/// member that brings its own resolver *and* its own wire shaping, so it fails independently. It also
+/// costs no infrastructure and burns no fronting domains, which makes it free to lose on an open
+/// network where `direct` wins.
 ///
-/// `connect` returns a TLS stream already handshaked to the host, so this is the direct path minus
-/// the resolve/dial/wrap — the strategy search does all three.
+/// **It speaks h2, not HTTP/1.1.** The connection arrives already TLS-handshaked by flint's Chrome
+/// connector, which offers `h2,http/1.1` (`flint-tls/src/connector.rs`) because ALPN is part of the
+/// JA4 this transport exists to imitate. A modern origin therefore selects h2, and writing HTTP/1.1
+/// onto that connection gets no valid response at all — it fails as "no header terminator" rather
+/// than as an HTTP error, which is exactly how a first version of this avenue was silently broken.
+/// Speaking HTTP/1.1 after a Chrome ClientHello would also be a fingerprint anomaly in its own right,
+/// so the correct protocol and the convincing one are the same. `direct` differs because spark's own
+/// `fetch_connector` sets no ALPN, leaving HTTP/1.1 as the default.
 #[cfg(feature = "proxyless")]
 async fn fetch_once_proxyless(
     env: &FetchEnv,
@@ -293,18 +299,19 @@ async fn fetch_once_proxyless(
     transport: &flint_kindling::ProxylessTransport,
     timeout: Duration,
 ) -> std::io::Result<FetchOutcome> {
-    let bytes =
-        build_request_bytes(&env.host, &env.path, req, cond).map_err(std::io::Error::other)?;
+    let oneshot = build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
     let resp = tokio::time::timeout(timeout, async {
-        // `ConnectionTransport` in scope only here: it is the trait that provides `connect`, and the
-        // import is local so it cannot collide with spark's own `Transport` trait.
+        // `ConnectionTransport` in scope only here: it provides `connect`, and a local import cannot
+        // collide with spark's own `Transport` trait.
         use flint_kindling::ConnectionTransport as _;
         let stream = transport.connect(&env.host).await?;
-        post_collect(stream, &bytes, 4 * 1024 * 1024).await
+        // The real host is the authority — unlike the fronted avenue, there is no decoy to address.
+        flint_kindling::h2_oneshot(stream, &env.host, &oneshot).await
     })
     .await
     .map_err(|_| std::io::Error::other("config-new proxyless fetch timed out"))??;
-    map_response(resp.status, resp.etag, resp.body)
+    let etag = resp.header("etag").map(ToOwned::to_owned);
+    map_response(resp.status, etag, resp.body)
 }
 
 /// Strict upper bound on candidates a single cold proxyless search will try, so its worst case is
@@ -878,28 +885,33 @@ mod tests {
     }
 
     /// **Design probe, not a regression test.** Decides how much of the fetch can move onto
-    /// `Kindling`.
+    /// `Kindling`. It has been wrong twice, and both mistakes are worth keeping written down because
+    /// each one was a silent failure rather than a loud one.
     ///
-    /// The first version of this probe failed with a 400, and the cause was the probe: it addressed
-    /// the inner request to config-new's own host. A fronted edge routes by the *provider's* host
-    /// (`front.fronted_host`) — SNI is a decoy, the inner `Host` is what selects the origin — so the
-    /// edge was right to reject it. It now addresses `fronted_host()`, matching what the h2 one-shot
-    /// does via `h2_oneshot(tls, &authority, ..)`.
+    /// First it addressed the inner request to config-new's own host and got a 400. A fronted edge
+    /// routes by the *provider's* host (`front.fronted_host`) — SNI is the decoy, the inner `Host`
+    /// selects the origin — so the edge was right to reject it.
     ///
-    /// That correction exposes the real finding, which is about the abstraction rather than HTTP:
-    /// `ConnectionTransport::connect` returns `conn.stream` and **drops `conn.front`**, so a generic
-    /// consumer of a kindling race cannot build a correct inner request — the authority it needs
-    /// depends on which front won, and that is exactly what the uniform interface erases. Hence this
-    /// probe uses `connect_fronted`, which keeps it.
+    /// Then it spoke HTTP/1.1 and got "no header terminator", i.e. no valid response at all. flint's
+    /// Chrome connector sets `ALPN_H2_HTTP11` unconditionally (`flint-tls/src/connector.rs`) because
+    /// ALPN is part of the JA4 being imitated, so the edge selects **h2**. HTTP/1.1 over that is not
+    /// an HTTP error, it is a protocol violation — which is why it surfaces as garbage rather than a
+    /// status code.
     ///
-    /// So what this now answers is narrower and still decisive: *if* the authority were available,
-    /// would plain HTTP/1.1 over a fronted TLS connection reach config-new? Pass ⇒ the full move is
-    /// worth a small flint change to surface the winning front. Fail ⇒ fronting stays a one-shot and
-    /// only the connection-shaped members (direct, proxyless, later dns-tunnel) move. Run:
-    /// `cargo test -p spark-core --features prod -- --ignored --nocapture fronted_connection_speaks_http1`
+    /// Both corrections point at the same structural finding: `ConnectionTransport::connect` returns
+    /// `conn.stream` and drops `conn.front`, and a generic consumer of a kindling race therefore
+    /// cannot address a fronted request correctly. The uniform interface erases the one thing this
+    /// caller needs. That is fine for a tunnel, where nobody cares which edge carried it; a bootstrap
+    /// HTTP request is the case where it is not.
+    ///
+    /// What this now answers: *if* the authority were available, does a fronted TLS connection carry
+    /// an ordinary h2 request to config-new? Pass ⇒ the full move is worth a small flint change to
+    /// surface the winning front alongside the stream. Fail ⇒ fronting stays a one-shot and only the
+    /// connection-shaped members move. Run:
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture fronted_connection_speaks_h2`
     #[tokio::test]
     #[ignore = "live: design probe, needs network + reachable fronting edges"]
-    async fn fronted_connection_speaks_http1() {
+    async fn fronted_connection_speaks_h2() {
         let dialer = fronted_dialer().expect("embedded fronted config parses");
         let env = FetchEnv::prod();
         let dir = std::env::temp_dir().join("spark-probe-fronted-conn");
@@ -920,11 +932,11 @@ mod tests {
         let authority = conn.fronted_host().to_owned();
         println!("probe: edge accepted, inner authority = {authority}");
 
-        let bytes = build_request_bytes(&authority, &env.path, &req, &Conditional::default())
-            .expect("request bytes");
-        let resp = post_collect(conn.stream, &bytes, 4 * 1024 * 1024)
+        let oneshot = build_oneshot_request(&env.path, &req, &Conditional::default())
+            .expect("oneshot request");
+        let resp = flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot)
             .await
-            .expect("HTTP/1.1 over the fronted connection");
+            .expect("h2 over the fronted connection");
         println!(
             "probe: status {}, {} body bytes",
             resp.status,
@@ -932,8 +944,7 @@ mod tests {
         );
         assert_eq!(
             resp.status, 200,
-            "HTTP/1.1 addressed to {authority} should reach the origin (got {})",
-            resp.status
+            "h2 to {authority} should reach the origin"
         );
         let raw = String::from_utf8(resp.body).expect("utf-8 body");
         let cfg = Config::from_config_str(&raw).expect("adapt config from the fronted connection");
