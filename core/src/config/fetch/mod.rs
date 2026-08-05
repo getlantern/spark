@@ -896,6 +896,50 @@ mod tests {
         // (No `> 0` assertion: it is constant-true, and flint's `with_max_candidates` floors at 1.)
     }
 
+    /// **Diagnostic, not a test of spark.** `connect_cached` collapses every candidate's error into
+    /// `AllFailed { tried }` (`.map_err(|_errors| ..)` — the reasons are collected and then dropped),
+    /// so a failing search is undiagnosable from the outside. This walks the same space one candidate
+    /// at a time via the public `probe` and prints what each one actually said.
+    ///
+    /// Run when the proxyless avenue fails and you need to know why:
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture why_proxyless_fails`
+    #[cfg(feature = "proxyless")]
+    #[tokio::test]
+    #[ignore = "diagnostic: needs network"]
+    async fn why_proxyless_fails() {
+        let env = FetchEnv::prod();
+        let space =
+            flint_kindling::Space::new(flint_dns::default_pool()).with_roots(pinned_roots());
+        println!(
+            "space: {} resolvers x {} wires = {} candidates, {} trust anchors",
+            space.resolvers.len(),
+            space.wires.len(),
+            space.len(),
+            space.roots.len()
+        );
+        let n = space.len().min(PROXYLESS_MAX_CANDIDATES);
+        let mut ok = 0usize;
+        for i in 0..n {
+            let Some(strategy) = space.strategy(i) else {
+                println!("  [{i}] no strategy at this index");
+                continue;
+            };
+            match flint_proxyless::probe(&strategy, &env.host).await {
+                Ok(()) => {
+                    ok += 1;
+                    println!("  [{i}] OK");
+                }
+                Err(e) => println!("  [{i}] FAILED: {e} (kind {:?})", e.kind()),
+            }
+        }
+        println!("{ok}/{n} candidates reached {}", env.host);
+        assert!(
+            ok > 0,
+            "no candidate reached {} — see the errors above",
+            env.host
+        );
+    }
+
     /// Live: fetch prod config-new strictly through the **proxyless** avenue — no proxy, no exit hop,
     /// no fronting. The end-to-end check that the resolver+shaping search actually reaches the origin,
     /// which is the whole reason this member is in the race. Run:
