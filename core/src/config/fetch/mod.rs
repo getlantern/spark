@@ -180,6 +180,7 @@ async fn fetch_once(
     cond: &Conditional,
     fronted: Option<&FrontedTlsDialer<FlintDnsResolver>>,
     bootstrap: Option<&FrontedBootstrap>,
+    #[cfg(feature = "proxyless")] proxyless: Option<&flint_kindling::ProxylessTransport>,
 ) -> std::io::Result<FetchOutcome> {
     const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -187,7 +188,7 @@ async fn fetch_once(
     req.user_id = creds.user_id.clone();
     req.pro_token = creds.pro_token.clone();
 
-    let mut attempts: Vec<FetchAttempt<'_>> = Vec::with_capacity(3);
+    let mut attempts: Vec<FetchAttempt<'_>> = Vec::with_capacity(4);
     attempts.push(Box::pin(with_outcome(
         "direct",
         Box::pin(fetch_once_direct(env, &req, cond, ATTEMPT_TIMEOUT)),
@@ -202,6 +203,13 @@ async fn fetch_once(
         attempts.push(Box::pin(with_outcome(
             "scanned",
             Box::pin(fetch_once_scanned(env, &req, cond, b, ATTEMPT_TIMEOUT)),
+        )));
+    }
+    #[cfg(feature = "proxyless")]
+    if let Some(p) = proxyless {
+        attempts.push(Box::pin(with_outcome(
+            "proxyless",
+            Box::pin(fetch_once_proxyless(env, &req, cond, p, ATTEMPT_TIMEOUT)),
         )));
     }
     first_ok(attempts).await
@@ -255,6 +263,66 @@ async fn fetch_once_direct(
     .await
     .map_err(|_| std::io::Error::other("config-new direct fetch timed out"))??;
     map_response(resp.status, resp.etag, resp.body)
+}
+
+/// The proxyless path: reach config-new with **no proxy and no exit hop**, by searching for an
+/// un-poisoned resolver plus opening-handshake shaping this network does not block (ADR 0014).
+///
+/// Why it belongs in this race rather than being a nice-to-have: the other three avenues are all
+/// TLS-over-TCP/443 to a CDN or origin — two of them are the same technique with different edge
+/// lists — so they share a failure mode. A network that poisons DNS or classifies the ClientHello
+/// takes out all three at once. Proxyless is the only member that brings its own resolver *and* its
+/// own wire shaping, so it fails independently of the others. It also costs no infrastructure and
+/// burns no fronting domains, which makes it free to lose on an open network where `direct` wins.
+///
+/// `connect` returns a TLS stream already handshaked to the host, so this is the direct path minus
+/// the resolve/dial/wrap — the strategy search does all three.
+#[cfg(feature = "proxyless")]
+async fn fetch_once_proxyless(
+    env: &FetchEnv,
+    req: &ConfigRequest,
+    cond: &Conditional,
+    transport: &flint_kindling::ProxylessTransport,
+    timeout: Duration,
+) -> std::io::Result<FetchOutcome> {
+    let bytes =
+        build_request_bytes(&env.host, &env.path, req, cond).map_err(std::io::Error::other)?;
+    let resp = tokio::time::timeout(timeout, async {
+        // `ConnectionTransport` in scope only here: it is the trait that provides `connect`, and the
+        // import is local so it cannot collide with spark's own `Transport` trait.
+        use flint_kindling::ConnectionTransport as _;
+        let stream = transport.connect(&env.host).await?;
+        post_collect(stream, &bytes, 4 * 1024 * 1024).await
+    })
+    .await
+    .map_err(|_| std::io::Error::other("config-new proxyless fetch timed out"))??;
+    map_response(resp.status, resp.etag, resp.body)
+}
+
+/// Strict upper bound on candidates a single cold proxyless search will try, so its worst case is
+/// predictable rather than proportional to the resolver pool. Sized to finish well inside the 30s
+/// attempt window this race gives each avenue.
+#[cfg(feature = "proxyless")]
+const PROXYLESS_MAX_CANDIDATES: usize = 8;
+
+/// Build the proxyless race member, or `None` when the feature is off.
+///
+/// **Bounded on purpose.** The first connection on a new network is a *search*, not a dial — flint's
+/// own docs flag the interaction with an attempt timeout — and this race gives every avenue 30s. An
+/// unbounded search would simply spend that budget and lose, so the candidate count is capped: enough
+/// to cover the common resolver/shaping combinations, few enough to finish inside the window. Built
+/// once by the caller and reused, so its `StrategyCache` keeps the winning strategy for later fetches
+/// (the same reason the fronted dialer and the scanner are hoisted out of the refresh loop).
+#[cfg(feature = "proxyless")]
+fn proxyless_transport(env: &FetchEnv) -> Option<flint_kindling::ProxylessTransport> {
+    Some(
+        flint_kindling::ProxylessTransport::new(
+            flint_kindling::Space::new(flint_dns::default_pool()),
+            "config-fetch",
+        )
+        .with_port(env.port)
+        .with_max_candidates(PROXYLESS_MAX_CANDIDATES),
+    )
 }
 
 /// The fronted path: run the config-new request as a one-shot h2 request over `dialer` (the fronting
@@ -412,6 +480,8 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
     // censored cold-start resilience.
     let fronted = fronted_dialer();
     let bootstrap = fronted_bootstrap(env, seed_from_device_id(&did));
+    #[cfg(feature = "proxyless")]
+    let proxyless = proxyless_transport(env);
     match fetch_once(
         env,
         &did,
@@ -419,6 +489,8 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
         &Conditional::default(),
         fronted.as_ref(),
         Some(&bootstrap),
+        #[cfg(feature = "proxyless")]
+        proxyless.as_ref(),
     )
     .await
     {
@@ -506,9 +578,24 @@ where
     // the vantage-point scanner (whose winning-front cache then persists for the loop's lifetime).
     let fronted = fronted_dialer();
     let bootstrap = fronted_bootstrap(env, seed_from_device_id(&did));
+    // Built once and reused for the loop's lifetime, so the strategy cache keeps the winning
+    // resolver+shaping pair rather than re-searching on every poll.
+    #[cfg(feature = "proxyless")]
+    let proxyless = proxyless_transport(env);
     let mut fail = 0u32;
     while !should_stop() {
-        match fetch_once(env, &did, &creds, &cond, fronted.as_ref(), Some(&bootstrap)).await {
+        match fetch_once(
+            env,
+            &did,
+            &creds,
+            &cond,
+            fronted.as_ref(),
+            Some(&bootstrap),
+            #[cfg(feature = "proxyless")]
+            proxyless.as_ref(),
+        )
+        .await
+        {
             Ok(FetchOutcome::New { raw, etag }) => match Config::from_config_str(&raw) {
                 Ok(cfg) => {
                     fail = 0;
@@ -673,6 +760,68 @@ mod tests {
             !cfg.transport.servers.is_empty(),
             "staging should return a pool"
         );
+    }
+
+    /// The proxyless member must be *bounded*. A cold search is a search, not a dial, and this race
+    /// gives every avenue 30s — an unbounded space would spend the whole budget and lose, making the
+    /// avenue useless rather than absent, which is worse because it looks like it is covered.
+    ///
+    /// This guards our choice of bound: that it is a real restriction against the current resolver
+    /// pool, so a pool that shrinks (or a constant someone raises) fails here rather than silently
+    /// becoming unbounded. It does *not* re-test that flint honours `with_max_candidates` — that is
+    /// flint's own invariant and it tests it.
+    #[cfg(feature = "proxyless")]
+    #[test]
+    fn the_proxyless_member_searches_a_bounded_space() {
+        let full = flint_kindling::Space::new(flint_dns::default_pool()).len();
+        assert!(
+            PROXYLESS_MAX_CANDIDATES < full,
+            "the cap ({PROXYLESS_MAX_CANDIDATES}) must actually restrict the {full}-candidate space"
+        );
+        // (No `> 0` assertion: it is constant-true, and flint's `with_max_candidates` floors at 1.)
+        // The member is built when the feature is on — the wiring this bound protects.
+        assert!(proxyless_transport(&FetchEnv::prod()).is_some());
+    }
+
+    /// Live: fetch prod config-new strictly through the **proxyless** avenue — no proxy, no exit hop,
+    /// no fronting. The end-to-end check that the resolver+shaping search actually reaches the origin,
+    /// which is the whole reason this member is in the race. Run:
+    /// `cargo test -p spark-core --features config-fetch,proxyless -- --ignored live_proxyless_fetch`
+    #[cfg(feature = "proxyless")]
+    #[tokio::test]
+    #[ignore = "live: needs network"]
+    async fn live_proxyless_fetch() {
+        let env = FetchEnv::prod();
+        let transport = proxyless_transport(&env).expect("proxyless member");
+        let dir = std::env::temp_dir().join("spark-live-proxyless");
+        let _ = std::fs::remove_dir_all(&dir);
+        let did = device_id(&dir).unwrap();
+        let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
+            .await
+            .expect("user-create");
+        let mut req = ConfigRequest::new(did);
+        req.user_id = creds.user_id.clone();
+        req.pro_token = creds.pro_token.clone();
+        let outcome = fetch_once_proxyless(
+            &env,
+            &req,
+            &Conditional::default(),
+            &transport,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("proxyless config-new fetch");
+        match outcome {
+            FetchOutcome::New { raw, .. } => {
+                let cfg = Config::from_config_str(&raw).expect("adapt proxyless config");
+                assert!(
+                    !cfg.transport.servers.is_empty(),
+                    "proxyless fetch should return a pool"
+                );
+            }
+            FetchOutcome::NotModified => panic!("unexpected 304 on unconditional proxyless fetch"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Live: fetch **prod** config-new strictly through the domain-fronted path (aliyun/akamai/
