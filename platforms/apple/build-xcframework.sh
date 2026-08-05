@@ -45,15 +45,22 @@ for t in "${TARGETS[@]}"; do
             unset IPHONEOS_DEPLOYMENT_TARGET MACOSX_DEPLOYMENT_TARGET
             ;;
     esac
+    # `prod` is the shared shipping set, defined once in core/Cargo.toml and forwarded by
+    # spark-apple. It used to be spelled out here as a literal list, which is how the three platforms
+    # drifted apart — desktop shipped for months without transports these slices carried. Changing
+    # what ships now means editing core/Cargo.toml, and every platform follows.
+    #
     # BoringSSL cross-compiles for every Apple target — iOS device, iOS simulator, and macOS (verified
-    # 2026-06-23) — so all slices get the SAME feature set rather than the former macOS-only set:
-    # `anytls`/`samizdat`/`shadowsocks`/`hysteria2` transports, the `multi-server` latency pool,
-    # `bootstrap-dns` for hostname pool members, and `config-fetch` for `lantern-api` self-fetch.
-    # Building BoringSSL on every slice means the cold-start config fetch uses one uniform
-    # (cert-verifying) BoringSSL handshake everywhere — no per-platform TLS-stack split. NB: v1's fetch
-    # is a *plain* boring connector (not yet Chrome-mimicked); Chrome-mimicry for the fetch is the
-    # deferred fronting milestone. See docs/config-fetch-cross-platform-design.md.
-    features="anytls,multi-server,bootstrap-dns,config-fetch,samizdat,shadowsocks,hysteria2,fronted-meek,smart-routing"
+    # 2026-06-23) — so all slices get the SAME set. Building it on every slice means the cold-start
+    # config fetch uses one uniform (cert-verifying) BoringSSL handshake everywhere, with no
+    # per-platform TLS-stack split. NB: v1's fetch is a *plain* boring connector (not yet
+    # Chrome-mimicked); that is the deferred fronting milestone. See
+    # docs/config-fetch-cross-platform-design.md.
+    #
+    # `system-stack` is absent on purpose: this one list covers the iOS slices, which cannot hand over
+    # a tun fd in the shape it needs, and enabling it would have them advertise a capability they do
+    # not have.
+    features="prod"
     # `bip324` (ADR 0013 §7) adds the dynamic-transport wasmi host + secp256k1 primitives + splitting
     # egress, so a signed bip324/obfs-xor module can be delivered by config with no app release. It's
     # opt-in: a *release* build with `wasm-transport` refuses the dev module-signing key (fail-closed),
