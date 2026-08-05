@@ -236,10 +236,13 @@ async fn with_outcome<'a>(
         avenue,
         latency_ms,
     ));
-    // Tag the error with its avenue. `first_ok` keeps only the last error, so without this a failed
-    // cold start reports something like "connection refused" with no way to tell which of four paths
-    // produced it — precisely the case where that matters most. The `ErrorKind` is preserved because
-    // callers match on it (`load_or_fetch` distinguishes a real failure from an offline fallback).
+    // Tag the error with its avenue, so the aggregate `first_ok` builds names which path produced
+    // each failure rather than reporting an anonymous "connection refused".
+    //
+    // The `ErrorKind` is carried through rather than flattened. No caller matches on it today —
+    // `cached_or_err` decides on whether a cache exists, not on the kind — so this is about not
+    // destroying information on the way past, not about a contract anyone relies on. An earlier
+    // version of this comment claimed `load_or_fetch` matched on it, which was simply untrue.
     result.map_err(|e| std::io::Error::new(e.kind(), format!("{avenue}: {e}")))
 }
 
@@ -276,15 +279,21 @@ async fn fetch_once_direct(
 /// The proxyless path: reach config-new with **no proxy and no exit hop**, by searching for an
 /// un-poisoned resolver plus opening-handshake shaping this network does not block (ADR 0014).
 ///
-/// Why it belongs in this race rather than being a nice-to-have: the other three avenues are all
-/// TLS-over-TCP/443 to a CDN or origin — two of them are the same technique with different edge
-/// lists — so they share a failure mode. A network that poisons DNS or classifies the ClientHello
-/// takes out all three at once. Proxyless is the only member that brings its own resolver *and* its
-/// own wire shaping, so it fails independently of the others. It also costs no infrastructure and
-/// burns no fronting domains, which makes it free to lose on an open network where `direct` wins.
+/// Why it belongs in this race: the other three avenues are all TLS-over-TCP/443 to a CDN or origin —
+/// two of them the same technique with different edge lists — so they share a failure mode. A network
+/// that poisons DNS or classifies the ClientHello takes out all three at once. Proxyless is the only
+/// member that brings its own resolver *and* its own wire shaping, so it fails independently. It also
+/// costs no infrastructure and burns no fronting domains, which makes it free to lose on an open
+/// network where `direct` wins.
 ///
-/// `connect` returns a TLS stream already handshaked to the host, so this is the direct path minus
-/// the resolve/dial/wrap — the strategy search does all three.
+/// **It speaks h2, not HTTP/1.1.** The connection arrives already TLS-handshaked by flint's Chrome
+/// connector, which offers `h2,http/1.1` (`flint-tls/src/connector.rs`) because ALPN is part of the
+/// JA4 this transport exists to imitate. A modern origin therefore selects h2, and writing HTTP/1.1
+/// onto that connection gets no valid response at all — it fails as "no header terminator" rather
+/// than as an HTTP error, which is exactly how a first version of this avenue was silently broken.
+/// Speaking HTTP/1.1 after a Chrome ClientHello would also be a fingerprint anomaly in its own right,
+/// so the correct protocol and the convincing one are the same. `direct` differs because spark's own
+/// `fetch_connector` sets no ALPN, leaving HTTP/1.1 as the default.
 #[cfg(feature = "proxyless")]
 async fn fetch_once_proxyless(
     env: &FetchEnv,
@@ -293,18 +302,19 @@ async fn fetch_once_proxyless(
     transport: &flint_kindling::ProxylessTransport,
     timeout: Duration,
 ) -> std::io::Result<FetchOutcome> {
-    let bytes =
-        build_request_bytes(&env.host, &env.path, req, cond).map_err(std::io::Error::other)?;
+    let oneshot = build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
     let resp = tokio::time::timeout(timeout, async {
-        // `ConnectionTransport` in scope only here: it is the trait that provides `connect`, and the
-        // import is local so it cannot collide with spark's own `Transport` trait.
+        // `ConnectionTransport` in scope only here: it provides `connect`, and a local import cannot
+        // collide with spark's own `Transport` trait.
         use flint_kindling::ConnectionTransport as _;
         let stream = transport.connect(&env.host).await?;
-        post_collect(stream, &bytes, 4 * 1024 * 1024).await
+        // The real host is the authority — unlike the fronted avenue, there is no decoy to address.
+        flint_kindling::h2_oneshot(stream, &env.host, &oneshot).await
     })
     .await
     .map_err(|_| std::io::Error::other("config-new proxyless fetch timed out"))??;
-    map_response(resp.status, resp.etag, resp.body)
+    let etag = resp.header("etag").map(ToOwned::to_owned);
+    map_response(resp.status, etag, resp.body)
 }
 
 /// Strict upper bound on candidates a single cold proxyless search will try, so its worst case is
@@ -324,11 +334,42 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 #[cfg(feature = "proxyless")]
 fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
     flint_kindling::ProxylessTransport::new(
-        flint_kindling::Space::new(flint_dns::default_pool()),
+        flint_kindling::Space::new(flint_dns::default_pool()).with_roots(pinned_roots()),
         "config-fetch",
     )
     .with_port(env.port)
     .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
+}
+
+/// The Mozilla root set as PEM, for a search `Space`'s trust anchors.
+///
+/// Leaving `Space::roots` empty makes flint fall back to BoringSSL's `set_default_paths()`, and
+/// BoringSSL ships no trust store of its own — it looks for OpenSSL-style paths. macOS keeps its
+/// certificates in the Keychain, which BoringSSL does not read, so on macOS that fallback finds
+/// nothing and **every** candidate fails certificate verification instantly. The symptom is a search
+/// that reports "all 8 candidates failed" in about a second, which reads like a blocked network
+/// rather than a missing trust store.
+///
+/// Spark already solves this for its own dials by loading the same root set into `fetch_connector`
+/// (`transport::probe`), for the same reason and with the same comment. This is that fix, in the
+/// shape a `Space` wants: `webpki-root-certs` ships DER, `Space::roots` wants PEM, and boring is
+/// already a dependency here so it can do the conversion.
+///
+/// Built once — parsing ~150 certificates per dial would be absurd on a race member whose whole job
+/// is to be cheap enough to lose.
+#[cfg(feature = "proxyless")]
+fn pinned_roots() -> std::sync::Arc<[String]> {
+    use std::sync::OnceLock;
+    static ROOTS: OnceLock<std::sync::Arc<[String]>> = OnceLock::new();
+    std::sync::Arc::clone(ROOTS.get_or_init(|| {
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .filter_map(|der| boring2::x509::X509::from_der(der.as_ref()).ok())
+            .filter_map(|cert| cert.to_pem().ok())
+            .filter_map(|pem| String::from_utf8(pem).ok())
+            .collect::<Vec<_>>()
+            .into()
+    }))
 }
 
 /// The fronted path: run the config-new request as a one-shot h2 request over `dialer` (the fronting
@@ -382,22 +423,51 @@ fn map_response(status: u16, etag: Option<String>, body: Vec<u8>) -> std::io::Re
     }
 }
 
-/// Race several fetch attempts, returning the first that succeeds; if all fail, return the last error.
+/// Race several fetch attempts, returning the first that succeeds.
+///
+/// If all of them fail, the error names **every** avenue and how each died, not just whichever
+/// attempt happened to finish last — on a censored network that report is the only evidence anyone
+/// gets. The `ErrorKind` is kept when all avenues agreed on one, since "they all timed out" and "they
+/// failed four different ways" are different diagnoses. An empty attempt list is reported distinctly:
+/// it is a programming error, and calling it "all 0 avenues failed" would read like a blocked network.
 /// Unlike a plain `select!`, an early *failure* doesn't end the race — the remaining attempts still
 /// run, so a censored direct dial doesn't pre-empt the fronted ones (and vice versa).
 async fn first_ok(mut attempts: Vec<FetchAttempt<'_>>) -> std::io::Result<FetchOutcome> {
-    let mut last_err = std::io::Error::other("no config-new fetch attempt ran");
+    if attempts.is_empty() {
+        return Err(std::io::Error::other("no config-new fetch attempt ran"));
+    }
+    // Every avenue's error, not just the last. A censored cold start is the case where this report is
+    // the only evidence available, and "the last future to finish said connection refused" describes
+    // whichever attempt happened to lose the race rather than why the fetch failed. `with_outcome`
+    // has already tagged each error with its avenue, so the joined message names all four.
+    let mut errors: Vec<String> = Vec::with_capacity(attempts.len());
+    let mut kinds: Vec<std::io::ErrorKind> = Vec::with_capacity(attempts.len());
     while !attempts.is_empty() {
         let (result, _idx, remaining) = futures::future::select_all(attempts).await;
         match result {
             Ok(outcome) => return Ok(outcome),
             Err(e) => {
-                last_err = e;
+                kinds.push(e.kind());
+                errors.push(e.to_string());
                 attempts = remaining;
             }
         }
     }
-    Err(last_err)
+    // Keep the `ErrorKind` when every avenue agreed on one — "they all timed out" is a materially
+    // different diagnosis from "they failed in four different ways", and flattening the aggregate to
+    // `Other` would throw away the per-avenue kinds that `with_outcome` deliberately preserved.
+    let kind = match kinds.split_first() {
+        Some((first, rest)) if rest.iter().all(|k| k == first) => *first,
+        _ => std::io::ErrorKind::Other,
+    };
+    Err(std::io::Error::new(
+        kind,
+        format!(
+            "all {} config-new fetch avenues failed: {}",
+            errors.len(),
+            errors.join("; ")
+        ),
+    ))
 }
 
 /// Build the fronted dialer from the embedded `domainfront/fronted.yaml.gz` (aliyun/akamai/cloudfront).
@@ -768,6 +838,82 @@ mod tests {
         );
     }
 
+    /// A failed cold start must report *every* avenue, not whichever future finished last. This is
+    /// the case where the error message is the only evidence anyone gets, so losing three quarters of
+    /// it is the difference between a diagnosable failure and a shrug.
+    #[tokio::test]
+    async fn a_total_failure_reports_every_avenue() {
+        let attempt = |name: &'static str, kind: std::io::ErrorKind| -> FetchAttempt<'static> {
+            Box::pin(with_outcome(
+                name,
+                Box::pin(async move { Err(std::io::Error::new(kind, "blocked")) }),
+            ))
+        };
+        let timed_out = std::io::ErrorKind::TimedOut;
+        let err = first_ok(vec![
+            attempt("direct", timed_out),
+            attempt("fronted", timed_out),
+            attempt("scanned", timed_out),
+            attempt("proxyless", timed_out),
+        ])
+        .await
+        .map(|_| ())
+        .expect_err("every avenue failed");
+        let msg = err.to_string();
+        for avenue in ["direct", "fronted", "scanned", "proxyless"] {
+            assert!(msg.contains(avenue), "the report must name {avenue}: {msg}");
+        }
+        assert!(msg.contains("all 4"), "and how many failed: {msg}");
+        assert_eq!(
+            err.kind(),
+            timed_out,
+            "a unanimous kind survives — 'they all timed out' is its own diagnosis"
+        );
+
+        // Mixed kinds cannot honestly be summarised as any one of them.
+        let err = first_ok(vec![
+            attempt("direct", std::io::ErrorKind::TimedOut),
+            attempt("fronted", std::io::ErrorKind::ConnectionRefused),
+        ])
+        .await
+        .map(|_| ())
+        .expect_err("both failed");
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    }
+
+    /// An empty attempt list is a programming error, not a network failure — it must not be reported
+    /// as "all 0 avenues failed", which would read like a blocked network.
+    #[tokio::test]
+    async fn no_attempts_is_distinguishable_from_every_attempt_failing() {
+        let err = first_ok(Vec::new())
+            .await
+            .map(|_| ())
+            .expect_err("an empty race cannot succeed");
+        assert!(err.to_string().contains("no config-new fetch attempt ran"));
+    }
+
+    /// The search space must carry trust anchors. Empty roots send flint to BoringSSL's
+    /// `set_default_paths()`, which finds nothing on macOS (certificates live in the Keychain), and
+    /// every candidate then fails verification instantly — a search that reports "all N failed" in a
+    /// second, indistinguishable from a blocked network. Offline, because the failure it guards
+    /// against is silent and platform-dependent.
+    #[cfg(feature = "proxyless")]
+    #[test]
+    fn the_proxyless_space_pins_trust_anchors() {
+        let roots = pinned_roots();
+        assert!(
+            roots.len() > 100,
+            "expected the Mozilla root set, got {} anchors",
+            roots.len()
+        );
+        assert!(
+            roots
+                .iter()
+                .all(|p| p.starts_with("-----BEGIN CERTIFICATE-----")),
+            "Space::roots wants PEM, not DER"
+        );
+    }
+
     /// The proxyless member must be *bounded*. A cold search is a search, not a dial, and this race
     /// gives every avenue 30s — an unbounded space would spend the whole budget and lose, making the
     /// avenue useless rather than absent, which is worse because it looks like it is covered.
@@ -785,6 +931,258 @@ mod tests {
             "the cap ({PROXYLESS_MAX_CANDIDATES}) must actually restrict the {full}-candidate space"
         );
         // (No `> 0` assertion: it is constant-true, and flint's `with_max_candidates` floors at 1.)
+    }
+
+    /// **2x2 isolation against the real origin.** The header capture showed exactly two differences
+    /// between what `h2_oneshot` sends and what curl sends: flint adds a `host` header (curl never
+    /// does, even when asked) and flint omits `content-length` (curl always sends it). Both of my
+    /// earlier curl-based eliminations were therefore invalid — curl normalizes, so it never put on
+    /// the wire what I believed I was testing.
+    ///
+    /// This sends all four combinations to the real origin over a real h2 connection and reports
+    /// which reproduce the `PROTOCOL_ERROR`. One connection per variant, since the failure is a
+    /// stream reset.
+    ///
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture isolate_h2_reset`
+    // `samizdat` as well as `proxyless`: this hand-builds h2 requests, and `h2`/`http` are optional
+    // deps that only `samizdat` turns on (`dep:h2`/`dep:http`). Without the second gate
+    // `--features config-fetch,proxyless` fails to compile. `prod` carries both, so it still runs
+    // wherever it is useful.
+    #[cfg(all(feature = "proxyless", feature = "samizdat"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "diagnostic: needs network"]
+    async fn isolate_h2_reset() {
+        use flint_kindling::ConnectionTransport as _;
+
+        let env = FetchEnv::prod();
+        let transport = proxyless_transport(&env);
+        let body = bytes::Bytes::from_static(b"{\"probe\":true}");
+
+        for (with_host, with_len) in [(true, false), (false, false), (true, true), (false, true)] {
+            let label = format!("host={:<5} content-length={:<5}", with_host, with_len);
+            let stream = match transport.connect(&env.host).await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("  {label} -> could not connect: {e}");
+                    continue;
+                }
+            };
+            let (send_request, connection) = match h2::client::handshake(stream).await {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("  {label} -> h2 handshake failed: {e}");
+                    continue;
+                }
+            };
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            // `::http` — `config::fetch::http` shadows the crate name in this module.
+            let mut b = ::http::Request::builder()
+                .method(::http::Method::POST)
+                .uri(format!("https://{}{}", env.host, env.path))
+                .header(::http::header::CONTENT_TYPE, "application/json");
+            if with_host {
+                b = b.header(::http::header::HOST, env.host.as_str());
+            }
+            if with_len {
+                b = b.header(::http::header::CONTENT_LENGTH, body.len());
+            }
+            let request = b.body(()).expect("request");
+
+            let outcome = async {
+                let mut sr = send_request.ready().await.map_err(|e| e.to_string())?;
+                let (resp, mut send) =
+                    sr.send_request(request, false).map_err(|e| e.to_string())?;
+                send.send_data(body.clone(), true)
+                    .map_err(|e| e.to_string())?;
+                let resp = resp.await.map_err(|e| e.to_string())?;
+                Ok::<u16, String>(resp.status().as_u16())
+            }
+            .await;
+            match outcome {
+                Ok(status) => println!("  {label} -> HTTP {status}"),
+                Err(e) => println!("  {label} -> ERROR {e}"),
+            }
+            driver.abort();
+        }
+        println!("(an HTTP status of any kind means the request was accepted at the h2 layer)");
+    }
+
+    /// **Header-capture experiment.** Four hypotheses for the proxyless `PROTOCOL_ERROR` were
+    /// eliminated by measurement from outside (ALPN is h2; content-length is not required by the
+    /// origin; the `X-Lantern-*` set is accepted; `h2_oneshot` works against Akamai). What remains is
+    /// the request itself, so this captures exactly what `h2_oneshot` puts on the wire and diffs it
+    /// against curl, which the same origin accepts.
+    ///
+    /// A local h2 server with prior knowledge — no TLS — because the question is the HEADERS frame,
+    /// not the transport. `h2_oneshot` takes any stream, so it can be pointed straight at it.
+    ///
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture capture_h2_headers`
+    // Multi-thread on purpose: the curl control below is a *blocking* `std::process::Command`, and on
+    // the default current-thread runtime it would starve the spawned server task — the client would
+    // connect, the server could never accept, and the test would deadlock (it did).
+    // Gated on `samizdat` for the same reason as `isolate_h2_reset`: it runs an h2 server, and
+    // `h2`/`http` are optional deps that only that feature enables.
+    #[cfg(feature = "samizdat")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "diagnostic: spawns a local server and shells out to curl"]
+    async fn capture_h2_headers() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        // Accept two connections (flint, then curl) and record each request's head.
+        let server = tokio::spawn(async move {
+            let mut captured: Vec<(String, Vec<(String, String)>)> = Vec::new();
+            for label in ["flint h2_oneshot", "curl --http2-prior-knowledge"] {
+                // Bounded: if curl is missing or fails, the second accept would otherwise block
+                // forever and hang the test rather than reporting what it did capture.
+                let accepted =
+                    tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
+                let Ok(Ok((tcp, _))) = accepted else {
+                    captured.push((
+                        label.to_owned(),
+                        vec![("<no connection>".into(), "client never connected".into())],
+                    ));
+                    continue;
+                };
+                let mut conn = match h2::server::handshake(tcp).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        captured.push((
+                            label.to_owned(),
+                            vec![("<handshake failed>".into(), e.to_string())],
+                        ));
+                        continue;
+                    }
+                };
+                // The h2 server connection must keep being polled for frames to flush — responding
+                // and then dropping it means the response is never written and the client hangs
+                // forever (which it did, the first time this was written). Loop on `accept`, which
+                // drives the connection, and stop on close or a short deadline.
+                // One request per connection is all this captures.
+                let next = tokio::time::timeout(Duration::from_secs(5), conn.accept()).await;
+                if let Ok(Some(Ok((request, mut respond)))) = next {
+                    let (parts, mut body) = request.into_parts();
+                    let mut head = vec![
+                        (":method".to_owned(), parts.method.to_string()),
+                        (
+                            ":scheme".to_owned(),
+                            parts.uri.scheme_str().unwrap_or("-").to_owned(),
+                        ),
+                        (
+                            ":authority".to_owned(),
+                            parts
+                                .uri
+                                .authority()
+                                .map(|a| a.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                        ),
+                        (":path".to_owned(), parts.uri.path().to_owned()),
+                    ];
+                    for (k, v) in parts.headers.iter() {
+                        head.push((
+                            k.as_str().to_owned(),
+                            v.to_str().unwrap_or("<non-utf8>").to_owned(),
+                        ));
+                    }
+                    let mut n = 0usize;
+                    while let Some(Ok(chunk)) = body.data().await {
+                        n += chunk.len();
+                        let _ = body.flow_control().release_capacity(chunk.len());
+                    }
+                    head.push(("<body bytes>".to_owned(), n.to_string()));
+                    captured.push((label.to_owned(), head));
+                    // `::http` — `config::fetch::http` shadows the crate name inside this module.
+                    let resp = ::http::Response::builder().status(200).body(()).unwrap();
+                    if let Ok(mut send) = respond.send_response(resp, false) {
+                        let _ = send.send_data(bytes::Bytes::from_static(b"{}"), true);
+                    }
+                }
+            }
+            captured
+        });
+
+        // 1) flint's client.
+        let req = ConfigRequest::new("probe-device".to_owned());
+        let oneshot = build_oneshot_request(&FetchEnv::prod().path, &req, &Conditional::default())
+            .expect("oneshot");
+        let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let _ = flint_kindling::h2_oneshot(tcp, "df.iantem.io", &oneshot).await;
+
+        // 2) curl, the control — same path, same body shape, prior-knowledge h2.
+        let out = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "--http2-prior-knowledge",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "--data-binary",
+                "{}",
+                &format!("http://{addr}/api/v1/config-new"),
+            ])
+            .output();
+        if let Err(e) = &out {
+            println!("(curl unavailable: {e})");
+        }
+
+        for (label, head) in server.await.expect("server task") {
+            println!("\n=== {label} ===");
+            for (k, v) in head {
+                println!("  {k}: {v}");
+            }
+        }
+    }
+
+    /// **Diagnostic, not a test of spark.** `connect_cached` collapses every candidate's error into
+    /// `AllFailed { tried }` (`.map_err(|_errors| ..)` — the reasons are collected and then dropped),
+    /// so a failing search is undiagnosable from the outside. This walks the same space one candidate
+    /// at a time via the public `probe` and prints what each one actually said.
+    ///
+    /// Run when the proxyless avenue fails and you need to know why:
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture why_proxyless_fails`
+    #[cfg(feature = "proxyless")]
+    #[tokio::test]
+    #[ignore = "diagnostic: needs network"]
+    async fn why_proxyless_fails() {
+        let env = FetchEnv::prod();
+        let space =
+            flint_kindling::Space::new(flint_dns::default_pool()).with_roots(pinned_roots());
+        println!(
+            "space: {} resolvers x {} wires = {} candidates, {} trust anchors",
+            space.resolvers.len(),
+            space.wires.len(),
+            space.len(),
+            space.roots.len()
+        );
+        let n = space.len().min(PROXYLESS_MAX_CANDIDATES);
+        let mut ok = 0usize;
+        for i in 0..n {
+            let Some(strategy) = space.strategy(i) else {
+                println!("  [{i}] no strategy at this index");
+                continue;
+            };
+            match flint_proxyless::probe(&strategy, &env.host).await {
+                Ok(()) => {
+                    ok += 1;
+                    println!("  [{i}] OK");
+                }
+                Err(e) => println!("  [{i}] FAILED: {e} (kind {:?})", e.kind()),
+            }
+        }
+        println!("{ok}/{n} candidates reached {}", env.host);
+        assert!(
+            ok > 0,
+            "no candidate reached {} — see the errors above",
+            env.host
+        );
     }
 
     /// Live: fetch prod config-new strictly through the **proxyless** avenue — no proxy, no exit hop,
@@ -825,6 +1223,74 @@ mod tests {
             }
             FetchOutcome::NotModified => panic!("unexpected 304 on unconditional proxyless fetch"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Design probe, not a regression test.** Decides how much of the fetch can move onto
+    /// `Kindling`. It has been wrong twice, and both mistakes are worth keeping written down because
+    /// each one was a silent failure rather than a loud one.
+    ///
+    /// First it addressed the inner request to config-new's own host and got a 400. A fronted edge
+    /// routes by the *provider's* host (`front.fronted_host`) — SNI is the decoy, the inner `Host`
+    /// selects the origin — so the edge was right to reject it.
+    ///
+    /// Then it spoke HTTP/1.1 and got "no header terminator", i.e. no valid response at all. flint's
+    /// Chrome connector sets `ALPN_H2_HTTP11` unconditionally (`flint-tls/src/connector.rs`) because
+    /// ALPN is part of the JA4 being imitated, so the edge selects **h2**. HTTP/1.1 over that is not
+    /// an HTTP error, it is a protocol violation — which is why it surfaces as garbage rather than a
+    /// status code.
+    ///
+    /// Both corrections point at the same structural finding: `ConnectionTransport::connect` returns
+    /// `conn.stream` and drops `conn.front`, and a generic consumer of a kindling race therefore
+    /// cannot address a fronted request correctly. The uniform interface erases the one thing this
+    /// caller needs. That is fine for a tunnel, where nobody cares which edge carried it; a bootstrap
+    /// HTTP request is the case where it is not.
+    ///
+    /// What this now answers: *if* the authority were available, does a fronted TLS connection carry
+    /// an ordinary h2 request to config-new? Pass ⇒ the full move is worth a small flint change to
+    /// surface the winning front alongside the stream. Fail ⇒ fronting stays a one-shot and only the
+    /// connection-shaped members move. Run:
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture fronted_connection_speaks_h2`
+    #[tokio::test]
+    #[ignore = "live: design probe, needs network + reachable fronting edges"]
+    async fn fronted_connection_speaks_h2() {
+        let dialer = fronted_dialer().expect("embedded fronted config parses");
+        let env = FetchEnv::prod();
+        let dir = std::env::temp_dir().join("spark-probe-fronted-conn");
+        let _ = std::fs::remove_dir_all(&dir);
+        let did = device_id(&dir).unwrap();
+        let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
+            .await
+            .expect("user-create");
+        let mut req = ConfigRequest::new(did);
+        req.user_id = creds.user_id.clone();
+        req.pro_token = creds.pro_token.clone();
+
+        // `connect_fronted`, not the `ConnectionTransport` path, so the winning front survives.
+        let conn = dialer
+            .connect_fronted(&env.host)
+            .await
+            .expect("a fronted edge accepts a connection");
+        let authority = conn.fronted_host().to_owned();
+        println!("probe: edge accepted, inner authority = {authority}");
+
+        let oneshot = build_oneshot_request(&env.path, &req, &Conditional::default())
+            .expect("oneshot request");
+        let resp = flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot)
+            .await
+            .expect("h2 over the fronted connection");
+        println!(
+            "probe: status {}, {} body bytes",
+            resp.status,
+            resp.body.len()
+        );
+        assert_eq!(
+            resp.status, 200,
+            "h2 to {authority} should reach the origin"
+        );
+        let raw = String::from_utf8(resp.body).expect("utf-8 body");
+        let cfg = Config::from_config_str(&raw).expect("adapt config from the fronted connection");
+        assert!(!cfg.transport.servers.is_empty(), "should return a pool");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
