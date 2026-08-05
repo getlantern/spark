@@ -122,7 +122,16 @@ impl ProxylessTransport {
         wire: WirePlan,
         protector: Option<SocketProtector>,
     ) -> io::Result<Self> {
-        let mut space = Space::new(flint_dns::default_pool());
+        // Pin the trust anchors. `Space::new` leaves `roots` empty, which flint reads as "use
+        // BoringSSL's `set_default_paths()`" — and BoringSSL ships no trust store of its own. On
+        // macOS the certificates live in the Keychain, which it does not read, and mobile has the
+        // same gap (`transport::probe` records it for the direct dial). Without anchors every
+        // candidate fails certificate verification instantly, so the search reports "all N
+        // candidates failed" in about a second: indistinguishable from a censored network, and
+        // silently disabling the one property this transport exists for — the *verified* handshake
+        // that stops a poisoned lookup being mistaken for success.
+        let mut space = Space::new(flint_dns::default_pool())
+            .with_roots(crate::transport::probe::webpki_roots_pem());
         // Wire-major enumeration means the no-op plan is tried against every resolver first, so a
         // network that needs no shaping is settled at the cheapest end of the space.
         if !wire.is_noop() {
@@ -455,6 +464,29 @@ mod tests {
         // A no-op configured plan must not be added as a second axis entry: it would double the space
         // to search the same thing twice.
         assert_eq!(t.space.wires.len(), 1);
+    }
+
+    /// The search space must carry trust anchors. Empty roots send flint to BoringSSL's
+    /// `set_default_paths()`, which finds nothing on macOS (Keychain) or mobile, so every candidate
+    /// fails verification instantly — a search that reports "all N failed" in a second and reads as a
+    /// censored network. This transport's whole premise is the *verified* handshake, so losing
+    /// verification silently is the worst available failure.
+    #[test]
+    fn the_search_space_pins_trust_anchors() {
+        let t = ProxylessTransport::new(&ProxylessConfig::default(), WirePlan::default(), None)
+            .expect("build");
+        assert!(
+            t.space.roots.len() > 100,
+            "expected the Mozilla root set, got {} anchors",
+            t.space.roots.len()
+        );
+        assert!(
+            t.space
+                .roots
+                .iter()
+                .all(|p| p.starts_with("-----BEGIN CERTIFICATE-----")),
+            "Space::roots wants PEM, not DER"
+        );
     }
 
     #[test]

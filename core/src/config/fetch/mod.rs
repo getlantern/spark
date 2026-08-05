@@ -334,42 +334,12 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 #[cfg(feature = "proxyless")]
 fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
     flint_kindling::ProxylessTransport::new(
-        flint_kindling::Space::new(flint_dns::default_pool()).with_roots(pinned_roots()),
+        flint_kindling::Space::new(flint_dns::default_pool())
+            .with_roots(crate::transport::probe::webpki_roots_pem()),
         "config-fetch",
     )
     .with_port(env.port)
     .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
-}
-
-/// The Mozilla root set as PEM, for a search `Space`'s trust anchors.
-///
-/// Leaving `Space::roots` empty makes flint fall back to BoringSSL's `set_default_paths()`, and
-/// BoringSSL ships no trust store of its own — it looks for OpenSSL-style paths. macOS keeps its
-/// certificates in the Keychain, which BoringSSL does not read, so on macOS that fallback finds
-/// nothing and **every** candidate fails certificate verification instantly. The symptom is a search
-/// that reports "all 8 candidates failed" in about a second, which reads like a blocked network
-/// rather than a missing trust store.
-///
-/// Spark already solves this for its own dials by loading the same root set into `fetch_connector`
-/// (`transport::probe`), for the same reason and with the same comment. This is that fix, in the
-/// shape a `Space` wants: `webpki-root-certs` ships DER, `Space::roots` wants PEM, and boring is
-/// already a dependency here so it can do the conversion.
-///
-/// Built once — parsing ~150 certificates per dial would be absurd on a race member whose whole job
-/// is to be cheap enough to lose.
-#[cfg(feature = "proxyless")]
-fn pinned_roots() -> std::sync::Arc<[String]> {
-    use std::sync::OnceLock;
-    static ROOTS: OnceLock<std::sync::Arc<[String]>> = OnceLock::new();
-    std::sync::Arc::clone(ROOTS.get_or_init(|| {
-        webpki_root_certs::TLS_SERVER_ROOT_CERTS
-            .iter()
-            .filter_map(|der| boring2::x509::X509::from_der(der.as_ref()).ok())
-            .filter_map(|cert| cert.to_pem().ok())
-            .filter_map(|pem| String::from_utf8(pem).ok())
-            .collect::<Vec<_>>()
-            .into()
-    }))
 }
 
 /// The fronted path: run the config-new request as a one-shot h2 request over `dialer` (the fronting
@@ -900,7 +870,7 @@ mod tests {
     #[cfg(feature = "proxyless")]
     #[test]
     fn the_proxyless_space_pins_trust_anchors() {
-        let roots = pinned_roots();
+        let roots = crate::transport::probe::webpki_roots_pem();
         assert!(
             roots.len() > 100,
             "expected the Mozilla root set, got {} anchors",
@@ -1153,8 +1123,8 @@ mod tests {
     #[ignore = "diagnostic: needs network"]
     async fn why_proxyless_fails() {
         let env = FetchEnv::prod();
-        let space =
-            flint_kindling::Space::new(flint_dns::default_pool()).with_roots(pinned_roots());
+        let space = flint_kindling::Space::new(flint_dns::default_pool())
+            .with_roots(crate::transport::probe::webpki_roots_pem());
         println!(
             "space: {} resolvers x {} wires = {} candidates, {} trust anchors",
             space.resolvers.len(),
