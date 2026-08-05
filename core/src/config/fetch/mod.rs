@@ -1199,6 +1199,89 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Which protocol does a fronted edge actually speak? **It varies per connection**, which is the
+    /// finding that decides whether fronting can join a kindling connection race.
+    ///
+    /// Measured over four runs, two fresh connections each:
+    ///
+    /// ```text
+    /// run 1:  h2 -> HTTP 500          http/1.1 -> no header terminator
+    /// run 2:  h2 -> frame size error  http/1.1 -> HTTP 500
+    /// run 3:  h2 -> frame size error  http/1.1 -> HTTP 500
+    /// run 4:  h2 -> frame size error  http/1.1 -> HTTP 500
+    /// ```
+    ///
+    /// `GoAway(FRAME_SIZE_ERROR, Library)` is our *own* h2 client rejecting the bytes — the
+    /// signature of parsing an HTTP/1.1 response as h2 frames. The dialer races several masquerade
+    /// candidates and whichever edge wins may have negotiated either protocol, so a caller holding
+    /// only the stream cannot know which to speak.
+    ///
+    /// Together with `conn.front` being dropped, that is two things
+    /// `ConnectionTransport::connect` erases which an HTTP caller needs: the inner authority and the
+    /// negotiated protocol. It is why flint has `dial_fronts_alpn` at all, and why the fronted
+    /// avenue is a one-shot: `race_oneshot` runs the full dial *and* request per candidate, so a
+    /// candidate wins only after a complete response — which inherently discards edges speaking a
+    /// protocol the caller cannot handle. A connect-race would pick the fastest handshake and then
+    /// discover the problem.
+    ///
+    /// (The HTTP 500s are the origin's answer to spark's request shape at the time of measurement,
+    /// unrelated to the protocol question — what matters here is which protocol got *an* answer.)
+    ///
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture which_protocol_fronted`
+    #[cfg(feature = "samizdat")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "diagnostic: needs network"]
+    async fn which_protocol_fronted() {
+        let dialer = fronted_dialer().expect("embedded fronted config parses");
+        let env = FetchEnv::prod();
+        let dir = std::env::temp_dir().join("spark-probe-fronted-conn");
+        let did = device_id(&dir).unwrap();
+        let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
+            .await
+            .expect("user-create");
+        let mut req = ConfigRequest::new(did);
+        req.user_id = creds.user_id.clone();
+        req.pro_token = creds.pro_token.clone();
+
+        // h2 over one connection.
+        match dialer.connect_fronted(&env.host).await {
+            Ok(conn) => {
+                let authority = conn.fronted_host().to_owned();
+                let oneshot = build_oneshot_request(&env.path, &req, &Conditional::default())
+                    .expect("oneshot");
+                match flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot).await {
+                    Ok(r) => println!(
+                        "  h2       -> HTTP {} ({} body bytes)",
+                        r.status,
+                        r.body.len()
+                    ),
+                    Err(e) => println!("  h2       -> ERROR {e}"),
+                }
+            }
+            Err(e) => println!("  h2       -> could not connect: {e}"),
+        }
+
+        // HTTP/1.1 over another.
+        match dialer.connect_fronted(&env.host).await {
+            Ok(conn) => {
+                let authority = conn.fronted_host().to_owned();
+                let bytes =
+                    build_request_bytes(&authority, &env.path, &req, &Conditional::default())
+                        .expect("request bytes");
+                match post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await {
+                    Ok(r) => println!(
+                        "  http/1.1 -> HTTP {} ({} body bytes)",
+                        r.status,
+                        r.body.len()
+                    ),
+                    Err(e) => println!("  http/1.1 -> ERROR {e}"),
+                }
+            }
+            Err(e) => println!("  http/1.1 -> could not connect: {e}"),
+        }
+        println!("(whichever answers is what the edge negotiated on that connection)");
+    }
+
     /// **Design probe, not a regression test.** Decides how much of the fetch can move onto
     /// `Kindling`. It has been wrong twice, and both mistakes are worth keeping written down because
     /// each one was a silent failure rather than a loud one.
