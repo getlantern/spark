@@ -944,7 +944,11 @@ mod tests {
     /// stream reset.
     ///
     /// `cargo test -p spark-core --features prod -- --ignored --nocapture isolate_h2_reset`
-    #[cfg(feature = "proxyless")]
+    // `samizdat` as well as `proxyless`: this hand-builds h2 requests, and `h2`/`http` are optional
+    // deps that only `samizdat` turns on (`dep:h2`/`dep:http`). Without the second gate
+    // `--features config-fetch,proxyless` fails to compile. `prod` carries both, so it still runs
+    // wherever it is useful.
+    #[cfg(all(feature = "proxyless", feature = "samizdat"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "diagnostic: needs network"]
     async fn isolate_h2_reset() {
@@ -1019,6 +1023,9 @@ mod tests {
     // Multi-thread on purpose: the curl control below is a *blocking* `std::process::Command`, and on
     // the default current-thread runtime it would starve the spawned server task — the client would
     // connect, the server could never accept, and the test would deadlock (it did).
+    // Gated on `samizdat` for the same reason as `isolate_h2_reset`: it runs an h2 server, and
+    // `h2`/`http` are optional deps that only that feature enables.
+    #[cfg(feature = "samizdat")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "diagnostic: spawns a local server and shells out to curl"]
     async fn capture_h2_headers() {
