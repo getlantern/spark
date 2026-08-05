@@ -1,6 +1,7 @@
 # ADR 0013 — Protocol-agnostic dynamic transports: generic primitives + opaque engine params, toward WASM+config transports with no client release
 
-- **Status:** Proposed — 2026-07-19. Design + work breakdown: `docs/dynamic-transport-framework-design.md`.
+- **Status:** Accepted — 2026-07-19; **largely implemented** as of 2026-08-04. Design + work
+  breakdown: `docs/dynamic-transport-framework-design.md`. Implementation status below.
 - **North star:** create and distribute a new transport as a **signed WASM module + config, runnable by
   an unchanged client** — remove the app-store release pipeline from the censorship-response loop
   (extends ADR 0003; the release pipeline is the chokepoint).
@@ -46,6 +47,53 @@ expressed by composing generic primitives, distributable as WASM+config.
 4. **BIP324 is the forcing function and first fully-dynamic transport** — it exercises every primitive
    with nothing Bitcoin-specific in core. The ADR 0012 native engine is a documented fallback, not the
    target.
+
+## Implementation status (2026-08-04)
+
+Recorded because the ADR sat at "Proposed" while most of it shipped, which makes it read as a plan
+when it is now mostly a description. Decision numbers refer to the list above.
+
+**Done.**
+
+- **1 — core = generic primitives + opaque seam + registry.** `core/src/transport/engine/`: the
+  neutral `Genome` (header + generic wire + opaque `engine_params`), `OpeningEngine`, and a registry
+  resolving a name to either compiled-in code or a delivered module. Core parses no protocol.
+- **2 (crypto + ABI).** secp256k1 + ElligatorSwift + X-only ECDH and raw ChaCha20 are host
+  primitives; `handshake_step` and `upgrade_to` both exist, the latter with a composition test.
+- **3 — de-TLS the structure.** Neutral genome, registry keyed by engine id, `compute_gambit`
+  returning the neutral genome, and GA operators over generic shaping with a per-engine
+  `EngineDiscovery` hook.
+- **4 — BIP324 as the forcing function.** `modules/bip324` is a signed WASM transport, selectable by
+  a genome's `engine` string, with nothing Bitcoin-specific in core. The ADR 0012 native engine was
+  never needed.
+
+**Done beyond what this ADR specified** — the north star ("no client release") needed a delivery and
+trust story the ADR left implicit:
+
+- Signed transport **bundles** (`SPKB`): genomes and their module signed together, which is what
+  finally made `Genome.version` enforceable rather than merely carried.
+- A **bundle store**, so config names an engine rather than an artifact path — the last step between
+  "signed config + module" and "a server can introduce a transport".
+- **Capability scoping**: a module is restricted to the host imports inside its signed grant. The
+  import table is the whole sandbox boundary, so this is what makes a third-party transport a bounded
+  risk.
+
+**Not done.**
+
+- **2 (shaping primitives).** Opening random-padding with a sampled length distribution, and
+  scheduled decoy/cover injection, were never built as generic primitives. The only `random_padding`
+  in the tree is Hysteria-2's own, not a shared one.
+- **§7 step 5 — non-Chrome anchor set + a STARTTLS proof.** The `upgrade_to` seam RDP-SSL and
+  TURNS-over-TCP need exists and is tested, but the Schannel/OpenSSL and WebRTC-TLS anchors are
+  unwritten, so neither worked example has been demonstrated. This is anchor *data* authoring, not
+  core code.
+- **§7 step 6 — discovery generalization, in practice.** The hook is protocol-neutral and the GA
+  operators evolve the neutral genome, but `TlsDiscovery` is still the only implementation. Fitness
+  is scored as JA4 distance from a TLS anchor, which is meaningless for a Bitcoin opening — so
+  discovery cannot yet evolve a non-TLS transport, only carry one.
+- **Third-party signing.** The verifier trusts a single pinned Ed25519 key, so an outside
+  contributor's module still has to be signed by us. Capability scoping makes a key set or delegation
+  scheme *safe* to introduce; it does not introduce one.
 
 ## Consequences
 
