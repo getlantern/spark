@@ -207,6 +207,36 @@ hysteria2 = ["dep:quinn", "dep:quinn-udp", "dep:blake2", "dep:webpki-roots"]
 # default so the base build stays free of DNS-tunnel code. See docs/dns-tunnel-design.md.
 dns-tunnel = ["dep:dns-tunnel-core"]
 
+# The set every shipping build carries, on every platform — desktop, Apple and Android. Defined here,
+# in the crate that owns the features, because it was previously written out three times: a `prod`
+# list in cli/ and service/, a shell variable in platforms/apple/build-xcframework.sh, and a
+# dependency array in platforms/android/Cargo.toml. Three hand-maintained copies of one idea drift,
+# and they had: desktop shipped for months without transports the phones carried.
+#
+# A config naming a transport the binary lacks is a hard error at transport-build time, by design —
+# spark refuses rather than silently degrading — so a gap here is a pool entry that works on one
+# platform and fails on another.
+#
+# Deliberately NOT here, because they are genuinely per-platform rather than shared:
+#   - `system-stack`: needs a tun fd the platform can hand over. Desktop and Android add it; the
+#     Apple build does not, because one feature list covers its iOS slices too and they would then
+#     advertise a capability they cannot provide.
+#   - `bip324`: gated on a pinned module-signing key, so each build adds it conditionally.
+#   - `module-signer`: offline tooling that signs with a private key. Never in a shipped binary.
+prod = [
+    "anytls",
+    "shadowsocks",
+    "samizdat",
+    "hysteria2",
+    "dns-tunnel",
+    "proxyless",
+    "fronted-meek",
+    "multi-server",
+    "bootstrap-dns",
+    "config-fetch",
+    "smart-routing",
+]
+
 # Offline tool that signs a compiled `.wasm` into a `.spkw` artifact (scripts/build-module.sh). Not a
 # product binary — `required-features` keeps it out of every normal/release build.
 [[bin]]

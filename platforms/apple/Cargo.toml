@@ -53,6 +53,12 @@ smart-routing = ["spark-core/smart-routing"]
 wasm-transport = ["spark-core/wasm-transport"]
 bip324 = ["spark-core/bip324"]
 
+# The shared shipping set (spark-core/prod) — what build-xcframework.sh builds every slice with.
+# `system-stack` is deliberately absent: one feature list covers the iOS slices, which cannot hand
+# over a tun fd in the shape it needs, and enabling it there would advertise a capability the
+# platform cannot provide (`caps.system_stack`).
+prod = ["spark-core/prod"]
+
 [dependencies]
 spark-core = { path = "../../core" }
 # This crate emits a few `tracing` events of its own (notably the refusal to start without a supplied

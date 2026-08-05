@@ -42,19 +42,12 @@ spark-core = { path = "../../core" }
 # touches the desktop/Apple/core builds.
 [target.'cfg(target_os = "android")'.dependencies]
 spark-core = { path = "../../core", features = [
+    # The shared shipping set, defined once in core/Cargo.toml so this cannot drift from what desktop
+    # and Apple carry — it did, and desktop went months without transports this slice had.
+    "prod",
+    # Android-specific: VpnService hands us a Linux tun fd, so the kernel-TCP redirect stack works
+    # here (sing-box ships `stack: system` on Android the same way).
     "system-stack",
-    "config-fetch",
-    "anytls",
-    "multi-server",
-    "bootstrap-dns",
-    "samizdat",
-    "shadowsocks",
-    "hysteria2",
-    "fronted-meek",
-    # smart-routing + ad-block: fake-IP DNS, per-flow Direct/Proxy/Reject from the config's
-    # smart_routing/ad_block/route sections, and kindling-fetched .srs rule-sets. Inert unless the
-    # fetched config carries rules; needs config-fetch (above) for the rule-set fetch + lantern-api path.
-    "smart-routing",
 ] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

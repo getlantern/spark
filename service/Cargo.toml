@@ -57,18 +57,11 @@ fronted-meek = ["spark-core/fronted-meek"]
 #   - `module-signer`: offline tooling that signs modules with a private key. It has no place in a
 #     shipped binary.
 prod = [
-    "anytls",
-    "shadowsocks",
-    "samizdat",
-    "hysteria2",
-    "dns-tunnel",
-    "proxyless",
-    "fronted-meek",
-    "multi-server",
-    "bootstrap-dns",
-    "config-fetch",
-    "smart-routing",
-    "system-stack",
+    # The shared set (spark-core/prod), plus the kernel-TCP stack: desktop owns the tun fd, so
+    # `stack = system` is a real option here. Everything else lives in core/Cargo.toml so this list
+    # cannot drift from what the phones ship.
+    "spark-core/prod",
+    "spark-core/system-stack",
 ]
 
 [dependencies]
