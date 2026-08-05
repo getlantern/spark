@@ -1,7 +1,15 @@
 # ADR 0012 — Bitcoin (BIP324) opening-move transport: be the real v2 wire protocol on port 8333
 
-- **Status:** Proposed — 2026-07-18. Design only, no code yet. Full analysis + build order:
-  `docs/bitcoin-transport-design.md`.
+- **Status:** Accepted — 2026-07-18; **built, but not the way this ADR describes.** Full analysis +
+  build order: `docs/bitcoin-transport-design.md`.
+
+  The transport ships: `bip324-core` (sans-io protocol core), `modules/bip324` (a signed WASM module),
+  the keyed-garbage side door, and a splitting egress that proxies genuine Bitcoin peers to a real
+  `bitcoind`. What did **not** happen is the *native* BIP324 engine below. ADR 0013 generalized the
+  framework instead — adding an interactive-handshake channel to the WASM ABI, which was the one gap
+  that had forced a handshake protocol to be native — so BIP324 became the first transport expressed
+  purely as a signed module plus config, with nothing Bitcoin-specific in core. Read this ADR for the
+  protocol analysis and the threat model, which stand; read ADR 0013 for how it is actually realized.
 - **Scope:** Add a spark client `Transport` (TCP byte-stream) that carries proxied traffic inside the
   **genuine Bitcoin P2P v2 encrypted transport (BIP324)** on **TCP 8333**, so DPI classifies the flow
   as a Bitcoin node connection. The handshake + framing run in a **native** BIP324 engine; the
