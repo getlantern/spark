@@ -896,6 +896,207 @@ mod tests {
         // (No `> 0` assertion: it is constant-true, and flint's `with_max_candidates` floors at 1.)
     }
 
+    /// **2x2 isolation against the real origin.** The header capture showed exactly two differences
+    /// between what `h2_oneshot` sends and what curl sends: flint adds a `host` header (curl never
+    /// does, even when asked) and flint omits `content-length` (curl always sends it). Both of my
+    /// earlier curl-based eliminations were therefore invalid — curl normalizes, so it never put on
+    /// the wire what I believed I was testing.
+    ///
+    /// This sends all four combinations to the real origin over a real h2 connection and reports
+    /// which reproduce the `PROTOCOL_ERROR`. One connection per variant, since the failure is a
+    /// stream reset.
+    ///
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture isolate_h2_reset`
+    #[cfg(feature = "proxyless")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "diagnostic: needs network"]
+    async fn isolate_h2_reset() {
+        use flint_kindling::ConnectionTransport as _;
+
+        let env = FetchEnv::prod();
+        let transport = proxyless_transport(&env);
+        let body = bytes::Bytes::from_static(b"{\"probe\":true}");
+
+        for (with_host, with_len) in [(true, false), (false, false), (true, true), (false, true)] {
+            let label = format!("host={:<5} content-length={:<5}", with_host, with_len);
+            let stream = match transport.connect(&env.host).await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("  {label} -> could not connect: {e}");
+                    continue;
+                }
+            };
+            let (send_request, connection) = match h2::client::handshake(stream).await {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("  {label} -> h2 handshake failed: {e}");
+                    continue;
+                }
+            };
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            // `::http` — `config::fetch::http` shadows the crate name in this module.
+            let mut b = ::http::Request::builder()
+                .method(::http::Method::POST)
+                .uri(format!("https://{}{}", env.host, env.path))
+                .header(::http::header::CONTENT_TYPE, "application/json");
+            if with_host {
+                b = b.header(::http::header::HOST, env.host.as_str());
+            }
+            if with_len {
+                b = b.header(::http::header::CONTENT_LENGTH, body.len());
+            }
+            let request = b.body(()).expect("request");
+
+            let outcome = async {
+                let mut sr = send_request.ready().await.map_err(|e| e.to_string())?;
+                let (resp, mut send) =
+                    sr.send_request(request, false).map_err(|e| e.to_string())?;
+                send.send_data(body.clone(), true)
+                    .map_err(|e| e.to_string())?;
+                let resp = resp.await.map_err(|e| e.to_string())?;
+                Ok::<u16, String>(resp.status().as_u16())
+            }
+            .await;
+            match outcome {
+                Ok(status) => println!("  {label} -> HTTP {status}"),
+                Err(e) => println!("  {label} -> ERROR {e}"),
+            }
+            driver.abort();
+        }
+        println!("(an HTTP status of any kind means the request was accepted at the h2 layer)");
+    }
+
+    /// **Header-capture experiment.** Four hypotheses for the proxyless `PROTOCOL_ERROR` were
+    /// eliminated by measurement from outside (ALPN is h2; content-length is not required by the
+    /// origin; the `X-Lantern-*` set is accepted; `h2_oneshot` works against Akamai). What remains is
+    /// the request itself, so this captures exactly what `h2_oneshot` puts on the wire and diffs it
+    /// against curl, which the same origin accepts.
+    ///
+    /// A local h2 server with prior knowledge — no TLS — because the question is the HEADERS frame,
+    /// not the transport. `h2_oneshot` takes any stream, so it can be pointed straight at it.
+    ///
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture capture_h2_headers`
+    // Multi-thread on purpose: the curl control below is a *blocking* `std::process::Command`, and on
+    // the default current-thread runtime it would starve the spawned server task — the client would
+    // connect, the server could never accept, and the test would deadlock (it did).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "diagnostic: spawns a local server and shells out to curl"]
+    async fn capture_h2_headers() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        // Accept two connections (flint, then curl) and record each request's head.
+        let server = tokio::spawn(async move {
+            let mut captured: Vec<(String, Vec<(String, String)>)> = Vec::new();
+            for label in ["flint h2_oneshot", "curl --http2-prior-knowledge"] {
+                // Bounded: if curl is missing or fails, the second accept would otherwise block
+                // forever and hang the test rather than reporting what it did capture.
+                let accepted =
+                    tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
+                let Ok(Ok((tcp, _))) = accepted else {
+                    captured.push((
+                        label.to_owned(),
+                        vec![("<no connection>".into(), "client never connected".into())],
+                    ));
+                    continue;
+                };
+                let mut conn = match h2::server::handshake(tcp).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        captured.push((
+                            label.to_owned(),
+                            vec![("<handshake failed>".into(), e.to_string())],
+                        ));
+                        continue;
+                    }
+                };
+                // The h2 server connection must keep being polled for frames to flush — responding
+                // and then dropping it means the response is never written and the client hangs
+                // forever (which it did, the first time this was written). Loop on `accept`, which
+                // drives the connection, and stop on close or a short deadline.
+                // One request per connection is all this captures.
+                let next = tokio::time::timeout(Duration::from_secs(5), conn.accept()).await;
+                if let Ok(Some(Ok((request, mut respond)))) = next {
+                    let (parts, mut body) = request.into_parts();
+                    let mut head = vec![
+                        (":method".to_owned(), parts.method.to_string()),
+                        (
+                            ":scheme".to_owned(),
+                            parts.uri.scheme_str().unwrap_or("-").to_owned(),
+                        ),
+                        (
+                            ":authority".to_owned(),
+                            parts
+                                .uri
+                                .authority()
+                                .map(|a| a.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                        ),
+                        (":path".to_owned(), parts.uri.path().to_owned()),
+                    ];
+                    for (k, v) in parts.headers.iter() {
+                        head.push((
+                            k.as_str().to_owned(),
+                            v.to_str().unwrap_or("<non-utf8>").to_owned(),
+                        ));
+                    }
+                    let mut n = 0usize;
+                    while let Some(Ok(chunk)) = body.data().await {
+                        n += chunk.len();
+                        let _ = body.flow_control().release_capacity(chunk.len());
+                    }
+                    head.push(("<body bytes>".to_owned(), n.to_string()));
+                    captured.push((label.to_owned(), head));
+                    // `::http` — `config::fetch::http` shadows the crate name inside this module.
+                    let resp = ::http::Response::builder().status(200).body(()).unwrap();
+                    if let Ok(mut send) = respond.send_response(resp, false) {
+                        let _ = send.send_data(bytes::Bytes::from_static(b"{}"), true);
+                    }
+                }
+            }
+            captured
+        });
+
+        // 1) flint's client.
+        let req = ConfigRequest::new("probe-device".to_owned());
+        let oneshot = build_oneshot_request(&FetchEnv::prod().path, &req, &Conditional::default())
+            .expect("oneshot");
+        let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let _ = flint_kindling::h2_oneshot(tcp, "df.iantem.io", &oneshot).await;
+
+        // 2) curl, the control — same path, same body shape, prior-knowledge h2.
+        let out = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "--http2-prior-knowledge",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "--data-binary",
+                "{}",
+                &format!("http://{addr}/api/v1/config-new"),
+            ])
+            .output();
+        if let Err(e) = &out {
+            println!("(curl unavailable: {e})");
+        }
+
+        for (label, head) in server.await.expect("server task") {
+            println!("\n=== {label} ===");
+            for (k, v) in head {
+                println!("  {k}: {v}");
+            }
+        }
+    }
+
     /// **Diagnostic, not a test of spark.** `connect_cached` collapses every candidate's error into
     /// `AllFailed { tried }` (`.map_err(|_errors| ..)` — the reasons are collected and then dropped),
     /// so a failing search is undiagnosable from the outside. This walks the same space one candidate

@@ -39,12 +39,12 @@ md-5.workspace = true
 postcard.workspace = true
 # Opening-handshake wire shaping (tcp_split + record_fragment), extracted to the reusable flint crate.
 # Non-optional: the gambit genome (always compiled) bridges its Layer C to flint_shaping::WirePlan.
-flint-shaping = { git = "https://github.com/getlantern/flint", rev = "55330eee44ad57383f82c31038dd8688294277c6" }
+flint-shaping = { git = "https://github.com/getlantern/flint", rev = "2bf0b50918706bd0c6fbab40311a995f6e79a73c" }
 # Chrome-mimicry TLS: the gambit ClientHello genome, JA4, the boring Chrome connector + Profile + the
 # JA4 anchor — extracted to flint. Non-optional (gambit/ja4/profile are always compiled, e.g. by
 # `config` and `discovery`); the boring connector rides flint-tls's `boring` feature, enabled by
 # spark's `anytls`. Pinned to the same rev as flint-shaping (flint-tls path-depends on it).
-flint-tls = { git = "https://github.com/getlantern/flint", rev = "55330eee44ad57383f82c31038dd8688294277c6" }
+flint-tls = { git = "https://github.com/getlantern/flint", rev = "2bf0b50918706bd0c6fbab40311a995f6e79a73c" }
 # AnyTLS mimicry TLS backend (BoringSSL) — optional; only the `anytls` feature pulls the C build.
 # `pq-experimental` exposes Chrome's post-quantum group X25519MLKEM768; `cert-compression` exposes
 # brotli cert compression — both part of the Chrome ClientHello profile.
@@ -61,28 +61,28 @@ http = { workspace = true, optional = true }
 wasmi = { workspace = true, optional = true }
 # Signed-blob verification (Ed25519 + versioned framing + anti-rollback), extracted from this crate's
 # wasm `signing.rs` into the reusable flint crate. Only the `wasm-transport` feature pulls it.
-flint-verify = { git = "https://github.com/getlantern/flint", rev = "55330eee44ad57383f82c31038dd8688294277c6", optional = true }
+flint-verify = { git = "https://github.com/getlantern/flint", rev = "2bf0b50918706bd0c6fbab40311a995f6e79a73c", optional = true }
 # Bootstrap control-plane name resolution (design: docs/bootstrap-resolver-design.md). flint-dial
 # supplies happy-eyeballs racing (race_with / race_windowed); flint-dns supplies the un-poisoned DoH
 # resolver + the A/AAAA codec + answer validation. Both optional — only the `bootstrap-dns` feature
 # pulls them (and the boring Chrome connector they dial over). Same rev as the other flint crates.
-flint-dial = { git = "https://github.com/getlantern/flint", rev = "55330eee44ad57383f82c31038dd8688294277c6", optional = true }
-flint-dns = { git = "https://github.com/getlantern/flint", rev = "55330eee44ad57383f82c31038dd8688294277c6", optional = true }
+flint-dial = { git = "https://github.com/getlantern/flint", rev = "2bf0b50918706bd0c6fbab40311a995f6e79a73c", optional = true }
+flint-dns = { git = "https://github.com/getlantern/flint", rev = "2bf0b50918706bd0c6fbab40311a995f6e79a73c", optional = true }
 # Domain-fronting transport for the censored cold-start config fetch (config-new-fetch-design.md §9):
 # `FrontedTlsDialer` + the one-shot h2 request (`OneshotRequest`/`HttpResponse`), seeded from the
 # embedded `domainfront/fronted.yaml.gz` (aliyun/akamai/cloudfront). The `boring` feature pulls the
 # Chrome dial path (flint-dial/flint-dns boring). Only `config-fetch` pulls it; same rev as the others.
-flint-fronted = { git = "https://github.com/getlantern/flint", rev = "55330eee44ad57383f82c31038dd8688294277c6", optional = true, features = ["boring"] }
+flint-fronted = { git = "https://github.com/getlantern/flint", rev = "2bf0b50918706bd0c6fbab40311a995f6e79a73c", optional = true, features = ["boring"] }
 # Rust Kindling: the self-bootstrapping `FrontedBootstrap` (scan local fronts -> race -> one-shot h2),
 # the fronted entry point for reaching the config API. Augments the embedded fronted.yaml.gz one-shot
 # with live-scanned edges so a fully-blocked front list self-heals. Only `config-fetch` pulls it; the
 # `boring` feature rides flint-fronted's Chrome dial path. Same rev as the other flint crates.
-flint-kindling = { git = "https://github.com/getlantern/flint", rev = "55330eee44ad57383f82c31038dd8688294277c6", optional = true, features = ["boring"] }
+flint-kindling = { git = "https://github.com/getlantern/flint", rev = "2bf0b50918706bd0c6fbab40311a995f6e79a73c", optional = true, features = ["boring"] }
 # Proxyless: the `resolver × wire-shaping` strategy search (ADR 0014). `boring` because selecting a
 # strategy means proving it with a certificate-verified handshake, which needs the Chrome dial path.
 # Same rev as the other flint crates — a mixed rev would resolve to two checkouts and fail on type
 # identity.
-flint-proxyless = { git = "https://github.com/getlantern/flint", rev = "55330eee44ad57383f82c31038dd8688294277c6", optional = true, features = ["boring"] }
+flint-proxyless = { git = "https://github.com/getlantern/flint", rev = "2bf0b50918706bd0c6fbab40311a995f6e79a73c", optional = true, features = ["boring"] }
 blake3 = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
 chacha20 = { workspace = true, optional = true }
