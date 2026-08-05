@@ -25,6 +25,25 @@ returning the packed `(ptr << 32) | len` region to read its output from. Its onl
 `env` host functions (`host_rand`, `host_hash`, the AEAD/HKDF/x25519/… crypto menu); no WASI, no
 network.
 
+### Capabilities
+
+Because there is no WASI and no network import, that `env` table *is* the sandbox boundary — so it is
+also the lever for granting one module less authority than another. A module delivered in a signed
+**bundle** is restricted to the allow-list inside the signed payload; the grant travels with the
+signature, so config cannot widen it. A module loaded from a local `.spkw` path is unrestricted.
+
+Declare only what you import. An import outside the grant is not linked, so the module fails to
+*instantiate* — early and by name — rather than trapping mid-handshake:
+
+```rust
+// tooling, when building the bundle
+Bundle::new("my-transport", genomes, Some(wasm))
+    .with_capabilities(vec!["host_rand".into(), "host_aead_seal".into()])
+```
+
+A transport that only reshapes bytes has no business holding an X25519 private key, and asking for
+less is the difference between a contribution that can be reviewed and one that has to be trusted.
+
 ## Adding a module
 
 1. Create `modules/<name>/` as a `cdylib` (copy `obfs-xor/`), implementing the ABI above.
