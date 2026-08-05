@@ -877,24 +877,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **Design probe, not a regression test.** Answers the one question that decides whether the
-    /// whole fetch can move onto `Kindling`: is a fronted TLS *connection* usable for config-new with
-    /// plain HTTP/1.1 over it?
+    /// **Design probe, not a regression test.** Decides how much of the fetch can move onto
+    /// `Kindling`.
     ///
-    /// Today the fronted avenue is an h2 **one-shot** (`FrontedTlsDialer::request`), whose success
-    /// criterion is a complete HTTP response. A kindling race wins on *connect*, so moving fronting
-    /// into it means speaking HTTP/1.1 over `ConnectionTransport::connect` and validating afterwards.
-    /// That is only sound if the edge accepts HTTP/1.1 and routes it to the origin by `Host`.
+    /// The first version of this probe failed with a 400, and the cause was the probe: it addressed
+    /// the inner request to config-new's own host. A fronted edge routes by the *provider's* host
+    /// (`front.fronted_host`) — SNI is a decoy, the inner `Host` is what selects the origin — so the
+    /// edge was right to reject it. It now addresses `fronted_host()`, matching what the h2 one-shot
+    /// does via `h2_oneshot(tls, &authority, ..)`.
     ///
-    /// If this passes, the fronted avenue can become a uniform kindling member and the whole race
-    /// collapses into one. If it fails, fronting stays a one-shot and only the connection-shaped
-    /// members (direct, proxyless, later dns-tunnel) move. Run:
-    /// `cargo test -p spark-core --features prod -- --ignored fronted_connection_speaks_http1`
+    /// That correction exposes the real finding, which is about the abstraction rather than HTTP:
+    /// `ConnectionTransport::connect` returns `conn.stream` and **drops `conn.front`**, so a generic
+    /// consumer of a kindling race cannot build a correct inner request — the authority it needs
+    /// depends on which front won, and that is exactly what the uniform interface erases. Hence this
+    /// probe uses `connect_fronted`, which keeps it.
+    ///
+    /// So what this now answers is narrower and still decisive: *if* the authority were available,
+    /// would plain HTTP/1.1 over a fronted TLS connection reach config-new? Pass ⇒ the full move is
+    /// worth a small flint change to surface the winning front. Fail ⇒ fronting stays a one-shot and
+    /// only the connection-shaped members (direct, proxyless, later dns-tunnel) move. Run:
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture fronted_connection_speaks_http1`
     #[tokio::test]
     #[ignore = "live: design probe, needs network + reachable fronting edges"]
     async fn fronted_connection_speaks_http1() {
-        use flint_kindling::ConnectionTransport as _;
-
         let dialer = fronted_dialer().expect("embedded fronted config parses");
         let env = FetchEnv::prod();
         let dir = std::env::temp_dir().join("spark-probe-fronted-conn");
@@ -907,19 +912,27 @@ mod tests {
         req.user_id = creds.user_id.clone();
         req.pro_token = creds.pro_token.clone();
 
-        // The connection path, not the one-shot path.
-        let stream = dialer
-            .connect(&env.host)
+        // `connect_fronted`, not the `ConnectionTransport` path, so the winning front survives.
+        let conn = dialer
+            .connect_fronted(&env.host)
             .await
-            .expect("fronted edge accepts a connection");
-        let bytes = build_request_bytes(&env.host, &env.path, &req, &Conditional::default())
+            .expect("a fronted edge accepts a connection");
+        let authority = conn.fronted_host().to_owned();
+        println!("probe: edge accepted, inner authority = {authority}");
+
+        let bytes = build_request_bytes(&authority, &env.path, &req, &Conditional::default())
             .expect("request bytes");
-        let resp = post_collect(stream, &bytes, 4 * 1024 * 1024)
+        let resp = post_collect(conn.stream, &bytes, 4 * 1024 * 1024)
             .await
             .expect("HTTP/1.1 over the fronted connection");
+        println!(
+            "probe: status {}, {} body bytes",
+            resp.status,
+            resp.body.len()
+        );
         assert_eq!(
             resp.status, 200,
-            "the edge routed HTTP/1.1 to the origin by Host (status {})",
+            "HTTP/1.1 addressed to {authority} should reach the origin (got {})",
             resp.status
         );
         let raw = String::from_utf8(resp.body).expect("utf-8 body");
