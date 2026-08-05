@@ -1166,7 +1166,10 @@ mod tests {
         let env = FetchEnv::prod();
         let transport = proxyless_transport(&env);
         let dir = std::env::temp_dir().join("spark-live-proxyless");
-        let _ = std::fs::remove_dir_all(&dir);
+        // Deliberately NOT wiped. `device_id` and `ensure_user` cache credentials here, and
+        // wiping mints a brand-new user on every run — enough repeated runs and `user-create`
+        // starts answering 500, which then reads as a test failure rather than the throttling it
+        // is. Reusing the cache keeps these tests repeatable and is kinder to the API.
         let did = device_id(&dir).unwrap();
         let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
             .await
@@ -1226,8 +1229,11 @@ mod tests {
     async fn fronted_connection_speaks_h2() {
         let dialer = fronted_dialer().expect("embedded fronted config parses");
         let env = FetchEnv::prod();
+        // Reuse a persistent directory rather than wiping it. `ensure_user` caches credentials
+        // there, and minting a fresh user on every run is both wasteful and self-defeating: repeated
+        // runs of this probe earned an HTTP 500 from user-create, which then looks like a probe
+        // failure rather than the rate-limiting it is.
         let dir = std::env::temp_dir().join("spark-probe-fronted-conn");
-        let _ = std::fs::remove_dir_all(&dir);
         let did = device_id(&dir).unwrap();
         let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
             .await
@@ -1261,7 +1267,6 @@ mod tests {
         let raw = String::from_utf8(resp.body).expect("utf-8 body");
         let cfg = Config::from_config_str(&raw).expect("adapt config from the fronted connection");
         assert!(!cfg.transport.servers.is_empty(), "should return a pool");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Live: fetch **prod** config-new strictly through the domain-fronted path (aliyun/akamai/
@@ -1274,7 +1279,10 @@ mod tests {
         let dialer = fronted_dialer().expect("embedded fronted config parses");
         let env = FetchEnv::prod();
         let dir = std::env::temp_dir().join("spark-live-fronted");
-        let _ = std::fs::remove_dir_all(&dir);
+        // Deliberately NOT wiped. `device_id` and `ensure_user` cache credentials here, and
+        // wiping mints a brand-new user on every run — enough repeated runs and `user-create`
+        // starts answering 500, which then reads as a test failure rather than the throttling it
+        // is. Reusing the cache keeps these tests repeatable and is kinder to the API.
         let did = device_id(&dir).unwrap();
         // Creds are minted via the (direct) user-create pre-step; the config fetch itself is fronted.
         let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
