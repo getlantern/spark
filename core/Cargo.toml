@@ -193,7 +193,14 @@ fronted-meek = ["dep:flint-fronted"]
 # flint-proxyless (the resolver × shaping search) and flint-dns (the resolver pool it searches over);
 # the `boring` feature rides flint-proxyless's dial path, which the strategy search needs to verify a
 # candidate's certificate. Off by default: it has no exit hop, so it must be opted into.
-proxyless = ["dep:flint-proxyless", "dep:flint-dns"]
+# `anytls` is required, not incidental: the transport's whole security property is a
+# **certificate-verified** handshake, and verifying needs trust anchors. `Space::roots` empty makes
+# flint fall back to BoringSSL's `set_default_paths()`, and BoringSSL ships no store — on macOS the
+# certificates live in the Keychain, which it does not read, so every candidate fails verification
+# instantly and the search looks like a blocked network. `anytls` supplies `webpki-root-certs` (and
+# direct `boring2`) so the anchors can be pinned. It costs almost nothing here: flint-proxyless
+# already pulls the boring stack via its own `boring` feature, so only the root set is new.
+proxyless = ["anytls", "dep:flint-proxyless", "dep:flint-dns"]
 # Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel interoperable with
 # deployed shadowsocks-rust servers. `ring` provides the AEADs; `blake3` derives session subkeys and
 # `aes` provides the raw block cipher for the UDP separate-header. Off by default so the base build

@@ -293,6 +293,37 @@ where
 /// runs in the multi-server probe loop. See [`tls_wrap`] for why the roots are loaded (BoringSSL has
 /// no built-in store; Android/iOS don't resolve it via the default verify paths). A cert that fails to
 /// parse is skipped. The cached value is `None` only if the connector itself can't be allocated (an
+/// The Mozilla root set as PEM, for a flint search `Space`'s trust anchors.
+///
+/// The same root set [`fetch_connector`] loads, in the other shape flint wants: `webpki-root-certs`
+/// ships DER, `flint_proxyless::Space::roots` wants PEM. Kept beside it deliberately — root handling
+/// belongs in one place, and this file already explains why BoringSSL needs it at all.
+///
+/// Leaving `Space::roots` empty is not a neutral default: flint falls back to BoringSSL's
+/// `set_default_paths()`, which finds nothing on macOS (certificates live in the Keychain) and on
+/// mobile. Every candidate then fails certificate verification instantly, and a strategy search that
+/// reports "all N candidates failed" in about a second is indistinguishable from a censored network —
+/// a bad thing for a censorship tool to be unable to tell apart.
+///
+/// Built once: parsing ~150 certificates per dial would be absurd, and the search dials often.
+#[cfg(all(
+    feature = "anytls",
+    any(feature = "proxyless", feature = "config-fetch")
+))]
+pub(crate) fn webpki_roots_pem() -> std::sync::Arc<[String]> {
+    use std::sync::OnceLock;
+    static ROOTS: OnceLock<std::sync::Arc<[String]>> = OnceLock::new();
+    std::sync::Arc::clone(ROOTS.get_or_init(|| {
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .filter_map(|der| boring2::x509::X509::from_der(der.as_ref()).ok())
+            .filter_map(|cert| cert.to_pem().ok())
+            .filter_map(|pem| String::from_utf8(pem).ok())
+            .collect::<Vec<_>>()
+            .into()
+    }))
+}
+
 /// OOM-class failure); then every call errors, which is correct — nothing can dial without it.
 #[cfg(feature = "anytls")]
 fn fetch_connector() -> io::Result<&'static boring2::ssl::SslConnector> {

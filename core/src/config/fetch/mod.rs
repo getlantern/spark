@@ -334,42 +334,12 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 #[cfg(feature = "proxyless")]
 fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
     flint_kindling::ProxylessTransport::new(
-        flint_kindling::Space::new(flint_dns::default_pool()).with_roots(pinned_roots()),
+        flint_kindling::Space::new(flint_dns::default_pool())
+            .with_roots(crate::transport::probe::webpki_roots_pem()),
         "config-fetch",
     )
     .with_port(env.port)
     .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
-}
-
-/// The Mozilla root set as PEM, for a search `Space`'s trust anchors.
-///
-/// Leaving `Space::roots` empty makes flint fall back to BoringSSL's `set_default_paths()`, and
-/// BoringSSL ships no trust store of its own — it looks for OpenSSL-style paths. macOS keeps its
-/// certificates in the Keychain, which BoringSSL does not read, so on macOS that fallback finds
-/// nothing and **every** candidate fails certificate verification instantly. The symptom is a search
-/// that reports "all 8 candidates failed" in about a second, which reads like a blocked network
-/// rather than a missing trust store.
-///
-/// Spark already solves this for its own dials by loading the same root set into `fetch_connector`
-/// (`transport::probe`), for the same reason and with the same comment. This is that fix, in the
-/// shape a `Space` wants: `webpki-root-certs` ships DER, `Space::roots` wants PEM, and boring is
-/// already a dependency here so it can do the conversion.
-///
-/// Built once — parsing ~150 certificates per dial would be absurd on a race member whose whole job
-/// is to be cheap enough to lose.
-#[cfg(feature = "proxyless")]
-fn pinned_roots() -> std::sync::Arc<[String]> {
-    use std::sync::OnceLock;
-    static ROOTS: OnceLock<std::sync::Arc<[String]>> = OnceLock::new();
-    std::sync::Arc::clone(ROOTS.get_or_init(|| {
-        webpki_root_certs::TLS_SERVER_ROOT_CERTS
-            .iter()
-            .filter_map(|der| boring2::x509::X509::from_der(der.as_ref()).ok())
-            .filter_map(|cert| cert.to_pem().ok())
-            .filter_map(|pem| String::from_utf8(pem).ok())
-            .collect::<Vec<_>>()
-            .into()
-    }))
 }
 
 /// The fronted path: run the config-new request as a one-shot h2 request over `dialer` (the fronting
@@ -900,7 +870,7 @@ mod tests {
     #[cfg(feature = "proxyless")]
     #[test]
     fn the_proxyless_space_pins_trust_anchors() {
-        let roots = pinned_roots();
+        let roots = crate::transport::probe::webpki_roots_pem();
         assert!(
             roots.len() > 100,
             "expected the Mozilla root set, got {} anchors",
@@ -1153,8 +1123,8 @@ mod tests {
     #[ignore = "diagnostic: needs network"]
     async fn why_proxyless_fails() {
         let env = FetchEnv::prod();
-        let space =
-            flint_kindling::Space::new(flint_dns::default_pool()).with_roots(pinned_roots());
+        let space = flint_kindling::Space::new(flint_dns::default_pool())
+            .with_roots(crate::transport::probe::webpki_roots_pem());
         println!(
             "space: {} resolvers x {} wires = {} candidates, {} trust anchors",
             space.resolvers.len(),
@@ -1196,7 +1166,10 @@ mod tests {
         let env = FetchEnv::prod();
         let transport = proxyless_transport(&env);
         let dir = std::env::temp_dir().join("spark-live-proxyless");
-        let _ = std::fs::remove_dir_all(&dir);
+        // Deliberately NOT wiped. `device_id` and `ensure_user` cache credentials here, and
+        // wiping mints a brand-new user on every run — enough repeated runs and `user-create`
+        // starts answering 500, which then reads as a test failure rather than the throttling it
+        // is. Reusing the cache keeps these tests repeatable and is kinder to the API.
         let did = device_id(&dir).unwrap();
         let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
             .await
@@ -1224,6 +1197,89 @@ mod tests {
             FetchOutcome::NotModified => panic!("unexpected 304 on unconditional proxyless fetch"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Which protocol does a fronted edge actually speak? **It varies per connection**, which is the
+    /// finding that decides whether fronting can join a kindling connection race.
+    ///
+    /// Measured over four runs, two fresh connections each:
+    ///
+    /// ```text
+    /// run 1:  h2 -> HTTP 500          http/1.1 -> no header terminator
+    /// run 2:  h2 -> frame size error  http/1.1 -> HTTP 500
+    /// run 3:  h2 -> frame size error  http/1.1 -> HTTP 500
+    /// run 4:  h2 -> frame size error  http/1.1 -> HTTP 500
+    /// ```
+    ///
+    /// `GoAway(FRAME_SIZE_ERROR, Library)` is our *own* h2 client rejecting the bytes — the
+    /// signature of parsing an HTTP/1.1 response as h2 frames. The dialer races several masquerade
+    /// candidates and whichever edge wins may have negotiated either protocol, so a caller holding
+    /// only the stream cannot know which to speak.
+    ///
+    /// Together with `conn.front` being dropped, that is two things
+    /// `ConnectionTransport::connect` erases which an HTTP caller needs: the inner authority and the
+    /// negotiated protocol. It is why flint has `dial_fronts_alpn` at all, and why the fronted
+    /// avenue is a one-shot: `race_oneshot` runs the full dial *and* request per candidate, so a
+    /// candidate wins only after a complete response — which inherently discards edges speaking a
+    /// protocol the caller cannot handle. A connect-race would pick the fastest handshake and then
+    /// discover the problem.
+    ///
+    /// (The HTTP 500s are the origin's answer to spark's request shape at the time of measurement,
+    /// unrelated to the protocol question — what matters here is which protocol got *an* answer.)
+    ///
+    /// `cargo test -p spark-core --features prod -- --ignored --nocapture which_protocol_fronted`
+    #[cfg(feature = "samizdat")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "diagnostic: needs network"]
+    async fn which_protocol_fronted() {
+        let dialer = fronted_dialer().expect("embedded fronted config parses");
+        let env = FetchEnv::prod();
+        let dir = std::env::temp_dir().join("spark-probe-fronted-conn");
+        let did = device_id(&dir).unwrap();
+        let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
+            .await
+            .expect("user-create");
+        let mut req = ConfigRequest::new(did);
+        req.user_id = creds.user_id.clone();
+        req.pro_token = creds.pro_token.clone();
+
+        // h2 over one connection.
+        match dialer.connect_fronted(&env.host).await {
+            Ok(conn) => {
+                let authority = conn.fronted_host().to_owned();
+                let oneshot = build_oneshot_request(&env.path, &req, &Conditional::default())
+                    .expect("oneshot");
+                match flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot).await {
+                    Ok(r) => println!(
+                        "  h2       -> HTTP {} ({} body bytes)",
+                        r.status,
+                        r.body.len()
+                    ),
+                    Err(e) => println!("  h2       -> ERROR {e}"),
+                }
+            }
+            Err(e) => println!("  h2       -> could not connect: {e}"),
+        }
+
+        // HTTP/1.1 over another.
+        match dialer.connect_fronted(&env.host).await {
+            Ok(conn) => {
+                let authority = conn.fronted_host().to_owned();
+                let bytes =
+                    build_request_bytes(&authority, &env.path, &req, &Conditional::default())
+                        .expect("request bytes");
+                match post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await {
+                    Ok(r) => println!(
+                        "  http/1.1 -> HTTP {} ({} body bytes)",
+                        r.status,
+                        r.body.len()
+                    ),
+                    Err(e) => println!("  http/1.1 -> ERROR {e}"),
+                }
+            }
+            Err(e) => println!("  http/1.1 -> could not connect: {e}"),
+        }
+        println!("(whichever answers is what the edge negotiated on that connection)");
     }
 
     /// **Design probe, not a regression test.** Decides how much of the fetch can move onto
@@ -1256,8 +1312,11 @@ mod tests {
     async fn fronted_connection_speaks_h2() {
         let dialer = fronted_dialer().expect("embedded fronted config parses");
         let env = FetchEnv::prod();
+        // Reuse a persistent directory rather than wiping it. `ensure_user` caches credentials
+        // there, and minting a fresh user on every run is both wasteful and self-defeating: repeated
+        // runs of this probe earned an HTTP 500 from user-create, which then looks like a probe
+        // failure rather than the rate-limiting it is.
         let dir = std::env::temp_dir().join("spark-probe-fronted-conn");
-        let _ = std::fs::remove_dir_all(&dir);
         let did = device_id(&dir).unwrap();
         let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
             .await
@@ -1291,7 +1350,6 @@ mod tests {
         let raw = String::from_utf8(resp.body).expect("utf-8 body");
         let cfg = Config::from_config_str(&raw).expect("adapt config from the fronted connection");
         assert!(!cfg.transport.servers.is_empty(), "should return a pool");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Live: fetch **prod** config-new strictly through the domain-fronted path (aliyun/akamai/
@@ -1304,7 +1362,10 @@ mod tests {
         let dialer = fronted_dialer().expect("embedded fronted config parses");
         let env = FetchEnv::prod();
         let dir = std::env::temp_dir().join("spark-live-fronted");
-        let _ = std::fs::remove_dir_all(&dir);
+        // Deliberately NOT wiped. `device_id` and `ensure_user` cache credentials here, and
+        // wiping mints a brand-new user on every run — enough repeated runs and `user-create`
+        // starts answering 500, which then reads as a test failure rather than the throttling it
+        // is. Reusing the cache keeps these tests repeatable and is kinder to the API.
         let did = device_id(&dir).unwrap();
         // Creds are minted via the (direct) user-create pre-step; the config fetch itself is fronted.
         let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
