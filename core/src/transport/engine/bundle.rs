@@ -40,7 +40,11 @@ const MAGIC: [u8; 4] = *b"SPKB";
 const SIG_LEN: usize = 64;
 
 /// The envelope schema version this build understands.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// Bumped to 2 when `capabilities` was appended. postcard is positional, so an older decoder cannot
+/// safely reinterpret the longer payload — and since no bundle has ever been distributed, there is no
+/// v1 artifact in the wild to stay compatible with.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// What a bundle carries. postcard is positional, so the field order below **is** the wire schema:
 /// new fields must be appended and [`SCHEMA_VERSION`] bumped.
@@ -58,17 +62,36 @@ pub struct Bundle {
     /// re-tuning of an existing transport ships plans alone — and re-sending a module nobody's client
     /// needs to change is wasted bytes on a network we assume is hostile and slow.
     pub wasm: Option<Vec<u8>>,
+    /// Host functions the module may import. `None` grants the full table.
+    ///
+    /// This is inside the signed payload deliberately: a module's authority is fixed by whoever
+    /// signed it and cannot be widened by editing a config file. The host-import table is the entire
+    /// sandbox boundary — no WASI, no network — so this is the only lever that gives one module less
+    /// authority than another, which is what makes a third-party transport safe to run at all.
+    ///
+    /// `None` means unrestricted, and is what a first-party bundle can reasonably use; a
+    /// less-trusted signer should be held to a list. Naming a capability the host does not have is
+    /// not an error here — the module simply fails to instantiate if it actually imports it.
+    pub capabilities: Option<Vec<String>>,
 }
 
 impl Bundle {
     /// A bundle of `genomes` for `engine`, optionally carrying the module that realizes them.
+    /// Unrestricted; use [`with_capabilities`](Self::with_capabilities) to scope the module.
     pub fn new(engine: impl Into<String>, genomes: Vec<Vec<u8>>, wasm: Option<Vec<u8>>) -> Self {
         Self {
             bundle_version: SCHEMA_VERSION,
             engine: engine.into(),
             genomes,
             wasm,
+            capabilities: None,
         }
+    }
+
+    /// Restrict the module to these host imports.
+    pub fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.capabilities = Some(capabilities);
+        self
     }
 
     /// postcard-encode the bundle (the form a signature covers).
@@ -132,6 +155,8 @@ pub struct VerifiedBundle {
     pub genomes: Vec<Genome>,
     /// The module bytes, if the bundle carried them. Still to be compiled by the caller.
     pub wasm: Option<Vec<u8>>,
+    /// The authenticated host-import allow-list for the module, or `None` for unrestricted.
+    pub capabilities: Option<Vec<String>>,
 }
 
 impl VerifiedBundle {
@@ -236,6 +261,7 @@ impl BundleVerifier {
             version: blob.version,
             genomes,
             wasm: bundle.wasm,
+            capabilities: bundle.capabilities,
         })
     }
 }
@@ -445,6 +471,39 @@ mod tests {
             verifier(&kp).verify(&artifact(&kp, ENGINE, 1, &future), 0, 0),
             Err(BundleError::Schema { .. })
         ));
+    }
+
+    /// Capabilities travel inside the signature, so they survive verification intact and a tampered
+    /// grant fails the signature rather than widening the module's authority.
+    #[test]
+    fn the_capability_grant_is_authenticated() {
+        let kp = dev_keypair();
+        let caps = vec!["host_rand".to_owned(), "host_hash".to_owned()];
+        let bundle = Bundle::new(ENGINE, vec![genome(ENGINE, 1)], Some(vec![0, 97, 115, 109]))
+            .with_capabilities(caps.clone());
+        let art = artifact(&kp, ENGINE, 1, &bundle);
+
+        let v = verifier(&kp).verify(&art, 0, 0).expect("verifies");
+        assert_eq!(
+            v.capabilities,
+            Some(caps),
+            "the grant survives verification"
+        );
+
+        // An unrestricted bundle stays unrestricted — `None` is distinct from an empty list.
+        let open = Bundle::new(ENGINE, vec![genome(ENGINE, 1)], None);
+        let v = verifier(&kp)
+            .verify(&artifact(&kp, ENGINE, 1, &open), 0, 0)
+            .expect("verifies");
+        assert_eq!(v.capabilities, None);
+
+        // An empty grant is a real restriction and must round-trip as one, not collapse to None.
+        let closed =
+            Bundle::new(ENGINE, vec![genome(ENGINE, 1)], None).with_capabilities(Vec::new());
+        let v = verifier(&kp)
+            .verify(&artifact(&kp, ENGINE, 1, &closed), 0, 0)
+            .expect("verifies");
+        assert_eq!(v.capabilities, Some(Vec::new()), "empty grants nothing");
     }
 
     /// A module artifact must not verify as a bundle: the magic namespaces them apart.

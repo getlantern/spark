@@ -35,7 +35,21 @@
 //!   can rewind a per-call scratch arena without growing memory; persistent state in globals survives.
 //!
 //! The module **imports** (host functions, under module `env`) — this is its entire capability
-//! surface:
+//! surface, and a module may be restricted to a subset of it.
+//!
+//! # Capabilities
+//!
+//! Because there is no WASI and no network import, the host-function table below *is* the sandbox
+//! boundary. Restricting it is therefore the only way to grant one module less authority than
+//! another — which is what makes running a transport somebody else wrote a bounded risk rather than
+//! an open one.
+//!
+//! A module loaded from a signed **bundle** is scoped to the allow-list inside that bundle's signed
+//! payload, so its authority is fixed by whoever signed it and cannot be widened by editing config.
+//! A module loaded directly from a local `.spkw` path is unrestricted — it is as trusted as the
+//! filesystem it came from. An import outside the grant is simply not linked, so the module fails to
+//! **instantiate**, loudly and by name, rather than receiving a stub that errors later somewhere
+//! that looks like a protocol fault. See [`TransformModule::load_scoped`].
 //! - `host_rand(ptr, len)` — fill `len` bytes with cryptographically secure random bytes.
 //! - `host_hash(in_ptr, in_len, out_ptr)` — SHA-256, writing 32 bytes.
 //! - `host_aead_seal(key_ptr, nonce_ptr, aad_ptr, aad_len, in_ptr, in_len, out_ptr) -> i64` —
@@ -307,6 +321,17 @@ pub enum WasmError {
 pub struct TransformModule {
     engine: Engine,
     module: Arc<Module>,
+    /// Host functions this module may import. `None` grants the full table.
+    ///
+    /// The import table *is* the sandbox boundary — there is no WASI and no network — so restricting
+    /// it is the only meaningful way to give one module less authority than another. That matters
+    /// once modules can come from someone other than us: a transport that only reshapes bytes has no
+    /// business holding an X25519 private key or drawing from the CSPRNG.
+    ///
+    /// `None` rather than "all names" so the distinction between *unrestricted* and *happens to list
+    /// everything* stays visible; a locally provisioned `.spkw` is unrestricted, a delivered bundle
+    /// declares what it needs.
+    capabilities: Option<Arc<[String]>>,
 }
 
 impl TransformModule {
@@ -315,6 +340,15 @@ impl TransformModule {
     /// This only validates and compiles; it does not run the module. Per-connection state is
     /// created by [`TransformModule::instantiate`].
     pub fn load(wasm: &[u8]) -> Result<Self, WasmError> {
+        Self::load_scoped(wasm, None)
+    }
+
+    /// Compile a module that may import only `capabilities` (host-function names).
+    ///
+    /// A module importing anything outside the list fails to **instantiate**, loudly, rather than
+    /// receiving a stub that returns an error at some later call — the failure belongs at load time,
+    /// where it names the module, not mid-handshake where it looks like a protocol fault.
+    pub fn load_scoped(wasm: &[u8], capabilities: Option<Vec<String>>) -> Result<Self, WasmError> {
         // Enable fuel metering so a runaway module is bounded per call (see `fuel_for`).
         let mut config = Config::default();
         config.consume_fuel(true);
@@ -323,7 +357,13 @@ impl TransformModule {
         Ok(Self {
             engine,
             module: Arc::new(module),
+            capabilities: capabilities.map(Arc::from),
         })
+    }
+
+    /// The host functions this module is permitted to import, or `None` when unrestricted.
+    pub fn capabilities(&self) -> Option<&[String]> {
+        self.capabilities.as_deref()
     }
 
     /// Instantiate a fresh transform session with its own linear memory and host state.
@@ -418,59 +458,93 @@ impl Transform {
         // `start` function (if any) and the `init` hook below. Per-transform calls refill in `run`.
         set_fuel(&mut store, fuel_for(config.len()))?;
 
-        // Register the host functions (the module's entire capability surface): a CSPRNG, SHA-256,
-        // and ChaCha20-Poly1305 seal/open. Bulk crypto runs natively here so modules don't pay the
-        // interpreter's per-byte cost (ADR 0003); the module interprets only its control/framing.
+        // Register the host functions the module is allowed to hold — its entire capability surface,
+        // since there is no WASI and no network import. Bulk crypto runs natively here so modules
+        // don't pay the interpreter's per-byte cost (ADR 0003); the module interprets only its
+        // control/framing.
+        // Only wrap the imports this module is allowed to hold. An unrestricted module (a locally
+        // provisioned artifact) gets the whole table; a scoped one gets exactly what it declared, and
+        // importing anything else fails instantiation below with a missing-import error naming it.
+        let allowed = |name: &str| match module.capabilities.as_deref() {
+            None => true,
+            Some(caps) => caps.iter().any(|c| c == name),
+        };
         let mut linker = Linker::<HostState>::new(&module.engine);
-        linker
-            .func_wrap(HOST_MODULE, HOST_RAND, host_rand)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_HASH, host_hash)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_AEAD_SEAL, host_aead_seal)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_AEAD_OPEN, host_aead_open)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_HKDF_EXTRACT, host_hkdf_extract)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_HKDF_EXPAND, host_hkdf_expand)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_AES_GCM_SEAL, host_aes_gcm_seal)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_AES_GCM_OPEN, host_aes_gcm_open)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_X25519_GENERATE, host_x25519_generate)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_X25519_AGREE, host_x25519_agree)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
-        linker
-            .func_wrap(HOST_MODULE, HOST_CHACHA20, host_chacha20)
-            .map_err(|e| WasmError::Link(e.to_string()))?;
+        if allowed(HOST_RAND) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_RAND, host_rand)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_HASH) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_HASH, host_hash)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_AEAD_SEAL) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_AEAD_SEAL, host_aead_seal)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_AEAD_OPEN) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_AEAD_OPEN, host_aead_open)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_HKDF_EXTRACT) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_HKDF_EXTRACT, host_hkdf_extract)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_HKDF_EXPAND) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_HKDF_EXPAND, host_hkdf_expand)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_AES_GCM_SEAL) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_AES_GCM_SEAL, host_aes_gcm_seal)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_AES_GCM_OPEN) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_AES_GCM_OPEN, host_aes_gcm_open)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_X25519_GENERATE) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_X25519_GENERATE, host_x25519_generate)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_X25519_AGREE) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_X25519_AGREE, host_x25519_agree)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
+        if allowed(HOST_CHACHA20) {
+            linker
+                .func_wrap(HOST_MODULE, HOST_CHACHA20, host_chacha20)
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
         #[cfg(feature = "bip324")]
-        linker
-            .func_wrap(
-                HOST_MODULE,
-                HOST_SECP256K1_ELLSWIFT_GENERATE,
-                host_secp256k1_ellswift_generate,
-            )
-            .map_err(|e| WasmError::Link(e.to_string()))?;
+        if allowed(HOST_SECP256K1_ELLSWIFT_GENERATE) {
+            linker
+                .func_wrap(
+                    HOST_MODULE,
+                    HOST_SECP256K1_ELLSWIFT_GENERATE,
+                    host_secp256k1_ellswift_generate,
+                )
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
         #[cfg(feature = "bip324")]
-        linker
-            .func_wrap(
-                HOST_MODULE,
-                HOST_SECP256K1_ELLSWIFT_ECDH,
-                host_secp256k1_ellswift_ecdh,
-            )
-            .map_err(|e| WasmError::Link(e.to_string()))?;
+        if allowed(HOST_SECP256K1_ELLSWIFT_ECDH) {
+            linker
+                .func_wrap(
+                    HOST_MODULE,
+                    HOST_SECP256K1_ELLSWIFT_ECDH,
+                    host_secp256k1_ellswift_ecdh,
+                )
+                .map_err(|e| WasmError::Link(e.to_string()))?;
+        }
 
         let instance = linker
             .instantiate_and_start(&mut store, &module.module)
@@ -1602,6 +1676,72 @@ pub(crate) mod testutil {
     // `#[cfg(any(test, feature = "module-signer"))]` so the `sign-module` tool can reuse them. Kept
     // reachable here as `testutil::dev_keypair` for the existing tests.
     pub(crate) use super::dev_keypair;
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::testutil::XOR_WAT;
+    use super::*;
+
+    /// The XOR fixture imports exactly one host function, `host_rand`, which makes it a precise probe
+    /// for the allow-list: grant it and the module loads, withhold it and instantiation must fail.
+    #[test]
+    fn a_module_may_only_import_what_it_was_granted() {
+        let wasm = wat::parse_str(XOR_WAT).expect("assemble fixture");
+
+        // Unrestricted (a locally provisioned artifact) — the whole table, as before.
+        TransformModule::load(&wasm)
+            .expect("compile")
+            .instantiate()
+            .expect("an unrestricted module keeps the full host table");
+
+        // Scoped to exactly what it needs.
+        TransformModule::load_scoped(&wasm, Some(vec![HOST_RAND.to_owned()]))
+            .expect("compile")
+            .instantiate()
+            .expect("granting host_rand is sufficient for the XOR fixture");
+
+        // Scoped to something else: the import it needs is simply not in the linker, so
+        // instantiation fails. This is the property the whole feature rests on — if this passed,
+        // scoping would be decorative.
+        let err = TransformModule::load_scoped(&wasm, Some(vec![HOST_HASH.to_owned()]))
+            .expect("compile")
+            .instantiate()
+            .map(|_| ())
+            .expect_err("a module must not instantiate without an import it uses");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(HOST_RAND) || msg.to_lowercase().contains("import"),
+            "the error should identify the missing import, got: {msg}"
+        );
+
+        // The empty list is a real restriction, not a synonym for "unrestricted".
+        assert!(
+            TransformModule::load_scoped(&wasm, Some(Vec::new()))
+                .expect("compile")
+                .instantiate()
+                .map(|_| ())
+                .is_err(),
+            "an empty allow-list must grant nothing"
+        );
+    }
+
+    /// Scoping must not weaken a module that stays within its grant: the transform still works, and
+    /// the granted capability is genuinely usable rather than a stub.
+    #[test]
+    fn a_scoped_module_still_functions_within_its_grant() {
+        let wasm = wat::parse_str(XOR_WAT).expect("assemble fixture");
+        let mut t = TransformModule::load_scoped(&wasm, Some(vec![HOST_RAND.to_owned()]))
+            .expect("compile")
+            .instantiate()
+            .expect("instantiate");
+        let out = t.transform_out(b"hello").expect("transform");
+        assert_eq!(out, b"hello".iter().map(|b| b ^ 0x5A).collect::<Vec<_>>());
+        assert!(
+            t.entropy_drawn() > 0,
+            "the granted host_rand was actually called, not stubbed"
+        );
+    }
 }
 
 #[cfg(test)]

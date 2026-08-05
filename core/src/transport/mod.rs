@@ -720,7 +720,11 @@ fn wasm_transport(
                     "transport.wasm: bundle for engine `{engine}` carries no module"
                 ))
             })?;
-            let module = wasm::TransformModule::load(wasm_bytes)
+            // Scoped to whatever the bundle was *signed* with. This is the difference between
+            // running a first-party module and being able to run somebody else's: the import table
+            // is the whole sandbox boundary, and the grant travels inside the signature, so config
+            // cannot widen it.
+            let module = wasm::TransformModule::load_scoped(wasm_bytes, verified.capabilities.clone())
                 .map_err(|e| io::Error::other(format!("transport.wasm: {e}")))?;
             // The bundle's first genome is its preferred plan, re-encoded because that is the form the
             // engine seam consumes.

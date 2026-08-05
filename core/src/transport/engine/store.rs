@@ -376,6 +376,49 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// End to end: a bundle installed with a capability grant produces a module that actually holds
+    /// only those imports. This is the property a third-party transport depends on — everything else
+    /// in the trust story (signature, anti-rollback, engine naming) says *who* wrote the code, and
+    /// this says *what it may do*.
+    #[test]
+    fn an_installed_bundle_scopes_the_module_it_carries() {
+        use crate::transport::wasm::{testutil::XOR_WAT, TransformModule};
+
+        let dir = temp_dir("caps");
+        let kp = dev_keypair();
+        let wasm = wat::parse_str(XOR_WAT).expect("assemble fixture");
+
+        // Grant only `host_hash` — the XOR fixture imports `host_rand`, so this is deliberately the
+        // wrong grant and the module must refuse to instantiate.
+        let b = Bundle::new(ENGINE, vec![genome(ENGINE, 1)], Some(wasm.clone()))
+            .with_capabilities(vec!["host_hash".to_owned()]);
+        let payload = bundle::signing_payload(ENGINE, 1, &b).expect("payload");
+        let sig = kp.sign(&payload);
+        let mut sg = [0u8; 64];
+        sg.copy_from_slice(sig.as_ref());
+        let art = bundle::build_artifact(ENGINE, 1, &b, &sg).expect("artifact");
+
+        let store = BundleStore::new(&dir);
+        let installed = store.install(&art).expect("install");
+        assert_eq!(
+            installed.capabilities.as_deref(),
+            Some(&["host_hash".to_owned()][..])
+        );
+
+        let loaded = store.load(ENGINE).expect("load");
+        let module = TransformModule::load_scoped(
+            loaded.wasm.as_deref().expect("wasm"),
+            loaded.capabilities.clone(),
+        )
+        .expect("compile");
+        assert!(
+            module.instantiate().map(|_| ()).is_err(),
+            "the signed grant withheld host_rand, so this module must not instantiate"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Concurrent installs of the same engine must not interleave through a shared scratch file.
     /// With a fixed `<name>.tmp` two writers race on one path and the rename can publish a mixture;
     /// with per-write temp names whichever lands last wins cleanly, and the result always verifies.
