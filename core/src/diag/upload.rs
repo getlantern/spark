@@ -272,7 +272,7 @@ async fn run_loop(
             // and letting each one cut the wait short would void the backoff into a
             // sub-second hammer on a dead endpoint. §C2a expedited flush applies to
             // the healthy path only.
-            sleep_or_stop(backoff(fail), &stop).await;
+            sleep_or_stop(crate::backoff::with_jitter(fail), &stop).await;
         } else {
             wait_wakeup(&notify, &stop, TICK).await;
         }
@@ -461,13 +461,6 @@ async fn resolve(host: &str, port: u16) -> io::Result<std::net::SocketAddr> {
         .await?
         .next()
         .ok_or_else(|| io::Error::other(format!("diag endpoint `{host}` resolved to no addresses")))
-}
-
-/// Quadratic backoff (10ms·n²) capped at 2 minutes — a local copy of
-/// `config::fetch::backoff` (4 lines; not worth coupling the modules).
-fn backoff(n: u32) -> Duration {
-    let ms = (10u64).saturating_mul((n as u64).saturating_mul(n as u64));
-    Duration::from_millis(ms.min(120_000))
 }
 
 #[cfg(test)]
@@ -757,10 +750,13 @@ mod tests {
         assert!(q.trace_ctx_for("s2").is_none());
     }
 
+    /// Upload retry pacing is [`crate::backoff`]'s, shared with the config refresh loop — the curve
+    /// is asserted there. This pins the wiring only.
     #[test]
-    fn backoff_is_quadratic_and_capped() {
-        assert_eq!(backoff(1), Duration::from_millis(10));
-        assert_eq!(backoff(2), Duration::from_millis(40));
-        assert_eq!(backoff(10_000), Duration::from_millis(120_000));
+    fn failure_delay_comes_from_the_shared_jittered_backoff() {
+        for fail in [1u32, 5, 99] {
+            let (lo, hi) = crate::backoff::bounds(fail);
+            assert!((lo..=hi).contains(&crate::backoff::with_jitter(fail)));
+        }
     }
 }
