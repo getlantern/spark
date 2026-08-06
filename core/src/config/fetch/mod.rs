@@ -499,14 +499,16 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 /// (the same reason the fronted dialer and the scanner are hoisted out of the refresh loop).
 #[cfg(feature = "proxyless")]
 fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
-    flint_kindling::ProxylessTransport::new(
-        flint_kindling::Space::new(flint_dns::default_pool())
-            .with_roots(crate::transport::probe::webpki_roots_pem())
-            .with_bootstrap_shaping(),
-        "config-fetch",
-    )
-    .with_port(env.port)
-    .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
+    let mut space = flint_kindling::Space::new(flint_dns::default_pool())
+        .with_roots(crate::transport::probe::webpki_roots_pem());
+    // `Space::new` seeds `wires[0]` with a no-op. Replace rather than append: appending would spend a
+    // second candidate slot re-testing the unshaped case that `direct` and both fronted members
+    // already cover, and `with_max_candidates` trims resolvers before plans, so that slot comes
+    // straight out of resolver diversity.
+    space.wires = vec![bootstrap_shaping()];
+    flint_kindling::ProxylessTransport::new(space, "config-fetch")
+        .with_port(env.port)
+        .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
 }
 
 /// The **embedded bootstrap shaping default**, replacing the space's no-op plan.
@@ -538,23 +540,6 @@ fn bootstrap_shaping() -> flint_shaping::WirePlan {
         // and both are common. Carrying both in a single plan beats strictly more networks per slot.
         segment_split: flint_shaping::SegmentSplit::SniBoundary,
         ..Default::default()
-    }
-}
-
-/// Replace the space's default no-op plan with [`bootstrap_shaping`], leaving exactly one plan.
-#[cfg(feature = "proxyless")]
-trait BootstrapShaping {
-    fn with_bootstrap_shaping(self) -> Self;
-}
-
-#[cfg(feature = "proxyless")]
-impl BootstrapShaping for flint_kindling::Space {
-    fn with_bootstrap_shaping(mut self) -> Self {
-        // `Space::new` seeds `wires[0]` with the no-op. Replace rather than append: appending would
-        // spend a second candidate slot re-testing the unshaped case the other race members already
-        // cover, and pay for it in resolver diversity.
-        self.wires = vec![bootstrap_shaping()];
-        self
     }
 }
 
@@ -1111,6 +1096,15 @@ mod tests {
         assert!(!plan.is_noop(), "a no-op plan would silently add nothing");
     }
 
+    /// Build the bootstrap space exactly as `proxyless_transport` does, so these tests exercise the
+    /// shipping construction rather than a parallel one that could drift from it.
+    #[cfg(feature = "proxyless")]
+    fn bootstrap_space() -> flint_kindling::Space {
+        let mut space = flint_kindling::Space::new(flint_dns::default_pool());
+        space.wires = vec![bootstrap_shaping()];
+        space
+    }
+
     /// Exactly one plan, and it is the shaped one.
     ///
     /// `Space::new` seeds `wires[0]` with a no-op. Appending to it rather than replacing would spend
@@ -1120,7 +1114,7 @@ mod tests {
     #[cfg(feature = "proxyless")]
     #[test]
     fn the_bootstrap_space_carries_one_shaped_plan_and_no_noop() {
-        let space = flint_kindling::Space::new(flint_dns::default_pool()).with_bootstrap_shaping();
+        let space = bootstrap_space();
         assert_eq!(space.wires.len(), 1, "one plan, not the no-op plus one");
         assert!(
             !space.wires[0].is_noop(),
@@ -1137,10 +1131,7 @@ mod tests {
     #[cfg(feature = "proxyless")]
     #[test]
     fn shaping_does_not_cost_resolver_diversity() {
-        let wires = flint_kindling::Space::new(flint_dns::default_pool())
-            .with_bootstrap_shaping()
-            .wires
-            .len();
+        let wires = bootstrap_space().wires.len();
         let resolvers_searched = PROXYLESS_MAX_CANDIDATES / wires;
         assert_eq!(
             (wires, resolvers_searched),
