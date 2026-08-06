@@ -502,40 +502,59 @@ fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
     flint_kindling::ProxylessTransport::new(
         flint_kindling::Space::new(flint_dns::default_pool())
             .with_roots(crate::transport::probe::webpki_roots_pem())
-            // `Space::new` seeds `wires[0]` with the no-op plan, and enumeration is wire-major, so
-            // every resolver is tried unshaped *first* — a network that needs no shaping still settles
-            // at the cheapest end of the space and pays nothing for this.
-            .with_wire(sni_straddle_plan()),
+            .with_bootstrap_shaping(),
         "config-fetch",
     )
     .with_port(env.port)
     .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
 }
 
-/// The one shaping plan the bootstrap search carries beyond "no shaping".
+/// The **embedded bootstrap shaping default**, replacing the space's no-op plan.
 ///
-/// `SniStraddle` splits the ClientHello into two TLS records cut so the SNI host value spans the
-/// boundary. That targets the specific, common censor that parses a single TLS record to extract the
-/// SNI and does not reassemble across records — the dominant TLS-layer blocking technique, and the
-/// one thing a resolver swap cannot help with.
+/// Bootstrap cannot read `[transport.shaping]` — it *is* the code that fetches the config — so
+/// unlike the data-path transport it has no configured plan to use. This is that missing
+/// configuration, compiled in.
 ///
-/// **Exactly one plan, deliberately.** `with_max_candidates` trims resolvers before wire plans, so
-/// each added plan costs resolver diversity under the same cap: at 8, one plan leaves 8 resolvers,
-/// two leaves 4, three leaves 2. Two is the balance — 4 resolvers × 2 plans is 8 candidates, whose
-/// worst case (`5s stale-cache retry + ceil(8/4) × 5s`) is 15s, inside [`CONNECT_TIMEOUT`] with
-/// margin. A third plan needs the cap raised to 12, which lands *exactly* on the 20s timeout — the
-/// boundary flint's own docs warn about, where the search is cancelled precisely when it would have
-/// cached a winner.
+/// **Both layers in one plan, and no unshaped candidate.** A `WirePlan` carries every knob at once,
+/// so SNI-targeting at Layer C (`SniBoundary`, TCP segment boundary) and Layer B (`SniStraddle`, TLS
+/// record boundary) costs a single candidate slot rather than two. Slots are the scarce resource:
+/// `with_max_candidates` trims resolvers before plans, so every extra plan is paid for in resolver
+/// diversity.
 ///
-/// It falls back to no fragmentation when the buffer carries no locatable SNI, so it is never worse
-/// than the no-op plan it sits beside.
+/// Dropping the no-op plan is what buys that back — one plan at a cap of 8 searches **8 resolvers**,
+/// where two searched 4. It costs nothing on an open network: shaping only changes where the
+/// ClientHello is cut, the handshake completes either way, and both variants fall back to no-ops when
+/// there is no locatable SNI. What it does add is a mild anomaly on networks that aren't blocking —
+/// acceptable here because proxyless is one member of a race whose other members dial unshaped, so it
+/// is not the only shape spark presents.
 #[cfg(feature = "proxyless")]
-fn sni_straddle_plan() -> flint_shaping::WirePlan {
+fn bootstrap_shaping() -> flint_shaping::WirePlan {
     flint_shaping::WirePlan {
+        // Layer B: cut the ClientHello into two TLS records so the SNI host straddles the boundary —
+        // beats a censor that parses one record and does not reassemble.
         record_fragment: flint_shaping::RecordFragment::SniStraddle,
-        // Layer C left alone: this plan is about record framing, and mixing in segment splitting
-        // would make a failure ambiguous between the two mechanisms.
+        // Layer C: cut the TCP segment mid-hostname too. A censor reassembling records but matching
+        // SNI within one segment is a different implementation from one matching within one record,
+        // and both are common. Carrying both in a single plan beats strictly more networks per slot.
+        segment_split: flint_shaping::SegmentSplit::SniBoundary,
         ..Default::default()
+    }
+}
+
+/// Replace the space's default no-op plan with [`bootstrap_shaping`], leaving exactly one plan.
+#[cfg(feature = "proxyless")]
+trait BootstrapShaping {
+    fn with_bootstrap_shaping(self) -> Self;
+}
+
+#[cfg(feature = "proxyless")]
+impl BootstrapShaping for flint_kindling::Space {
+    fn with_bootstrap_shaping(mut self) -> Self {
+        // `Space::new` seeds `wires[0]` with the no-op. Replace rather than append: appending would
+        // spend a second candidate slot re-testing the unshaped case the other race members already
+        // cover, and pay for it in resolver diversity.
+        self.wires = vec![bootstrap_shaping()];
+        self
     }
 }
 
@@ -1069,49 +1088,64 @@ mod tests {
     /// pool, so a pool that shrinks (or a constant someone raises) fails here rather than silently
     /// becoming unbounded. It does *not* re-test that flint honours `with_max_candidates` — that is
     /// flint's own invariant and it tests it.
-    /// The bootstrap search must cover **both** axes. It searched only resolvers for a long time —
-    /// the `wires` axis existed in the `Space` and was never populated — which left every
-    /// SNI-blocking network unreachable no matter how many resolvers were tried.
+    /// The bootstrap search must shape, and must shape at **both** layers.
+    ///
+    /// It searched only resolvers for a long time — the `wires` axis existed in the `Space` and was
+    /// never populated — which left every SNI-blocking network unreachable no matter how many
+    /// resolvers were tried.
     #[cfg(feature = "proxyless")]
     #[test]
-    fn the_proxyless_space_searches_shaping_as_well_as_resolvers() {
-        use flint_shaping::RecordFragment;
+    fn the_bootstrap_plan_shapes_at_both_layers() {
+        use flint_shaping::{RecordFragment, SegmentSplit};
 
-        let plan = sni_straddle_plan();
+        let plan = bootstrap_shaping();
         assert!(
             matches!(plan.record_fragment, RecordFragment::SniStraddle),
-            "the added plan must fragment records, not merely split segments — a resolver swap \
-             already covers what segment splitting alone would add here"
+            "Layer B: a censor parsing a single TLS record must not find the SNI"
+        );
+        assert!(
+            matches!(plan.segment_split, SegmentSplit::SniBoundary),
+            "Layer C: nor one matching SNI within a single TCP segment — different implementations, \
+             both common, and one plan covers both for the price of one candidate slot"
         );
         assert!(!plan.is_noop(), "a no-op plan would silently add nothing");
+    }
 
-        // Two plans, no more: `with_max_candidates` trims resolvers first, so each extra plan is
-        // paid for in resolver diversity. See `sni_straddle_plan` for the arithmetic.
-        let space = flint_kindling::Space::new(flint_dns::default_pool()).with_wire(plan);
-        assert_eq!(
-            space.wires.len(),
-            2,
-            "no-op plan plus exactly one shaping plan"
+    /// Exactly one plan, and it is the shaped one.
+    ///
+    /// `Space::new` seeds `wires[0]` with a no-op. Appending to it rather than replacing would spend
+    /// a second candidate slot re-testing the unshaped case that `direct` and the fronted members
+    /// already cover — and `with_max_candidates` trims resolvers before plans, so that slot is paid
+    /// for out of resolver diversity.
+    #[cfg(feature = "proxyless")]
+    #[test]
+    fn the_bootstrap_space_carries_one_shaped_plan_and_no_noop() {
+        let space = flint_kindling::Space::new(flint_dns::default_pool()).with_bootstrap_shaping();
+        assert_eq!(space.wires.len(), 1, "one plan, not the no-op plus one");
+        assert!(
+            !space.wires[0].is_noop(),
+            "the surviving plan must be the shaped one, not the default no-op"
         );
     }
 
-    /// The cap and the plan count interact, and the failure mode is silent: adding a third plan
-    /// under a cap of 8 quietly drops the search to **2 resolvers**, gutting the axis that handles
-    /// DNS poisoning in order to add one that handles SNI blocking.
+    /// Shaping must not be bought with resolver coverage.
     ///
-    /// Pins the resulting split so that trade has to be made deliberately.
+    /// `with_max_candidates` trims resolvers before plans, so plan count and resolver count trade
+    /// directly: at a cap of 8, one plan searches 8 resolvers and two searches 4. Keeping a single
+    /// combined plan is what lets the search shape *and* keep the full resolver spread — the axis
+    /// that handles DNS poisoning, which shaping cannot help with.
     #[cfg(feature = "proxyless")]
     #[test]
-    fn adding_a_shaping_plan_does_not_gut_resolver_diversity() {
+    fn shaping_does_not_cost_resolver_diversity() {
         let wires = flint_kindling::Space::new(flint_dns::default_pool())
-            .with_wire(sni_straddle_plan())
+            .with_bootstrap_shaping()
             .wires
             .len();
         let resolvers_searched = PROXYLESS_MAX_CANDIDATES / wires;
         assert_eq!(
             (wires, resolvers_searched),
-            (2, 4),
-            "expected 4 resolvers x 2 plans; a third plan needs the cap raised (see sni_straddle_plan)"
+            (1, 8),
+            "expected 8 resolvers x 1 combined plan; adding a second plan would halve the resolvers"
         );
 
         // Worst case must stay inside the connect budget: a stale cached winner costs one attempt
@@ -1120,8 +1154,7 @@ mod tests {
         // These two mirror `flint_proxyless`'s `ATTEMPT_TIMEOUT` and `PROBE_WINDOW`, which are
         // **private** to that crate and so cannot be referenced here. Named rather than inlined so
         // the coupling is visible: if flint retunes either, this test still passes while describing
-        // a budget that no longer exists, and the assertion message below is the only clue.
-        // Exporting them from flint is the real fix.
+        // a budget that no longer exists. Exporting them from flint is the real fix.
         const FLINT_ATTEMPT_TIMEOUT_SECS: u64 = 5;
         const FLINT_PROBE_WINDOW: usize = 4;
 
