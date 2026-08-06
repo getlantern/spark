@@ -56,7 +56,19 @@
       notify: Restart spark-dns
 
     # Recursive resolvers always hit :53; the server runs unprivileged on :5300 and we redirect.
-    # Persist across reboot with netfilter-persistent (or an @reboot hook) in real production.
+    #
+    # This MUST survive reboot. Without persistence the failure is silent and total: systemd brings
+    # the server back on :5300, it answers correctly if you query that port, and every recursive
+    # resolver in the world still gets nothing — so the tier looks blocked rather than broken.
+    - name: Install iptables-persistent so the redirect survives reboot
+      apt:
+        name: iptables-persistent
+        state: present
+        update_cache: true
+      # Pre-seed the debconf prompts; the package otherwise blocks asking whether to save rules.
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
     - name: DNAT udp/53 → udp/5300
       iptables:
         table: nat
@@ -66,6 +78,7 @@
         jump: REDIRECT
         to_ports: "5300"
         comment: spark-dns 53->5300
+      notify: Save iptables rules
 
     - name: systemd unit
       template:
@@ -85,3 +98,16 @@
       systemd:
         name: spark-dns
         state: restarted
+
+    - name: Save iptables rules
+      community.general.iptables_state:
+        state: saved
+        path: /etc/iptables/rules.v4
+      # `iptables_state` needs the collection; fall back to the command the package ships with.
+      failed_when: false
+      register: _saved
+
+    - name: Save iptables rules (fallback)
+      shell: iptables-save > /etc/iptables/rules.v4
+      when: _saved is failed or _saved is skipped
+      changed_when: true

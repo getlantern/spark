@@ -16,6 +16,14 @@ delegated authoritative subdomain. The only substantive differences:
 Because the wire protocols differ, spark needs its **own** server IP and its **own** delegated zone —
 it cannot co-tenant dnstt's `:53`. They coexist fine (dnstt on `t.iantem.io`, spark elsewhere).
 
+## Redeploying / debugging
+
+`.claude/skills/redeploy-dns-tunnel/SKILL.md` is the runbook: an ordered health-check chain, the
+silent failure modes (missing NS delegation, unpersisted DNAT, a proxied glue record), key recovery
+without rotation, and the end-to-end test. Read it before changing a running deployment.
+
+Requires `brew install ansible`.
+
 ## The zone is deliberately not in this repo
 
 The tunnel zone is chosen to be **unattributable** — that is the entire reason it is not a Lantern
