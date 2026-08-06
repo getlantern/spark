@@ -392,10 +392,15 @@ async fn fetch_once_kindling(
     timeout: Duration,
 ) -> std::io::Result<FetchOutcome> {
     let (status, etag, body) = tokio::time::timeout(timeout, async {
+        // `io::Error::from`, not `io::Error::other`: the race preserves the `ErrorKind` when every
+        // member reported the same one, and `other` would flatten that back to `Other`. "They all
+        // timed out" says the path is blackholed; "they failed five different ways" says the members
+        // failed for their own reasons. Consolidating the avenues into the race lost that distinction
+        // once already (#162) — this is what restores it.
         let conn = kindling
             .connect(&env.host)
             .await
-            .map_err(std::io::Error::other)?;
+            .map_err(std::io::Error::from)?;
         // Attribute the request to the member that actually won. The transports cannot set a header
         // themselves — they hand back bytes and know nothing about HTTP — but the race reports the
         // winner's name, and this is the layer where HTTP exists.
@@ -894,6 +899,56 @@ mod tests {
             assert!(msg.contains(member), "the report must name {member}: {msg}");
         }
         assert!(msg.contains("all 4"), "and how many failed: {msg}");
+    }
+
+    /// The unanimous `ErrorKind` must survive all the way out of `fetch_once_kindling`, not merely
+    /// out of flint's race. `io::Error::other` at the `map_err` would flatten it to `Other` and this
+    /// is the only thing that would notice — which is how the distinction was lost in #162.
+    #[tokio::test]
+    async fn a_unanimous_member_failure_keeps_its_kind_through_the_fetch() {
+        use flint_kindling::ConnectionTransport;
+
+        struct Dead;
+
+        #[async_trait::async_trait]
+        impl ConnectionTransport for Dead {
+            type Stream = crate::BoxedStream;
+
+            fn name(&self) -> &str {
+                "dead"
+            }
+
+            async fn connect(&self, _host: &str) -> std::io::Result<Self::Stream> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "blackholed",
+                ))
+            }
+        }
+
+        let kindling = flint_kindling::Kindling::new()
+            .with_race_options(flint_kindling::RaceOptions {
+                window: 2,
+                attempt_timeout: None,
+            })
+            .with_transport(Dead)
+            .with_transport(Dead);
+        let env = FetchEnv::prod();
+        let err = fetch_once_kindling(
+            &env,
+            &ConfigRequest::new("dev".into()),
+            &Conditional::default(),
+            &kindling,
+            ATTEMPT_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+        .expect_err("every member failed");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "a blackholed path must not be reported as a generic failure: {err}"
+        );
     }
 
     /// A race with no members is a programming error, not a blocked network, and must not read as one.
