@@ -10,9 +10,9 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use dns_tunnel_core::addr::Target;
 use dns_tunnel_core::session::{Config, Server};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
@@ -53,23 +53,14 @@ struct EgressHandle {
     task: tokio::task::JoinHandle<()>,
 }
 
-/// Decode SOCKS5 address bytes (`ATYP ‖ addr ‖ port`) into a `SocketAddr` — mirrors the client's
-/// `encode_target`.
-fn decode_target(b: &[u8]) -> Option<SocketAddr> {
-    match b.first()? {
-        0x01 => {
-            let ip: [u8; 4] = b.get(1..5)?.try_into().ok()?;
-            let port = u16::from_be_bytes(b.get(5..7)?.try_into().ok()?);
-            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), port))
-        }
-        0x04 => {
-            let ip: [u8; 16] = b.get(1..17)?.try_into().ok()?;
-            let port = u16::from_be_bytes(b.get(17..19)?.try_into().ok()?);
-            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(ip)), port))
-        }
-        _ => None,
-    }
-}
+/// How long a stream's egress connect — including a domain lookup — may take before the stream is
+/// closed.
+///
+/// Needed once targets can be names: `TcpStream::connect` on a domain resolves first, and a resolver
+/// that blackholes leaves the task alive with the client waiting on a stream that will never carry
+/// bytes. The bound applies to IP targets too, which is a small improvement on the previous unbounded
+/// connect rather than a change of intent.
+const EGRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Cap on a single stream's reassembled-but-undeliverable uplink backlog. If a stream's TCP target is
 /// wedged and its egress queue stays full past this, the stream is torn down to bound memory — the ARQ
@@ -99,14 +90,22 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
                 for id in server.session_ids() {
                     for (sid, target) in server.open_targets(&id) {
                         let key = (id, sid);
-                        match decode_target(&target) {
-                            Some(addr) => {
+                        // Parsed with the codec shared with the client (`dns_tunnel_core::addr`), so
+                        // the two ends cannot drift. A domain is NOT resolved here: this runs inside
+                        // the UDP select! loop that serves every session, and a lookup on it would
+                        // stall all of them behind one name. `egress_task` resolves in its own task.
+                        match dns_tunnel_core::addr::parse(&target) {
+                            Ok(t) => {
                                 let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
-                                let task = tokio::spawn(egress_task(key, addr, rx, egress_tx.clone()));
+                                let task = tokio::spawn(egress_task(key, t, rx, egress_tx.clone()));
                                 egress.insert(key, EgressHandle { tx, task });
                             }
                             // An undecodable target: close just that stream (client sees the FIN).
-                            None => server.close_stream(&id, sid),
+                            Err(e) => {
+                                // `AddrError` names the defect, never the address.
+                                tracing::debug!(%e, "undecodable stream target, closing stream");
+                                server.close_stream(&id, sid);
+                            }
                         }
                     }
                     for sid in server.streams_of(&id) {
@@ -175,13 +174,31 @@ fn drop_stream(server: &mut Server, egress: &mut HashMap<StreamKey, EgressHandle
 /// channels (reader: TCP → core as downlink; writer: core uplink → TCP).
 async fn egress_task(
     key: StreamKey,
-    addr: SocketAddr,
+    target: Target,
     mut rx: mpsc::Receiver<Vec<u8>>,
     etx: mpsc::Sender<(StreamKey, Egress)>,
 ) {
-    let stream = match TcpStream::connect(addr).await {
-        Ok(s) => s,
+    // A `Target::Domain` is resolved *here*, in this per-stream task, so the lookup cannot stall the
+    // shared UDP loop. Resolving at the exit is the point of the domain form: the client never has to
+    // ask a resolver it may not be able to trust. It grants no reach an IP target did not already —
+    // the client could always name any address directly — so it is not a new exposure, only a name.
+    let connect = async {
+        match &target {
+            Target::Ip(sa) => TcpStream::connect(*sa).await,
+            Target::Domain(host, port) => TcpStream::connect((host.as_str(), *port)).await,
+        }
+    };
+    let stream = match tokio::time::timeout(EGRESS_CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            // No target and no key: ADR 0011 log hygiene forbids logging target addresses, and a
+            // ConnectionID correlates a session across lines. The kind of failure is the useful part.
+            tracing::debug!(kind = %e.kind(), "egress connect failed");
+            let _ = etx.send((key, Egress::Eof)).await;
+            return;
+        }
         Err(_) => {
+            tracing::debug!("egress connect timed out");
             let _ = etx.send((key, Egress::Eof)).await;
             return;
         }

@@ -21,6 +21,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod addr;
 pub mod arq;
 pub mod compress;
 pub mod crypto;
