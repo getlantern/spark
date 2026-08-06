@@ -484,6 +484,13 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 
 /// Build the proxyless race member.
 ///
+/// **Both axes.** Proxyless is documented as a search over `DNS strategy × TLS strategy`, and the
+/// `Space` has carried a `wires` axis since flint#14 — but this space populated only the resolver
+/// half, so it searched `resolvers × {no-op}` and could never defeat a censor that reads the
+/// ClientHello. The two failures are genuinely different: a poisoned resolver is beaten by asking a
+/// different resolver, and SNI-based blocking is beaten by making the SNI unreadable. Searching one
+/// axis leaves the other class of network unreachable.
+///
 /// **Bounded on purpose.** The first connection on a new network is a *search*, not a dial — flint's
 /// own docs flag the interaction with an attempt timeout — and this race gives every avenue 30s. An
 /// unbounded search would simply spend that budget and lose, so the candidate count is capped: enough
@@ -492,13 +499,48 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 /// (the same reason the fronted dialer and the scanner are hoisted out of the refresh loop).
 #[cfg(feature = "proxyless")]
 fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
-    flint_kindling::ProxylessTransport::new(
-        flint_kindling::Space::new(flint_dns::default_pool())
-            .with_roots(crate::transport::probe::webpki_roots_pem()),
-        "config-fetch",
-    )
-    .with_port(env.port)
-    .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
+    let mut space = flint_kindling::Space::new(flint_dns::default_pool())
+        .with_roots(crate::transport::probe::webpki_roots_pem());
+    // `Space::new` seeds `wires[0]` with a no-op. Replace rather than append: appending would spend a
+    // second candidate slot re-testing the unshaped case that `direct` and both fronted members
+    // already cover, and `with_max_candidates` trims resolvers before plans, so that slot comes
+    // straight out of resolver diversity.
+    space.wires = vec![bootstrap_shaping()];
+    flint_kindling::ProxylessTransport::new(space, "config-fetch")
+        .with_port(env.port)
+        .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
+}
+
+/// The **embedded bootstrap shaping default**, replacing the space's no-op plan.
+///
+/// Bootstrap cannot read `[transport.shaping]` — it *is* the code that fetches the config — so
+/// unlike the data-path transport it has no configured plan to use. This is that missing
+/// configuration, compiled in.
+///
+/// **Both layers in one plan, and no unshaped candidate.** A `WirePlan` carries every knob at once,
+/// so SNI-targeting at Layer C (`SniBoundary`, TCP segment boundary) and Layer B (`SniStraddle`, TLS
+/// record boundary) costs a single candidate slot rather than two. Slots are the scarce resource:
+/// `with_max_candidates` trims resolvers before plans, so every extra plan is paid for in resolver
+/// diversity.
+///
+/// Dropping the no-op plan is what buys that back — one plan at a cap of 8 searches **8 resolvers**,
+/// where two searched 4. It costs nothing on an open network: shaping only changes where the
+/// ClientHello is cut, the handshake completes either way, and both variants fall back to no-ops when
+/// there is no locatable SNI. What it does add is a mild anomaly on networks that aren't blocking —
+/// acceptable here because proxyless is one member of a race whose other members dial unshaped, so it
+/// is not the only shape spark presents.
+#[cfg(feature = "proxyless")]
+fn bootstrap_shaping() -> flint_shaping::WirePlan {
+    flint_shaping::WirePlan {
+        // Layer B: cut the ClientHello into two TLS records so the SNI host straddles the boundary —
+        // beats a censor that parses one record and does not reassemble.
+        record_fragment: flint_shaping::RecordFragment::SniStraddle,
+        // Layer C: cut the TCP segment mid-hostname too. A censor reassembling records but matching
+        // SNI within one segment is a different implementation from one matching within one record,
+        // and both are common. Carrying both in a single plan beats strictly more networks per slot.
+        segment_split: flint_shaping::SegmentSplit::SniBoundary,
+        ..Default::default()
+    }
 }
 
 /// Map an HTTP status + `ETag` + body into a [`FetchOutcome`] (shared by the direct and fronted paths).
@@ -1031,6 +1073,93 @@ mod tests {
     /// pool, so a pool that shrinks (or a constant someone raises) fails here rather than silently
     /// becoming unbounded. It does *not* re-test that flint honours `with_max_candidates` — that is
     /// flint's own invariant and it tests it.
+    /// The bootstrap search must shape, and must shape at **both** layers.
+    ///
+    /// It searched only resolvers for a long time — the `wires` axis existed in the `Space` and was
+    /// never populated — which left every SNI-blocking network unreachable no matter how many
+    /// resolvers were tried.
+    #[cfg(feature = "proxyless")]
+    #[test]
+    fn the_bootstrap_plan_shapes_at_both_layers() {
+        use flint_shaping::{RecordFragment, SegmentSplit};
+
+        let plan = bootstrap_shaping();
+        assert!(
+            matches!(plan.record_fragment, RecordFragment::SniStraddle),
+            "Layer B: a censor parsing a single TLS record must not find the SNI"
+        );
+        assert!(
+            matches!(plan.segment_split, SegmentSplit::SniBoundary),
+            "Layer C: nor one matching SNI within a single TCP segment — different implementations, \
+             both common, and one plan covers both for the price of one candidate slot"
+        );
+        assert!(!plan.is_noop(), "a no-op plan would silently add nothing");
+    }
+
+    /// Build the bootstrap space exactly as `proxyless_transport` does, so these tests exercise the
+    /// shipping construction rather than a parallel one that could drift from it.
+    #[cfg(feature = "proxyless")]
+    fn bootstrap_space() -> flint_kindling::Space {
+        let mut space = flint_kindling::Space::new(flint_dns::default_pool());
+        space.wires = vec![bootstrap_shaping()];
+        space
+    }
+
+    /// Exactly one plan, and it is the shaped one.
+    ///
+    /// `Space::new` seeds `wires[0]` with a no-op. Appending to it rather than replacing would spend
+    /// a second candidate slot re-testing the unshaped case that `direct` and the fronted members
+    /// already cover — and `with_max_candidates` trims resolvers before plans, so that slot is paid
+    /// for out of resolver diversity.
+    #[cfg(feature = "proxyless")]
+    #[test]
+    fn the_bootstrap_space_carries_one_shaped_plan_and_no_noop() {
+        let space = bootstrap_space();
+        assert_eq!(space.wires.len(), 1, "one plan, not the no-op plus one");
+        assert!(
+            !space.wires[0].is_noop(),
+            "the surviving plan must be the shaped one, not the default no-op"
+        );
+    }
+
+    /// Shaping must not be bought with resolver coverage.
+    ///
+    /// `with_max_candidates` trims resolvers before plans, so plan count and resolver count trade
+    /// directly: at a cap of 8, one plan searches 8 resolvers and two searches 4. Keeping a single
+    /// combined plan is what lets the search shape *and* keep the full resolver spread — the axis
+    /// that handles DNS poisoning, which shaping cannot help with.
+    #[cfg(feature = "proxyless")]
+    #[test]
+    fn shaping_does_not_cost_resolver_diversity() {
+        let wires = bootstrap_space().wires.len();
+        let resolvers_searched = PROXYLESS_MAX_CANDIDATES / wires;
+        assert_eq!(
+            (wires, resolvers_searched),
+            (1, 8),
+            "expected 8 resolvers x 1 combined plan; adding a second plan would halve the resolvers"
+        );
+
+        // Worst case must stay inside the connect budget: a stale cached winner costs one attempt
+        // before the search starts, then ceil(candidates / window) attempts.
+        //
+        // These two mirror `flint_proxyless`'s `ATTEMPT_TIMEOUT` and `PROBE_WINDOW`, which are
+        // **private** to that crate and so cannot be referenced here. Named rather than inlined so
+        // the coupling is visible: if flint retunes either, this test still passes while describing
+        // a budget that no longer exists. Exporting them from flint is the real fix.
+        const FLINT_ATTEMPT_TIMEOUT_SECS: u64 = 5;
+        const FLINT_PROBE_WINDOW: usize = 4;
+
+        let candidates = resolvers_searched * wires;
+        let attempts = 1 + candidates.div_ceil(FLINT_PROBE_WINDOW) as u64;
+        let worst = std::time::Duration::from_secs(attempts * FLINT_ATTEMPT_TIMEOUT_SECS);
+        assert!(
+            worst < CONNECT_TIMEOUT,
+            "worst-case search {worst:?} must finish inside {CONNECT_TIMEOUT:?} with margin, or the \
+             race cancels it exactly when it would have cached a winner. If flint retuned \
+             ATTEMPT_TIMEOUT or PROBE_WINDOW, update the mirrored constants above."
+        );
+    }
+
     #[cfg(feature = "proxyless")]
     #[test]
     fn the_proxyless_member_searches_a_bounded_space() {
