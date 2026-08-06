@@ -117,9 +117,6 @@ pub struct Conditional {
     pub last_modified: Option<String>,
 }
 
-/// Strip CR/LF from a value before it's interpolated into a header line, so a tampered/corrupt
-/// non-constant source (the on-disk device id, the env-derived timezone, or a cached server-origin
-/// `ETag`/`Last-Modified`) can't inject extra headers or break request framing. Borrows when clean.
 /// Header naming the library that carried the request. Constant: it identifies the *racing layer*,
 /// which is flint regardless of which member won or which app is asking.
 pub(crate) const KINDLING_APP_HEADER: &str = "X-Kindling-App";
@@ -151,10 +148,16 @@ impl<'a> KindlingHeaders<'a> {
         }
     }
 
-    /// The member name, CR/LF-stripped: it originates from a transport's `name()`, which is a static
-    /// string today but reaches this as ordinary data.
-    fn method_value(&self) -> String {
-        header_safe(self.method.unwrap_or_default()).into_owned()
+    /// The member name, CR/LF-stripped, or `None` when there is nothing to attribute.
+    ///
+    /// Returns an `Option` rather than an empty string so both builders make the same
+    /// something-to-attribute decision from one place; an empty value is not a weaker attribution,
+    /// it is a wrong one.
+    ///
+    /// Stripped because the name originates from a transport's `name()` — a static string today, but
+    /// it arrives here as ordinary data.
+    fn method_value(&self) -> Option<String> {
+        self.method.map(|m| header_safe(m).into_owned())
     }
 
     /// The HTTP/1.1 header lines, or empty when there is nothing to attribute.
@@ -169,6 +172,9 @@ impl<'a> KindlingHeaders<'a> {
     }
 }
 
+/// Strip CR/LF from a value before it's interpolated into a header line, so a tampered/corrupt
+/// non-constant source (the on-disk device id, the env-derived timezone, or a cached server-origin
+/// `ETag`/`Last-Modified`) can't inject extra headers or break request framing. Borrows when clean.
 pub(crate) fn header_safe(v: &str) -> std::borrow::Cow<'_, str> {
     if v.contains(['\r', '\n']) {
         std::borrow::Cow::Owned(v.replace(['\r', '\n'], ""))
@@ -248,8 +254,6 @@ pub fn build_oneshot_request(
 ) -> Result<OneshotRequest, serde_json::Error> {
     let body = serde_json::to_vec(req)?;
     let mut out = OneshotRequest::post(path.to_owned(), body)
-        .header(KINDLING_APP_HEADER, KINDLING_APP)
-        .header(KINDLING_METHOD_HEADER, kindling.method_value())
         .header("X-Lantern-App", APP_NAME)
         .header("X-Lantern-App-Version", req.version.clone())
         .header("X-Lantern-Version", req.version.clone())
@@ -265,6 +269,14 @@ pub fn build_oneshot_request(
         )
         .header("Content-Type", "application/json")
         .header("Cache-Control", "no-cache");
+    // Attribution only when there is something to attribute — an unraced request must carry neither
+    // header, exactly as on the HTTP/1.1 path. Emitting the pair with an empty method would attribute
+    // the request to a member that never ran, which is the failure these headers exist to prevent.
+    if let Some(method) = kindling.method_value() {
+        out = out
+            .header(KINDLING_APP_HEADER, KINDLING_APP)
+            .header(KINDLING_METHOD_HEADER, method);
+    }
     if let Some(etag) = &cond.etag {
         out = out.header("If-None-Match", header_safe(etag).into_owned());
     }
@@ -297,9 +309,13 @@ mod tests {
         );
     }
 
-    /// A request that did not go through the race carries **neither** header. Omitting is the point:
-    /// a default value would attribute the request to a member that never ran, corrupting exactly the
-    /// signal these headers exist to provide.
+    /// A request that did not go through the race carries **neither** header, on **both** builders.
+    /// Omitting is the point: a default would attribute the request to a member that never ran,
+    /// corrupting exactly the signal these headers exist to provide.
+    ///
+    /// Both are asserted here because an earlier version checked only the HTTP/1.1 path while the h2
+    /// one emitted `X-Kindling-App` with an empty method — the contract held on the branch under test
+    /// and was broken on the branch that wasn't.
     #[test]
     fn a_non_raced_request_is_left_unattributed() {
         let req = ConfigRequest::new("dev".into());
@@ -314,7 +330,23 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(!text.contains("X-Kindling-"), "{text}");
+        assert!(!text.contains("X-Kindling-"), "http/1.1 path: {text}");
+
+        let oneshot = build_oneshot_request(
+            "/p",
+            &req,
+            &Conditional::default(),
+            KindlingHeaders::default(),
+        )
+        .unwrap();
+        assert!(
+            !oneshot
+                .headers
+                .iter()
+                .any(|(k, _)| k.to_ascii_lowercase().starts_with("x-kindling-")),
+            "h2 path: {:?}",
+            oneshot.headers
+        );
     }
 
     /// The h2 path carries the same pair — the member name reaches the server whichever protocol the
