@@ -163,10 +163,6 @@ pub enum FetchOutcome {
     NotModified,
 }
 
-/// A boxed config-fetch attempt, borrowing the request/env/dialer for the duration of the race.
-type FetchAttempt<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<FetchOutcome>> + Send + 'a>>;
-
 /// One config-new fetch: race a direct plain-TLS request against the fronted avenues, returning the
 /// first usable outcome. Direct typically wins on an open network; the fronted paths win where the
 /// direct dial is censored (DNS poisoning / SNI block / RST). Two fronted avenues run when available:
@@ -178,16 +174,12 @@ async fn fetch_once(
     device_id: &str,
     creds: &user::Creds,
     cond: &Conditional,
-    fronted: Option<&FrontedTlsDialer<FlintDnsResolver>>,
-    bootstrap: Option<&FrontedBootstrap>,
     kindling: &flint_kindling::Kindling,
 ) -> std::io::Result<FetchOutcome> {
     let mut req = ConfigRequest::new(device_id.to_string());
     req.user_id = creds.user_id.clone();
     req.pro_token = creds.pro_token.clone();
-
-    let mut attempts: Vec<FetchAttempt<'_>> = Vec::with_capacity(3);
-    attempts.push(Box::pin(with_outcome(
+    with_outcome(
         "kindling",
         Box::pin(fetch_once_kindling(
             env,
@@ -196,20 +188,8 @@ async fn fetch_once(
             kindling,
             ATTEMPT_TIMEOUT,
         )),
-    )));
-    if let Some(dialer) = fronted {
-        attempts.push(Box::pin(with_outcome(
-            "fronted",
-            Box::pin(fetch_once_fronted(env, &req, cond, dialer, ATTEMPT_TIMEOUT)),
-        )));
-    }
-    if let Some(b) = bootstrap {
-        attempts.push(Box::pin(with_outcome(
-            "scanned",
-            Box::pin(fetch_once_scanned(env, &req, cond, b, ATTEMPT_TIMEOUT)),
-        )));
-    }
-    first_ok(attempts).await
+    )
+    .await
 }
 
 /// How long any one avenue gets before it loses the race.
@@ -354,7 +334,7 @@ fn bootstrap_dns_tunnel(env: &FetchEnv) -> Option<DnsTunnelConfigTransport> {
 /// the common case where the earlier one is blocked — which is the case this race exists for. Derived
 /// rather than hardcoded because the member count is already conditional (`proxyless`), and because a
 /// literal would silently start staggering the moment a third member is added.
-fn config_kindling(env: &FetchEnv) -> flint_kindling::Kindling {
+fn config_kindling(env: &FetchEnv, seed: u64) -> flint_kindling::Kindling {
     #[cfg_attr(
         not(any(feature = "proxyless", feature = "dns-tunnel")),
         allow(unused_mut)
@@ -365,6 +345,14 @@ fn config_kindling(env: &FetchEnv) -> flint_kindling::Kindling {
     {
         kindling = kindling.with_proxyless(proxyless_transport(env));
     }
+    // The embedded front list: a known-good accelerator, and the avenue that survives when the origin
+    // itself is unreachable but a CDN edge is not.
+    if let Some(dialer) = fronted_dialer() {
+        kindling = kindling.with_fronted_tls(dialer);
+    }
+    // The vantage-point scanner: discovers live edges from the user's *own* network, so it self-heals
+    // when the embedded list is entirely blocked. Needs no server-delivered front list at all.
+    kindling = kindling.with_transport(fronted_bootstrap(env, seed));
     // Registered last, and only when this build pinned a bootstrap tunnel. Order matters less than it
     // looks — the window below starts every member at once — but last reflects what it is: the leg
     // that wins only when the faster ones cannot.
@@ -380,15 +368,22 @@ fn config_kindling(env: &FetchEnv) -> flint_kindling::Kindling {
     })
 }
 
-/// Race the connection-level avenues, then speak whichever HTTP version the winner negotiated.
+/// Race every connection-level avenue, then speak to the winner on **its** terms.
 ///
-/// The protocol is **read, not assumed**. The two members do not agree: `direct` goes through
-/// spark's `fetch_connector`, which sets no ALPN and so lands on HTTP/1.1, while `proxyless` goes
-/// through flint's Chrome connector, which must offer `h2,http/1.1` because ALPN is part of the JA4
-/// it exists to imitate — and the *peer* picks from that. Guessing is not a safe default here:
-/// writing HTTP/1.1 at an h2 peer does not fail like an HTTP error, it fails as a response that never
-/// terminates ("no header terminator"), which is exactly how an earlier version of the proxyless
+/// Both the HTTP version and the address are read off the winning connection rather than assumed,
+/// because the members disagree on each and the disagreement is invisible from here.
+///
+/// **Protocol.** `direct` and `dns-tunnel` go through spark's `fetch_connector`, which sets no ALPN
+/// and so lands on HTTP/1.1; `proxyless` and both fronted members go through flint's Chrome
+/// connector, which must offer `h2,http/1.1` because ALPN is part of the JA4 it exists to imitate —
+/// and the *peer* chooses. Writing HTTP/1.1 at an h2 peer does not fail like an HTTP error; the
+/// response never terminates ("no header terminator"), which is exactly how an earlier proxyless
 /// avenue was silently broken.
+///
+/// **Authority.** A fronted connection must name the *front's* inner host so the edge re-originates
+/// it, and that name differs per CDN. Addressing `env.host` there succeeds at the TLS layer and
+/// routes wrong, which reads as the CDN being blocked rather than as a bug. `conn.authority` falls
+/// back to `env.host` for every member that has no opinion, so the non-fronted paths are unchanged.
 async fn fetch_once_kindling(
     env: &FetchEnv,
     req: &ConfigRequest,
@@ -404,12 +399,25 @@ async fn fetch_once_kindling(
         if conn.is_h2() {
             let oneshot =
                 build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
-            // The real host is the authority — unlike the fronted avenue, there is no decoy.
-            let resp = flint_kindling::h2_oneshot(conn.stream, &env.host, &oneshot).await?;
+            // The winner's own authority — the origin for a direct-ish member, the front's inner
+            // host for a fronted one. Never unconditionally `env.host`.
+            //
+            // CR/LF-stripped because it is no longer a constant: a fronted authority comes from
+            // parsed config or a live scan, and an embedded newline would let it forge extra headers.
+            // `h2_oneshot` builds a URI, whose parser would reject the value rather than inject — but
+            // the guard belongs at the source so both branches are covered by one rule.
+            let authority =
+                crate::config::fetch::request::header_safe(conn.authority(&env.host)).into_owned();
+            let resp = flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot).await?;
             let etag = resp.header("etag").map(ToOwned::to_owned);
             Ok::<_, std::io::Error>((resp.status, etag, resp.body))
         } else {
-            let bytes = build_request_bytes(&env.host, &env.path, req, cond)
+            // Same rule on the 1.1 path: the `Host:` header is the authority, so a fronted winner
+            // needs the front's inner host here too. Only the header changes — the request line and
+            // path are the origin's either way, since the edge re-originates by `Host`.
+            // `build_request_bytes` strips CR/LF from the host for the reason above.
+            let authority = conn.authority(&env.host).to_owned();
+            let bytes = build_request_bytes(&authority, &env.path, req, cond)
                 .map_err(std::io::Error::other)?;
             let resp = post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await?;
             Ok((resp.status, resp.etag, resp.body))
@@ -420,14 +428,17 @@ async fn fetch_once_kindling(
     map_response(status, etag, body)
 }
 
-/// Wrap one avenue's fetch future so its outcome (ok / not_modified / error) and
-/// latency land in the diagnostics stream (§C6 `config.fetch_outcome`). Instrumented
-/// here in `fetch_once` — one point covering all three avenues — rather than inside
-/// each avenue fn. An avenue cancelled by losing the race emits nothing (it never
-/// completes), which is the intent: only real outcomes are reported.
-async fn with_outcome<'a>(
+/// Wrap the fetch so its outcome (ok / not_modified / error) and latency land in the diagnostics
+/// stream (§C6 `config.fetch_outcome`).
+///
+/// `avenue` is now always `"kindling"`: every path is one member of one connection race, so the
+/// interesting question moved from *which avenue ran* to *which member won*, which the race reports
+/// on the connection itself.
+async fn with_outcome(
     avenue: &'static str,
-    fut: FetchAttempt<'a>,
+    fut: std::pin::Pin<
+        Box<dyn std::future::Future<Output = std::io::Result<FetchOutcome>> + Send + '_>,
+    >,
 ) -> std::io::Result<FetchOutcome> {
     let start = std::time::Instant::now();
     let result = fut.await;
@@ -481,44 +492,6 @@ fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
     .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
 }
 
-/// The fronted path: run the config-new request as a one-shot h2 request over `dialer` (the fronting
-/// providers from the embedded config). The provider addresses its fronted host and presents a decoy
-/// SNI; the response is mapped exactly like the direct path. Bounded by `timeout`.
-async fn fetch_once_fronted(
-    env: &FetchEnv,
-    req: &ConfigRequest,
-    cond: &Conditional,
-    dialer: &FrontedTlsDialer<FlintDnsResolver>,
-    timeout: Duration,
-) -> std::io::Result<FetchOutcome> {
-    let oneshot = build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
-    let resp = tokio::time::timeout(timeout, dialer.request(&env.host, &oneshot))
-        .await
-        .map_err(|_| std::io::Error::other("config-new fronted fetch timed out"))?
-        .map_err(std::io::Error::other)?;
-    let etag = resp.header("etag").map(ToOwned::to_owned);
-    map_response(resp.status, etag, resp.body)
-}
-
-/// The scanner path: run the config-new request as a one-shot through `bootstrap`, which discovers
-/// working fronts from the user's *own* network (Akamai local-DNS + CloudFront/Aliyun sampling) and
-/// caches the winner. Self-bootstrapping — needs no embedded/server front list, so it self-heals when
-/// the embedded list is fully blocked. Bounded by `timeout`.
-async fn fetch_once_scanned(
-    env: &FetchEnv,
-    req: &ConfigRequest,
-    cond: &Conditional,
-    bootstrap: &FrontedBootstrap,
-    timeout: Duration,
-) -> std::io::Result<FetchOutcome> {
-    let oneshot = build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
-    let resp = tokio::time::timeout(timeout, bootstrap.request(&oneshot))
-        .await
-        .map_err(|_| std::io::Error::other("config-new scanned fetch timed out"))??;
-    let etag = resp.header("etag").map(ToOwned::to_owned);
-    map_response(resp.status, etag, resp.body)
-}
-
 /// Map an HTTP status + `ETag` + body into a [`FetchOutcome`] (shared by the direct and fronted paths).
 fn map_response(status: u16, etag: Option<String>, body: Vec<u8>) -> std::io::Result<FetchOutcome> {
     match status {
@@ -530,53 +503,6 @@ fn map_response(status: u16, etag: Option<String>, body: Vec<u8>) -> std::io::Re
         304 | 204 => Ok(FetchOutcome::NotModified),
         other => Err(std::io::Error::other(format!("config-new HTTP {other}"))),
     }
-}
-
-/// Race several fetch attempts, returning the first that succeeds.
-///
-/// If all of them fail, the error names **every** avenue and how each died, not just whichever
-/// attempt happened to finish last — on a censored network that report is the only evidence anyone
-/// gets. The `ErrorKind` is kept when all avenues agreed on one, since "they all timed out" and "they
-/// failed four different ways" are different diagnoses. An empty attempt list is reported distinctly:
-/// it is a programming error, and calling it "all 0 avenues failed" would read like a blocked network.
-/// Unlike a plain `select!`, an early *failure* doesn't end the race — the remaining attempts still
-/// run, so a censored direct dial doesn't pre-empt the fronted ones (and vice versa).
-async fn first_ok(mut attempts: Vec<FetchAttempt<'_>>) -> std::io::Result<FetchOutcome> {
-    if attempts.is_empty() {
-        return Err(std::io::Error::other("no config-new fetch attempt ran"));
-    }
-    // Every avenue's error, not just the last. A censored cold start is the case where this report is
-    // the only evidence available, and "the last future to finish said connection refused" describes
-    // whichever attempt happened to lose the race rather than why the fetch failed. `with_outcome`
-    // has already tagged each error with its avenue, so the joined message names all four.
-    let mut errors: Vec<String> = Vec::with_capacity(attempts.len());
-    let mut kinds: Vec<std::io::ErrorKind> = Vec::with_capacity(attempts.len());
-    while !attempts.is_empty() {
-        let (result, _idx, remaining) = futures::future::select_all(attempts).await;
-        match result {
-            Ok(outcome) => return Ok(outcome),
-            Err(e) => {
-                kinds.push(e.kind());
-                errors.push(e.to_string());
-                attempts = remaining;
-            }
-        }
-    }
-    // Keep the `ErrorKind` when every avenue agreed on one — "they all timed out" is a materially
-    // different diagnosis from "they failed in four different ways", and flattening the aggregate to
-    // `Other` would throw away the per-avenue kinds that `with_outcome` deliberately preserved.
-    let kind = match kinds.split_first() {
-        Some((first, rest)) if rest.iter().all(|k| k == first) => *first,
-        _ => std::io::ErrorKind::Other,
-    };
-    Err(std::io::Error::new(
-        kind,
-        format!(
-            "all {} config-new fetch avenues failed: {}",
-            errors.len(),
-            errors.join("; ")
-        ),
-    ))
 }
 
 /// Build the fronted dialer from the embedded `domainfront/fronted.yaml.gz` (aliyun/akamai/cloudfront).
@@ -663,20 +589,8 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
     // Unconditional fetch (no If-None-Match): every connect pulls the current config and overwrites.
     // Race the connection-level avenues (direct + proxyless) against both fronted avenues (embedded
     // list + vantage-point scanner) for censored cold-start resilience.
-    let fronted = fronted_dialer();
-    let bootstrap = fronted_bootstrap(env, seed_from_device_id(&did));
-    let kindling = config_kindling(env);
-    match fetch_once(
-        env,
-        &did,
-        &creds,
-        &Conditional::default(),
-        fronted.as_ref(),
-        Some(&bootstrap),
-        &kindling,
-    )
-    .await
-    {
+    let kindling = config_kindling(env, seed_from_device_id(&did));
+    match fetch_once(env, &did, &creds, &Conditional::default(), &kindling).await {
         Ok(FetchOutcome::New { raw, etag }) => {
             let cfg = Config::from_config_str(&raw).map_err(std::io::Error::other)?;
             let meta = CacheMeta {
@@ -759,24 +673,13 @@ where
     };
     // Build the fronted avenues once and reuse them across the loop: the embedded-config dialer, and
     // the vantage-point scanner (whose winning-front cache then persists for the loop's lifetime).
-    let fronted = fronted_dialer();
-    let bootstrap = fronted_bootstrap(env, seed_from_device_id(&did));
+
     // Built once and reused for the loop's lifetime, so proxyless's strategy cache keeps the winning
     // resolver+shaping pair rather than re-searching on every poll.
-    let kindling = config_kindling(env);
+    let kindling = config_kindling(env, seed_from_device_id(&did));
     let mut fail = 0u32;
     while !should_stop() {
-        match fetch_once(
-            env,
-            &did,
-            &creds,
-            &cond,
-            fronted.as_ref(),
-            Some(&bootstrap),
-            &kindling,
-        )
-        .await
-        {
+        match fetch_once(env, &did, &creds, &cond, &kindling).await {
             Ok(FetchOutcome::New { raw, etag }) => match Config::from_config_str(&raw) {
                 Ok(cfg) => {
                     fail = 0;
@@ -941,58 +844,101 @@ mod tests {
         );
     }
 
-    /// A failed cold start must report *every* avenue, not whichever future finished last. This is
-    /// the case where the error message is the only evidence anyone gets, so losing three quarters of
-    /// it is the difference between a diagnosable failure and a shrug.
+    /// A failed cold start must report *every* member, not whichever attempt finished last. On a
+    /// censored network that message is the only evidence anyone gets, so losing most of it is the
+    /// difference between a diagnosable failure and a shrug.
+    ///
+    /// This property moved into flint's race when the avenues were consolidated — `RaceError::
+    /// AllFailed` aggregates each member's error — so the test now covers it where it lives rather
+    /// than being deleted along with `first_ok`.
     #[tokio::test]
-    async fn a_total_failure_reports_every_avenue() {
-        let attempt = |name: &'static str, kind: std::io::ErrorKind| -> FetchAttempt<'static> {
-            Box::pin(with_outcome(
-                name,
-                Box::pin(async move { Err(std::io::Error::new(kind, "blocked")) }),
-            ))
-        };
-        let timed_out = std::io::ErrorKind::TimedOut;
-        let err = first_ok(vec![
-            attempt("direct", timed_out),
-            attempt("fronted", timed_out),
-            attempt("scanned", timed_out),
-            attempt("proxyless", timed_out),
-        ])
-        .await
-        .map(|_| ())
-        .expect_err("every avenue failed");
+    async fn a_total_failure_names_every_member() {
+        use flint_kindling::ConnectionTransport;
+
+        struct Dead(&'static str);
+
+        #[async_trait::async_trait]
+        impl ConnectionTransport for Dead {
+            type Stream = crate::BoxedStream;
+
+            fn name(&self) -> &str {
+                self.0
+            }
+
+            async fn connect(&self, _host: &str) -> std::io::Result<Self::Stream> {
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "blocked"))
+            }
+        }
+
+        let kindling = flint_kindling::Kindling::new()
+            .with_race_options(flint_kindling::RaceOptions {
+                window: 4,
+                attempt_timeout: None,
+            })
+            .with_transport(Dead("direct"))
+            .with_transport(Dead("proxyless"))
+            .with_transport(Dead("fronted-tls"))
+            .with_transport(Dead("fronted-scan"));
+
+        let err = kindling
+            .connect("api.example.com")
+            .await
+            .map(|_| ())
+            .expect_err("every member failed");
         let msg = err.to_string();
-        for avenue in ["direct", "fronted", "scanned", "proxyless"] {
-            assert!(msg.contains(avenue), "the report must name {avenue}: {msg}");
+        for member in ["direct", "proxyless", "fronted-tls", "fronted-scan"] {
+            assert!(msg.contains(member), "the report must name {member}: {msg}");
         }
         assert!(msg.contains("all 4"), "and how many failed: {msg}");
-        assert_eq!(
-            err.kind(),
-            timed_out,
-            "a unanimous kind survives — 'they all timed out' is its own diagnosis"
-        );
-
-        // Mixed kinds cannot honestly be summarised as any one of them.
-        let err = first_ok(vec![
-            attempt("direct", std::io::ErrorKind::TimedOut),
-            attempt("fronted", std::io::ErrorKind::ConnectionRefused),
-        ])
-        .await
-        .map(|_| ())
-        .expect_err("both failed");
-        assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 
-    /// An empty attempt list is a programming error, not a network failure — it must not be reported
-    /// as "all 0 avenues failed", which would read like a blocked network.
+    /// A race with no members is a programming error, not a blocked network, and must not read as one.
     #[tokio::test]
-    async fn no_attempts_is_distinguishable_from_every_attempt_failing() {
-        let err = first_ok(Vec::new())
+    async fn no_members_is_distinguishable_from_every_member_failing() {
+        let err = flint_kindling::Kindling::new()
+            .connect("api.example.com")
             .await
             .map(|_| ())
             .expect_err("an empty race cannot succeed");
-        assert!(err.to_string().contains("no config-new fetch attempt ran"));
+        // Asserted on concepts, not flint's exact wording: the guarantee that matters is that an
+        // empty race is distinguishable from every member failing, and pinning the phrase would
+        // break on an upstream reword that changed nothing semantically.
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("no"), "must say there were none: {msg}");
+        assert!(msg.contains("transport"), "must say of what: {msg}");
+        assert!(
+            !msg.contains("all "),
+            "must not read like an AllFailed report: {msg}"
+        );
+    }
+
+    /// A fronted authority is parsed config or scan output, not a constant, so a smuggled newline
+    /// must not be able to forge headers. `build_request_bytes` used to take only `FetchEnv`'s
+    /// compile-time host, which is why its `Host:` line needed no guard until this race made the
+    /// value dynamic.
+    #[test]
+    fn a_newline_in_the_authority_cannot_forge_a_header() {
+        let req = ConfigRequest::new("dev".into());
+        let bytes = build_request_bytes(
+            "evil.test\r\nX-Injected: 1",
+            "/api/v1/config-new",
+            &req,
+            &Conditional::default(),
+        )
+        .expect("builds");
+        let text = String::from_utf8_lossy(&bytes);
+        // Stripping, not rejecting: `X-Injected: 1` survives as text *inside* the Host value, which
+        // is harmless. What must not exist is a header LINE of that name — that is what "forge a
+        // header" means, and asserting on the substring instead would fail on correct behaviour.
+        assert!(
+            !text.lines().any(|l| l.starts_with("X-Injected")),
+            "CR/LF in the authority forged a header line:\n{text}"
+        );
+        assert!(
+            text.contains("Host: evil.testX-Injected: 1\r\n"),
+            "the value is stripped, not truncated or rejected: {}",
+            text.lines().next().unwrap_or_default()
+        );
     }
 
     /// The search space must carry trust anchors. Empty roots send flint to BoringSSL's
@@ -1351,7 +1297,7 @@ mod tests {
     #[ignore = "live: needs network"]
     async fn live_kindling_fetch() {
         let env = FetchEnv::prod();
-        let kindling = config_kindling(&env);
+        let kindling = config_kindling(&env, 0);
         let dir = std::env::temp_dir().join("spark-live-kindling");
         // Not wiped, for the same credential-reuse reason as `live_proxyless_fetch`.
         let did = device_id(&dir).expect("device id");
@@ -1391,16 +1337,19 @@ mod tests {
     #[ignore = "diagnostic: needs network"]
     async fn which_member_wins() {
         let env = FetchEnv::prod();
-        let kindling = config_kindling(&env);
+        let kindling = config_kindling(&env, 0);
         for attempt in 1..=3 {
             match kindling.connect(&env.host).await {
                 Ok(conn) => println!(
-                    "  attempt {attempt}: winner={:<10} alpn={:<10} -> {}",
+                    "  attempt {attempt}: winner={:<13} alpn={:<9} authority={:<22} -> {}",
                     conn.transport,
-                    conn.alpn
+                    conn.info
+                        .alpn
                         .as_deref()
                         .map(|a| String::from_utf8_lossy(a).into_owned())
                         .unwrap_or_else(|| "(none)".into()),
+                    // Whether this differs from `env.host` is the whole reason the race carries it.
+                    conn.authority(&env.host),
                     if conn.is_h2() {
                         "h2_oneshot"
                     } else {
@@ -1427,9 +1376,15 @@ mod tests {
     /// that adding a member changes the window with it instead of leaving a stale literal.
     #[test]
     fn the_race_has_one_member_per_enabled_avenue() {
-        let members = config_kindling(&FetchEnv::prod()).transport_count();
-        let mut expected = 1; // direct, always
+        let members = config_kindling(&FetchEnv::prod(), 0).transport_count();
+        // direct, plus the vantage-point scanner — both unconditional.
+        let mut expected = 2;
         if cfg!(feature = "proxyless") {
+            expected += 1;
+        }
+        // The embedded front list is present unless its bundled config fails to parse, which would be
+        // a build problem rather than a runtime one.
+        if fronted_dialer().is_some() {
             expected += 1;
         }
         // Feature alone is not enough: without build-time parameters there is no tunnel to dial, so
@@ -1438,6 +1393,16 @@ mod tests {
             expected += 1;
         }
         assert_eq!(members, expected, "member count drives the race window");
+    }
+
+    /// The embedded front list must actually parse — every other test here would still pass with a
+    /// corrupt `fronted.yaml.gz`, since a `None` dialer simply drops the member from the race.
+    #[test]
+    fn the_embedded_front_list_parses() {
+        assert!(
+            fronted_dialer().is_some(),
+            "embedded fronted.yaml.gz failed to parse, silently costing the race a member"
+        );
     }
 
     /// Whether this build pinned bootstrap DNS-tunnel parameters. Mirrors `bootstrap_dns_tunnel`'s
@@ -1496,14 +1461,17 @@ mod tests {
     async fn direct_member_negotiates_no_alpn() {
         use flint_kindling::ConnectionTransport as _;
         let env = FetchEnv::prod();
-        let (_stream, alpn) = DirectConfigTransport { port: env.port }
-            .connect_alpn(&env.host)
+        let (_stream, info) = DirectConfigTransport { port: env.port }
+            .connect_info(&env.host)
             .await
             .expect("direct dial to the config host");
         assert_eq!(
-            alpn, None,
+            info.alpn, None,
             "fetch_connector sets no ALPN; if this changes, the HTTP/1.1 branch is wrong"
         );
+        // And it must not claim an authority — only a fronted member routes by another name.
+        assert_eq!(info.authority, None);
+        assert_eq!(info.authority(&env.host), env.host);
     }
 
     /// Which protocol does a fronted edge actually speak? **It varies per connection**, which is the
@@ -1681,12 +1649,21 @@ mod tests {
         let mut req = ConfigRequest::new(did);
         req.user_id = creds.user_id.clone();
         req.pro_token = creds.pro_token.clone();
-        let outcome = fetch_once_fronted(
+        // A Kindling holding ONLY the embedded-list fronted dialer, for the same reason
+        // `live_proxyless_fetch` isolates its member: against the full race `direct` wins on an open
+        // network, so a broken fronted avenue would still show green.
+        let kindling = flint_kindling::Kindling::new()
+            .with_race_options(flint_kindling::RaceOptions {
+                window: 1,
+                attempt_timeout: Some(CONNECT_TIMEOUT),
+            })
+            .with_fronted_tls(dialer);
+        let outcome = fetch_once_kindling(
             &env,
             &req,
             &Conditional::default(),
-            &dialer,
-            Duration::from_secs(30),
+            &kindling,
+            ATTEMPT_TIMEOUT,
         )
         .await
         .expect("fronted config-new fetch");
@@ -1700,7 +1677,7 @@ mod tests {
             }
             FetchOutcome::NotModified => panic!("unexpected 304 on unconditional fronted fetch"),
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        // Not wiped — see the credential-reuse note above.
     }
 
     #[test]
