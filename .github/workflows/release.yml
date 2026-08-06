@@ -74,9 +74,18 @@ jobs:
         # (vars.SPARK_MODULE_PUBKEY_HEX). Only the public key lives in CI — a release build with
         # wasm-transport pins it (and refuses the dev key); the private key + module signing stay
         # offline. Unset → no wasm runtime, smaller binaries.
+        #
+        # The bootstrap DNS-tunnel race member (config-fetch) is likewise pinned at build time, for
+        # the same reason: it exists to *perform* the config fetch, so it cannot read its own zone and
+        # key out of the fetched config. Unset -> that member is simply absent and the race runs on
+        # direct + proxyless. Only the server's PUBLIC key is ever in CI, and no live zone is
+        # committed to the repo.
         shell: bash
         env:
           SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
+          SPARK_BOOTSTRAP_DNS_ZONE: ${{ vars.SPARK_BOOTSTRAP_DNS_ZONE }}
+          SPARK_BOOTSTRAP_DNS_PUBKEY: ${{ vars.SPARK_BOOTSTRAP_DNS_PUBKEY }}
+          SPARK_BOOTSTRAP_DNS_RESOLVERS: ${{ vars.SPARK_BOOTSTRAP_DNS_RESOLVERS }}
         run: |
           features=prod
           if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then features="$features,bip324"; fi

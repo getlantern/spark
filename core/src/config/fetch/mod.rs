@@ -249,6 +249,99 @@ impl flint_kindling::ConnectionTransport for DirectConfigTransport {
     // for spark's own connector is HTTP/1.1; `fetch_once_kindling` reads it exactly that way.
 }
 
+/// The DNS-tunnel as a race member: reach config-new by tunnelling over DNS itself.
+///
+/// The last-resort leg. `direct` and `proxyless` both still need a TCP connection to the origin to
+/// survive; this one needs only that *recursive DNS resolution works at all*, which is close to the
+/// last thing a network turns off. It is slow — a DNS tunnel moves KB/s — so it is expected to lose
+/// every race it does not have to win.
+///
+/// Two ways it differs from the other members:
+///
+/// * It hands back a **raw TCP** stream to the exit rather than a TLS one, so the TLS handshake
+///   happens here, through the tunnel, against `host`. That keeps the certificate check end-to-end:
+///   the tunnel exit carries bytes but cannot read or forge them.
+/// * The target is a **domain**, resolved by the exit (spark#160). A member whose whole purpose is
+///   surviving DNS interference must not begin by asking the local resolver for the origin's address.
+#[cfg(feature = "dns-tunnel")]
+struct DnsTunnelConfigTransport {
+    tunnel: std::sync::Arc<dyn Transport>,
+    port: u16,
+}
+
+#[cfg(feature = "dns-tunnel")]
+#[async_trait::async_trait]
+impl flint_kindling::ConnectionTransport for DnsTunnelConfigTransport {
+    type Stream = crate::BoxedStream;
+
+    fn name(&self) -> &str {
+        "dns-tunnel"
+    }
+
+    async fn connect(&self, host: &str) -> std::io::Result<Self::Stream> {
+        // The `HeaderError` goes in whole rather than stringified, so it survives as `source()`.
+        // Safe for log hygiene: every variant reports a length or a byte, never the host itself.
+        let target = crate::transport::Address::domain(host, self.port)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let stream = self.tunnel.dial_addr(target).await?;
+        Ok(Box::new(tls_wrap(stream, host).await?))
+    }
+
+    // No `connect_alpn` override, for the same reason as `DirectConfigTransport`: the TLS above is
+    // spark's own `fetch_connector`, which offers no ALPN. Reports `None` → HTTP/1.1.
+}
+
+/// Build the bootstrap DNS-tunnel member from **build-time** parameters, or `None` if this build has
+/// none pinned.
+///
+/// The zone and server key cannot come from the fetched config the way the runtime dns-tunnel
+/// transport's do — this member exists to *perform* that fetch, so reading them from its result would
+/// be circular. They are injected at build time instead, the same mechanism as
+/// `SPARK_MODULE_PUBKEY_HEX`, which keeps live infrastructure identifiers out of a repo that is
+/// intended to be public.
+///
+/// Absence is **not** an error, unlike the module-signing key. A missing signing key would be
+/// fail-open, so that one refuses to build; a missing bootstrap tunnel just means one fewer avenue,
+/// and the race still has `direct` and `proxyless`. Degrading quietly is the correct behaviour here.
+#[cfg(feature = "dns-tunnel")]
+fn bootstrap_dns_tunnel(env: &FetchEnv) -> Option<DnsTunnelConfigTransport> {
+    let zone = option_env!("SPARK_BOOTSTRAP_DNS_ZONE")?;
+    let server_pubkey = option_env!("SPARK_BOOTSTRAP_DNS_PUBKEY")?;
+    let cfg = crate::config::DnsTunnelConfig {
+        zone: zone.to_string(),
+        server_pubkey: server_pubkey.to_string(),
+        // Empty is fine: `dns_tunnel_transport` falls back to the OS resolvers, which is the right
+        // default here — under a shutdown the mandated local resolver is often the only one still
+        // forwarding, and it is the one every device already has.
+        resolvers: option_env!("SPARK_BOOTSTRAP_DNS_RESOLVERS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .collect(),
+        authoritative: None,
+        cipher: crate::config::DnsTunnelCipher::default(),
+        compression: crate::config::DnsTunnelCompression::default(),
+        // Bootstrap is one small fetch on a possibly-hostile network, and this is the leg that runs
+        // when the others are already failing. Duplicating queries trades bandwidth for finding the
+        // working resolver subset fast — measured at 27s → 0.3s time-to-first-byte against a mostly
+        // dead pool. Worth it once, at startup.
+        duplication: Some(3),
+        use_system_resolvers: None,
+    };
+    match crate::transport::dns_tunnel_transport(&cfg, None) {
+        Ok((tunnel, _udp)) => Some(DnsTunnelConfigTransport {
+            tunnel,
+            port: env.port,
+        }),
+        Err(e) => {
+            // Log hygiene: `e` names the defect, never the zone.
+            tracing::warn!(err = %e, "config-fetch: bootstrap dns-tunnel unusable, skipping that member");
+            None
+        }
+    }
+}
+
 /// Build the connection-level race: the direct dial, plus proxyless where the feature is on.
 ///
 /// Both members reach the *same* origin, so this is not a diversity play the way the fronted avenues
@@ -262,12 +355,22 @@ impl flint_kindling::ConnectionTransport for DirectConfigTransport {
 /// rather than hardcoded because the member count is already conditional (`proxyless`), and because a
 /// literal would silently start staggering the moment a third member is added.
 fn config_kindling(env: &FetchEnv) -> flint_kindling::Kindling {
-    #[cfg_attr(not(feature = "proxyless"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(feature = "proxyless", feature = "dns-tunnel")),
+        allow(unused_mut)
+    )]
     let mut kindling =
         flint_kindling::Kindling::new().with_transport(DirectConfigTransport { port: env.port });
     #[cfg(feature = "proxyless")]
     {
         kindling = kindling.with_proxyless(proxyless_transport(env));
+    }
+    // Registered last, and only when this build pinned a bootstrap tunnel. Order matters less than it
+    // looks — the window below starts every member at once — but last reflects what it is: the leg
+    // that wins only when the faster ones cannot.
+    #[cfg(feature = "dns-tunnel")]
+    if let Some(dns) = bootstrap_dns_tunnel(env) {
+        kindling = kindling.with_transport(dns);
     }
     // `max(1)` mirrors `race_boxed`'s own floor; a zero window would never start anything.
     let window = kindling.transport_count().max(1);
@@ -1316,16 +1419,70 @@ mod tests {
     }
 
     /// Pins the member count the race window is derived from — `direct` always, plus `proxyless`
-    /// where the feature is on. The window itself is not publicly readable off `Kindling`, so this
+    /// where the feature is on, plus `dns-tunnel` where the feature is on *and* this build pinned
+    /// bootstrap parameters. The window itself is not publicly readable off `Kindling`, so this
     /// asserts the input to that one-line derivation rather than the window.
     ///
     /// The point is that a `config-fetch`-only build still gets a working single-member race, and
-    /// that adding a member later changes the window with it instead of leaving a stale literal.
+    /// that adding a member changes the window with it instead of leaving a stale literal.
     #[test]
     fn the_race_has_one_member_per_enabled_avenue() {
         let members = config_kindling(&FetchEnv::prod()).transport_count();
-        let expected = if cfg!(feature = "proxyless") { 2 } else { 1 };
+        let mut expected = 1; // direct, always
+        if cfg!(feature = "proxyless") {
+            expected += 1;
+        }
+        // Feature alone is not enough: without build-time parameters there is no tunnel to dial, so
+        // the member is absent by design rather than broken.
+        if cfg!(feature = "dns-tunnel") && bootstrap_is_pinned() {
+            expected += 1;
+        }
         assert_eq!(members, expected, "member count drives the race window");
+    }
+
+    /// Whether this build pinned bootstrap DNS-tunnel parameters. Mirrors `bootstrap_dns_tunnel`'s
+    /// own precondition so the count test states the rule rather than hardcoding today's answer.
+    fn bootstrap_is_pinned() -> bool {
+        option_env!("SPARK_BOOTSTRAP_DNS_ZONE").is_some()
+            && option_env!("SPARK_BOOTSTRAP_DNS_PUBKEY").is_some()
+    }
+
+    /// An ordinary build pins nothing, so the member must be absent — not a half-built transport that
+    /// fails at dial time inside the race, where it would burn an attempt slot on every fetch.
+    #[cfg(feature = "dns-tunnel")]
+    #[test]
+    fn without_build_time_parameters_there_is_no_dns_tunnel_member() {
+        if bootstrap_is_pinned() {
+            return; // a build that pinned them legitimately has the member
+        }
+        assert!(
+            bootstrap_dns_tunnel(&FetchEnv::prod()).is_none(),
+            "unpinned build must not produce a dns-tunnel member"
+        );
+    }
+
+    /// The name the race reports for this member — it is what appears in an `AllFailed` error, which
+    /// on a censored network is the only evidence anyone gets about which avenues were tried.
+    #[cfg(feature = "dns-tunnel")]
+    #[test]
+    fn the_dns_tunnel_member_is_named_for_the_race_error_message() {
+        use flint_kindling::ConnectionTransport as _;
+        let cfg = crate::config::DnsTunnelConfig {
+            zone: "t.example.com".into(),
+            // A syntactically valid but throwaway key: this asserts naming, not connectivity.
+            server_pubkey: dns_tunnel_core::crypto::base64_encode(&[7u8; 32]),
+            resolvers: vec!["127.0.0.1:5353".into()],
+            authoritative: None,
+            cipher: crate::config::DnsTunnelCipher::default(),
+            compression: crate::config::DnsTunnelCompression::default(),
+            duplication: Some(3),
+            use_system_resolvers: Some(false),
+        };
+        let (tunnel, _) = crate::transport::dns_tunnel_transport(&cfg, None).expect("builds");
+        assert_eq!(
+            DnsTunnelConfigTransport { tunnel, port: 443 }.name(),
+            "dns-tunnel"
+        );
     }
 
     /// The contract [`fetch_once_kindling`] dispatches on: spark's `fetch_connector` offers no ALPN,
