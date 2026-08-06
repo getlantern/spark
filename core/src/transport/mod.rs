@@ -32,7 +32,7 @@ use crate::config::{
 use crate::config::DnsTunnelCipher;
 use crate::net::SocketProtector;
 use crate::BoxedStream;
-use flint_shaping::{DelaySpec, SegmentSplit, WirePlan};
+use flint_shaping::{DelaySpec, RecordFragment, SegmentSplit, WirePlan};
 
 /// Build a [`WirePlan`] from the static `[transport.shaping]` config. flint's `WirePlan` is
 /// config-agnostic, so this adapter (the public replacement for the former `WirePlan::from_config`)
@@ -53,7 +53,120 @@ pub fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
             DelaySpec::Fixed(std::time::Duration::from_millis(ms))
         }),
         tcp_nodelay: c.tcp_nodelay,
-        ..Default::default()
+        record_fragment: record_fragment_from_config(&c.record_fragment),
+    }
+}
+
+/// Parse `[transport.shaping] record_fragment` into a [`RecordFragment`] (genome Layer B).
+///
+/// This was previously unreachable: `wire_plan_from_config` filled the Layer C fields and left
+/// `record_fragment` at its default, so a data-path transport could split TCP segments but never TLS
+/// records — half the shaping the engine implements, with no config surface to reach the other half.
+///
+/// Unparseable input degrades to no fragmentation rather than erroring. That matches how
+/// `segment_split` treats a bad offset list, and it is the safe direction here: shaping is an
+/// optimisation over a connection that is otherwise fine, so a typo should cost evasion, not
+/// connectivity. A structurally invalid plan would also be caught by `WirePlan::is_noop`.
+fn record_fragment_from_config(spec: &str) -> RecordFragment {
+    match spec.trim() {
+        "" | "none" => RecordFragment::None,
+        "sni_straddle" => RecordFragment::SniStraddle,
+        s => match s.strip_prefix("chunks:") {
+            // `0` would mean "records of at most zero bytes", which cannot make progress — treat it
+            // as unset rather than emitting a plan that could not be realized.
+            Some(n) => match n.trim().parse::<usize>() {
+                Ok(n) if n > 0 => RecordFragment::Chunks(n),
+                _ => RecordFragment::None,
+            },
+            None => {
+                let offsets: Vec<usize> =
+                    s.split(',').filter_map(|o| o.trim().parse().ok()).collect();
+                if offsets.is_empty() {
+                    RecordFragment::None
+                } else {
+                    RecordFragment::Offsets(offsets)
+                }
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod record_fragment_config_tests {
+    use super::*;
+    use crate::config::ShapingConfig;
+
+    fn parse(spec: &str) -> RecordFragment {
+        record_fragment_from_config(spec)
+    }
+
+    #[test]
+    fn parses_every_documented_form() {
+        assert!(matches!(parse("none"), RecordFragment::None));
+        assert!(matches!(parse(""), RecordFragment::None));
+        assert!(matches!(parse("sni_straddle"), RecordFragment::SniStraddle));
+        assert!(matches!(parse("chunks:512"), RecordFragment::Chunks(512)));
+        // `RecordFragment` has no `PartialEq`, so match rather than compare.
+        match parse("700, 1400") {
+            RecordFragment::Offsets(o) => assert_eq!(
+                o,
+                vec![700, 1400],
+                "whitespace around offsets is tolerated, like segment_split"
+            ),
+            other => panic!("expected offsets, got {other:?}"),
+        }
+    }
+
+    /// Unparseable input degrades to no fragmentation rather than erroring — shaping is an
+    /// optimisation over a connection that is otherwise fine, so a typo should cost evasion, not
+    /// connectivity. Pinned because the *silent* direction is the dangerous one to get wrong.
+    #[test]
+    fn malformed_input_degrades_to_no_fragmentation() {
+        for bad in ["nonsense", "chunks:", "chunks:abc", "chunks:0", ",,,", "  "] {
+            assert!(
+                matches!(parse(bad), RecordFragment::None),
+                "{bad:?} should degrade to None, not produce an unrealizable plan"
+            );
+        }
+    }
+
+    /// `chunks:0` deserves its own note: it parses as a number but means "records of at most zero
+    /// bytes", which cannot make progress. Treated as unset rather than emitted.
+    #[test]
+    fn a_zero_chunk_size_is_not_emitted() {
+        assert!(matches!(parse("chunks:0"), RecordFragment::None));
+        assert!(matches!(parse("chunks:1"), RecordFragment::Chunks(1)));
+    }
+
+    /// The gap this closes: the config could express Layer C but never Layer B, so a configured
+    /// transport could split TCP segments and never TLS records.
+    #[test]
+    fn the_config_now_reaches_both_shaping_layers() {
+        let plan = wire_plan_from_config(&ShapingConfig {
+            segment_split: "sni_boundary".into(),
+            record_fragment: "sni_straddle".into(),
+            ..Default::default()
+        });
+        assert!(
+            matches!(plan.segment_split, SegmentSplit::SniBoundary),
+            "Layer C"
+        );
+        assert!(
+            matches!(plan.record_fragment, RecordFragment::SniStraddle),
+            "Layer B — this was unreachable from config before"
+        );
+        assert!(!plan.is_noop());
+    }
+
+    /// The default must stay inert: shaping is opt-in, and a default that fragmented would change
+    /// the wire for every existing deployment that never asked for it.
+    #[test]
+    fn the_default_config_shapes_nothing() {
+        let plan = wire_plan_from_config(&ShapingConfig::default());
+        assert!(
+            plan.is_noop(),
+            "adding a record_fragment field must not make the default plan start shaping"
+        );
     }
 }
 
