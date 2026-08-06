@@ -256,19 +256,25 @@ impl flint_kindling::ConnectionTransport for DirectConfigTransport {
 /// shaping. Built once by the caller and reused, so proxyless's `StrategyCache` keeps the winning
 /// strategy across polls rather than re-searching each time.
 ///
-/// The window is left at the member count so both start together: with only two members there is no
-/// tail to stagger, and holding the second back would just add its latency to the common case where
-/// the first is blocked.
+/// The window is **derived from the members actually registered**, so every one starts together.
+/// There is no tail to stagger at this size, and holding a member back would just add its latency to
+/// the common case where the earlier one is blocked — which is the case this race exists for. Derived
+/// rather than hardcoded because the member count is already conditional (`proxyless`), and because a
+/// literal would silently start staggering the moment a third member is added.
 fn config_kindling(env: &FetchEnv) -> flint_kindling::Kindling {
-    let kindling = flint_kindling::Kindling::new()
-        .with_race_options(flint_kindling::RaceOptions {
-            window: 2,
-            attempt_timeout: Some(CONNECT_TIMEOUT),
-        })
-        .with_transport(DirectConfigTransport { port: env.port });
+    #[cfg_attr(not(feature = "proxyless"), allow(unused_mut))]
+    let mut kindling =
+        flint_kindling::Kindling::new().with_transport(DirectConfigTransport { port: env.port });
     #[cfg(feature = "proxyless")]
-    let kindling = kindling.with_proxyless(proxyless_transport(env));
-    kindling
+    {
+        kindling = kindling.with_proxyless(proxyless_transport(env));
+    }
+    // `max(1)` mirrors `race_boxed`'s own floor; a zero window would never start anything.
+    let window = kindling.transport_count().max(1);
+    kindling.with_race_options(flint_kindling::RaceOptions {
+        window,
+        attempt_timeout: Some(CONNECT_TIMEOUT),
+    })
 }
 
 /// Race the connection-level avenues, then speak whichever HTTP version the winner negotiated.
@@ -1307,6 +1313,19 @@ mod tests {
     fn the_direct_member_is_named_for_the_race_error_message() {
         use flint_kindling::ConnectionTransport as _;
         assert_eq!(DirectConfigTransport { port: 443 }.name(), "direct");
+    }
+
+    /// Pins the member count the race window is derived from — `direct` always, plus `proxyless`
+    /// where the feature is on. The window itself is not publicly readable off `Kindling`, so this
+    /// asserts the input to that one-line derivation rather than the window.
+    ///
+    /// The point is that a `config-fetch`-only build still gets a working single-member race, and
+    /// that adding a member later changes the window with it instead of leaving a stale literal.
+    #[test]
+    fn the_race_has_one_member_per_enabled_avenue() {
+        let members = config_kindling(&FetchEnv::prod()).transport_count();
+        let expected = if cfg!(feature = "proxyless") { 2 } else { 1 };
+        assert_eq!(members, expected, "member count drives the race window");
     }
 
     /// The contract [`fetch_once_kindling`] dispatches on: spark's `fetch_connector` offers no ALPN,
