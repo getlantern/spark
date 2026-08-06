@@ -31,8 +31,8 @@ Then walk the chain **in this order**, because each step only makes sense if the
 | 4 | answers on :53 | `dig @HOST SOA <zone>` | `NOERROR` |
 | 5 | no cloud firewall | `linode-cli linodes firewalls-list <id>` | none, or UDP/53 allowed |
 | 6 | glue record | `dig +short A ns-spark.<domain>` | the host IP |
-| 7 | **delegation** | `dig +norec NS t.<domain> @<domain's NS>` | `NS ns-spark.<domain>` |
-| 8 | recursive reachability | `dig @1.1.1.1 SOA t.<domain>` | `NOERROR` |
+| 7 | **delegation** | `dig +norec NS t.example.com @<the domain's NS>` | `NS ns-spark.…` |
+| 8 | recursive reachability | `dig @1.1.1.1 SOA t.example.com` | `NOERROR` |
 | 9 | real traffic | see *End-to-end test* | an HTTP status line |
 
 ### Traps in that sequence
@@ -51,6 +51,10 @@ Then walk the chain **in this order**, because each step only makes sense if the
 
 ## Redeploy
 
+> Commands below use `example.com` as a stand-in — RFC 2606 reserves it, so a
+> forgotten substitution fails loudly instead of deploying somewhere real. Replace it with the
+> delegated zone, which is deliberately not written down in this repo.
+
 ```sh
 # 1. Static binary (aarch64-unknown-linux-musl for ARM hosts)
 cargo zigbuild --release -p dns-tunnel-server --target x86_64-unknown-linux-musl
@@ -64,7 +68,7 @@ echo '<privkey b64>' > deploy/ansible/files/spark-dns.privkey
 cp deploy/ansible/inventory/spark-dns.example.yaml deploy/ansible/inventory/spark-dns.yaml
 #   …set ansible_host to the real IP…
 ansible-playbook -i deploy/ansible/inventory/spark-dns.yaml \
-  deploy/ansible/bootstrap-spark-dns.yaml -e zone=t.<domain>
+  deploy/ansible/bootstrap-spark-dns.yaml -e zone=t.example.com
 ```
 
 The playbook is idempotent; re-running it against a live host only restarts on a real change.
@@ -132,7 +136,7 @@ resolver list, so the same test covers both modes — **run both**, because auth
 recursive fails is precisely the delegation bug above:
 
 ```sh
-export DNS_TUNNEL_PUBKEY='<base64 pubkey>' DNS_TUNNEL_ZONE='t.<domain>'
+export DNS_TUNNEL_PUBKEY='PASTE_BASE64_PUBKEY' DNS_TUNNEL_ZONE='t.example.com'
 
 # authoritative — proves the server and protocol
 DNS_TUNNEL_SERVER="<host-ip>:53" \
@@ -152,8 +156,8 @@ The member is absent unless the build pins its parameters, and absence is delibe
 broken — an unpinned build simply races the other four avenues.
 
 ```sh
-gh variable set SPARK_BOOTSTRAP_DNS_ZONE   --repo getlantern/spark --body 't.<domain>'
-gh variable set SPARK_BOOTSTRAP_DNS_PUBKEY --repo getlantern/spark --body '<base64 pubkey>'
+gh variable set SPARK_BOOTSTRAP_DNS_ZONE   --repo getlantern/spark --body 't.example.com'
+gh variable set SPARK_BOOTSTRAP_DNS_PUBKEY --repo getlantern/spark --body 'PASTE_BASE64_PUBKEY'
 # SPARK_BOOTSTRAP_DNS_RESOLVERS: leave unset. The client then uses the OS resolver, which is often
 # the only one still forwarding under a shutdown, and hardcoded public IPs are both the first thing
 # blocked and a static fingerprint in the binary.

@@ -24,9 +24,11 @@ enum Cmd {
     /// Print the public key for an existing private key, so a lost `pubkey` can be recovered from the
     /// server that still holds its `privkey` — without the private half ever leaving the host.
     ///
-    /// The public key is not derivable by any other means once the `keygen` output is gone, and every
-    /// client needs it to authenticate this server. Re-running `keygen` would mint a *new* identity
-    /// and orphan every client already configured for the old one.
+    /// Every client needs this key to authenticate the server, and before this subcommand existed the
+    /// only copy was `keygen`'s output: lose it and the recovery path was to re-run `keygen`, which
+    /// mints a *new* identity and orphans every client configured for the old one. Deriving it is
+    /// arithmetic (it is the public half of the same Ed25519 pair) — there simply was no command that
+    /// did so.
     Pubkey(PubkeyArgs),
     /// Run the tunnel server.
     Serve(ServeArgs),

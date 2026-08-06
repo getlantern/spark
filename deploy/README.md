@@ -38,6 +38,18 @@ The same applies to the host IP and the server's private key. The server's **pub
 secret — it is distributed to every client by design — but it is still deployment state, so it lives
 in `/etc/spark-dns/pubkey` on the host and in the build variable, not here.
 
+That file is written by hand, from the private key the host already holds — the private half never
+moves:
+
+```sh
+scp target/x86_64-unknown-linux-musl/release/dns-tunnel-server root@HOST:/tmp/dts
+ssh root@HOST '/tmp/dts pubkey --privkey-file /etc/spark-dns/privkey | cut -d" " -f2 \
+  > /etc/spark-dns/pubkey; chmod 644 /etc/spark-dns/pubkey; rm -f /tmp/dts'
+```
+
+Do **not** re-run `keygen` to recover it: that mints a new identity and orphans every client already
+configured for the old key.
+
 ## What to reuse from lantern-cloud
 
 - **Client config distribution.** Surface a spark-dns config (zone / server public key / resolvers) to
@@ -67,8 +79,8 @@ The Ansible playbook + systemd template here are provider-agnostic and intended 
 3. **Delegate an unattributable zone** to that IP (at the domain's DNS host — e.g. Cloudflare),
    both records **DNS-only / unproxied**:
    ```
-   ns-spark.<domain>   A    <host-ip>
-   t.<domain>          NS   ns-spark.<domain>
+   ns-spark.example.com   A    203.0.113.10          # your domain, your host IP
+   t.example.com          NS   ns-spark.example.com  # the delegation
    ```
 
 4. **Generate the server keypair** and place the private key for the playbook (keep the public key
@@ -83,13 +95,13 @@ The Ansible playbook + systemd template here are provider-agnostic and intended 
 5. **Deploy** (put the IP in `inventory/spark-dns.yaml`, then):
    ```sh
    ansible-playbook -i deploy/ansible/inventory/spark-dns.yaml \
-     deploy/ansible/bootstrap-spark-dns.yaml -e zone=t.<domain>
+     deploy/ansible/bootstrap-spark-dns.yaml -e zone=t.example.com   # replace with your zone
    ```
 
 6. **Verify** (recursive resolution reaches the server; then a real fetch through the tunnel):
    ```sh
-   dig @1.1.1.1 SOA t.<domain>            # expect NOERROR (the QNAME-min / NODATA handling)
-   # client-side: DnsTunnelConfig{ zone=t.<domain>, server_pubkey=<pubkey>, resolvers=[public pool] }
+   dig @1.1.1.1 SOA t.example.com         # replace with your zone; expect NOERROR (QNAME-min / NODATA)
+   # client-side: DnsTunnelConfig{ zone, server_pubkey, resolvers=[public pool] }
    ```
 
 ## Operational notes

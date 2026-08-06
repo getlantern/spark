@@ -16,7 +16,8 @@
 #     `dns-tunnel-server keygen` (secret; mode 0600). Distribute the matching `pubkey` to clients;
 #     the private key never leaves the server.
 #
-# Run: ansible-playbook -i inventory/spark-dns.yaml bootstrap-spark-dns.yaml -e zone=t.<domain>
+# Run (replace the zone with your delegated one; example.com is RFC 2606 reserved and inert):
+#   ansible-playbook -i inventory/spark-dns.yaml bootstrap-spark-dns.yaml -e zone=t.example.com
 - name: Deploy and start spark dns-tunnel-server
   hosts: spark_dns
   become: true
