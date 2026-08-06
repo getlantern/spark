@@ -1114,14 +1114,25 @@ mod tests {
             "expected 4 resolvers x 2 plans; a third plan needs the cap raised (see sni_straddle_plan)"
         );
 
-        // Worst case must stay inside the connect budget: a stale cached winner costs one 5s attempt
-        // before the search starts, then ceil(candidates / PROBE_WINDOW) x 5s.
+        // Worst case must stay inside the connect budget: a stale cached winner costs one attempt
+        // before the search starts, then ceil(candidates / window) attempts.
+        //
+        // These two mirror `flint_proxyless`'s `ATTEMPT_TIMEOUT` and `PROBE_WINDOW`, which are
+        // **private** to that crate and so cannot be referenced here. Named rather than inlined so
+        // the coupling is visible: if flint retunes either, this test still passes while describing
+        // a budget that no longer exists, and the assertion message below is the only clue.
+        // Exporting them from flint is the real fix.
+        const FLINT_ATTEMPT_TIMEOUT_SECS: u64 = 5;
+        const FLINT_PROBE_WINDOW: usize = 4;
+
         let candidates = resolvers_searched * wires;
-        let worst = std::time::Duration::from_secs(5 + 5 * candidates.div_ceil(4) as u64);
+        let attempts = 1 + candidates.div_ceil(FLINT_PROBE_WINDOW) as u64;
+        let worst = std::time::Duration::from_secs(attempts * FLINT_ATTEMPT_TIMEOUT_SECS);
         assert!(
             worst < CONNECT_TIMEOUT,
             "worst-case search {worst:?} must finish inside {CONNECT_TIMEOUT:?} with margin, or the \
-             race cancels it exactly when it would have cached a winner"
+             race cancels it exactly when it would have cached a winner. If flint retuned \
+             ATTEMPT_TIMEOUT or PROBE_WINDOW, update the mirrored constants above."
         );
     }
 
