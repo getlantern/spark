@@ -120,6 +120,55 @@ pub struct Conditional {
 /// Strip CR/LF from a value before it's interpolated into a header line, so a tampered/corrupt
 /// non-constant source (the on-disk device id, the env-derived timezone, or a cached server-origin
 /// `ETag`/`Last-Modified`) can't inject extra headers or break request framing. Borrows when clean.
+/// Header naming the library that carried the request. Constant: it identifies the *racing layer*,
+/// which is flint regardless of which member won or which app is asking.
+pub(crate) const KINDLING_APP_HEADER: &str = "X-Kindling-App";
+/// The one value [`KINDLING_APP_HEADER`] ever takes.
+pub(crate) const KINDLING_APP: &str = "flint";
+/// Header naming the winning race member (`direct`, `proxyless`, `fronted-tls`, …).
+pub(crate) const KINDLING_METHOD_HEADER: &str = "X-Kindling-Method";
+
+/// Which kindling member carried this request, for the server to attribute it to.
+///
+/// A `ConnectionTransport` hands back bytes and knows nothing about HTTP, so it cannot set a header
+/// itself — but it does not need to. The race already reports the winner's name on the connection,
+/// and this carries that name down to whichever HTTP builder runs. The transports stay
+/// protocol-agnostic and the header still gets set.
+///
+/// [`Default`] is the no-attribution case: the request did not come through a race at all (the
+/// `/user-create` pre-step dials directly), so the headers are omitted rather than guessed. An absent
+/// header is honest; a wrong one corrupts the very attribution this exists for.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KindlingHeaders<'a> {
+    method: Option<&'a str>,
+}
+
+impl<'a> KindlingHeaders<'a> {
+    /// Attribute the request to the race member named `method`.
+    pub fn method(method: &'a str) -> Self {
+        Self {
+            method: Some(method),
+        }
+    }
+
+    /// The member name, CR/LF-stripped: it originates from a transport's `name()`, which is a static
+    /// string today but reaches this as ordinary data.
+    fn method_value(&self) -> String {
+        header_safe(self.method.unwrap_or_default()).into_owned()
+    }
+
+    /// The HTTP/1.1 header lines, or empty when there is nothing to attribute.
+    fn http1_lines(&self) -> String {
+        match self.method {
+            None => String::new(),
+            Some(m) => format!(
+                "{KINDLING_APP_HEADER}: {KINDLING_APP}\r\n{KINDLING_METHOD_HEADER}: {}\r\n",
+                header_safe(m)
+            ),
+        }
+    }
+}
+
 pub(crate) fn header_safe(v: &str) -> std::borrow::Cow<'_, str> {
     if v.contains(['\r', '\n']) {
         std::borrow::Cow::Owned(v.replace(['\r', '\n'], ""))
@@ -140,6 +189,7 @@ pub fn build_request_bytes(
     path: &str,
     req: &ConfigRequest,
     cond: &Conditional,
+    kindling: KindlingHeaders<'_>,
 ) -> Result<Vec<u8>, serde_json::Error> {
     let body = serde_json::to_vec(req)?;
     let mut head = String::new();
@@ -149,6 +199,7 @@ pub fn build_request_bytes(
     // addressed by the *winning front's* inner host, which comes from parsed config or a live scan.
     head.push_str(&format!("Host: {}\r\n", header_safe(host)));
     head.push_str(&format!("X-Lantern-App: {APP_NAME}\r\n"));
+    head.push_str(&kindling.http1_lines());
     head.push_str(&format!("X-Lantern-App-Version: {}\r\n", req.version));
     head.push_str(&format!("X-Lantern-Version: {}\r\n", req.version));
     head.push_str(&format!("X-Lantern-Platform: {}\r\n", req.platform));
@@ -193,9 +244,12 @@ pub fn build_oneshot_request(
     path: &str,
     req: &ConfigRequest,
     cond: &Conditional,
+    kindling: KindlingHeaders<'_>,
 ) -> Result<OneshotRequest, serde_json::Error> {
     let body = serde_json::to_vec(req)?;
     let mut out = OneshotRequest::post(path.to_owned(), body)
+        .header(KINDLING_APP_HEADER, KINDLING_APP)
+        .header(KINDLING_METHOD_HEADER, kindling.method_value())
         .header("X-Lantern-App", APP_NAME)
         .header("X-Lantern-App-Version", req.version.clone())
         .header("X-Lantern-Version", req.version.clone())
@@ -222,6 +276,95 @@ pub fn build_oneshot_request(
 
 #[cfg(test)]
 mod tests {
+
+    /// Both headers ride the HTTP/1.1 request when the fetch came through the race.
+    #[test]
+    fn the_http1_request_names_the_winning_member() {
+        let req = ConfigRequest::new("dev".into());
+        let bytes = build_request_bytes(
+            "h",
+            "/p",
+            &req,
+            &Conditional::default(),
+            KindlingHeaders::method("fronted-tls"),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("X-Kindling-App: flint\r\n"), "{text}");
+        assert!(
+            text.contains("X-Kindling-Method: fronted-tls\r\n"),
+            "{text}"
+        );
+    }
+
+    /// A request that did not go through the race carries **neither** header. Omitting is the point:
+    /// a default value would attribute the request to a member that never ran, corrupting exactly the
+    /// signal these headers exist to provide.
+    #[test]
+    fn a_non_raced_request_is_left_unattributed() {
+        let req = ConfigRequest::new("dev".into());
+        let text = String::from_utf8(
+            build_request_bytes(
+                "h",
+                "/p",
+                &req,
+                &Conditional::default(),
+                KindlingHeaders::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!text.contains("X-Kindling-"), "{text}");
+    }
+
+    /// The h2 path carries the same pair — the member name reaches the server whichever protocol the
+    /// winning edge negotiated, which is the whole point of attributing per connection.
+    #[test]
+    fn the_h2_request_names_the_winning_member() {
+        let req = ConfigRequest::new("dev".into());
+        let oneshot = build_oneshot_request(
+            "/p",
+            &req,
+            &Conditional::default(),
+            KindlingHeaders::method("proxyless"),
+        )
+        .unwrap();
+        let has = |k: &str, v: &str| {
+            oneshot
+                .headers
+                .iter()
+                .any(|(hk, hv)| hk.eq_ignore_ascii_case(k) && hv == v)
+        };
+        assert!(has("X-Kindling-App", "flint"), "{:?}", oneshot.headers);
+        assert!(
+            has("X-Kindling-Method", "proxyless"),
+            "{:?}",
+            oneshot.headers
+        );
+    }
+
+    /// The member name reaches here as ordinary data, so it gets the same CR/LF guard as every other
+    /// non-constant header value.
+    #[test]
+    fn a_newline_in_the_member_name_cannot_forge_a_header() {
+        let req = ConfigRequest::new("dev".into());
+        let text = String::from_utf8(
+            build_request_bytes(
+                "h",
+                "/p",
+                &req,
+                &Conditional::default(),
+                KindlingHeaders::method("direct\r\nX-Injected: 1"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !text.lines().any(|l| l.starts_with("X-Injected")),
+            "forged a header line:\n{text}"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -269,7 +412,14 @@ mod tests {
             etag: Some("\"abc\"".into()),
             last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".into()),
         };
-        let bytes = build_request_bytes("df.iantem.io", "/api/v1/config-new", &req, &cond).unwrap();
+        let bytes = build_request_bytes(
+            "df.iantem.io",
+            "/api/v1/config-new",
+            &req,
+            &cond,
+            KindlingHeaders::default(),
+        )
+        .unwrap();
         let s = String::from_utf8(bytes).unwrap();
         assert!(s.starts_with("POST /api/v1/config-new HTTP/1.1\r\n"));
         assert!(s.contains("Host: df.iantem.io\r\n"));
@@ -294,7 +444,14 @@ mod tests {
     fn omits_conditional_headers_when_absent() {
         let req = ConfigRequest::new("d".into());
         let s = String::from_utf8(
-            build_request_bytes("h", "/p", &req, &Conditional::default()).unwrap(),
+            build_request_bytes(
+                "h",
+                "/p",
+                &req,
+                &Conditional::default(),
+                KindlingHeaders::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(!s.contains("If-None-Match") && !s.contains("If-Modified-Since"));
@@ -315,7 +472,10 @@ mod tests {
             etag: Some("\"e\"\r\nX-Injected: 1".into()),
             last_modified: None,
         };
-        let s = String::from_utf8(build_request_bytes("h", "/p", &req, &cond).unwrap()).unwrap();
+        let s = String::from_utf8(
+            build_request_bytes("h", "/p", &req, &cond, KindlingHeaders::default()).unwrap(),
+        )
+        .unwrap();
         // CRLF stripped: X-Injected must NOT appear as its own header line.
         assert!(
             !s.contains("\r\nX-Injected:"),
@@ -330,7 +490,14 @@ mod tests {
         let mut req = ConfigRequest::new("dev\r\nX-Evil: 1".into());
         req.time_zone = "Zone\r\nX-Evil2: 2".into();
         let s = String::from_utf8(
-            build_request_bytes("h", "/p", &req, &Conditional::default()).unwrap(),
+            build_request_bytes(
+                "h",
+                "/p",
+                &req,
+                &Conditional::default(),
+                KindlingHeaders::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(
@@ -355,7 +522,13 @@ mod tests {
             etag: Some("\"v1\"".into()),
             last_modified: None,
         };
-        let os = build_oneshot_request("/api/v1/config-new", &req, &cond).unwrap();
+        let os = build_oneshot_request(
+            "/api/v1/config-new",
+            &req,
+            &cond,
+            KindlingHeaders::default(),
+        )
+        .unwrap();
         assert_eq!(os.method.as_str(), "POST");
         assert_eq!(os.path, "/api/v1/config-new");
         let has = |k: &str, v: &str| os.headers.iter().any(|(hk, hv)| hk == k && hv == v);
@@ -379,7 +552,13 @@ mod tests {
     #[test]
     fn oneshot_request_omits_conditional_headers_when_absent() {
         let req = ConfigRequest::new("d".into());
-        let os = build_oneshot_request("/p", &req, &Conditional::default()).unwrap();
+        let os = build_oneshot_request(
+            "/p",
+            &req,
+            &Conditional::default(),
+            KindlingHeaders::default(),
+        )
+        .unwrap();
         assert!(!os
             .headers
             .iter()

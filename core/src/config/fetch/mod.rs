@@ -55,7 +55,7 @@ pub fn poll_after(server_seconds: u64) -> Duration {
 use crate::config::fetch::cache::CacheMeta;
 use crate::config::fetch::http::post_collect;
 use crate::config::fetch::request::{
-    build_oneshot_request, build_request_bytes, Conditional, ConfigRequest,
+    build_oneshot_request, build_request_bytes, Conditional, ConfigRequest, KindlingHeaders,
 };
 use crate::config::Config;
 use crate::transport::{probe::tls_wrap, DirectTransport, Transport};
@@ -396,9 +396,13 @@ async fn fetch_once_kindling(
             .connect(&env.host)
             .await
             .map_err(std::io::Error::other)?;
+        // Attribute the request to the member that actually won. The transports cannot set a header
+        // themselves — they hand back bytes and know nothing about HTTP — but the race reports the
+        // winner's name, and this is the layer where HTTP exists.
+        let attribution = KindlingHeaders::method(&conn.transport);
         if conn.is_h2() {
-            let oneshot =
-                build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
+            let oneshot = build_oneshot_request(&env.path, req, cond, attribution)
+                .map_err(std::io::Error::other)?;
             // The winner's own authority — the origin for a direct-ish member, the front's inner
             // host for a fronted one. Never unconditionally `env.host`.
             //
@@ -417,7 +421,7 @@ async fn fetch_once_kindling(
             // path are the origin's either way, since the edge re-originates by `Host`.
             // `build_request_bytes` strips CR/LF from the host for the reason above.
             let authority = conn.authority(&env.host).to_owned();
-            let bytes = build_request_bytes(&authority, &env.path, req, cond)
+            let bytes = build_request_bytes(&authority, &env.path, req, cond, attribution)
                 .map_err(std::io::Error::other)?;
             let resp = post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await?;
             Ok((resp.status, resp.etag, resp.body))
@@ -924,6 +928,7 @@ mod tests {
             "/api/v1/config-new",
             &req,
             &Conditional::default(),
+            KindlingHeaders::default(),
         )
         .expect("builds");
         let text = String::from_utf8_lossy(&bytes);
@@ -1157,8 +1162,13 @@ mod tests {
 
         // 1) flint's client.
         let req = ConfigRequest::new("probe-device".to_owned());
-        let oneshot = build_oneshot_request(&FetchEnv::prod().path, &req, &Conditional::default())
-            .expect("oneshot");
+        let oneshot = build_oneshot_request(
+            &FetchEnv::prod().path,
+            &req,
+            &Conditional::default(),
+            KindlingHeaders::default(),
+        )
+        .expect("oneshot");
         let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
         let _ = flint_kindling::h2_oneshot(tcp, "df.iantem.io", &oneshot).await;
 
@@ -1522,8 +1532,13 @@ mod tests {
         match dialer.connect_fronted(&env.host).await {
             Ok(conn) => {
                 let authority = conn.fronted_host().to_owned();
-                let oneshot = build_oneshot_request(&env.path, &req, &Conditional::default())
-                    .expect("oneshot");
+                let oneshot = build_oneshot_request(
+                    &env.path,
+                    &req,
+                    &Conditional::default(),
+                    KindlingHeaders::default(),
+                )
+                .expect("oneshot");
                 match flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot).await {
                     Ok(r) => println!(
                         "  h2       -> HTTP {} ({} body bytes)",
@@ -1540,9 +1555,14 @@ mod tests {
         match dialer.connect_fronted(&env.host).await {
             Ok(conn) => {
                 let authority = conn.fronted_host().to_owned();
-                let bytes =
-                    build_request_bytes(&authority, &env.path, &req, &Conditional::default())
-                        .expect("request bytes");
+                let bytes = build_request_bytes(
+                    &authority,
+                    &env.path,
+                    &req,
+                    &Conditional::default(),
+                    KindlingHeaders::default(),
+                )
+                .expect("request bytes");
                 match post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await {
                     Ok(r) => println!(
                         "  http/1.1 -> HTTP {} ({} body bytes)",
@@ -1608,8 +1628,13 @@ mod tests {
         let authority = conn.fronted_host().to_owned();
         println!("probe: edge accepted, inner authority = {authority}");
 
-        let oneshot = build_oneshot_request(&env.path, &req, &Conditional::default())
-            .expect("oneshot request");
+        let oneshot = build_oneshot_request(
+            &env.path,
+            &req,
+            &Conditional::default(),
+            KindlingHeaders::default(),
+        )
+        .expect("oneshot request");
         let resp = flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot)
             .await
             .expect("h2 over the fronted connection");
