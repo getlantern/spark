@@ -180,18 +180,22 @@ async fn fetch_once(
     cond: &Conditional,
     fronted: Option<&FrontedTlsDialer<FlintDnsResolver>>,
     bootstrap: Option<&FrontedBootstrap>,
-    #[cfg(feature = "proxyless")] proxyless: &flint_kindling::ProxylessTransport,
+    kindling: &flint_kindling::Kindling,
 ) -> std::io::Result<FetchOutcome> {
-    const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
-
     let mut req = ConfigRequest::new(device_id.to_string());
     req.user_id = creds.user_id.clone();
     req.pro_token = creds.pro_token.clone();
 
-    let mut attempts: Vec<FetchAttempt<'_>> = Vec::with_capacity(4);
+    let mut attempts: Vec<FetchAttempt<'_>> = Vec::with_capacity(3);
     attempts.push(Box::pin(with_outcome(
-        "direct",
-        Box::pin(fetch_once_direct(env, &req, cond, ATTEMPT_TIMEOUT)),
+        "kindling",
+        Box::pin(fetch_once_kindling(
+            env,
+            &req,
+            cond,
+            kindling,
+            ATTEMPT_TIMEOUT,
+        )),
     )));
     if let Some(dialer) = fronted {
         attempts.push(Box::pin(with_outcome(
@@ -205,18 +209,112 @@ async fn fetch_once(
             Box::pin(fetch_once_scanned(env, &req, cond, b, ATTEMPT_TIMEOUT)),
         )));
     }
-    #[cfg(feature = "proxyless")]
-    attempts.push(Box::pin(with_outcome(
-        "proxyless",
-        Box::pin(fetch_once_proxyless(
-            env,
-            &req,
-            cond,
-            proxyless,
-            ATTEMPT_TIMEOUT,
-        )),
-    )));
     first_ok(attempts).await
+}
+
+/// How long any one avenue gets before it loses the race.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ceiling on the connection-level race, so the `Kindling` avenue cannot outlive the budget
+/// [`fetch_once`] gives it. Left deliberately below [`ATTEMPT_TIMEOUT`]: the remainder is the HTTP
+/// exchange that runs *after* a connection is won, and a connect that consumed the whole window would
+/// leave nothing to send the request with.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The direct config-host dial, expressed as a [`ConnectionTransport`] so it can share one race with
+/// the other connection-level avenues instead of being a separate hand-rolled future.
+///
+/// [`ConnectionTransport`]: flint_kindling::ConnectionTransport
+struct DirectConfigTransport {
+    port: u16,
+}
+
+#[async_trait::async_trait]
+impl flint_kindling::ConnectionTransport for DirectConfigTransport {
+    type Stream = crate::BoxedStream;
+
+    fn name(&self) -> &str {
+        "direct"
+    }
+
+    async fn connect(&self, host: &str) -> std::io::Result<Self::Stream> {
+        let addr = resolve(host, self.port).await?;
+        let stream = DirectTransport::new(None).dial(addr).await?;
+        Ok(Box::new(tls_wrap(stream, host).await?))
+    }
+
+    // `connect_alpn` is deliberately NOT overridden. `fetch_connector` offers no ALPN, so nothing is
+    // negotiated and there is genuinely nothing to report — the default `None` is accurate, not a
+    // gap. Per flint's contract that means "speak the version this transport was built for", which
+    // for spark's own connector is HTTP/1.1; `fetch_once_kindling` reads it exactly that way.
+}
+
+/// Build the connection-level race: the direct dial, plus proxyless where the feature is on.
+///
+/// Both members reach the *same* origin, so this is not a diversity play the way the fronted avenues
+/// are — it is the two ways of reaching it directly, one of which brings its own resolver and wire
+/// shaping. Built once by the caller and reused, so proxyless's `StrategyCache` keeps the winning
+/// strategy across polls rather than re-searching each time.
+///
+/// The window is **derived from the members actually registered**, so every one starts together.
+/// There is no tail to stagger at this size, and holding a member back would just add its latency to
+/// the common case where the earlier one is blocked — which is the case this race exists for. Derived
+/// rather than hardcoded because the member count is already conditional (`proxyless`), and because a
+/// literal would silently start staggering the moment a third member is added.
+fn config_kindling(env: &FetchEnv) -> flint_kindling::Kindling {
+    #[cfg_attr(not(feature = "proxyless"), allow(unused_mut))]
+    let mut kindling =
+        flint_kindling::Kindling::new().with_transport(DirectConfigTransport { port: env.port });
+    #[cfg(feature = "proxyless")]
+    {
+        kindling = kindling.with_proxyless(proxyless_transport(env));
+    }
+    // `max(1)` mirrors `race_boxed`'s own floor; a zero window would never start anything.
+    let window = kindling.transport_count().max(1);
+    kindling.with_race_options(flint_kindling::RaceOptions {
+        window,
+        attempt_timeout: Some(CONNECT_TIMEOUT),
+    })
+}
+
+/// Race the connection-level avenues, then speak whichever HTTP version the winner negotiated.
+///
+/// The protocol is **read, not assumed**. The two members do not agree: `direct` goes through
+/// spark's `fetch_connector`, which sets no ALPN and so lands on HTTP/1.1, while `proxyless` goes
+/// through flint's Chrome connector, which must offer `h2,http/1.1` because ALPN is part of the JA4
+/// it exists to imitate — and the *peer* picks from that. Guessing is not a safe default here:
+/// writing HTTP/1.1 at an h2 peer does not fail like an HTTP error, it fails as a response that never
+/// terminates ("no header terminator"), which is exactly how an earlier version of the proxyless
+/// avenue was silently broken.
+async fn fetch_once_kindling(
+    env: &FetchEnv,
+    req: &ConfigRequest,
+    cond: &Conditional,
+    kindling: &flint_kindling::Kindling,
+    timeout: Duration,
+) -> std::io::Result<FetchOutcome> {
+    let (status, etag, body) = tokio::time::timeout(timeout, async {
+        let conn = kindling
+            .connect(&env.host)
+            .await
+            .map_err(std::io::Error::other)?;
+        if conn.is_h2() {
+            let oneshot =
+                build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
+            // The real host is the authority — unlike the fronted avenue, there is no decoy.
+            let resp = flint_kindling::h2_oneshot(conn.stream, &env.host, &oneshot).await?;
+            let etag = resp.header("etag").map(ToOwned::to_owned);
+            Ok::<_, std::io::Error>((resp.status, etag, resp.body))
+        } else {
+            let bytes = build_request_bytes(&env.host, &env.path, req, cond)
+                .map_err(std::io::Error::other)?;
+            let resp = post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await?;
+            Ok((resp.status, resp.etag, resp.body))
+        }
+    })
+    .await
+    .map_err(|_| std::io::Error::other("config-new kindling fetch timed out"))??;
+    map_response(status, etag, body)
 }
 
 /// Wrap one avenue's fetch future so its outcome (ok / not_modified / error) and
@@ -253,68 +351,6 @@ fn outcome_label(r: &std::io::Result<FetchOutcome>) -> &'static str {
         Ok(FetchOutcome::NotModified) => "not_modified",
         Err(_) => "error",
     }
-}
-
-/// The direct path: dial the API host directly, plain-boring TLS-wrap, send the HTTP/1.1 request, and
-/// collect the response. Bounded by `timeout` (`post_collect` reads to EOF with no internal timeout).
-async fn fetch_once_direct(
-    env: &FetchEnv,
-    req: &ConfigRequest,
-    cond: &Conditional,
-    timeout: Duration,
-) -> std::io::Result<FetchOutcome> {
-    let bytes =
-        build_request_bytes(&env.host, &env.path, req, cond).map_err(std::io::Error::other)?;
-    let resp = tokio::time::timeout(timeout, async {
-        let addr = resolve(&env.host, env.port).await?;
-        let stream = DirectTransport::new(None).dial(addr).await?;
-        let tls = tls_wrap(stream, &env.host).await?;
-        post_collect(tls, &bytes, 4 * 1024 * 1024).await
-    })
-    .await
-    .map_err(|_| std::io::Error::other("config-new direct fetch timed out"))??;
-    map_response(resp.status, resp.etag, resp.body)
-}
-
-/// The proxyless path: reach config-new with **no proxy and no exit hop**, by searching for an
-/// un-poisoned resolver plus opening-handshake shaping this network does not block (ADR 0014).
-///
-/// Why it belongs in this race: the other three avenues are all TLS-over-TCP/443 to a CDN or origin —
-/// two of them the same technique with different edge lists — so they share a failure mode. A network
-/// that poisons DNS or classifies the ClientHello takes out all three at once. Proxyless is the only
-/// member that brings its own resolver *and* its own wire shaping, so it fails independently. It also
-/// costs no infrastructure and burns no fronting domains, which makes it free to lose on an open
-/// network where `direct` wins.
-///
-/// **It speaks h2, not HTTP/1.1.** The connection arrives already TLS-handshaked by flint's Chrome
-/// connector, which offers `h2,http/1.1` (`flint-tls/src/connector.rs`) because ALPN is part of the
-/// JA4 this transport exists to imitate. A modern origin therefore selects h2, and writing HTTP/1.1
-/// onto that connection gets no valid response at all — it fails as "no header terminator" rather
-/// than as an HTTP error, which is exactly how a first version of this avenue was silently broken.
-/// Speaking HTTP/1.1 after a Chrome ClientHello would also be a fingerprint anomaly in its own right,
-/// so the correct protocol and the convincing one are the same. `direct` differs because spark's own
-/// `fetch_connector` sets no ALPN, leaving HTTP/1.1 as the default.
-#[cfg(feature = "proxyless")]
-async fn fetch_once_proxyless(
-    env: &FetchEnv,
-    req: &ConfigRequest,
-    cond: &Conditional,
-    transport: &flint_kindling::ProxylessTransport,
-    timeout: Duration,
-) -> std::io::Result<FetchOutcome> {
-    let oneshot = build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
-    let resp = tokio::time::timeout(timeout, async {
-        // `ConnectionTransport` in scope only here: it provides `connect`, and a local import cannot
-        // collide with spark's own `Transport` trait.
-        use flint_kindling::ConnectionTransport as _;
-        let stream = transport.connect(&env.host).await?;
-        // The real host is the authority — unlike the fronted avenue, there is no decoy to address.
-        flint_kindling::h2_oneshot(stream, &env.host, &oneshot).await
-    })
-    .await
-    .map_err(|_| std::io::Error::other("config-new proxyless fetch timed out"))??;
-    let etag = resp.header("etag").map(ToOwned::to_owned);
-    map_response(resp.status, etag, resp.body)
 }
 
 /// Strict upper bound on candidates a single cold proxyless search will try, so its worst case is
@@ -522,12 +558,11 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
         Err(e) => return cached_or_err(cached, e),
     };
     // Unconditional fetch (no If-None-Match): every connect pulls the current config and overwrites.
-    // Race the direct request against both fronted avenues (embedded list + vantage-point scanner) for
-    // censored cold-start resilience.
+    // Race the connection-level avenues (direct + proxyless) against both fronted avenues (embedded
+    // list + vantage-point scanner) for censored cold-start resilience.
     let fronted = fronted_dialer();
     let bootstrap = fronted_bootstrap(env, seed_from_device_id(&did));
-    #[cfg(feature = "proxyless")]
-    let proxyless = proxyless_transport(env);
+    let kindling = config_kindling(env);
     match fetch_once(
         env,
         &did,
@@ -535,8 +570,7 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
         &Conditional::default(),
         fronted.as_ref(),
         Some(&bootstrap),
-        #[cfg(feature = "proxyless")]
-        &proxyless,
+        &kindling,
     )
     .await
     {
@@ -624,10 +658,9 @@ where
     // the vantage-point scanner (whose winning-front cache then persists for the loop's lifetime).
     let fronted = fronted_dialer();
     let bootstrap = fronted_bootstrap(env, seed_from_device_id(&did));
-    // Built once and reused for the loop's lifetime, so the strategy cache keeps the winning
+    // Built once and reused for the loop's lifetime, so proxyless's strategy cache keeps the winning
     // resolver+shaping pair rather than re-searching on every poll.
-    #[cfg(feature = "proxyless")]
-    let proxyless = proxyless_transport(env);
+    let kindling = config_kindling(env);
     let mut fail = 0u32;
     while !should_stop() {
         match fetch_once(
@@ -637,8 +670,7 @@ where
             &cond,
             fronted.as_ref(),
             Some(&bootstrap),
-            #[cfg(feature = "proxyless")]
-            &proxyless,
+            &kindling,
         )
         .await
         {
@@ -1162,7 +1194,15 @@ mod tests {
     #[ignore = "live: needs network"]
     async fn live_proxyless_fetch() {
         let env = FetchEnv::prod();
-        let transport = proxyless_transport(&env);
+        // A Kindling holding ONLY proxyless. Pointing this at `config_kindling` would test the race,
+        // not the member: on any open network `direct` wins, and a proxyless avenue that had stopped
+        // working entirely would still show green.
+        let kindling = flint_kindling::Kindling::new()
+            .with_race_options(flint_kindling::RaceOptions {
+                window: 1,
+                attempt_timeout: Some(CONNECT_TIMEOUT),
+            })
+            .with_proxyless(proxyless_transport(&env));
         let dir = std::env::temp_dir().join("spark-live-proxyless");
         // Deliberately NOT wiped. `device_id` and `ensure_user` cache credentials here, and
         // wiping mints a brand-new user on every run — enough repeated runs and `user-create`
@@ -1175,12 +1215,12 @@ mod tests {
         let mut req = ConfigRequest::new(did);
         req.user_id = creds.user_id.clone();
         req.pro_token = creds.pro_token.clone();
-        let outcome = fetch_once_proxyless(
+        let outcome = fetch_once_kindling(
             &env,
             &req,
             &Conditional::default(),
-            &transport,
-            Duration::from_secs(30),
+            &kindling,
+            ATTEMPT_TIMEOUT,
         )
         .await
         .expect("proxyless config-new fetch");
@@ -1194,7 +1234,119 @@ mod tests {
             }
             FetchOutcome::NotModified => panic!("unexpected 304 on unconditional proxyless fetch"),
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        // NOT wiped — see the comment above. Removing the dir here would undo the credential reuse
+        // it exists for, minting a fresh user on the next run after all.
+    }
+
+    /// The race as it actually ships, rather than one member of it.
+    ///
+    /// `live_proxyless_fetch` deliberately isolates proxyless; this covers the composed avenue —
+    /// whichever member wins, the ALPN dispatch must pick an HTTP version that yields a usable body.
+    ///
+    /// Live: `cargo test -p spark-core --lib --features prod -- --ignored live_kindling_fetch`
+    #[tokio::test]
+    #[ignore = "live: needs network"]
+    async fn live_kindling_fetch() {
+        let env = FetchEnv::prod();
+        let kindling = config_kindling(&env);
+        let dir = std::env::temp_dir().join("spark-live-kindling");
+        // Not wiped, for the same credential-reuse reason as `live_proxyless_fetch`.
+        let did = device_id(&dir).expect("device id");
+        let creds = user::ensure_user(&dir, &env.pro_host, &env.pro_path)
+            .await
+            .expect("user-create");
+        let mut req = ConfigRequest::new(did);
+        req.user_id = creds.user_id.clone();
+        req.pro_token = creds.pro_token.clone();
+        let outcome = fetch_once_kindling(
+            &env,
+            &req,
+            &Conditional::default(),
+            &kindling,
+            ATTEMPT_TIMEOUT,
+        )
+        .await
+        .expect("kindling config-new fetch");
+        match outcome {
+            FetchOutcome::New { raw, .. } => {
+                let cfg = Config::from_config_str(&raw).expect("adapt kindling config");
+                assert!(
+                    !cfg.transport.servers.is_empty(),
+                    "kindling fetch should return a pool"
+                );
+            }
+            FetchOutcome::NotModified => panic!("unexpected 304 on unconditional fetch"),
+        }
+    }
+
+    /// **Diagnostic, not a test of spark.** Reports which member won and what it negotiated, so the
+    /// dispatch in [`fetch_once_kindling`] can be checked against reality rather than reasoned about.
+    /// Expect `direct`/(no ALPN) on an open network — proxyless is meant to lose there.
+    ///
+    /// `cargo test -p spark-core --lib --features prod -- --ignored --nocapture which_member_wins`
+    #[tokio::test]
+    #[ignore = "diagnostic: needs network"]
+    async fn which_member_wins() {
+        let env = FetchEnv::prod();
+        let kindling = config_kindling(&env);
+        for attempt in 1..=3 {
+            match kindling.connect(&env.host).await {
+                Ok(conn) => println!(
+                    "  attempt {attempt}: winner={:<10} alpn={:<10} -> {}",
+                    conn.transport,
+                    conn.alpn
+                        .as_deref()
+                        .map(|a| String::from_utf8_lossy(a).into_owned())
+                        .unwrap_or_else(|| "(none)".into()),
+                    if conn.is_h2() {
+                        "h2_oneshot"
+                    } else {
+                        "HTTP/1.1"
+                    }
+                ),
+                Err(e) => println!("  attempt {attempt}: all members failed: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_direct_member_is_named_for_the_race_error_message() {
+        use flint_kindling::ConnectionTransport as _;
+        assert_eq!(DirectConfigTransport { port: 443 }.name(), "direct");
+    }
+
+    /// Pins the member count the race window is derived from — `direct` always, plus `proxyless`
+    /// where the feature is on. The window itself is not publicly readable off `Kindling`, so this
+    /// asserts the input to that one-line derivation rather than the window.
+    ///
+    /// The point is that a `config-fetch`-only build still gets a working single-member race, and
+    /// that adding a member later changes the window with it instead of leaving a stale literal.
+    #[test]
+    fn the_race_has_one_member_per_enabled_avenue() {
+        let members = config_kindling(&FetchEnv::prod()).transport_count();
+        let expected = if cfg!(feature = "proxyless") { 2 } else { 1 };
+        assert_eq!(members, expected, "member count drives the race window");
+    }
+
+    /// The contract [`fetch_once_kindling`] dispatches on: spark's `fetch_connector` offers no ALPN,
+    /// so the direct member negotiates nothing and reports `None`, which the dispatch reads as
+    /// HTTP/1.1. Asserting this needs a real handshake — a failed connect would report `None` too,
+    /// and would prove nothing.
+    ///
+    /// Live: `cargo test -p spark-core --lib --features prod -- --ignored direct_member_negotiates_no_alpn`
+    #[tokio::test]
+    #[ignore = "live: needs network"]
+    async fn direct_member_negotiates_no_alpn() {
+        use flint_kindling::ConnectionTransport as _;
+        let env = FetchEnv::prod();
+        let (_stream, alpn) = DirectConfigTransport { port: env.port }
+            .connect_alpn(&env.host)
+            .await
+            .expect("direct dial to the config host");
+        assert_eq!(
+            alpn, None,
+            "fetch_connector sets no ALPN; if this changes, the HTTP/1.1 branch is wrong"
+        );
     }
 
     /// Which protocol does a fronted edge actually speak? **It varies per connection**, which is the
