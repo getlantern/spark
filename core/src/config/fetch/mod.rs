@@ -484,6 +484,13 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 
 /// Build the proxyless race member.
 ///
+/// **Both axes.** Proxyless is documented as a search over `DNS strategy × TLS strategy`, and the
+/// `Space` has carried a `wires` axis since flint#14 — but this space populated only the resolver
+/// half, so it searched `resolvers × {no-op}` and could never defeat a censor that reads the
+/// ClientHello. The two failures are genuinely different: a poisoned resolver is beaten by asking a
+/// different resolver, and SNI-based blocking is beaten by making the SNI unreadable. Searching one
+/// axis leaves the other class of network unreachable.
+///
 /// **Bounded on purpose.** The first connection on a new network is a *search*, not a dial — flint's
 /// own docs flag the interaction with an attempt timeout — and this race gives every avenue 30s. An
 /// unbounded search would simply spend that budget and lose, so the candidate count is capped: enough
@@ -494,11 +501,42 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
     flint_kindling::ProxylessTransport::new(
         flint_kindling::Space::new(flint_dns::default_pool())
-            .with_roots(crate::transport::probe::webpki_roots_pem()),
+            .with_roots(crate::transport::probe::webpki_roots_pem())
+            // `Space::new` seeds `wires[0]` with the no-op plan, and enumeration is wire-major, so
+            // every resolver is tried unshaped *first* — a network that needs no shaping still settles
+            // at the cheapest end of the space and pays nothing for this.
+            .with_wire(sni_straddle_plan()),
         "config-fetch",
     )
     .with_port(env.port)
     .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
+}
+
+/// The one shaping plan the bootstrap search carries beyond "no shaping".
+///
+/// `SniStraddle` splits the ClientHello into two TLS records cut so the SNI host value spans the
+/// boundary. That targets the specific, common censor that parses a single TLS record to extract the
+/// SNI and does not reassemble across records — the dominant TLS-layer blocking technique, and the
+/// one thing a resolver swap cannot help with.
+///
+/// **Exactly one plan, deliberately.** `with_max_candidates` trims resolvers before wire plans, so
+/// each added plan costs resolver diversity under the same cap: at 8, one plan leaves 8 resolvers,
+/// two leaves 4, three leaves 2. Two is the balance — 4 resolvers × 2 plans is 8 candidates, whose
+/// worst case (`5s stale-cache retry + ceil(8/4) × 5s`) is 15s, inside [`CONNECT_TIMEOUT`] with
+/// margin. A third plan needs the cap raised to 12, which lands *exactly* on the 20s timeout — the
+/// boundary flint's own docs warn about, where the search is cancelled precisely when it would have
+/// cached a winner.
+///
+/// It falls back to no fragmentation when the buffer carries no locatable SNI, so it is never worse
+/// than the no-op plan it sits beside.
+#[cfg(feature = "proxyless")]
+fn sni_straddle_plan() -> flint_shaping::WirePlan {
+    flint_shaping::WirePlan {
+        record_fragment: flint_shaping::RecordFragment::SniStraddle,
+        // Layer C left alone: this plan is about record framing, and mixing in segment splitting
+        // would make a failure ambiguous between the two mechanisms.
+        ..Default::default()
+    }
 }
 
 /// Map an HTTP status + `ETag` + body into a [`FetchOutcome`] (shared by the direct and fronted paths).
@@ -1031,6 +1069,62 @@ mod tests {
     /// pool, so a pool that shrinks (or a constant someone raises) fails here rather than silently
     /// becoming unbounded. It does *not* re-test that flint honours `with_max_candidates` — that is
     /// flint's own invariant and it tests it.
+    /// The bootstrap search must cover **both** axes. It searched only resolvers for a long time —
+    /// the `wires` axis existed in the `Space` and was never populated — which left every
+    /// SNI-blocking network unreachable no matter how many resolvers were tried.
+    #[cfg(feature = "proxyless")]
+    #[test]
+    fn the_proxyless_space_searches_shaping_as_well_as_resolvers() {
+        use flint_shaping::RecordFragment;
+
+        let plan = sni_straddle_plan();
+        assert!(
+            matches!(plan.record_fragment, RecordFragment::SniStraddle),
+            "the added plan must fragment records, not merely split segments — a resolver swap \
+             already covers what segment splitting alone would add here"
+        );
+        assert!(!plan.is_noop(), "a no-op plan would silently add nothing");
+
+        // Two plans, no more: `with_max_candidates` trims resolvers first, so each extra plan is
+        // paid for in resolver diversity. See `sni_straddle_plan` for the arithmetic.
+        let space = flint_kindling::Space::new(flint_dns::default_pool()).with_wire(plan);
+        assert_eq!(
+            space.wires.len(),
+            2,
+            "no-op plan plus exactly one shaping plan"
+        );
+    }
+
+    /// The cap and the plan count interact, and the failure mode is silent: adding a third plan
+    /// under a cap of 8 quietly drops the search to **2 resolvers**, gutting the axis that handles
+    /// DNS poisoning in order to add one that handles SNI blocking.
+    ///
+    /// Pins the resulting split so that trade has to be made deliberately.
+    #[cfg(feature = "proxyless")]
+    #[test]
+    fn adding_a_shaping_plan_does_not_gut_resolver_diversity() {
+        let wires = flint_kindling::Space::new(flint_dns::default_pool())
+            .with_wire(sni_straddle_plan())
+            .wires
+            .len();
+        let resolvers_searched = PROXYLESS_MAX_CANDIDATES / wires;
+        assert_eq!(
+            (wires, resolvers_searched),
+            (2, 4),
+            "expected 4 resolvers x 2 plans; a third plan needs the cap raised (see sni_straddle_plan)"
+        );
+
+        // Worst case must stay inside the connect budget: a stale cached winner costs one 5s attempt
+        // before the search starts, then ceil(candidates / PROBE_WINDOW) x 5s.
+        let candidates = resolvers_searched * wires;
+        let worst = std::time::Duration::from_secs(5 + 5 * candidates.div_ceil(4) as u64);
+        assert!(
+            worst < CONNECT_TIMEOUT,
+            "worst-case search {worst:?} must finish inside {CONNECT_TIMEOUT:?} with margin, or the \
+             race cancels it exactly when it would have cached a winner"
+        );
+    }
+
     #[cfg(feature = "proxyless")]
     #[test]
     fn the_proxyless_member_searches_a_bounded_space() {
