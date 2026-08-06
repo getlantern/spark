@@ -503,8 +503,18 @@ impl Default for TransportConfig {
     }
 }
 
-/// Opening-handshake framing/timing (ADR 0006 Phase 1, genome Layer C). Shapes only the opening
-/// write (the ClientHello); a default value does nothing.
+/// Opening-handshake framing/timing (ADR 0006 Phase 1, genome Layers B and C). Shapes only the
+/// opening write (the ClientHello); a default value does nothing.
+///
+/// The two layers cut the *same* ClientHello at different levels and defeat different censors, so
+/// they are independent knobs rather than alternatives:
+///
+/// * **Layer C** ([`segment_split`](Self::segment_split)) moves TCP segment boundaries — beats a
+///   censor that matches SNI within a single segment.
+/// * **Layer B** ([`record_fragment`](Self::record_fragment)) moves TLS *record* boundaries — beats a
+///   censor that parses one record and does not reassemble across them.
+///
+/// Setting both is normal and costs nothing extra; one write carries both.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShapingConfig {
@@ -516,6 +526,14 @@ pub struct ShapingConfig {
     pub delay_ms: Option<u64>,
     /// Set `TCP_NODELAY` so each flushed segment leaves as its own packet.
     pub tcp_nodelay: bool,
+    /// How to fragment the ClientHello across TLS records (Layer B):
+    ///
+    /// * `"none"` — one record (the default).
+    /// * `"sni_straddle"` — two records cut so the SNI host value spans the boundary. Falls back to
+    ///   one record when the write carries no locatable SNI, so it is never worse than `"none"`.
+    /// * `"chunks:N"` — records of at most `N` payload bytes each.
+    /// * comma-separated offsets (e.g. `"700,1400"`) — a record boundary at each payload offset.
+    pub record_fragment: String,
 }
 
 impl Default for ShapingConfig {
@@ -524,6 +542,7 @@ impl Default for ShapingConfig {
             segment_split: "none".to_owned(),
             delay_ms: None,
             tcp_nodelay: true,
+            record_fragment: "none".to_owned(),
         }
     }
 }
@@ -1164,6 +1183,7 @@ mod tests {
                         segment_split: "sni_boundary".into(),
                         delay_ms: Some(12),
                         tcp_nodelay: true,
+                        record_fragment: "sni_straddle".into(),
                     },
                     servers: Vec::new(),
                     callback_url: None,
