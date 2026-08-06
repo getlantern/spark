@@ -55,7 +55,7 @@ pub fn poll_after(server_seconds: u64) -> Duration {
 use crate::config::fetch::cache::CacheMeta;
 use crate::config::fetch::http::post_collect;
 use crate::config::fetch::request::{
-    build_oneshot_request, build_request_bytes, Conditional, ConfigRequest,
+    build_oneshot_request, build_request_bytes, Conditional, ConfigRequest, KindlingHeaders,
 };
 use crate::config::Config;
 use crate::transport::{probe::tls_wrap, DirectTransport, Transport};
@@ -392,13 +392,22 @@ async fn fetch_once_kindling(
     timeout: Duration,
 ) -> std::io::Result<FetchOutcome> {
     let (status, etag, body) = tokio::time::timeout(timeout, async {
+        // `io::Error::from`, not `io::Error::other`: the race preserves the `ErrorKind` when every
+        // member reported the same one, and `other` would flatten that back to `Other`. "They all
+        // timed out" says the path is blackholed; "they failed five different ways" says the members
+        // failed for their own reasons. Consolidating the avenues into the race lost that distinction
+        // once already (#162) — this is what restores it.
         let conn = kindling
             .connect(&env.host)
             .await
-            .map_err(std::io::Error::other)?;
+            .map_err(std::io::Error::from)?;
+        // Attribute the request to the member that actually won. The transports cannot set a header
+        // themselves — they hand back bytes and know nothing about HTTP — but the race reports the
+        // winner's name, and this is the layer where HTTP exists.
+        let attribution = KindlingHeaders::method(&conn.transport);
         if conn.is_h2() {
-            let oneshot =
-                build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
+            let oneshot = build_oneshot_request(&env.path, req, cond, attribution)
+                .map_err(std::io::Error::other)?;
             // The winner's own authority — the origin for a direct-ish member, the front's inner
             // host for a fronted one. Never unconditionally `env.host`.
             //
@@ -417,7 +426,7 @@ async fn fetch_once_kindling(
             // path are the origin's either way, since the edge re-originates by `Host`.
             // `build_request_bytes` strips CR/LF from the host for the reason above.
             let authority = conn.authority(&env.host).to_owned();
-            let bytes = build_request_bytes(&authority, &env.path, req, cond)
+            let bytes = build_request_bytes(&authority, &env.path, req, cond, attribution)
                 .map_err(std::io::Error::other)?;
             let resp = post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await?;
             Ok((resp.status, resp.etag, resp.body))
@@ -892,6 +901,56 @@ mod tests {
         assert!(msg.contains("all 4"), "and how many failed: {msg}");
     }
 
+    /// The unanimous `ErrorKind` must survive all the way out of `fetch_once_kindling`, not merely
+    /// out of flint's race. `io::Error::other` at the `map_err` would flatten it to `Other` and this
+    /// is the only thing that would notice — which is how the distinction was lost in #162.
+    #[tokio::test]
+    async fn a_unanimous_member_failure_keeps_its_kind_through_the_fetch() {
+        use flint_kindling::ConnectionTransport;
+
+        struct Dead;
+
+        #[async_trait::async_trait]
+        impl ConnectionTransport for Dead {
+            type Stream = crate::BoxedStream;
+
+            fn name(&self) -> &str {
+                "dead"
+            }
+
+            async fn connect(&self, _host: &str) -> std::io::Result<Self::Stream> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "blackholed",
+                ))
+            }
+        }
+
+        let kindling = flint_kindling::Kindling::new()
+            .with_race_options(flint_kindling::RaceOptions {
+                window: 2,
+                attempt_timeout: None,
+            })
+            .with_transport(Dead)
+            .with_transport(Dead);
+        let env = FetchEnv::prod();
+        let err = fetch_once_kindling(
+            &env,
+            &ConfigRequest::new("dev".into()),
+            &Conditional::default(),
+            &kindling,
+            ATTEMPT_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+        .expect_err("every member failed");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "a blackholed path must not be reported as a generic failure: {err}"
+        );
+    }
+
     /// A race with no members is a programming error, not a blocked network, and must not read as one.
     #[tokio::test]
     async fn no_members_is_distinguishable_from_every_member_failing() {
@@ -924,6 +983,7 @@ mod tests {
             "/api/v1/config-new",
             &req,
             &Conditional::default(),
+            KindlingHeaders::default(),
         )
         .expect("builds");
         let text = String::from_utf8_lossy(&bytes);
@@ -1157,8 +1217,13 @@ mod tests {
 
         // 1) flint's client.
         let req = ConfigRequest::new("probe-device".to_owned());
-        let oneshot = build_oneshot_request(&FetchEnv::prod().path, &req, &Conditional::default())
-            .expect("oneshot");
+        let oneshot = build_oneshot_request(
+            &FetchEnv::prod().path,
+            &req,
+            &Conditional::default(),
+            KindlingHeaders::default(),
+        )
+        .expect("oneshot");
         let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
         let _ = flint_kindling::h2_oneshot(tcp, "df.iantem.io", &oneshot).await;
 
@@ -1522,8 +1587,13 @@ mod tests {
         match dialer.connect_fronted(&env.host).await {
             Ok(conn) => {
                 let authority = conn.fronted_host().to_owned();
-                let oneshot = build_oneshot_request(&env.path, &req, &Conditional::default())
-                    .expect("oneshot");
+                let oneshot = build_oneshot_request(
+                    &env.path,
+                    &req,
+                    &Conditional::default(),
+                    KindlingHeaders::default(),
+                )
+                .expect("oneshot");
                 match flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot).await {
                     Ok(r) => println!(
                         "  h2       -> HTTP {} ({} body bytes)",
@@ -1540,9 +1610,14 @@ mod tests {
         match dialer.connect_fronted(&env.host).await {
             Ok(conn) => {
                 let authority = conn.fronted_host().to_owned();
-                let bytes =
-                    build_request_bytes(&authority, &env.path, &req, &Conditional::default())
-                        .expect("request bytes");
+                let bytes = build_request_bytes(
+                    &authority,
+                    &env.path,
+                    &req,
+                    &Conditional::default(),
+                    KindlingHeaders::default(),
+                )
+                .expect("request bytes");
                 match post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await {
                     Ok(r) => println!(
                         "  http/1.1 -> HTTP {} ({} body bytes)",
@@ -1608,8 +1683,13 @@ mod tests {
         let authority = conn.fronted_host().to_owned();
         println!("probe: edge accepted, inner authority = {authority}");
 
-        let oneshot = build_oneshot_request(&env.path, &req, &Conditional::default())
-            .expect("oneshot request");
+        let oneshot = build_oneshot_request(
+            &env.path,
+            &req,
+            &Conditional::default(),
+            KindlingHeaders::default(),
+        )
+        .expect("oneshot request");
         let resp = flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot)
             .await
             .expect("h2 over the fronted connection");
