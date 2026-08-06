@@ -279,8 +279,10 @@ impl flint_kindling::ConnectionTransport for DnsTunnelConfigTransport {
     }
 
     async fn connect(&self, host: &str) -> std::io::Result<Self::Stream> {
+        // The `HeaderError` goes in whole rather than stringified, so it survives as `source()`.
+        // Safe for log hygiene: every variant reports a length or a byte, never the host itself.
         let target = crate::transport::Address::domain(host, self.port)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let stream = self.tunnel.dial_addr(target).await?;
         Ok(Box::new(tls_wrap(stream, host).await?))
     }
