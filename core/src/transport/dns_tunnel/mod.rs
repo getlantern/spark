@@ -37,7 +37,7 @@ use dns_tunnel_core::session::{self, AnswerOutcome, ClientSession, PRIMARY_STREA
 
 use crate::net::SocketProtector;
 use crate::transport::{
-    protected_udp_socket, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport,
+    protected_udp_socket, Address, BoxedPacketSink, BoxedPacketSource, Transport, UdpTransport,
 };
 use crate::BoxedStream;
 
@@ -63,7 +63,7 @@ const IDLE_GRACE_MS: u64 = 3_000;
 /// its app-facing duplex (the pump splits it into a downlink writer + an uplink reader task).
 enum Ctl {
     Open {
-        target: SocketAddr,
+        target: Address,
         pump_side: DuplexStream,
     },
 }
@@ -128,20 +128,17 @@ impl DnsTunnelTransport {
     /// stream together with the handle to store. Called on the first dial (or after an idle teardown).
     fn spawn_session(
         &self,
-        target: SocketAddr,
+        target: Address,
         app_side: DuplexStream,
         pump_side: DuplexStream,
     ) -> io::Result<(BoxedStream, SessionHandle)> {
         let i = &self.inner;
         let pool = ResolverPool::parse(&i.resolvers, i.pool_cfg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-        let session = ClientSession::new(
-            &i.server_pub,
-            &i.zone,
-            &encode_target(&target),
-            i.cfg.clone(),
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let encoded = encode_target(&target)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("dns-tunnel: {e}")))?;
+        let session = ClientSession::new(&i.server_pub, &i.zone, &encoded, i.cfg.clone())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         // One protector-pinned, *unconnected* UDP socket (so its own packets bypass the tunnel route);
         // the pump `send_to`s the picked resolvers. Family follows a representative resolver.
         let sock = protected_udp_socket(pool.any_addr(), i.protector.as_ref())?;
@@ -154,33 +151,62 @@ impl DnsTunnelTransport {
     }
 }
 
-/// Encode a target `SocketAddr` as SOCKS5 address bytes (`ATYP ‖ addr ‖ port`) — the opaque payload the
-/// SYN carries for the server to dial.
-fn encode_target(addr: &SocketAddr) -> Vec<u8> {
-    let mut v = Vec::with_capacity(19);
-    match addr {
-        SocketAddr::V4(a) => {
-            v.push(0x01);
-            v.extend_from_slice(&a.ip().octets());
+/// Encode a target as the SYN's opaque payload, via the codec **shared with the server**
+/// ([`dns_tunnel_core::addr`]).
+///
+/// Deliberately not hand-rolled here. The client used to carry its own encoder and the server its own
+/// decoder, which is how a format that always allowed `ATYP 0x03` ended up with no way to send a
+/// domain: neither side implemented the case, and nothing tested that they agreed.
+///
+/// A domain is **resolved by the exit**. The name never reaches a resolver on this side, so a network
+/// that poisons DNS cannot touch the destination lookup — which is the reason to be in a DNS tunnel at
+/// all. It is also strictly cheaper than the alternative, since the client would otherwise have to
+/// learn the address before dialing.
+fn encode_target(addr: &Address) -> Result<Vec<u8>, dns_tunnel_core::addr::AddrError> {
+    let target = match addr {
+        Address::Ip(sa) => dns_tunnel_core::addr::Target::Ip(*sa),
+        Address::Domain { host, port } => {
+            dns_tunnel_core::addr::Target::Domain(host.clone(), *port)
         }
-        SocketAddr::V6(a) => {
-            v.push(0x04);
-            v.extend_from_slice(&a.ip().octets());
-        }
-    }
-    v.extend_from_slice(&addr.port().to_be_bytes());
-    v
+    };
+    dns_tunnel_core::addr::encode(&target)
 }
 
 #[async_trait]
 impl Transport for DnsTunnelTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        self.dial_addr(Address::Ip(target)).await
+    }
+
+    /// Carries a **domain** to the exit, which resolves it there.
+    ///
+    /// Overriding this is what makes the dns-tunnel usable for bootstrap. The default rejects domains
+    /// as `Unsupported`, forcing the caller to resolve locally first — on a network whose DNS is
+    /// exactly what this transport exists to route around. The SYN's SOCKS5 payload already had a
+    /// `DOMAINNAME` form; the client simply never emitted it.
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        // Reject an unencodable target before taking the session lock or building a duplex — a
+        // too-long name cannot be fixed by retrying, and truncating it would dial a *different* host.
+        // The destination is deliberately absent from the message (GOAL.md log hygiene: never log
+        // destination IPs/hostnames by default). `AddrError` names the defect — "domain is 300 bytes,
+        // over the 255-byte wire limit" — which is the whole diagnostic; the host adds nothing but
+        // exposure, and an `io::Error` message travels wherever the caller decides to log it.
+        if let Err(e) = encode_target(&target) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("dns-tunnel: cannot carry this target: {e}"),
+            ));
+        }
         let (app_side, pump_side) = tokio::io::duplex(DUPLEX_BUF);
         let mut guard = self.inner.session.lock().await;
 
         // Attach to the live session if one is running: hand the pump an Open for a new stream.
         if let Some(h) = guard.as_ref() {
-            match h.ctl_tx.send(Ctl::Open { target, pump_side }).await {
+            let open = Ctl::Open {
+                target: target.clone(),
+                pump_side,
+            };
+            match h.ctl_tx.send(open).await {
                 Ok(()) => return Ok(Box::new(app_side)),
                 // The pump has exited (idle teardown / fatal): recover the duplex from the failed
                 // send and rebuild a fresh session below, with this dial as the primary stream.
@@ -245,7 +271,16 @@ fn open_stream_io(
     up_tx: &mpsc::Sender<Up>,
 ) {
     let Ctl::Open { target, pump_side } = ctl;
-    let sid = session.open_stream(&encode_target(&target));
+    // `dial_addr` rejects an unencodable target before it can reach the pump, so this cannot fail
+    // here. Dropping the Open is still the right fallback: the caller's duplex closes and it sees
+    // EOF, rather than the pump opening a stream to a target it could not name.
+    //
+    // Logs the defect, never the destination — GOAL.md log hygiene.
+    let Ok(encoded) = encode_target(&target) else {
+        tracing::debug!("dns-tunnel: unencodable target reached the pump, dropping stream");
+        return;
+    };
+    let sid = session.open_stream(&encoded);
     let (rd, wr) = tokio::io::split(pump_side);
     writers.insert(sid, wr);
     readers.insert(sid, tokio::spawn(stream_reader(sid, rd, up_tx.clone())));
@@ -476,6 +511,48 @@ mod tests {
     use dns_tunnel_core::crypto::{server_public_from_pkcs8, ServerStatic};
     use dns_tunnel_core::session::{Config as SessCfg, Server};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A domain target must survive as a *domain* on the wire. The byte layout is covered by
+    /// `dns_tunnel_core::addr`; what is spark's to get wrong is the `Address` → `Target` mapping —
+    /// quietly turning a domain into something else here would put the client back to resolving
+    /// locally, which is the failure this transport exists to avoid.
+    #[test]
+    fn a_domain_target_reaches_the_wire_as_a_domain() {
+        let encoded = encode_target(&Address::Domain {
+            host: "df.iantem.io".into(),
+            port: 443,
+        })
+        .expect("encodes");
+        assert_eq!(
+            dns_tunnel_core::addr::parse(&encoded).unwrap(),
+            dns_tunnel_core::addr::Target::Domain("df.iantem.io".into(), 443)
+        );
+    }
+
+    #[test]
+    fn ip_targets_still_encode_as_ip() {
+        for s in ["1.2.3.4:443", "[2606:4700::1111]:853"] {
+            let sa: SocketAddr = s.parse().unwrap();
+            let encoded = encode_target(&Address::Ip(sa)).expect("encodes");
+            assert_eq!(
+                dns_tunnel_core::addr::parse(&encoded).unwrap(),
+                dns_tunnel_core::addr::Target::Ip(sa)
+            );
+        }
+    }
+
+    /// `Address::Domain` is a public variant with public fields, so it can be built without going
+    /// through `Address::domain`'s validation. The encoder must still refuse rather than truncate the
+    /// length byte into a *different* hostname.
+    #[test]
+    fn an_over_long_domain_is_refused_not_truncated() {
+        let err = encode_target(&Address::Domain {
+            host: "x".repeat(256),
+            port: 443,
+        })
+        .expect_err("must not encode");
+        assert_eq!(err, dns_tunnel_core::addr::AddrError::DomainTooLong(256));
+    }
 
     /// A fresh server identity (PKCS#8 private key) + its 32-byte public key, for tests: the private
     /// key goes to the in-test server, the public key to the transport.

@@ -4,29 +4,13 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use dns_tunnel_core::addr::{self, Target};
 use dns_tunnel_core::arq;
 use dns_tunnel_core::crypto::{server_public_from_pkcs8, ServerStatic};
 use dns_tunnel_core::session::{ClientSession, Config};
 use dns_tunnel_server::{serve, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
-
-/// SOCKS5 address bytes (`ATYP ‖ addr ‖ port`) — matches the client transport's encoding.
-fn encode_target(a: &SocketAddr) -> Vec<u8> {
-    let mut v = Vec::new();
-    match a {
-        SocketAddr::V4(x) => {
-            v.push(1);
-            v.extend_from_slice(&x.ip().octets());
-        }
-        SocketAddr::V6(x) => {
-            v.push(4);
-            v.extend_from_slice(&x.ip().octets());
-        }
-    }
-    v.extend_from_slice(&a.port().to_be_bytes());
-    v
-}
 
 /// A real TCP echo server.
 async fn tcp_echo() -> SocketAddr {
@@ -65,13 +49,30 @@ fn test_cfg() -> Config {
     }
 }
 
+/// A real TCP echo target reached by IP.
 #[tokio::test]
 async fn full_stack_real_tcp_egress_round_trip() {
+    let echo = tcp_echo().await;
+    round_trip_to(Target::Ip(echo)).await;
+}
+
+/// The same full stack, but the client names the target by **domain** and the *server* resolves it.
+///
+/// This is the capability the tunnel needs for bootstrap: the client never asks a resolver, so a
+/// network that poisons DNS cannot reach the destination lookup. `localhost` keeps the test hermetic
+/// while still exercising a genuine server-side resolution — the port is the echo server's real one,
+/// so nothing passes unless the name actually resolved and connected.
+#[tokio::test]
+async fn full_stack_domain_target_is_resolved_by_the_server() {
+    let echo = tcp_echo().await;
+    round_trip_to(Target::Domain("localhost".into(), echo.port())).await;
+}
+
+/// Drive a payload through the tunnel to `target` and assert it comes back intact.
+async fn round_trip_to(target: Target) {
     let pkcs8 = ServerStatic::generate().unwrap();
     let pubkey = server_public_from_pkcs8(&pkcs8).unwrap();
     let zone = "t.example.com";
-
-    let echo = tcp_echo().await;
 
     // The server (authoritative UDP endpoint) doing real TCP egress to the client's target.
     let server_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -87,7 +88,8 @@ async fn full_stack_real_tcp_egress_round_trip() {
     ));
 
     // Minimal client: drive a ClientSession over a connected UDP socket (authoritative mode).
-    let mut client = ClientSession::new(&pubkey, zone, &encode_target(&echo), test_cfg()).unwrap();
+    let encoded = addr::encode(&target).expect("target encodes");
+    let mut client = ClientSession::new(&pubkey, zone, &encoded, test_cfg()).unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     udp.connect(server_addr).await.unwrap();
 
@@ -117,6 +119,6 @@ async fn full_stack_real_tcp_egress_round_trip() {
     }
     assert_eq!(
         got, payload,
-        "payload round-trips through the DNS tunnel and the server's real TCP egress"
+        "payload round-trips to {target} through the DNS tunnel and the server's real TCP egress"
     );
 }
