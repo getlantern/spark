@@ -144,7 +144,10 @@ pub fn build_request_bytes(
     let body = serde_json::to_vec(req)?;
     let mut head = String::new();
     head.push_str(&format!("POST {path} HTTP/1.1\r\n"));
-    head.push_str(&format!("Host: {host}\r\n"));
+    // `host` is CR/LF-stripped like the other non-constant values below. It used to be a compile-time
+    // constant from `FetchEnv`, which is why it once needed no guard — but a fronted connection is now
+    // addressed by the *winning front's* inner host, which comes from parsed config or a live scan.
+    head.push_str(&format!("Host: {}\r\n", header_safe(host)));
     head.push_str(&format!("X-Lantern-App: {APP_NAME}\r\n"));
     head.push_str(&format!("X-Lantern-App-Version: {}\r\n", req.version));
     head.push_str(&format!("X-Lantern-Version: {}\r\n", req.version));

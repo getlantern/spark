@@ -401,7 +401,13 @@ async fn fetch_once_kindling(
                 build_oneshot_request(&env.path, req, cond).map_err(std::io::Error::other)?;
             // The winner's own authority — the origin for a direct-ish member, the front's inner
             // host for a fronted one. Never unconditionally `env.host`.
-            let authority = conn.authority(&env.host).to_owned();
+            //
+            // CR/LF-stripped because it is no longer a constant: a fronted authority comes from
+            // parsed config or a live scan, and an embedded newline would let it forge extra headers.
+            // `h2_oneshot` builds a URI, whose parser would reject the value rather than inject — but
+            // the guard belongs at the source so both branches are covered by one rule.
+            let authority =
+                crate::config::fetch::request::header_safe(conn.authority(&env.host)).into_owned();
             let resp = flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot).await?;
             let etag = resp.header("etag").map(ToOwned::to_owned);
             Ok::<_, std::io::Error>((resp.status, etag, resp.body))
@@ -409,6 +415,7 @@ async fn fetch_once_kindling(
             // Same rule on the 1.1 path: the `Host:` header is the authority, so a fronted winner
             // needs the front's inner host here too. Only the header changes — the request line and
             // path are the origin's either way, since the edge re-originates by `Host`.
+            // `build_request_bytes` strips CR/LF from the host for the reason above.
             let authority = conn.authority(&env.host).to_owned();
             let bytes = build_request_bytes(&authority, &env.path, req, cond)
                 .map_err(std::io::Error::other)?;
@@ -893,10 +900,44 @@ mod tests {
             .await
             .map(|_| ())
             .expect_err("an empty race cannot succeed");
-        let msg = err.to_string();
+        // Asserted on concepts, not flint's exact wording: the guarantee that matters is that an
+        // empty race is distinguishable from every member failing, and pinning the phrase would
+        // break on an upstream reword that changed nothing semantically.
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("no"), "must say there were none: {msg}");
+        assert!(msg.contains("transport"), "must say of what: {msg}");
         assert!(
-            msg.contains("no connection transports"),
-            "must not look like a blocked network: {msg}"
+            !msg.contains("all "),
+            "must not read like an AllFailed report: {msg}"
+        );
+    }
+
+    /// A fronted authority is parsed config or scan output, not a constant, so a smuggled newline
+    /// must not be able to forge headers. `build_request_bytes` used to take only `FetchEnv`'s
+    /// compile-time host, which is why its `Host:` line needed no guard until this race made the
+    /// value dynamic.
+    #[test]
+    fn a_newline_in_the_authority_cannot_forge_a_header() {
+        let req = ConfigRequest::new("dev".into());
+        let bytes = build_request_bytes(
+            "evil.test\r\nX-Injected: 1",
+            "/api/v1/config-new",
+            &req,
+            &Conditional::default(),
+        )
+        .expect("builds");
+        let text = String::from_utf8_lossy(&bytes);
+        // Stripping, not rejecting: `X-Injected: 1` survives as text *inside* the Host value, which
+        // is harmless. What must not exist is a header LINE of that name — that is what "forge a
+        // header" means, and asserting on the substring instead would fail on correct behaviour.
+        assert!(
+            !text.lines().any(|l| l.starts_with("X-Injected")),
+            "CR/LF in the authority forged a header line:\n{text}"
+        );
+        assert!(
+            text.contains("Host: evil.testX-Injected: 1\r\n"),
+            "the value is stripped, not truncated or rejected: {}",
+            text.lines().next().unwrap_or_default()
         );
     }
 
