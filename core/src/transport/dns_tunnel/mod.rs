@@ -187,10 +187,14 @@ impl Transport for DnsTunnelTransport {
     async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
         // Reject an unencodable target before taking the session lock or building a duplex — a
         // too-long name cannot be fixed by retrying, and truncating it would dial a *different* host.
+        // The destination is deliberately absent from the message (GOAL.md log hygiene: never log
+        // destination IPs/hostnames by default). `AddrError` names the defect — "domain is 300 bytes,
+        // over the 255-byte wire limit" — which is the whole diagnostic; the host adds nothing but
+        // exposure, and an `io::Error` message travels wherever the caller decides to log it.
         if let Err(e) = encode_target(&target) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("dns-tunnel: cannot carry target `{target}`: {e}"),
+                format!("dns-tunnel: cannot carry this target: {e}"),
             ));
         }
         let (app_side, pump_side) = tokio::io::duplex(DUPLEX_BUF);
@@ -267,11 +271,13 @@ fn open_stream_io(
     up_tx: &mpsc::Sender<Up>,
 ) {
     let Ctl::Open { target, pump_side } = ctl;
-    // `dial_addr` rejects an unencodable target before it can reach the pump, so this cannot be
-    // `None` here. Dropping the Open is still the right fallback: the caller's duplex closes and it
-    // sees EOF, rather than the pump opening a stream to a target it could not name.
+    // `dial_addr` rejects an unencodable target before it can reach the pump, so this cannot fail
+    // here. Dropping the Open is still the right fallback: the caller's duplex closes and it sees
+    // EOF, rather than the pump opening a stream to a target it could not name.
+    //
+    // Logs the defect, never the destination — GOAL.md log hygiene.
     let Ok(encoded) = encode_target(&target) else {
-        tracing::debug!(%target, "dns-tunnel: unencodable target reached the pump, dropping stream");
+        tracing::debug!("dns-tunnel: unencodable target reached the pump, dropping stream");
         return;
     };
     let sid = session.open_stream(&encoded);
