@@ -890,7 +890,7 @@ fn hysteria2_transport(
 /// resolver list (the configured `resolvers`, or the `authoritative`
 /// address when none are given — authoritative mode). TCP only; `UdpTransport` reports unsupported.
 #[cfg(feature = "dns-tunnel")]
-fn dns_tunnel_transport(
+pub(crate) fn dns_tunnel_transport(
     cfg: &DnsTunnelConfig,
     protector: Option<SocketProtector>,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
@@ -940,7 +940,7 @@ fn dns_tunnel_transport(
 /// Without the `dns-tunnel` feature, a configured DNS-tunnel transport is a hard error (mirrors
 /// anytls/shadowsocks/hysteria2/wasm).
 #[cfg(not(feature = "dns-tunnel"))]
-fn dns_tunnel_transport(
+pub(crate) fn dns_tunnel_transport(
     _cfg: &DnsTunnelConfig,
     _protector: Option<SocketProtector>,
 ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
