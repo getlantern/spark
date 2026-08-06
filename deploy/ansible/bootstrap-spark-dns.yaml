@@ -7,7 +7,7 @@
 # Prereqs:
 #   - inventory group `spark_dns` (see inventory/spark-dns.example.yaml)
 #   - a delegated tunnel zone: `t.<domain>` NS → `ns-spark.<domain>` A → the host IP.
-#     Use an UNATTRIBUTABLE domain (e.g. ss7hc6jm.io), NOT a known Lantern domain — a censor's
+#     Use an UNATTRIBUTABLE domain, NOT a known Lantern domain — a censor's
 #     resolver is far likelier to filter a recognizable name.
 #   - the cross-built static server binary at files/dns-tunnel-server
 #     (`cargo zigbuild --release -p dns-tunnel-server --target x86_64-unknown-linux-musl`;
@@ -16,7 +16,7 @@
 #     `dns-tunnel-server keygen` (secret; mode 0600). Distribute the matching `pubkey` to clients;
 #     the private key never leaves the server.
 #
-# Run: ansible-playbook -i inventory/spark-dns.yaml bootstrap-spark-dns.yaml -e zone=t.ss7hc6jm.io
+# Run: ansible-playbook -i inventory/spark-dns.yaml bootstrap-spark-dns.yaml -e zone=t.<domain>
 - name: Deploy and start spark dns-tunnel-server
   hosts: spark_dns
   become: true

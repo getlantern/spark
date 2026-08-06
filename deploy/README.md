@@ -11,10 +11,24 @@ delegated authoritative subdomain. The only substantive differences:
 | key | Noise keypair (`server.key`/`.pub`) | static **Ed25519** keypair — public key distributed |
 | wire | dnstt (KCP+smux+Noise) | spark's own (ADR 0011) — **not** interop |
 | provider (prod) | OCI | **Linode** |
-| zone | `t.iantem.io` | an **unattributable** domain (e.g. `t.ss7hc6jm.io`) |
+| zone | `t.iantem.io` | an **unattributable** domain (never named in this repo — see below) |
 
 Because the wire protocols differ, spark needs its **own** server IP and its **own** delegated zone —
 it cannot co-tenant dnstt's `:53`. They coexist fine (dnstt on `t.iantem.io`, spark elsewhere).
+
+## The zone is deliberately not in this repo
+
+The tunnel zone is chosen to be **unattributable** — that is the entire reason it is not a Lantern
+domain. Committing it here would hand a censor the one string needed to block the escalation tier,
+and this repository is intended to be public, so naming the live zone would undo the property the
+zone was picked for.
+
+It lives with the deployment: the running host's systemd unit (`--zone`), the client build's
+`SPARK_BOOTSTRAP_DNS_ZONE` repo variable, and the config server. Docs here say `t.<domain>`.
+
+The same applies to the host IP and the server's private key. The server's **public** key is not a
+secret — it is distributed to every client by design — but it is still deployment state, so it lives
+in `/etc/spark-dns/pubkey` on the host and in the build variable, not here.
 
 ## What to reuse from lantern-cloud
 
