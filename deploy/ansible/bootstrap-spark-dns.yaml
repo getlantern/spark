@@ -7,7 +7,7 @@
 # Prereqs:
 #   - inventory group `spark_dns` (see inventory/spark-dns.example.yaml)
 #   - a delegated tunnel zone: `t.<domain>` NS → `ns-spark.<domain>` A → the host IP.
-#     Use an UNATTRIBUTABLE domain (e.g. ss7hc6jm.io), NOT a known Lantern domain — a censor's
+#     Use an UNATTRIBUTABLE domain, NOT a known Lantern domain — a censor's
 #     resolver is far likelier to filter a recognizable name.
 #   - the cross-built static server binary at files/dns-tunnel-server
 #     (`cargo zigbuild --release -p dns-tunnel-server --target x86_64-unknown-linux-musl`;
@@ -16,7 +16,8 @@
 #     `dns-tunnel-server keygen` (secret; mode 0600). Distribute the matching `pubkey` to clients;
 #     the private key never leaves the server.
 #
-# Run: ansible-playbook -i inventory/spark-dns.yaml bootstrap-spark-dns.yaml -e zone=t.ss7hc6jm.io
+# Run (replace the zone with your delegated one; example.com is RFC 2606 reserved and inert):
+#   ansible-playbook -i inventory/spark-dns.yaml bootstrap-spark-dns.yaml -e zone=t.example.com
 - name: Deploy and start spark dns-tunnel-server
   hosts: spark_dns
   become: true
@@ -56,7 +57,19 @@
       notify: Restart spark-dns
 
     # Recursive resolvers always hit :53; the server runs unprivileged on :5300 and we redirect.
-    # Persist across reboot with netfilter-persistent (or an @reboot hook) in real production.
+    #
+    # This MUST survive reboot. Without persistence the failure is silent and total: systemd brings
+    # the server back on :5300, it answers correctly if you query that port, and every recursive
+    # resolver in the world still gets nothing — so the tier looks blocked rather than broken.
+    - name: Install iptables-persistent so the redirect survives reboot
+      apt:
+        name: iptables-persistent
+        state: present
+        update_cache: true
+      # Pre-seed the debconf prompts; the package otherwise blocks asking whether to save rules.
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
     - name: DNAT udp/53 → udp/5300
       iptables:
         table: nat
@@ -66,6 +79,7 @@
         jump: REDIRECT
         to_ports: "5300"
         comment: spark-dns 53->5300
+      notify: Save iptables rules
 
     - name: systemd unit
       template:
@@ -85,3 +99,16 @@
       systemd:
         name: spark-dns
         state: restarted
+
+    - name: Save iptables rules
+      community.general.iptables_state:
+        state: saved
+        path: /etc/iptables/rules.v4
+      # `iptables_state` needs the collection; fall back to the command the package ships with.
+      failed_when: false
+      register: _saved
+
+    - name: Save iptables rules (fallback)
+      shell: iptables-save > /etc/iptables/rules.v4
+      when: _saved is failed or _saved is skipped
+      changed_when: true

@@ -21,8 +21,24 @@ enum Cmd {
     /// Generate a server identity keypair. Prints two lines to stdout: `privkey <base64>` (store this
     /// on the server, keep it secret) and `pubkey <base64>` (distribute to clients).
     Keygen,
+    /// Print the public key for an existing private key, so a lost `pubkey` can be recovered from the
+    /// server that still holds its `privkey` — without the private half ever leaving the host.
+    ///
+    /// Every client needs this key to authenticate the server, and before this subcommand existed the
+    /// only copy was `keygen`'s output: lose it and the recovery path was to re-run `keygen`, which
+    /// mints a *new* identity and orphans every client configured for the old one. Deriving it is
+    /// arithmetic (it is the public half of the same Ed25519 pair) — there simply was no command that
+    /// did so.
+    Pubkey(PubkeyArgs),
     /// Run the tunnel server.
     Serve(ServeArgs),
+}
+
+#[derive(Parser)]
+struct PubkeyArgs {
+    /// Path to the base64 private key (PKCS#8) — the same file `serve --privkey-file` reads.
+    #[arg(long)]
+    privkey_file: String,
 }
 
 #[derive(Parser)]
@@ -53,6 +69,14 @@ async fn main() -> anyhow::Result<()> {
             let pubkey = crypto::server_public_from_pkcs8(&pkcs8)?;
             // stdout, parseable. The privkey is secret — never log it.
             println!("privkey {}", crypto::base64_encode(&pkcs8));
+            println!("pubkey {}", crypto::base64_encode(&pubkey));
+        }
+        Cmd::Pubkey(a) => {
+            let privb64 = std::fs::read_to_string(&a.privkey_file)?;
+            let pkcs8 = crypto::base64_decode(privb64.trim())
+                .ok_or_else(|| anyhow::anyhow!("privkey file is not valid base64"))?;
+            let pubkey = crypto::server_public_from_pkcs8(&pkcs8)?;
+            // Only the public half is printed; the private key is read and dropped.
             println!("pubkey {}", crypto::base64_encode(&pubkey));
         }
         Cmd::Serve(a) => {
