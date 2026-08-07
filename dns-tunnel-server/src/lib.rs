@@ -8,8 +8,12 @@
 //! **Log hygiene (ADR 0011 / GOAL.md):** never log the tunnel zone, target addresses, or client/
 //! resolver IPs. Log only coarse, non-identifying events.
 
+// Only the exporter is feature-gated; `metrics` is pure std and always present, so every build
+// tallies the counters and a default build simply has nowhere to send them.
+#[cfg(feature = "otlp")]
 pub mod export;
 pub mod metrics;
+#[cfg(feature = "otlp")]
 pub mod otlp;
 
 use std::collections::HashMap;
@@ -92,8 +96,14 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig, metrics: Arc<Metrics>) -> 
                 metrics.query_received();
                 let now = start.elapsed().as_millis() as u64;
                 if let Some(ans) = server.on_query(&buf[..n], now) {
-                    let _ = udp.send_to(&ans, from).await;
-                    metrics.answer_sent();
+                    // Counted only on a successful send. `queries - answers` is meant to measure the
+                    // share of queries the session layer declined (unparseable, unauthenticated,
+                    // replayed); counting a failed `send_to` would fold socket errors into that
+                    // number and hide them in the one metric that would otherwise reveal them.
+                    match udp.send_to(&ans, from).await {
+                        Ok(_) => metrics.answer_sent(),
+                        Err(e) => tracing::debug!(kind = %e.kind(), "answer send failed"),
+                    }
                 }
                 // Spawn TCP egress for any newly opened stream, then push each stream's uplink bytes.
                 for id in server.session_ids() {

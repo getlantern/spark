@@ -73,7 +73,11 @@ The Ansible playbook + systemd template here are provider-agnostic and intended 
 
 1. **Build the static server binary** (distro-agnostic; from the spark repo root):
    ```sh
-   cargo zigbuild --release -p dns-tunnel-server --target x86_64-unknown-linux-musl
+   # `--features otlp` is required for metric export (issue #165). It is off by default because it
+   # pulls BoringSSL and docs/GOAL.md keeps the base build C-free; a binary built without it still
+   # tallies every counter, it just has nowhere to send them — and warns at startup if given an
+   # endpoint, so the mismatch is never silent.
+   cargo zigbuild --release -p dns-tunnel-server --features otlp --target x86_64-unknown-linux-musl
    cp target/x86_64-unknown-linux-musl/release/dns-tunnel-server deploy/ansible/files/
    #  (for ARM Linode/OCI hosts: --target aarch64-unknown-linux-musl)
    ```

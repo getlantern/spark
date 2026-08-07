@@ -7,9 +7,10 @@
 //! unique and unrecoverable) would buy nothing here and would add a disk-growth failure mode to a
 //! server whose job is to stay up.
 //!
-//! Export is **off unless an endpoint is configured**. A server with no `--otel-endpoint` opens no
+//! Export is **off unless an endpoint is configured**. A server with no `--otel-host` opens no
 //! outbound connections at all, which keeps the default deployment as quiet on the network as it was
-//! before this module existed.
+//! before this module existed. The whole module is also behind the off-by-default `otlp` feature, so
+//! a default build does not link BoringSSL at all (docs/GOAL.md: the base build stays C-free).
 
 use std::io;
 use std::sync::Arc;
@@ -94,9 +95,7 @@ async fn post(cfg: &ExportConfig, body: &[u8]) -> io::Result<u16> {
     tls.write_all(body).await?;
     tls.flush().await?;
 
-    let mut buf = [0u8; 128];
-    let n = tls.read(&mut buf).await?;
-    parse_status(&buf[..n])
+    read_status(&mut tls).await
 }
 
 /// TLS with an explicit Mozilla root store.
@@ -137,6 +136,32 @@ async fn tls_connect(
         .map_err(|e| io::Error::other(format!("otlp tls handshake: {e}")))
 }
 
+/// Read until the status line is complete, then parse it.
+///
+/// A single `read` is not enough: TLS records split wherever the peer chose, so a short first read
+/// can hand `parse_status` a truncated line and turn a healthy 200 into a spurious warning. Reads
+/// until the first newline, EOF, or the cap — the cap being what stops a collector that streams
+/// headers forever from growing this buffer without bound.
+async fn read_status<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> io::Result<u16> {
+    /// Generous for a status line; a response whose first line exceeds this is malformed.
+    const MAX: usize = 512;
+    let mut buf = Vec::with_capacity(64);
+    let mut byte = [0u8; 1];
+    while buf.len() < MAX {
+        match stream.read(&mut byte).await {
+            Ok(0) => break, // EOF: parse whatever arrived
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    parse_status(&buf)
+}
+
 /// Pull the status code out of an HTTP/1.1 status line.
 fn parse_status(head: &[u8]) -> io::Result<u16> {
     let text = String::from_utf8_lossy(head);
@@ -166,6 +191,39 @@ mod tests {
             Some(401)
         );
         assert_eq!(parse_status(b"HTTP/1.1 503 \r\n").ok(), Some(503));
+    }
+
+    /// The regression Copilot flagged: TLS records split wherever the peer chose, so the status line
+    /// can arrive in pieces. A single `read` would hand `parse_status` a truncated line and turn a
+    /// healthy 200 into a spurious warning. Driven through a reader that yields one byte at a time —
+    /// the worst case — so the loop is what is under test, not the buffer size.
+    #[tokio::test]
+    async fn status_line_split_across_reads() {
+        struct Dribble(Vec<u8>, usize);
+        impl tokio::io::AsyncRead for Dribble {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                if self.1 < self.0.len() {
+                    let b = self.0[self.1];
+                    self.1 += 1;
+                    buf.put_slice(&[b]);
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut r = Dribble(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(), 0);
+        assert_eq!(read_status(&mut r).await.ok(), Some(200));
+    }
+
+    /// EOF before any newline must still parse what arrived rather than hang or error.
+    #[tokio::test]
+    async fn status_line_truncated_at_eof() {
+        let mut r = std::io::Cursor::new(b"HTTP/1.1 503".to_vec());
+        assert_eq!(read_status(&mut r).await.ok(), Some(503));
     }
 
     #[test]

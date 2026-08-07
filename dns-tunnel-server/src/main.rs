@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 use dns_tunnel_core::crypto;
 use dns_tunnel_core::session::Config;
-use dns_tunnel_server::{export, metrics::Metrics, serve, ServerConfig};
+use dns_tunnel_server::{metrics::Metrics, serve, ServerConfig};
 use tokio::net::UdpSocket;
 
 #[derive(Parser)]
@@ -88,11 +88,18 @@ fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// `Some(v)` unless `v` is blank. Applied to CLI flags so an explicitly empty one means "unset",
+/// matching [`env_opt`] — otherwise `--otel-host ""` would enable export to a hostless endpoint.
+fn non_empty(v: String) -> Option<String> {
+    Some(v).filter(|v| !v.trim().is_empty())
+}
+
 /// A numeric environment variable, falling back to `flag` when unset, empty, or unparseable.
 ///
 /// Unparseable falls back rather than failing: a typo in a systemd `Environment=` line should cost
 /// the default export interval, not prevent the tunnel from starting. The tunnel is the product;
 /// telemetry misconfiguration must never be able to take it down.
+#[cfg(feature = "otlp")]
 fn env_num<T: std::str::FromStr>(key: &str, flag: T) -> T {
     match env_opt(key).map(|v| v.trim().parse::<T>()) {
         Some(Ok(v)) => v,
@@ -140,30 +147,51 @@ async fn main() -> anyhow::Result<()> {
             // Env fallback is resolved here rather than via clap's `env` feature: that feature
             // would have to be enabled on the *workspace* clap, and cargo's feature unification
             // would then pull it into the client binaries the <3 MB size budget guards.
-            let otel_host = a.otel_host.or_else(|| env_opt("SPARK_OTEL_HOST"));
-            // The key comes from the environment in production so it never lands in a process
-            // listing or a shell history; the systemd unit sources it from a root-only file.
-            let otel_key = a.otel_key.or_else(|| env_opt("SPARK_OTEL_INGEST_KEY"));
-            let otel_instance = env_opt("SPARK_OTEL_INSTANCE").unwrap_or(a.otel_instance);
-            let otel_port = env_num("SPARK_OTEL_PORT", a.otel_port);
-            let otel_interval_secs = env_num("SPARK_OTEL_INTERVAL_SECS", a.otel_interval_secs);
+            //
+            // Flags go through `non_empty` for the same reason env values do: `--otel-host ""` is a
+            // request for no host, not a request to export to the empty string.
+            let otel_host = a
+                .otel_host
+                .and_then(non_empty)
+                .or_else(|| env_opt("SPARK_OTEL_HOST"));
 
             let metrics = std::sync::Arc::new(Metrics::new());
             // Held so the exporter is cancelled with the process rather than detached (CLAUDE.md:
             // no `tokio::spawn` whose handle is dropped unless the task is genuinely fire-and-forget).
+            #[cfg(feature = "otlp")]
             let _exporter = otel_host.map(|host| {
+                // The key comes from the environment in production so it never lands in a process
+                // listing or a shell history; the systemd unit sources it from a root-only file.
+                let otel_key = a
+                    .otel_key
+                    .and_then(non_empty)
+                    .or_else(|| env_opt("SPARK_OTEL_INGEST_KEY"));
+                let otel_instance = env_opt("SPARK_OTEL_INSTANCE").unwrap_or(a.otel_instance);
+                let otel_interval_secs = env_num("SPARK_OTEL_INTERVAL_SECS", a.otel_interval_secs);
                 tracing::info!(interval_secs = otel_interval_secs, "metrics export enabled");
-                export::spawn(
+                dns_tunnel_server::export::spawn(
                     std::sync::Arc::clone(&metrics),
-                    export::ExportConfig {
+                    dns_tunnel_server::export::ExportConfig {
                         host,
-                        port: otel_port,
+                        port: env_num("SPARK_OTEL_PORT", a.otel_port),
                         key: otel_key,
                         instance: otel_instance,
                         interval: std::time::Duration::from_secs(otel_interval_secs.max(1)),
                     },
                 )
             });
+
+            // A binary built without `otlp` still accepts the flags, so an operator who configures an
+            // endpoint against the wrong build must be told. Silence here would look exactly like a
+            // working exporter whose data never arrives — the failure mode this whole issue exists to
+            // remove.
+            #[cfg(not(feature = "otlp"))]
+            if otel_host.is_some() {
+                tracing::warn!(
+                    "an OTLP endpoint is configured but this binary was built without the `otlp` \
+                     feature; no metrics will be exported (rebuild with --features otlp)"
+                );
+            }
 
             serve(
                 udp,

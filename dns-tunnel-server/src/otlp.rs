@@ -95,7 +95,14 @@ pub fn encode_metrics(
             }],
         }],
     });
-    serde_json::to_vec(&body).unwrap_or_default()
+    // Practically unreachable — `body` is a `Value` built from owned strings and integers, which has
+    // no failing Serialize path. Logged rather than swallowed anyway: an empty body would POST as a
+    // 4xx forever with no local signal, and a panic here would take the tunnel down for a telemetry
+    // bug. Visible and harmless beats silent or fatal.
+    serde_json::to_vec(&body).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to encode OTLP metrics body");
+        Vec::new()
+    })
 }
 
 fn build_resource_attrs(res: &ResourceAttrs) -> Vec<Value> {

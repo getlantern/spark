@@ -22,10 +22,19 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-# Telemetry (issue #165). All already workspace deps — this adds no new external dependency to the
-# project, only to this crate. serde_json encodes the OTLP/JSON body; boring2 + webpki-root-certs are
-# the same TLS stack and root set the client dials with (ADR 0001).
-serde_json = { workspace = true }
-boring2 = { workspace = true }
-tokio-boring2 = { workspace = true }
-webpki-root-certs = { workspace = true }
+# Telemetry export (issue #165), behind the off-by-default `otlp` feature — see [features].
+serde_json = { workspace = true, optional = true }
+boring2 = { workspace = true, optional = true }
+tokio-boring2 = { workspace = true, optional = true }
+webpki-root-certs = { workspace = true, optional = true }
+
+[features]
+# OTLP metrics export. **Off by default** because it pulls BoringSSL, and docs/GOAL.md makes a
+# C-free base build a non-negotiable: documented C deps are "strictly off-by-default, feature-gated".
+# This is the same treatment `core` gives boring under `anytls` (ADR 0001).
+#
+# Only the *exporter* is gated. `metrics.rs` is pure std and always compiles, so the counters and the
+# instrumentation in `serve()` are present in every build — a default build tallies them and simply
+# has nowhere to send them. That split keeps the feature flag off the tunnel's data path entirely:
+# enabling or disabling telemetry cannot change how the server relays traffic.
+otlp = ["dep:serde_json", "dep:boring2", "dep:tokio-boring2", "dep:webpki-root-certs"]

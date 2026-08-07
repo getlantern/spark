@@ -7,10 +7,14 @@
 //! across every line it appears on, in a system many people can query. Aggregates carry the
 //! operational signal without ever holding a row that describes one user.
 //!
-//! **The cardinality rule.** Every attribute here is drawn from a set fixed at compile time:
-//! [`Metrics::egress_connect_failed`] keys on [`io::ErrorKind`], which is a closed enum, and nothing
-//! else is keyed at all. No destination, IP, ConnectionID, or StreamID is ever an attribute or a
-//! metric name. A reviewer should be able to enumerate every series this file can produce.
+//! **The cardinality rule.** Every attribute here is drawn from a set fixed at compile time.
+//! [`Metrics::egress_connect_failed`] keys on [`io::ErrorKind`], and nothing else is keyed at all.
+//! `ErrorKind` itself is `#[non_exhaustive]` and can grow between compiler releases — what is closed
+//! is the **label mapping** in [`kind_label`], which folds anything it does not recognise into a
+//! single `other` bucket. So the bound holds against future variants, not merely today's.
+//!
+//! No destination, IP, ConnectionID, or StreamID is ever an attribute or a metric name. A reviewer
+//! should be able to enumerate every series this file can produce by reading one `match`.
 //!
 //! All counters are cumulative and monotonic: the process reports a running total and the backend
 //! computes rates. That makes a missed export interval a gap in resolution rather than lost counts.
