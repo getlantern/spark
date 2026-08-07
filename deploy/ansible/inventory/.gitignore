@@ -1,0 +1,6 @@
+# The real inventory names a live tunnel host. This repo is intended to go public, and an IP in git
+# history cannot be taken back — deleting the file later does not remove it from previous commits.
+# Only the `.example` template is tracked.
+*
+!.gitignore
+!*.example.yaml
