@@ -409,12 +409,21 @@ mod tests {
             "sentinel reachable the instant init returns"
         );
 
-        // After init the gate is open. An EMPTY endpoint deliberately: it exercises the accept
-        // path without starting an uploader that would dial a real host from a unit test.
-        assert!(
-            set_telemetry(&telemetry("")).is_ok(),
-            "collecting process must accept a telemetry config"
-        );
+        // After init the "am I collecting?" gate is open, and the answer turns on whether this
+        // build has an uploader at all. Both branches are pinned: a `prod` binary must accept, and
+        // a build without `config-fetch` must still refuse rather than accept and drop the config
+        // on the floor. An EMPTY endpoint deliberately — it exercises the accept path without
+        // starting an uploader that would dial a real host from a unit test.
+        let accepted = set_telemetry(&telemetry(""));
+        if cfg!(feature = "config-fetch") {
+            assert!(
+                accepted.is_ok(),
+                "a collecting process with an uploader must accept: {accepted:?}"
+            );
+        } else {
+            let err = accepted.expect_err("a build with no uploader must refuse");
+            assert!(err.contains("uploader"), "{err}");
+        }
 
         disarm_sentinel();
         assert!(
