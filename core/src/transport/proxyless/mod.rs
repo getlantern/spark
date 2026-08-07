@@ -132,10 +132,18 @@ impl ProxylessTransport {
         // that stops a poisoned lookup being mistaken for success.
         let mut space = Space::new(flint_dns::default_pool())
             .with_roots(crate::transport::probe::webpki_roots_pem());
-        // Wire-major enumeration means the no-op plan is tried against every resolver first, so a
-        // network that needs no shaping is settled at the cheapest end of the space.
+        // Replace the seeded no-op rather than appending after it. `Space::new` starts with an
+        // unshaped plan, and wire-major enumeration would then try unshaped against every resolver
+        // before reaching the shaped one — so an appended plan is only reached after the whole
+        // no-op row fails, which on a censored network is precisely the slow path.
+        //
+        // The bootstrap race made this call first (#166); the data path kept appending, so the two
+        // disagreed about whether spark leads with shaping. It now leads with it in both.
+        //
+        // A no-op plan still means no-op: config that explicitly asks for `"none"` on both layers
+        // gets the unshaped space it asked for.
         if !wire.is_noop() {
-            space = space.with_wire(wire);
+            space.wires = vec![wire];
         }
         if let Some(max) = cfg.max_candidates {
             // Reject rather than clamp. This is user-authored config, and `0` can only be a mistake:
@@ -490,16 +498,16 @@ mod tests {
     }
 
     #[test]
-    fn a_real_shaping_plan_becomes_a_second_axis_entry() {
+    fn a_real_shaping_plan_replaces_the_noop() {
         let wire = WirePlan {
             record_fragment: flint_shaping::RecordFragment::SniStraddle,
             ..Default::default()
         };
         let t = ProxylessTransport::new(&cfg(), wire, None).unwrap();
-        assert_eq!(t.space.wires.len(), 2);
+        assert_eq!(t.space.wires.len(), 1, "the shaped plan replaces the no-op");
         assert!(
-            t.space.wires[0].is_noop(),
-            "the cheap plan must be tried first"
+            !t.space.wires[0].is_noop(),
+            "spark must lead with shaping, not reach it only after the no-op row fails"
         );
     }
 

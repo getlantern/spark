@@ -34,9 +34,39 @@ use crate::net::SocketProtector;
 use crate::BoxedStream;
 use flint_shaping::{DelaySpec, RecordFragment, SegmentSplit, WirePlan};
 
+/// The shaping spark uses when config says nothing: Layer B **and** Layer C, both cut at the SNI.
+///
+/// One definition, used by the bootstrap race and the data-path transport alike. They were written
+/// separately and had already drifted — bootstrap carried both layers while the data path defaulted
+/// to neither — which is exactly the kind of divergence nobody notices, because both configurations
+/// connect fine on an uncensored network and differ only where it matters.
+///
+/// Cheap to apply unconditionally: `SniStraddle` falls back to a single record when the write has no
+/// locatable SNI, so it is never worse than `None`.
+pub fn default_shaping() -> WirePlan {
+    WirePlan {
+        // Layer B: cut the ClientHello into two TLS records so the SNI host straddles the boundary —
+        // beats a censor that parses one record and does not reassemble.
+        record_fragment: RecordFragment::SniStraddle,
+        // Layer C: cut the TCP segment mid-hostname too. A censor reassembling records but matching
+        // SNI within one segment is a different implementation from one matching within one record,
+        // and both are common; carrying both in one plan beats strictly more networks per slot.
+        segment_split: SegmentSplit::SniBoundary,
+        // Required for Layer C to mean anything. `WirePlan::default()` leaves this false, and with
+        // Nagle on, the kernel is free to coalesce the segments we just went to the trouble of
+        // splitting back into one packet — the split survives in the write pattern and vanishes on
+        // the wire, which is the only place it matters. The bootstrap race inherited the false
+        // default from #166 and has been shaping Layer C into a single packet ever since; the
+        // config path set it true, which is how the two disagreed without either looking wrong.
+        tcp_nodelay: true,
+        ..Default::default()
+    }
+}
+
 /// Build a [`WirePlan`] from the static `[transport.shaping]` config. flint's `WirePlan` is
 /// config-agnostic, so this adapter (the public replacement for the former `WirePlan::from_config`)
-/// lives spark-side. Maps Layer C only; Layer B `record_fragment` defaults off.
+/// lives spark-side. Both layers default to [`default_shaping`]; config-new can override either,
+/// including back to `"none"`.
 pub fn wire_plan_from_config(c: &crate::config::ShapingConfig) -> WirePlan {
     let segment_split = match c.segment_split.trim() {
         "" | "none" => SegmentSplit::None,
@@ -158,14 +188,24 @@ mod record_fragment_config_tests {
         assert!(!plan.is_noop());
     }
 
-    /// The default must stay inert: shaping is opt-in, and a default that fragmented would change
-    /// the wire for every existing deployment that never asked for it.
+    /// The default now shapes, deliberately reversing what this test used to assert.
+    ///
+    /// It previously held that shaping must stay opt-in so the default would not "change the wire
+    /// for every existing deployment that never asked for it". That reasoning treated the unshaped
+    /// wire as the safe baseline, which it is not for a censorship tool: the bootstrap race had been
+    /// shaping by default since #166, so the property actually being preserved was a *disagreement*
+    /// between spark's two proxyless paths, not compatibility.
+    ///
+    /// The wire does change for deployments that never asked. That is the intent — and it is cheap,
+    /// since `SniStraddle` falls back to a single record when there is no locatable SNI. Anything
+    /// that genuinely needs the old behaviour sets `"none"`, which
+    /// `config_can_override_back_to_none` covers.
     #[test]
-    fn the_default_config_shapes_nothing() {
+    fn the_default_config_shapes_both_layers() {
         let plan = wire_plan_from_config(&ShapingConfig::default());
         assert!(
-            plan.is_noop(),
-            "adding a record_fragment field must not make the default plan start shaping"
+            !plan.is_noop(),
+            "the default plan must shape; an inert default silently disagrees with the bootstrap race"
         );
     }
 }
@@ -2340,5 +2380,50 @@ mod real_server_probe {
                 eprintln!("{label}: UNHEALTHY (probe failed/timed out)");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod default_shaping_tests {
+    use super::*;
+
+    /// The two shaping definitions must not drift again.
+    ///
+    /// They already had: the bootstrap race carried both layers while the data path defaulted to
+    /// neither, and nothing caught it because both configurations connect fine on an uncensored
+    /// network. This asserts the string form in `ShapingConfig::default()` parses back to exactly
+    /// the shared plan, so changing one without the other fails here rather than in the field.
+    #[test]
+    fn shaping_default_matches_the_shared_plan() {
+        let from_config = wire_plan_from_config(&crate::config::ShapingConfig::default());
+        let shared = default_shaping();
+        // The **whole plan**, not a field list: `tcp_nodelay` and `inter_segment_delay` are part of
+        // the shaping decision too, and a per-field assertion silently stops covering any field
+        // added to `WirePlan` later — which is the same drift this test exists to catch.
+        //
+        // Compared via `Debug` because flint's `WirePlan` derives `Debug` but not `PartialEq`.
+        // Formatting instability is not a hazard here: both sides are the same type formatted the
+        // same way, so a `Debug` change moves them together. What it must not do is *omit* a field,
+        // and a derived `Debug` prints them all.
+        assert_eq!(format!("{from_config:?}"), format!("{shared:?}"));
+    }
+
+    /// The default must actually shape — a default that parsed cleanly to `None` on both layers
+    /// would satisfy an equality test against a `default_shaping()` someone had also neutered.
+    #[test]
+    fn the_default_is_not_a_noop() {
+        assert!(!default_shaping().is_noop());
+        assert!(!wire_plan_from_config(&crate::config::ShapingConfig::default()).is_noop());
+    }
+
+    /// Config-new keeps the last word, including turning shaping off.
+    #[test]
+    fn config_can_override_back_to_none() {
+        let cfg = crate::config::ShapingConfig {
+            segment_split: "none".to_owned(),
+            record_fragment: "none".to_owned(),
+            ..Default::default()
+        };
+        assert!(wire_plan_from_config(&cfg).is_noop());
     }
 }
