@@ -538,11 +538,15 @@ pub struct ShapingConfig {
 
 impl Default for ShapingConfig {
     fn default() -> Self {
+        // Must stay the string form of `transport::default_shaping()` — `shaping_default_matches_
+        // the_shared_plan` in transport/mod.rs fails if these drift. `#[serde(default)]` is at the
+        // container level, so a config-new payload that omits `[transport.shaping]`, or any single
+        // field of it, lands here; one that sets a field overrides it, `"none"` included.
         Self {
-            segment_split: "none".to_owned(),
+            segment_split: "sni_boundary".to_owned(),
             delay_ms: None,
             tcp_nodelay: true,
-            record_fragment: "none".to_owned(),
+            record_fragment: "sni_straddle".to_owned(),
         }
     }
 }

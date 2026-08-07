@@ -531,16 +531,9 @@ fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
 /// is not the only shape spark presents.
 #[cfg(feature = "proxyless")]
 fn bootstrap_shaping() -> flint_shaping::WirePlan {
-    flint_shaping::WirePlan {
-        // Layer B: cut the ClientHello into two TLS records so the SNI host straddles the boundary —
-        // beats a censor that parses one record and does not reassemble.
-        record_fragment: flint_shaping::RecordFragment::SniStraddle,
-        // Layer C: cut the TCP segment mid-hostname too. A censor reassembling records but matching
-        // SNI within one segment is a different implementation from one matching within one record,
-        // and both are common. Carrying both in a single plan beats strictly more networks per slot.
-        segment_split: flint_shaping::SegmentSplit::SniBoundary,
-        ..Default::default()
-    }
+    // Delegates rather than restating: the data-path transport defaults to the same plan, and two
+    // copies of a shaping decision drift silently (they already had).
+    crate::transport::default_shaping()
 }
 
 /// Map an HTTP status + `ETag` + body into a [`FetchOutcome`] (shared by the direct and fronted paths).
