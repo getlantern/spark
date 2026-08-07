@@ -260,11 +260,10 @@ mod upload_impl {
     fn resource_attrs(version: &str, cfg: &TelemetryConfig) -> ResourceAttrs {
         ResourceAttrs {
             service_version: version.to_string(),
-            // No build script on this crate today; `option_env!` (not `env!`) so adding
-            // one lights this up without touching this line.
-            git_sha: option_env!("SPARK_GIT_SHA")
-                .unwrap_or("unknown")
-                .to_string(),
+            // From core, deliberately: a build script's `cargo:rustc-env` applies only while
+            // compiling its own crate, so an `option_env!` here would read `None` and report
+            // "unknown" however the build was configured. See `spark_core::GIT_SHA`.
+            git_sha: spark_core::GIT_SHA.to_string(),
             device_id: cfg.device_id.clone(),
             platform: lantern_platform(std::env::consts::OS).to_string(),
             country: cfg.country.clone(),

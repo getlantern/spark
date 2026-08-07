@@ -259,10 +259,21 @@ jobs:
           AC_USERNAME: ${{ secrets.AC_USERNAME }}
           AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
           REF_NAME: ${{ github.ref_name }}
-          # The DMG is the actual macOS product (the app + the bundled system extension), so the
-          # build-time otel block has to reach THIS step, not just the CLI/service one above —
-          # otherwise the shipped app is the one binary without a pre-config reporting path.
-          # See `config::lantern::embedded_otel`; unset stays a working configuration.
+          # The DMG is the actual macOS product (the app + the bundled system extension), so every
+          # build-time-pinned value has to reach THIS step, not just the CLI/service one above.
+          # They previously reached only that one, which meant the shipped macOS app had no
+          # bootstrap dns-tunnel race member at all — the last-resort tier was present in the CLI
+          # and absent from the product. Env inherits down build-dmg.sh → build-xcframework.sh →
+          # cargo, so listing them here is all that is needed.
+          #
+          # Unset stays a working configuration for all of these: the dns-tunnel member is simply
+          # absent and the race runs on direct + proxyless + fronted, and no embedded otel block
+          # means the config-delivered one is the only source. Only the server's PUBLIC key and a
+          # public hostname are ever in CI.
+          SPARK_BOOTSTRAP_DNS_ZONE: ${{ vars.SPARK_BOOTSTRAP_DNS_ZONE }}
+          SPARK_BOOTSTRAP_DNS_PUBKEY: ${{ vars.SPARK_BOOTSTRAP_DNS_PUBKEY }}
+          SPARK_BOOTSTRAP_DNS_RESOLVERS: ${{ vars.SPARK_BOOTSTRAP_DNS_RESOLVERS }}
+          SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
           SPARK_OTEL_ENDPOINT: ${{ vars.SPARK_OTEL_ENDPOINT }}
           SPARK_OTEL_INGEST_KEY: ${{ secrets.SPARK_OTEL_INGEST_KEY }}
         run: |
