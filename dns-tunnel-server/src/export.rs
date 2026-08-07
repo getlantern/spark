@@ -36,6 +36,27 @@ pub struct ExportConfig {
     pub interval: Duration,
 }
 
+impl ExportConfig {
+    /// Reject values that would break out of their header line.
+    ///
+    /// `host` and `key` are interpolated into request headers, so a CR, LF, or NUL in either turns a
+    /// header into header injection. These are operator-supplied rather than attacker-supplied, but
+    /// the realistic path here needs no attacker at all: a key pasted from a file or a heredoc very
+    /// easily carries a trailing newline. Returns the offending field name.
+    fn headers_are_safe(&self) -> Result<(), &'static str> {
+        fn safe(v: &str) -> bool {
+            !v.chars().any(|c| c == '\r' || c == '\n' || c == '\0')
+        }
+        if !safe(&self.host) {
+            return Err("host");
+        }
+        if !self.key.as_deref().map(safe).unwrap_or(true) {
+            return Err("key");
+        }
+        Ok(())
+    }
+}
+
 /// How long one export attempt may take end to end.
 ///
 /// Bounded well under a typical interval so a black-holed collector cannot pile up tasks. The export
@@ -46,6 +67,17 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Spawn the exporter. Returns the handle so the caller owns cancellation.
 pub fn spawn(metrics: Arc<Metrics>, cfg: ExportConfig) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Checked once, here, rather than per export: these come from startup config, so a value
+        // that cannot be sent safely will never become sendable by retrying. Refusing to start the
+        // loop makes the misconfiguration one loud line instead of a warning every interval.
+        if let Err(field) = cfg.headers_are_safe() {
+            tracing::error!(
+                field,
+                "OTLP config contains a control character (CR/LF/NUL); refusing to export"
+            );
+            return;
+        }
+
         let res = ResourceAttrs {
             service_name: "spark-dns-tunnel-server".to_string(),
             service_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -81,7 +113,13 @@ async fn post(cfg: &ExportConfig, body: &[u8]) -> io::Result<u16> {
 
     let mut head = String::with_capacity(256);
     head.push_str("POST /v1/metrics HTTP/1.1\r\n");
-    head.push_str(&format!("Host: {}\r\n", cfg.host));
+    // RFC 9110 §7.2: the port belongs in Host unless it is the scheme default. Virtual-hosted
+    // collectors route on this, so omitting a non-default port sends the request to the wrong vhost.
+    if cfg.port == 443 {
+        head.push_str(&format!("Host: {}\r\n", cfg.host));
+    } else {
+        head.push_str(&format!("Host: {}:{}\r\n", cfg.host, cfg.port));
+    }
     head.push_str("Content-Type: application/json\r\n");
     head.push_str(&format!("Content-Length: {}\r\n", body.len()));
     if let Some(key) = &cfg.key {
@@ -224,6 +262,44 @@ mod tests {
     async fn status_line_truncated_at_eof() {
         let mut r = std::io::Cursor::new(b"HTTP/1.1 503".to_vec());
         assert_eq!(read_status(&mut r).await.ok(), Some(503));
+    }
+
+    fn cfg(host: &str, key: Option<&str>, port: u16) -> ExportConfig {
+        ExportConfig {
+            host: host.to_string(),
+            port,
+            key: key.map(str::to_string),
+            instance: "dns-1".to_string(),
+            interval: Duration::from_secs(60),
+        }
+    }
+
+    #[test]
+    fn control_characters_are_rejected() {
+        assert!(cfg("collector.example", Some("k"), 443)
+            .headers_are_safe()
+            .is_ok());
+        // The realistic case: a key pasted from a file, carrying its trailing newline.
+        assert_eq!(
+            cfg("collector.example", Some("secret\n"), 443)
+                .headers_are_safe()
+                .unwrap_err(),
+            "key"
+        );
+        assert_eq!(
+            cfg("evil\r\nX-Injected: 1", None, 443)
+                .headers_are_safe()
+                .unwrap_err(),
+            "host"
+        );
+        assert_eq!(
+            cfg("host\0", None, 443).headers_are_safe().unwrap_err(),
+            "host"
+        );
+        // No key at all is fine.
+        assert!(cfg("collector.example", None, 443)
+            .headers_are_safe()
+            .is_ok());
     }
 
     #[test]
