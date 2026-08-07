@@ -27,8 +27,8 @@ pub use codec::{
 pub use message::{
     negotiate, Capabilities, Details, ErrorCode, KillSwitchMode, LogLevel, LogLine, Metrics,
     ModuleInfo, NetStack, ProfileDoc, ProfileSummary, ProtocolVersion, Push, ReqId, Request,
-    RequestPayload, Response, ResponsePayload, ServerMessage, TransportKind, TunnelEvent,
-    TunnelState, TunnelStatus, Validation, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
+    RequestPayload, Response, ResponsePayload, ServerMessage, TelemetryConfig, TransportKind,
+    TunnelEvent, TunnelState, TunnelStatus, Validation, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION,
 };
 #[cfg(feature = "stream")]
 pub use stream::{read_frame, write_frame, Client};

@@ -1,11 +1,15 @@
 //! The diagnostics uploader (design §C3/§C4): ships spool batches as OTLP/HTTP JSON
 //! logs — and queued session spans as traces — to the config-delivered otel endpoint.
 //!
-//! Reuses config-fetch's transport verbatim (resolve → `DirectTransport` → `tls_wrap`
-//! → `post_collect`); the module only compiles under `feature = "config-fetch"` so the
-//! real (boring) `tls_wrap` is always in play — a build where `tls_wrap` degrades to
-//! the no-op passthrough cannot contain this uploader, so a plaintext upload is
-//! impossible by construction.
+//! **Delivery is a race, not a dial** ([`diag_kindling`], #165). Telemetry goes out over the same
+//! kindling machinery the config fetch uses — direct, proxyless, and the vantage-point scanner —
+//! because the client with the most to report is the one that cannot reach anything, and a
+//! direct-only uploader is silent exactly there. The dns-tunnel member is deliberately *not*
+//! among them; see [`diag_kindling`] for why that one is different in kind.
+//!
+//! Every member is TLS, and the module only compiles under `feature = "config-fetch"` — so the
+//! real (boring) `tls_wrap` is always in play and a build whose `tls_wrap` degrades to the no-op
+//! passthrough cannot contain this uploader. A plaintext upload stays impossible by construction.
 //!
 //! Failure discipline mirrors `config::fetch::run_loop`: nothing here ever returns an
 //! error to a caller or crashes the process, and internal failures log at
@@ -18,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{watch, Notify};
 
@@ -265,6 +270,8 @@ async fn run_loop(
 ) {
     let notify = sink.error_notify();
     let mut fail = 0u32;
+    // Built on first use and reused across cycles — see `Avenues`.
+    let mut avenues: Option<Avenues> = None;
     loop {
         if fail > 0 {
             // Backing off: sleep the full quadratic delay WITHOUT the error-notify
@@ -279,7 +286,10 @@ async fn run_loop(
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let cfg = cfg_rx.borrow_and_update().clone();
+        // Fall back to the build-time block when config-new has delivered nothing. Without this
+        // the uploader is gated on the very fetch whose failure it most needs to report — see
+        // `lantern::embedded_otel`.
+        let cfg = crate::config::lantern::effective_otel(cfg_rx.borrow_and_update().clone());
         if !upload_allowed(cfg.as_ref(), local_opt_out, &device_id) {
             // Off: leave the spool accumulating (its rotation cap bounds disk, §C2)
             // and re-check the gate next tick — the server may flip it back on.
@@ -287,13 +297,27 @@ async fn run_loop(
         }
         let Some(otel) = cfg else { continue };
 
+        // Build the avenues on first use, and rebuild only if the config re-points the endpoint at
+        // a different host — otherwise proxyless would lose its learned strategy every cycle.
+        let (host, port) = split_host_port(&otel.endpoint);
+        if avenues.as_ref().is_none_or(|a| a.host != host) {
+            avenues = Some(Avenues {
+                kindling: diag_kindling(&host, port, &device_id),
+                host,
+            });
+        }
+        // Set immediately above; `continue` rather than unwrap keeps the loop's no-panic contract.
+        let Some(avenues) = avenues.as_ref() else {
+            continue;
+        };
+
         // Logs: take a batch, replay it as OTLP, restore it on any failure.
         match sink.take_spool_batch(BATCH_BYTES) {
             Ok(lines) if !lines.is_empty() => {
                 let events = parse_spool(&lines);
                 if !events.is_empty() {
                     let body = encode_spool_logs(&res, &events, |s| spans.trace_ctx_for(s));
-                    match try_post(&otel, "/v1/logs", &body).await {
+                    match try_post(avenues, &otel, "/v1/logs", &body).await {
                         Ok(status) if (200..300).contains(&status) => {
                             fail = 0;
                             // Ended sessions' ctx entries outlive them by RETIRE_GRACE
@@ -325,7 +349,7 @@ async fn run_loop(
             let batch = spans.drain();
             if !batch.is_empty() {
                 let body = encode_spans(&res, &batch);
-                match try_post(&otel, "/v1/traces", &body).await {
+                match try_post(avenues, &otel, "/v1/traces", &body).await {
                     Ok(status) if (200..300).contains(&status) => fail = 0,
                     Ok(status) => {
                         tracing::debug!(status, "diag: trace upload rejected");
@@ -400,20 +424,143 @@ fn parse_spool(lines: &[String]) -> Vec<SpoolEvent> {
     out
 }
 
-/// One network attempt: resolve, dial direct, TLS-wrap, POST, return the HTTP status.
-/// Bounded by a 30 s timeout (mirrors `fetch_once_direct`).
-async fn try_post(otel: &OtelConfig, path: &str, body: &[u8]) -> io::Result<u16> {
-    const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
-    let (host, port) = split_host_port(&otel.endpoint);
-    tokio::time::timeout(ATTEMPT_TIMEOUT, async {
-        let addr = resolve(&host, port).await?;
+/// The direct dial to the otel host, as a race member so it shares one race with the
+/// censorship-resistant avenues instead of being the only way out.
+///
+/// A near-twin of `config::fetch`'s `DirectConfigTransport`, kept local for the reason
+/// its `resolve` is: the shared thing would be six lines, and coupling the uploader to
+/// a fetch internal costs more than the duplication.
+struct DirectDiagTransport {
+    port: u16,
+}
+
+#[async_trait::async_trait]
+impl flint_kindling::ConnectionTransport for DirectDiagTransport {
+    type Stream = crate::BoxedStream;
+
+    fn name(&self) -> &str {
+        "direct"
+    }
+
+    async fn connect(&self, host: &str) -> io::Result<Self::Stream> {
+        let addr = resolve(host, self.port).await?;
         let stream = DirectTransport::new(None).dial(addr).await?;
-        let tls = tls_wrap(stream, &host).await?;
-        post_body(tls, &host, path, &otel.headers, body).await
+        Ok(Box::new(tls_wrap(stream, host).await?))
+    }
+
+    // `connect_alpn` deliberately not overridden — `tls_wrap` offers no ALPN, so `None` is
+    // accurate rather than a gap, and flint reads it as HTTP/1.1. Same as the config member.
+}
+
+/// The upload avenues for one otel host, built once and reused across cycles.
+///
+/// Reuse is the point, not just an optimization: proxyless's `StrategyCache` keeps whichever
+/// resolver × shaping pair beat the local network, so rebuilding per upload would re-run the
+/// search every minute.
+struct Avenues {
+    /// The host these avenues were built for; a config that re-points the endpoint rebuilds them.
+    host: String,
+    kindling: flint_kindling::Kindling,
+}
+
+/// Build the diagnostics upload race for `host` (#165).
+///
+/// **Why race at all.** The uploader used to dial direct only, which quietly excluded the
+/// population whose telemetry is worth the most: a client that cannot reach the network cannot
+/// report that it cannot reach the network. The spool persists across failed sends and restarts,
+/// so this converts a permanently-lost signal into a delayed one.
+///
+/// **Members.** `direct`, `proxyless` (an un-poisoned resolver plus opening shaping), and the
+/// vantage-point scanner, which discovers live CDN edges from the user's own network and so needs
+/// no server-delivered front list for this host.
+///
+/// **Two deliberate omissions.**
+///
+/// * The **embedded fronted list** (`fronted.yaml.gz`) is keyed to the config host. Fronting the
+///   otel host through it needs a server-side entry in `host_aliases`/`passthrough_patterns`;
+///   until that exists the member could only ever fail, and racing a member that structurally
+///   cannot win is noise in the logs, not resilience. One line to add once the entry lands.
+/// * The **dns-tunnel** is excluded on purpose, and this is the load-bearing one. It is the
+///   last-resort tier — it needs only that recursive DNS resolves at all — and it moves KB/s. A
+///   256 KiB diag batch through it is minutes of hammering public resolvers, for diagnostics.
+///   That tier is reserved for *reachability*: bootstrap must never be degraded to deliver
+///   telemetry. Note this is an omission by construction, not a runtime check — the member is
+///   simply never registered here, so no future config can turn it on by accident.
+fn diag_kindling(host: &str, port: u16, device_id: &str) -> flint_kindling::Kindling {
+    #[cfg_attr(not(feature = "proxyless"), allow(unused_mut))]
+    let mut kindling = flint_kindling::Kindling::new().with_transport(DirectDiagTransport { port });
+    #[cfg(feature = "proxyless")]
+    {
+        kindling = kindling.with_proxyless(crate::config::fetch::proxyless_transport_for(
+            port,
+            "diag-upload",
+        ));
+    }
+    kindling = kindling.with_transport(
+        flint_kindling::FrontedBootstrap::new(host.to_string())
+            .with_seed(crate::config::fetch::seed_from_device_id(device_id)),
+    );
+    // Every member starts together, as in the config race: there is no tail to stagger at this
+    // size, and holding one back would add its latency to the blocked case this exists for.
+    let window = kindling.transport_count().max(1);
+    kindling.with_race_options(flint_kindling::RaceOptions {
+        window,
+        attempt_timeout: Some(CONNECT_TIMEOUT),
+    })
+}
+
+/// Ceiling on the connection race, leaving the rest of [`ATTEMPT_TIMEOUT`] for the HTTP exchange
+/// that runs after a member wins. Mirrors `config::fetch`'s split, for the same reason: a connect
+/// that consumed the whole window would leave nothing to send the batch with.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long one upload attempt gets, connection race included.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One upload attempt: race the avenues, then speak to the winner on **its** terms — HTTP/1.1 or
+/// h2, and the winner's own authority, both read off the connection rather than assumed.
+///
+/// The members disagree on each and the disagreement is invisible from here: `direct` goes through
+/// spark's ALPN-less connector and lands on HTTP/1.1, while the scanner goes through flint's Chrome
+/// connector, which must offer `h2,http/1.1` because ALPN is part of the fingerprint it imitates —
+/// and the peer chooses. Writing HTTP/1.1 at an h2 peer does not fail like an HTTP error; the
+/// response simply never terminates, which is how an earlier proxyless avenue was silently broken.
+async fn try_post(
+    avenues: &Avenues,
+    otel: &OtelConfig,
+    path: &str,
+    body: &[u8],
+) -> io::Result<u16> {
+    tokio::time::timeout(ATTEMPT_TIMEOUT, async {
+        let conn = avenues
+            .kindling
+            .connect(&avenues.host)
+            .await
+            .map_err(io::Error::from)?;
+        // A fronted winner must name the front's inner host so the edge re-originates; a direct
+        // one has no opinion and falls back to the host we asked for. CRLF-stripped because this
+        // is no longer a constant — a scanned authority comes from a live scan.
+        let authority = header_safe(conn.authority(&avenues.host)).into_owned();
+        if conn.is_h2() {
+            let mut req = flint_kindling::OneshotRequest::post(path, Bytes::copy_from_slice(body))
+                .header("content-type", "application/json");
+            for (k, v) in &otel.headers {
+                req = req.header(header_safe(k).into_owned(), header_safe(v).into_owned());
+            }
+            // Same 64 KiB response cap as the 1.1 path: OTLP ingest replies are tiny.
+            req.max_body = MAX_RESPONSE_BYTES;
+            let resp = flint_kindling::h2_oneshot(conn.stream, &authority, &req).await?;
+            Ok(resp.status)
+        } else {
+            post_body(conn.stream, &authority, path, &otel.headers, body).await
+        }
     })
     .await
     .map_err(|_| io::Error::other("diag upload timed out"))?
 }
+
+/// Cap on a collected upload response. OTLP ingest replies are tiny (empty JSON or a status body).
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Write the request and collect the response status over any duplex stream — the
 /// testable half of [`try_post`].
@@ -630,6 +777,31 @@ mod tests {
         assert_eq!(
             split_host_port("h:notaport"),
             ("h:notaport".to_string(), 443)
+        );
+    }
+
+    /// The upload race carries exactly the members it is meant to — and in particular does not
+    /// grow a dns-tunnel one.
+    ///
+    /// `Kindling` exposes a count but not its members' names, so this pins the count. That is
+    /// enough for what it guards: registering the dns-tunnel member (or any other) changes the
+    /// count, and the failure message says what the change has to be checked against. The
+    /// exclusion itself is structural — `diag_kindling` never constructs one — so this test exists
+    /// to make a *future* addition deliberate rather than to detect a runtime toggle.
+    ///
+    /// Why it matters, from #165: the dns-tunnel is the last-resort reachability tier and moves
+    /// KB/s. A 256 KiB diag batch through it is minutes of hammering public resolvers, spending
+    /// the bootstrap path on telemetry.
+    #[test]
+    fn the_upload_race_excludes_the_dns_tunnel() {
+        let kindling = diag_kindling("ingest.example", 443, "0123456789abcdef");
+        // direct + the vantage-point scanner, plus proxyless where the feature is on.
+        let expected = if cfg!(feature = "proxyless") { 3 } else { 2 };
+        assert_eq!(
+            kindling.transport_count(),
+            expected,
+            "the diag upload race changed shape — if a member was added, confirm it is not the \
+             dns-tunnel (it must never carry telemetry; see diag_kindling)"
         );
     }
 

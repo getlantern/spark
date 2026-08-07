@@ -262,12 +262,9 @@ fn arm_and_register(dir: &Path, version: &str) -> Option<DiagEvent> {
 fn resource_attrs(version: &str, device_id: &str, cache_path: &Path) -> ResourceAttrs {
     ResourceAttrs {
         service_version: version.to_string(),
-        // The plugin's build.rs sets SPARK_GIT_SHA for the PLUGIN crate only; core
-        // has no build.rs, so this is "unknown" today. option_env! (not env!) so a
-        // future core build-script can light it up without touching this line.
-        git_sha: option_env!("SPARK_GIT_SHA")
-            .unwrap_or("unknown")
-            .to_string(),
+        // Resolved by core's build script — see `crate::GIT_SHA` for why it is a constant here
+        // rather than an `option_env!` at each host.
+        git_sha: crate::GIT_SHA.to_string(),
         device_id: device_id.to_string(),
         platform: crate::config::fetch::request::lantern_platform(std::env::consts::OS).to_string(),
         country: country_from_cache(cache_path),
@@ -397,9 +394,10 @@ mod tests {
         assert_eq!(res.service_version, "1.2.3");
         assert_eq!(res.device_id, "abcd");
         assert_eq!(res.country, "DE");
-        // core has no SPARK_GIT_SHA build plumbing (the plugin's build.rs covers the
-        // plugin crate only) — so this is the documented fallback.
-        assert_eq!(res.git_sha, "unknown");
+        // Resolved by core's build script. Asserted as non-empty rather than as a literal: in a
+        // checkout it is the short HEAD sha, and outside one the documented "unknown" fallback —
+        // both legitimate, and an empty value is the only genuinely broken outcome.
+        assert!(!res.git_sha.is_empty(), "git_sha must always be populated");
         // Lantern platform convention (darwin, not macos) on this host.
         #[cfg(target_os = "macos")]
         assert_eq!(res.platform, "darwin");

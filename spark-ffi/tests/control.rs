@@ -133,6 +133,10 @@ mod harness {
                 | RequestPayload::DeleteProfile { .. }
                 | RequestPayload::SetActiveProfile { .. } => ResponsePayload::Ack,
                 RequestPayload::Subscribe { .. } => ResponsePayload::Ack,
+                // The FFI control surface never sends this — the app forwards telemetry config to
+                // the service directly (spark#165) — but the match stays exhaustive on purpose, so
+                // a new request variant surfaces here as a compile error rather than a silent gap.
+                RequestPayload::SetTelemetry(_) => ResponsePayload::Ack,
             };
             if write_frame(
                 &mut stream,

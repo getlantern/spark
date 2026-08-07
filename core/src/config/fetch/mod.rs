@@ -499,6 +499,23 @@ const PROXYLESS_MAX_CANDIDATES: usize = 8;
 /// (the same reason the fronted dialer and the scanner are hoisted out of the refresh loop).
 #[cfg(feature = "proxyless")]
 fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
+    proxyless_transport_for(env.port, "config-fetch")
+}
+
+/// [`proxyless_transport`] parameterized by port and caller label, so a second bootstrap-shaped
+/// race — the diagnostics uploader's, which targets the otel host rather than the config host — gets
+/// the identical search rather than a re-derived near-copy of it.
+///
+/// `label` names the caller in proxyless's own reporting; each caller keeps its own
+/// [`ProxylessTransport`] (and therefore its own `StrategyCache`), which is correct: a strategy that
+/// works for one origin is not evidence about another.
+///
+/// [`ProxylessTransport`]: flint_kindling::ProxylessTransport
+#[cfg(feature = "proxyless")]
+pub(crate) fn proxyless_transport_for(
+    port: u16,
+    label: &'static str,
+) -> flint_kindling::ProxylessTransport {
     let mut space = flint_kindling::Space::new(flint_dns::default_pool())
         .with_roots(crate::transport::probe::webpki_roots_pem());
     // `Space::new` seeds `wires[0]` with a no-op. Replace rather than append: appending would spend a
@@ -506,8 +523,8 @@ fn proxyless_transport(env: &FetchEnv) -> flint_kindling::ProxylessTransport {
     // already cover, and `with_max_candidates` trims resolvers before plans, so that slot comes
     // straight out of resolver diversity.
     space.wires = vec![bootstrap_shaping()];
-    flint_kindling::ProxylessTransport::new(space, "config-fetch")
-        .with_port(env.port)
+    flint_kindling::ProxylessTransport::new(space, label)
+        .with_port(port)
         .with_max_candidates(PROXYLESS_MAX_CANDIDATES)
 }
 

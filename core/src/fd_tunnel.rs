@@ -842,10 +842,25 @@ pub fn run_fd_lantern_api(
         // `load_or_fetch`/`run_loop` below cache `device_id` + `config_raw.json`
         // into, so diag identity matches this process's config identity. Placed
         // inside `block_on` because init spawns (sink writer, re-parse task,
-        // uploader) and needs the ambient runtime. macOS NE only for now: Android
-        // is deferred deliberately (separate rollout + battery/consent posture),
-        // and the desktop service does its own capture-only wiring.
-        #[cfg(all(feature = "config-fetch", target_os = "macos"))]
+        // uploader) and needs the ambient runtime.
+        //
+        // macOS NE **and** the Android `:vpn` process — both are the tunnel process on
+        // their platform, and both self-fetch here, so both have the config cache the
+        // uploader reads its endpoint from. Windows/Linux run the desktop service
+        // instead, which does its own wiring.
+        //
+        // Android was previously deferred over "battery/consent posture". Consent was
+        // never an Android-specific question — it is one shared gate for every host
+        // (#168). Battery is real but small, and bounded by where this runs: the
+        // `:vpn` process only exists while the tunnel is up, so the uploader cannot
+        // outlive a connected session, and its 60 s tick does no network work at all
+        // when the spool is empty. Against that, the whole point of this telemetry is
+        // a field-optimization loop, and a loop blind to the platform with the least
+        // visibility into its own failures is the wrong trade.
+        #[cfg(all(
+            feature = "config-fetch",
+            any(target_os = "macos", target_os = "android")
+        ))]
         crate::diag::tunnel_host::init(
             &data_dir,
             env!("CARGO_PKG_VERSION"),
@@ -987,7 +1002,16 @@ pub fn run_fd_lantern_api(
     // sentinel so this return isn't flagged as a crash on the next launch. Belt and
     // suspenders with the disarm in `spark_tunnel_stop` — the NE host usually stops
     // us via stop(), but this covers a data path that ends on its own.
-    #[cfg(all(feature = "config-fetch", target_os = "macos"))]
+    //
+    // On Android this is the ONLY disarm: `nativeStop` signals the run loop rather
+    // than tearing down itself, so the loop's own exit is where an orderly stop is
+    // observed. It must stay paired with the init above — a gate widened on one and
+    // not the other turns every clean Android stop into a false `error.unclean_exit`
+    // on the next launch.
+    #[cfg(all(
+        feature = "config-fetch",
+        any(target_os = "macos", target_os = "android")
+    ))]
     crate::diag::tunnel_host::disarm_sentinel();
     match result {
         Ok(()) => 0,

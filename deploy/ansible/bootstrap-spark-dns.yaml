@@ -24,10 +24,18 @@
   vars:
     bind: "0.0.0.0:5300"
     idle_secs: 300
-    # Telemetry (issue #165). Unset by default: no otel_host means the exporter never starts and the
-    # server makes no outbound connections. Turn it on with
-    #   -e otel_host=ingest.us.signoz.cloud -e otel_key=<key> -e otel_instance=dns-1
-    otel_host: ""
+    # Telemetry (issue #165). **On by default**, matching the binary's own `otlp` feature default
+    # and for the same reason it gives: if reporting takes an extra flag, the likeliest outcome of
+    # a redeploy is a server that silently reports nothing. A deployed server that isn't in SigNoz
+    # is one we cannot tell apart from a blocked one.
+    #
+    # Pass the key:  -e otel_key=<key>   (and -e otel_instance=dns-2 to name it on a dashboard)
+    # Opt out:       -e otel_host=""     (the exporter never starts; no outbound connections at all)
+    #
+    # Forgetting the key is a deploy failure rather than a silent no-telemetry server — see the
+    # assert below. `otel_instance` is an opaque operator label; never derive it from the zone or
+    # the host's address (the server's own hygiene rule).
+    otel_host: "ingest.us.signoz.cloud"
     otel_key: ""
     otel_instance: "dns-tunnel"
     otel_port: 443
@@ -39,6 +47,18 @@
           - zone is defined
           - zone | length > 0
         fail_msg: "pass -e zone=t.<your-domain> (an unattributable domain, not a known Lantern one)"
+
+    # Telemetry is on by default, so a missing key must stop the deploy rather than produce a
+    # server that runs fine and reports nothing — which is the failure mode that leaves us unable
+    # to tell a healthy deployment from a blocked one. Opting out is explicit and still allowed.
+    - name: Require an ingestion key when telemetry is on
+      assert:
+        that:
+          - otel_key | length > 0
+        fail_msg: >-
+          telemetry is on by default: pass -e otel_key=<signoz ingestion key>,
+          or opt out explicitly with -e otel_host=""
+      when: otel_host | length > 0
 
     - name: Config dir
       file:

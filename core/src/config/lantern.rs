@@ -106,6 +106,68 @@ pub fn unbounded_from_config_raw_json(s: &str) -> Result<UnboundedConfig, Config
 /// lantern-cloud; the `||` then falls through to the server flag with no other change needed.
 const FORCE_LOGS_ON: bool = true;
 
+/// The **build-time** otel endpoint and ingestion key, for the phase before any config exists.
+///
+/// [`FORCE_LOGS_ON`] removes one of `upload_allowed`'s three conditions; this removes the other
+/// two. Both exist for the same reason: `upload_allowed` opens with
+/// `let Some(o) = otel else { return false }`, and that block comes from config-new — so **no
+/// server-delivered value can ever describe a client that failed to reach config-new**. That is
+/// precisely the population worth hearing from, and precisely the one the config-gated path
+/// structurally excludes. Bootstrap failures are already captured to the spool from process start
+/// (the sink is installed long before any config); without an endpoint they are stranded on disk,
+/// not lost. This is what makes them reachable.
+///
+/// Injected the same way as `SPARK_BOOTSTRAP_DNS_*`, for the same reason — a value the pre-config
+/// phase needs cannot come from config — and, like them, **absence is a working configuration**:
+/// no embedded block simply means the config-delivered one is the only source, i.e. today's
+/// behaviour.
+///
+/// - `SPARK_OTEL_ENDPOINT` — a repo **variable**; `ingest.us.signoz.cloud:443` is not a secret.
+/// - `SPARK_OTEL_INGEST_KEY` — a repo **secret**, and a *throwaway* one, separate from the key the
+///   Go services use. An embedded key is extractable from any binary; a SigNoz ingestion key is
+///   write-only, so the exposure is junk telemetry and quota spend, never disclosure. Keeping it
+///   separate is what stops an extracted spark key from polluting radiance/flashlight/api. It is
+///   not rotatable without a release, so treat rotation as shipping a build.
+///
+/// **This does not override the user's choice.** The `SPARK_DIAGNOSTICS` decline gates
+/// `diag::init()` itself, so a declining user never reaches the uploader. What it removes is the
+/// *server's* ability to switch the signal off remotely, for clients it cannot reach anyway.
+pub fn embedded_otel() -> Option<OtelConfig> {
+    let endpoint = option_env!("SPARK_OTEL_ENDPOINT")?.trim();
+    if endpoint.is_empty() {
+        return None;
+    }
+    // A key-less collector is legitimate (a self-hosted one on a private network), so an absent
+    // key yields no header rather than refusing to build the block.
+    let headers = match option_env!("SPARK_OTEL_INGEST_KEY").map(str::trim) {
+        Some(k) if !k.is_empty() => vec![("signoz-ingestion-key".to_string(), k.to_string())],
+        _ => Vec::new(),
+    };
+    Some(OtelConfig {
+        endpoint: endpoint.to_string(),
+        headers,
+        // Every client, deliberately: this path exists to hear from a population that is already
+        // hard to reach, and sampling it down would defeat the purpose. The server-delivered block
+        // takes precedence the moment one arrives, and carries the real rate.
+        sample_rate: 1.0,
+        logs_enabled: true,
+        // Traces are correlated to log records by session; shipping them from the pre-config phase
+        // costs a second signal for the same records and buys little, so leave them to the
+        // server-delivered block.
+        traces_enabled: false,
+    })
+}
+
+/// The otel block the uploader should actually use: the config-delivered one when it exists, else
+/// the build-time fallback ([`embedded_otel`]).
+///
+/// Fetched wins on purpose. It carries the real sampling rate and the rotatable key, and it is the
+/// only one the server can switch off — so as soon as a client can be reached, it is governed
+/// remotely again. The embedded block is a floor for the unreachable, not an override.
+pub fn effective_otel(fetched: Option<OtelConfig>) -> Option<OtelConfig> {
+    fetched.or_else(embedded_otel)
+}
+
 /// client-side contract (see the diagnostics design spec §2/§C4). The diag uploader consumes this;
 /// `core` just carries the raw fields.
 ///
@@ -1282,6 +1344,50 @@ mod tests {
         // An endpoint missing entirely (not just empty) behaves the same.
         let raw2 = r#"{ "otel": { "headers": { "k": "v" } }, "options": { "outbounds": [] } }"#;
         assert_eq!(otel_from_config_raw_json(raw2).expect("parses"), None);
+    }
+
+    /// The config-delivered block always wins over the build-time fallback.
+    ///
+    /// This is what keeps the server in control of any client it can actually reach: the real
+    /// sampling rate, the rotatable key, and the kill switch all live in the fetched block, and an
+    /// embedded one that shadowed it would make every shipped binary permanently un-killable.
+    #[test]
+    fn a_fetched_otel_block_takes_precedence_over_the_embedded_one() {
+        let fetched = OtelConfig {
+            endpoint: "fetched.example:443".into(),
+            headers: vec![("signoz-ingestion-key".into(), "server-key".into())],
+            sample_rate: 0.25,
+            logs_enabled: true,
+            traces_enabled: true,
+        };
+        let effective = effective_otel(Some(fetched.clone())).expect("fetched block survives");
+        assert_eq!(effective, fetched);
+    }
+
+    /// With no fetched block, the uploader gets the embedded one — or `None` when this build
+    /// pinned none, which must remain a working configuration (today's behaviour).
+    #[test]
+    fn without_a_fetched_block_the_embedded_one_is_used_when_present() {
+        // `option_env!` is resolved at compile time, so which branch runs here depends on how this
+        // build was configured. Both are legitimate; assert the property that holds either way.
+        match effective_otel(None) {
+            Some(embedded) => {
+                assert_eq!(
+                    embedded,
+                    embedded_otel().expect("fallback came from embedded_otel")
+                );
+                assert!(
+                    !embedded.endpoint.is_empty(),
+                    "an embedded block with an empty endpoint must be None, not a dead endpoint"
+                );
+                assert!(
+                    embedded.logs_enabled,
+                    "logs gate ALL uploads — an embedded block with logs off would ship nothing"
+                );
+            }
+            // No key pinned in this build: absence stays a working configuration.
+            None => assert!(embedded_otel().is_none()),
+        }
     }
 
     #[test]

@@ -62,6 +62,12 @@ prod = [
     # cannot drift from what the phones ship.
     "spark-core/prod",
     "spark-core/system-stack",
+    # THIS crate's `config-fetch`, not just core's. `spark-core/prod` already turns core's on, so
+    # this adds no code to core — what it adds is the `cfg(feature = "config-fetch")` that THIS
+    # crate's source reads, which a `spark-core/…` entry does not set. `diag_wire`'s uploader is
+    # behind exactly that cfg, so without this line a `--features prod` service silently ships the
+    # capture half and no uploader, which is the bug this whole change exists to fix.
+    "config-fetch",
 ]
 
 [dependencies]

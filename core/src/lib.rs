@@ -32,6 +32,23 @@ pub mod split_tunnel;
 pub mod transport;
 pub mod tun;
 
+/// The git revision this build came from, stamped onto every OTLP resource block so a field report
+/// says which build produced it.
+///
+/// Resolved by `core`'s build script — an externally supplied `SPARK_GIT_SHA` (CI knows the real
+/// ref) first, else `git rev-parse --short HEAD`, else `"unknown"` for a build outside a checkout.
+///
+/// Exposed as a constant rather than each host calling `option_env!` itself, because
+/// `cargo:rustc-env` from a build script applies **only while compiling that crate** — the service
+/// and the Tauri plugin are separate compilations and would every one of them read `None` and
+/// report `"unknown"`. Reading it from here is what makes the sha the same across the app process,
+/// the tunnel process, and the CLI, which is the only way a field report can be attributed to a
+/// build at all.
+pub const GIT_SHA: &str = match option_env!("SPARK_GIT_SHA") {
+    Some(sha) => sha,
+    None => "unknown",
+};
+
 /// Control-plane name resolution for startup (design: docs/bootstrap-resolver-design.md). Resolves a
 /// proxy `server` hostname to validated IPs via an un-poisoned Chrome-mimicry DoH race, before any
 /// tunnel exists. Behind `bootstrap-dns` (pulls flint-dns/flint-dial + boring).

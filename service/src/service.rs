@@ -189,6 +189,15 @@ pub async fn run_service<E: TunnelEngine>(
                             message: "request requires protocol version 2".into(),
                         }
                     }
+                    // v3-only, same discipline. Its replies (`Ack`/`Error`) are v1 types, so unlike
+                    // the v2 block this is not about a frame the peer couldn't decode — it is about
+                    // not honouring a command from a peer that never agreed to speak it.
+                    RequestPayload::SetTelemetry(_) if negotiated < Some(3) => {
+                        ResponsePayload::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: "request requires protocol version 3".into(),
+                        }
+                    }
                     RequestPayload::GetCapabilities => {
                         ResponsePayload::Capabilities(info.capabilities.clone())
                     }
@@ -247,6 +256,22 @@ pub async fn run_service<E: TunnelEngine>(
                     },
                     RequestPayload::ValidateProfile { toml } => {
                         ResponsePayload::Validated(crate::profiles::validate(&toml))
+                    }
+                    // Point the diagnostics uploader at the collector the app fetched for us
+                    // (#165). Nothing is stored beyond the uploader's own channel and nothing is
+                    // ever read back out: the ingestion key must not reach an IPC peer, so there
+                    // is deliberately no `GetTelemetry`, and `Details` carries none of it.
+                    RequestPayload::SetTelemetry(cfg) => {
+                        match crate::diag_wire::set_telemetry(&cfg) {
+                            Ok(()) => ResponsePayload::Ack,
+                            // Not the peer's fault — this build or launch cannot upload. Answering
+                            // honestly lets the app stop re-sending and say so, where an `Ack`
+                            // would have it believe telemetry is flowing.
+                            Err(message) => ResponsePayload::Error {
+                                code: ErrorCode::Internal,
+                                message: message.to_string(),
+                            },
+                        }
                     }
                     RequestPayload::Connect => {
                         // Connect with the active profile's config, or the launch config if none.
@@ -624,6 +649,80 @@ mod tests {
                 ..
             }
         ));
+        drop(cmd);
+        let _ = handle.await;
+    }
+
+    fn telemetry() -> spark_ipc::TelemetryConfig {
+        spark_ipc::TelemetryConfig {
+            endpoint: "ingest.example:443".into(),
+            headers: vec![("signoz-ingestion-key".into(), "k".into())],
+            sample_rate_ppm: 1_000_000,
+            logs_enabled: true,
+            traces_enabled: true,
+            device_id: "0123456789abcdef0123456789abcdef".into(),
+            country: "US".into(),
+        }
+    }
+
+    /// `SetTelemetry` is v3; a v2 peer must be refused rather than have its command honoured.
+    #[tokio::test]
+    async fn set_telemetry_is_refused_on_a_v2_peer() {
+        let (cmd, cmd_rx) = channel();
+        let handle = tokio::spawn(run_service(
+            FakeEngine::default(),
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+            None,
+        ));
+        let (push_tx, _rx) = mpsc::channel::<Push>(4);
+        request(&cmd, &push_tx, RequestPayload::Hello { client_version: 2 }).await;
+        match request(&cmd, &push_tx, RequestPayload::SetTelemetry(telemetry())).await {
+            ResponsePayload::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InvalidRequest);
+                assert!(message.contains("version 3"), "{message}");
+            }
+            other => panic!("expected a version refusal, got {other:?}"),
+        }
+        drop(cmd);
+        let _ = handle.await;
+    }
+
+    /// A v3 peer's `SetTelemetry` reaches the diagnostics host instead of stopping at the
+    /// protocol gate.
+    ///
+    /// Deliberately does not assert `Ack` vs `Error`: which one comes back depends on whether
+    /// `diag_wire::init` has run in this process, and that is a **process-global** `OnceLock` that
+    /// another test in this binary sets — so asserting it here would make this test depend on test
+    /// order. The honest-answer contract is tested in `diag_wire`, which owns that lifecycle.
+    #[tokio::test]
+    async fn set_telemetry_reaches_the_diagnostics_host() {
+        let (cmd, cmd_rx) = channel();
+        let handle = tokio::spawn(run_service(
+            FakeEngine::default(),
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+            None,
+        ));
+        let (push_tx, _rx) = mpsc::channel::<Push>(4);
+        request(
+            &cmd,
+            &push_tx,
+            RequestPayload::Hello {
+                client_version: PROTOCOL_VERSION,
+            },
+        )
+        .await;
+        match request(&cmd, &push_tx, RequestPayload::SetTelemetry(telemetry())).await {
+            // Accepted, or refused for a reason that came from the diagnostics host.
+            ResponsePayload::Ack => {}
+            ResponsePayload::Error { code, message } => {
+                assert_eq!(code, ErrorCode::Internal, "{message}");
+            }
+            other => panic!("SetTelemetry did not reach the diagnostics host: {other:?}"),
+        }
         drop(cmd);
         let _ = handle.await;
     }
