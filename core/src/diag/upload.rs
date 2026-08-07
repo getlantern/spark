@@ -286,7 +286,10 @@ async fn run_loop(
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let cfg = cfg_rx.borrow_and_update().clone();
+        // Fall back to the build-time block when config-new has delivered nothing. Without this
+        // the uploader is gated on the very fetch whose failure it most needs to report — see
+        // `lantern::embedded_otel`.
+        let cfg = crate::config::lantern::effective_otel(cfg_rx.borrow_and_update().clone());
         if !upload_allowed(cfg.as_ref(), local_opt_out, &device_id) {
             // Off: leave the spool accumulating (its rotation cap bounds disk, §C2)
             // and re-check the gate next tick — the server may flip it back on.
