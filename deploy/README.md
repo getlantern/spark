@@ -23,7 +23,8 @@ The runbook is the **`redeploy-dns-tunnel` skill** in
 Claude Code session, or read `skills/redeploy-dns-tunnel/SKILL.md` there. It covers an ordered
 health-check chain, the silent failure modes (missing NS delegation, unpersisted DNAT, a proxied
 glue record), key recovery without rotation, and the end-to-end test. Read it before changing a
-running deployment.
+running deployment — or rehearse it with `/redeploy-dns-tunnel --dry-run`, which still runs every
+read-only health check but prints the writing steps instead of executing them.
 
 It lives in the shared plugin rather than here so it is discoverable without already knowing it
 exists — most of the failure modes it documents look like something else.
