@@ -18,9 +18,15 @@ it cannot co-tenant dnstt's `:53`. They coexist fine (dnstt on `t.iantem.io`, sp
 
 ## Redeploying / debugging
 
-`.claude/skills/redeploy-dns-tunnel/SKILL.md` is the runbook: an ordered health-check chain, the
-silent failure modes (missing NS delegation, unpersisted DNAT, a proxied glue record), key recovery
-without rotation, and the end-to-end test. Read it before changing a running deployment.
+The runbook is the **`redeploy-dns-tunnel` skill** in
+[getlantern/skills](https://github.com/getlantern/skills) — invoke it as `/redeploy-dns-tunnel` in a
+Claude Code session, or read `skills/redeploy-dns-tunnel/SKILL.md` there. It covers an ordered
+health-check chain, the silent failure modes (missing NS delegation, unpersisted DNAT, a proxied
+glue record), key recovery without rotation, and the end-to-end test. Read it before changing a
+running deployment.
+
+It lives in the shared plugin rather than here so it is discoverable without already knowing it
+exists — most of the failure modes it documents look like something else.
 
 Requires `brew install ansible`.
 
