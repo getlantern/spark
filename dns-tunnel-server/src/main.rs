@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 use dns_tunnel_core::crypto;
 use dns_tunnel_core::session::Config;
-use dns_tunnel_server::{serve, ServerConfig};
+use dns_tunnel_server::{export, metrics::Metrics, serve, ServerConfig};
 use tokio::net::UdpSocket;
 
 #[derive(Parser)]
@@ -55,6 +55,56 @@ struct ServeArgs {
     /// Idle session timeout, in seconds.
     #[arg(long, default_value_t = 300)]
     idle_secs: u64,
+    /// OTLP collector host, e.g. `ingest.us.signoz.cloud`. **Telemetry is off unless this is set** —
+    /// without it the server opens no outbound connections at all.
+    #[arg(long)]
+    otel_host: Option<String>,
+    /// OTLP collector port.
+    #[arg(long, default_value_t = 443)]
+    otel_port: u16,
+    /// Ingestion key, sent as `signoz-ingestion-key`.
+    ///
+    /// Read from the environment in production so it never appears in a process listing or a shell
+    /// history — the systemd unit sources it from a root-only `EnvironmentFile`.
+    #[arg(long)]
+    otel_key: Option<String>,
+    /// Opaque label distinguishing this server on a dashboard.
+    ///
+    /// Operator-chosen and deliberately not defaulted to the hostname or zone: the label lands in
+    /// every exported series, and a zone-derived one would publish the tunnel's location to everyone
+    /// with dashboard access.
+    #[arg(long, default_value = "dns-tunnel")]
+    otel_instance: String,
+    /// Seconds between metric exports.
+    #[arg(long, default_value_t = 60)]
+    otel_interval_secs: u64,
+}
+
+/// An environment variable, treating unset and empty as equally absent.
+///
+/// Empty matters: a systemd `Environment=` line for an unconfigured key yields `""`, and an empty
+/// string here would otherwise enable export against a hostless endpoint or send a blank auth header.
+fn env_opt(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// A numeric environment variable, falling back to `flag` when unset, empty, or unparseable.
+///
+/// Unparseable falls back rather than failing: a typo in a systemd `Environment=` line should cost
+/// the default export interval, not prevent the tunnel from starting. The tunnel is the product;
+/// telemetry misconfiguration must never be able to take it down.
+fn env_num<T: std::str::FromStr>(key: &str, flag: T) -> T {
+    match env_opt(key).map(|v| v.trim().parse::<T>()) {
+        Some(Ok(v)) => v,
+        Some(Err(_)) => {
+            tracing::warn!(
+                key,
+                "ignoring unparseable numeric env var, using the default"
+            );
+            flag
+        }
+        None => flag,
+    }
 }
 
 #[tokio::main]
@@ -86,6 +136,35 @@ async fn main() -> anyhow::Result<()> {
             let udp = UdpSocket::bind(&a.bind).await?;
             // Log hygiene: report readiness without the zone or bind address.
             tracing::info!("dns-tunnel-server listening");
+
+            // Env fallback is resolved here rather than via clap's `env` feature: that feature
+            // would have to be enabled on the *workspace* clap, and cargo's feature unification
+            // would then pull it into the client binaries the <3 MB size budget guards.
+            let otel_host = a.otel_host.or_else(|| env_opt("SPARK_OTEL_HOST"));
+            // The key comes from the environment in production so it never lands in a process
+            // listing or a shell history; the systemd unit sources it from a root-only file.
+            let otel_key = a.otel_key.or_else(|| env_opt("SPARK_OTEL_INGEST_KEY"));
+            let otel_instance = env_opt("SPARK_OTEL_INSTANCE").unwrap_or(a.otel_instance);
+            let otel_port = env_num("SPARK_OTEL_PORT", a.otel_port);
+            let otel_interval_secs = env_num("SPARK_OTEL_INTERVAL_SECS", a.otel_interval_secs);
+
+            let metrics = std::sync::Arc::new(Metrics::new());
+            // Held so the exporter is cancelled with the process rather than detached (CLAUDE.md:
+            // no `tokio::spawn` whose handle is dropped unless the task is genuinely fire-and-forget).
+            let _exporter = otel_host.map(|host| {
+                tracing::info!(interval_secs = otel_interval_secs, "metrics export enabled");
+                export::spawn(
+                    std::sync::Arc::clone(&metrics),
+                    export::ExportConfig {
+                        host,
+                        port: otel_port,
+                        key: otel_key,
+                        instance: otel_instance,
+                        interval: std::time::Duration::from_secs(otel_interval_secs.max(1)),
+                    },
+                )
+            });
+
             serve(
                 udp,
                 ServerConfig {
@@ -94,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
                     session: Config::default(),
                     idle_timeout_ms: a.idle_secs.saturating_mul(1000),
                 },
+                metrics,
             )
             .await?;
         }

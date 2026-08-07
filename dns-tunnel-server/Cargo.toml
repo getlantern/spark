@@ -22,3 +22,10 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+# Telemetry (issue #165). All already workspace deps — this adds no new external dependency to the
+# project, only to this crate. serde_json encodes the OTLP/JSON body; boring2 + webpki-root-certs are
+# the same TLS stack and root set the client dials with (ADR 0001).
+serde_json = { workspace = true }
+boring2 = { workspace = true }
+tokio-boring2 = { workspace = true }
+webpki-root-certs = { workspace = true }
