@@ -52,6 +52,13 @@ pub fn default_shaping() -> WirePlan {
         // SNI within one segment is a different implementation from one matching within one record,
         // and both are common; carrying both in one plan beats strictly more networks per slot.
         segment_split: SegmentSplit::SniBoundary,
+        // Required for Layer C to mean anything. `WirePlan::default()` leaves this false, and with
+        // Nagle on, the kernel is free to coalesce the segments we just went to the trouble of
+        // splitting back into one packet — the split survives in the write pattern and vanishes on
+        // the wire, which is the only place it matters. The bootstrap race inherited the false
+        // default from #166 and has been shaping Layer C into a single packet ever since; the
+        // config path set it true, which is how the two disagreed without either looking wrong.
+        tcp_nodelay: true,
         ..Default::default()
     }
 }
@@ -2390,17 +2397,15 @@ mod default_shaping_tests {
     fn shaping_default_matches_the_shared_plan() {
         let from_config = wire_plan_from_config(&crate::config::ShapingConfig::default());
         let shared = default_shaping();
-        // Compared via `Debug`: flint's `RecordFragment`/`SegmentSplit` derive `Debug` but not
-        // `PartialEq`, and their `Debug` carries the payloads (`Chunks(n)`, `Explicit(vec)`) that
-        // distinguish the variants, so it discriminates everything an equality impl would.
-        assert_eq!(
-            format!("{:?}", from_config.record_fragment),
-            format!("{:?}", shared.record_fragment),
-        );
-        assert_eq!(
-            format!("{:?}", from_config.segment_split),
-            format!("{:?}", shared.segment_split),
-        );
+        // The **whole plan**, not a field list: `tcp_nodelay` and `inter_segment_delay` are part of
+        // the shaping decision too, and a per-field assertion silently stops covering any field
+        // added to `WirePlan` later — which is the same drift this test exists to catch.
+        //
+        // Compared via `Debug` because flint's `WirePlan` derives `Debug` but not `PartialEq`.
+        // Formatting instability is not a hazard here: both sides are the same type formatted the
+        // same way, so a `Debug` change moves them together. What it must not do is *omit* a field,
+        // and a derived `Debug` prints them all.
+        assert_eq!(format!("{from_config:?}"), format!("{shared:?}"));
     }
 
     /// The default must actually shape — a default that parsed cleanly to `None` on both layers

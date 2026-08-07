@@ -504,7 +504,9 @@ impl Default for TransportConfig {
 }
 
 /// Opening-handshake framing/timing (ADR 0006 Phase 1, genome Layers B and C). Shapes only the
-/// opening write (the ClientHello); a default value does nothing.
+/// opening write (the ClientHello). **Both layers are on by default** — see
+/// [`ShapingConfig::default`], which mirrors `transport::default_shaping()`; set a field to
+/// `"none"` to turn that layer off.
 ///
 /// The two layers cut the *same* ClientHello at different levels and defeat different censors, so
 /// they are independent knobs rather than alternatives:
@@ -520,6 +522,8 @@ impl Default for TransportConfig {
 pub struct ShapingConfig {
     /// `"none"`, `"sni_boundary"`, or comma-separated byte offsets (e.g. `"700,1400"`) into the
     /// opening write at which to split it into separate, flushed TCP segments.
+    ///
+    /// Defaults to `"sni_boundary"`.
     pub segment_split: String,
     /// Fixed delay between segments, in milliseconds (omit for none).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -528,11 +532,13 @@ pub struct ShapingConfig {
     pub tcp_nodelay: bool,
     /// How to fragment the ClientHello across TLS records (Layer B):
     ///
-    /// * `"none"` — one record (the default).
+    /// * `"none"` — one record.
     /// * `"sni_straddle"` — two records cut so the SNI host value spans the boundary. Falls back to
     ///   one record when the write carries no locatable SNI, so it is never worse than `"none"`.
     /// * `"chunks:N"` — records of at most `N` payload bytes each.
     /// * comma-separated offsets (e.g. `"700,1400"`) — a record boundary at each payload offset.
+    ///
+    /// Defaults to `"sni_straddle"`.
     pub record_fragment: String,
 }
 
