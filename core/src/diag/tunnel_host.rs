@@ -28,11 +28,15 @@
 //! fall back to deriving one from the data dir — which also *persists* it, and is why
 //! the supplied path must not fall through. See `docs/identity-unification-design.md`.
 //!
-//! ## Opt-out
-//! Only the local `SPARK_DIAGNOSTICS=off` env override is honored here — the tunnel
-//! has no persisted toggle (the app owns the user-facing setting, and its persistence
-//! lives in the app container this process can't read). A follow-up can plumb the
-//! toggle through `providerConfiguration` alongside the unified device id.
+//! ## Consent: opt-IN
+//! Diagnostics are **off unless explicitly enabled** ([`super::opted_in`]). The initial test
+//! phases collect extensive metrics, and extensive collection is only defensible from users
+//! who chose it — so the absence of a decision means no.
+//!
+//! The tunnel still has no persisted toggle (the app owns the user-facing setting, and its
+//! persistence lives in an app container this process can't read), so consent arrives per
+//! launch. Plumbing that toggle through `providerConfiguration` alongside the unified device
+//! id is the production channel and the remaining piece.
 //!
 //! Init is infallible by design (same contract as the app host): every step degrades
 //! gracefully to less diagnostics, and internal failures log at `tracing::debug!`
@@ -103,9 +107,8 @@ fn lock_sentinel() -> MutexGuard<'static, Option<Arc<SessionSentinel>>> {
 /// fallback `fetch::device_id()` *creates and persists* a file — it is what keeps the
 /// tunnel from minting its own identity behind the fetch path's back.
 pub fn init(data_dir: &Path, version: &str, device_id: Option<&str>) {
-    // Local opt-out (spec §C4.3): env override only — see the module doc for why the
-    // tunnel has no persisted toggle.
-    if std::env::var("SPARK_DIAGNOSTICS").as_deref() == Ok("off") {
+    // Consent gate — opt-in, shared with the service host so the two cannot drift.
+    if !super::opted_in() {
         return;
     }
     // A later session in this same process (the NE persists across

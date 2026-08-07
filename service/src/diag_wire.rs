@@ -41,9 +41,10 @@ static SENTINEL: OnceLock<Arc<SessionSentinel>> = OnceLock::new();
 /// (`/var/lib/spark` / `C:\ProgramData\spark`), the same root-owned dir the profile
 /// store already creates and writes, so the writability assumption is shared.
 pub fn init(state_dir: &Path, version: &str) {
-    // Local opt-out: env override only, mirroring the tunnel host (the service has
-    // no persisted toggle; the app owns the user-facing setting).
-    if std::env::var("SPARK_DIAGNOSTICS").as_deref() == Ok("off") {
+    // Consent gate — **opt-in**, sharing the tunnel host's predicate rather than
+    // re-implementing it. Two gates that could drift is how one entry point ends up
+    // still collecting from users who never agreed.
+    if !spark_core::diag::opted_in() {
         return;
     }
     // An unwritable/unresolvable dir means no diagnostics this run.
