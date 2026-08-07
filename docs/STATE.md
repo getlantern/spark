@@ -5,7 +5,45 @@
 
 ## Current position
 
-**2026-08-01 — PICK UP HERE. The proxyless transport arc is complete end to end; tree green, all
+**2026-08-07 — PICK UP HERE. Telemetry now reaches SigNoz from every client surface and by default
+from the deployed server (#165); tree green, branch `feat/tunnel-process-telemetry`, NOT yet merged.**
+
+Six commits, each independently green:
+
+| commit | what |
+|---|---|
+| `094ba9a` | Desktop tunnel process uploads. New **v3** IPC `SetTelemetry` carries endpoint/headers/gates + the app's device id and country to `spark-service`, which had everything but the collector's address. |
+| `9d4dc7b` | Uploads go over **kindling** (direct + proxyless + vantage-point scanner), **never the dns-tunnel** — that tier is reserved for reachability and must not be spent on 256 KiB diag batches at KB/s. |
+| `5def555` | Log hygiene is **held by tests**: a corpus of all 18 event constructors checked against a source scan, leak assertions over the *encoded OTLP payload*, and a closed set of attribute **keys**. |
+| `774bae6` | **Android** `:vpn` process reports (was `target_os = "macos"` only). |
+| `caa95b3` | **Build-time otel block** (`SPARK_OTEL_ENDPOINT` / `secrets.SPARK_OTEL_INGEST_KEY`) so a client that never reached config-new can still report *why*. |
+| `46ccf35` | DNS-tunnel server telemetry **on by default** in the deploy; missing key now fails the deploy. |
+
+**Facts worth not re-deriving.**
+- The service's `prod` feature must list its **own** `config-fetch`, not just `spark-core/config-fetch`
+  — only the former sets the `cfg` the service's own source reads. That distinction silently decided
+  whether a release build had an uploader at all.
+- `RequestPayload` derives `Eq`, so no `f64` can cross the control plane. The sample rate travels as
+  integer parts-per-million.
+- An **empty endpoint** is how "telemetry off" is spelled everywhere (radiance, `upload_allowed`,
+  `otel_config`), so the kill switch needs no separate wire variant.
+- Attribute **keys** are the only place a ConnectionID can be caught — it is 8 random bytes in hex,
+  which no redactor can distinguish from an ordinary token. Hence the closed-key-set test.
+- `cargo ndk -t arm64-v8a check -p spark-android` (NDK 28.2) is the way to verify the Android slice
+  here; `cargo check -p spark-core --target …-android` is NOT — it uses default features, so
+  `config-fetch` is off and the diagnostics block is excluded entirely.
+- **Binary size:** `spark-service --features prod`, macOS: 8.66 → **8.99 MB** (+323 KB) across this
+  branch. Budget is 12 MiB against the Linux ELF (the fattest), previously measured 10.75 MB.
+
+**Open on this track (all in #165):** a live end-to-end verification against a running client (never
+done — needs a packaged macOS or Tauri build); the throwaway ingestion key still has to be minted and
+set as `secrets.SPARK_OTEL_INGEST_KEY`; dashboards + a privacy review that should gate the release,
+not follow it; and the meek server, which is Lantern's, not spark's (lantern-cloud work). Noted but
+deliberately **not** fixed here: the DMG build step does not receive the `SPARK_BOOTSTRAP_DNS_*` vars
+the CLI/service step does, so the shipped macOS app has no bootstrap dns-tunnel race member — a
+pre-existing gap whose fix changes which transports the product ships.
+
+**2026-08-01 — the proxyless transport arc is complete end to end; tree green, all
 merged.** Proxyless (ADR 0014) reaches destinations with **no proxy and no exit hop** by searching a
 (DNS resolver × TLS wire shaping) space for a pair the local censor doesn't break, verifying each
 candidate against the one thing a censor cannot forge — a valid certificate for the destination.
