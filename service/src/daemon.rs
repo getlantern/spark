@@ -219,7 +219,9 @@ fn init_tracing() {
     //
     // DiagLayer: capture-only diagnostics (design §5 Phase B-lite) — events reach the
     // service's local spool/diag.log (wired by `diag_wire::init`) for hand-collection;
-    // upload needs an IPC-plumbed otel config (follow-up, see diag_wire's module doc).
+    // No uploader: the daemon loads a local config file, and the `otel` block lives only in
+    // config-new's payload, which the client app fetches. Not a size or feature limit — see
+    // diag_wire's module doc, which corrects an earlier comment claiming otherwise.
     // A no-op until diag_wire installs the sink. Note the global EnvFilter above sits
     // in front of every layer: at the default `info`, spark DEBUG events don't reach
     // this layer (a deliberate scope-down vs the NE — RUST_LOG=debug widens capture).
