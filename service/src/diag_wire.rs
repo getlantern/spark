@@ -1,16 +1,33 @@
 //! Capture-only diagnostics wiring for the service process (design §5 Phase B-lite).
 //!
 //! The service is the tunnel process on Windows/Linux (`spark.component` "tunnel",
-//! like the macOS NE), but unlike the NE it has **no config source**: it doesn't carry
-//! spark-core's `config-fetch` feature (forcing it on would pull the BoringSSL build
-//! and blow the 4 MiB size budget), so there is no `otel` block to gate an uploader
-//! with — and `diag::tunnel_host` (cfg `config-fetch`) isn't even compiled in. What
-//! runs here is the capture side only: the sink (spool + backup log under the service
-//! state dir), the `DiagLayer` on the daemon's subscriber (see `daemon::init_tracing`),
-//! the panic hook, and the unclean-exit sentinel. Captured events accumulate in
-//! `diagnostics.jsonl`/`diag.log` for hand-collection; **upload arrives via a later
-//! IPC plumb** (the client app, which does fetch config, hands the otel endpoint —
-//! or ferries batches — across the control channel).
+//! like the macOS NE), but unlike the NE it never sees an `otel` block, so there is
+//! nothing to gate an uploader with.
+//!
+//! **Why, precisely** — the earlier version of this comment blamed the feature set and
+//! the size budget, and both premises are now false. `config-fetch` *is* in
+//! `spark-core/prod` (core/Cargo.toml), BoringSSL *is* already linked (anytls and
+//! samizdat pull it regardless), `diag::tunnel_host` *is* compiled in, and the budget
+//! is 12 MiB against a measured 8.24 MiB on macOS / 10.75 MiB on Linux — not 4 MiB.
+//! None of that is what stops an uploader here.
+//!
+//! What stops it is the **config source**: the daemon loads a local config file handed
+//! to it at startup (`daemon::run`), and an `otel` block only exists in config-new's
+//! payload, which the *client app* fetches. Deliberately so — the tunnel process does
+//! not fetch on its own behalf (#132). So the service has the transport, the trust
+//! anchors, and the uploader's host module all compiled in, and simply lacks the one
+//! value that would point them at a collector.
+//!
+//! What runs here is the capture side only: the sink (spool + backup log under the
+//! service state dir), the `DiagLayer` on the daemon's subscriber (see
+//! `daemon::init_tracing`), the panic hook, and the unclean-exit sentinel. Captured
+//! events accumulate in `diagnostics.jsonl`/`diag.log` for hand-collection.
+//!
+//! **Upload arrives via a later IPC plumb**: the client app hands the otel endpoint and
+//! ingestion key across the control channel, and the service uploads directly with the
+//! boring stack it already links. Ferrying whole batches to the client instead was the
+//! other candidate; it is the heavier of the two now that the TLS constraint is gone.
+//! Whichever lands, the key must not be echoed back to any IPC peer (CLAUDE.md).
 //!
 //! Same infallibility contract as the other diag hosts: every step degrades
 //! gracefully to less diagnostics, and internal failures log at `tracing::debug!`
