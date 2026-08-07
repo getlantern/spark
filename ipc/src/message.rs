@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 pub type ProtocolVersion = u32;
 
 /// The version this build speaks. v2 (ADR 0004) adds the read-only backend-contract requests
-/// [`RequestPayload::GetCapabilities`]/[`RequestPayload::GetDetails`] and their responses; all
-/// additive (appended enum variants), so v1 peers still decode v1 frames.
-pub const PROTOCOL_VERSION: ProtocolVersion = 2;
+/// [`RequestPayload::GetCapabilities`]/[`RequestPayload::GetDetails`] and their responses; v3 adds
+/// [`RequestPayload::SetTelemetry`]. All additive (appended enum variants), so older peers still
+/// decode the frames of their own version.
+pub const PROTOCOL_VERSION: ProtocolVersion = 3;
 
 /// The oldest version this build can still interoperate with.
 pub const MIN_SUPPORTED_VERSION: ProtocolVersion = 1;
@@ -88,6 +89,10 @@ pub enum RequestPayload {
         /// A candidate `core::config::Config` as TOML.
         toml: String,
     },
+    /// (v3) Point the tunnel process's diagnostics uploader at a collector — see
+    /// [`TelemetryConfig`]. Write-only: nothing here is ever readable back over the control plane.
+    /// → `Ack`.
+    SetTelemetry(TelemetryConfig),
 }
 
 /// A service→client response. `req_id` echoes the request it answers.
@@ -311,6 +316,89 @@ pub struct Details {
     pub last_error: Option<String>,
 }
 
+/// (v3) Where the tunnel process should send its diagnostics; see [`RequestPayload::SetTelemetry`].
+///
+/// **Why this crosses the control plane at all.** The tunnel process has everything it needs to
+/// upload — TLS stack, trust anchors, the uploader itself — and lacks only the collector's address
+/// and key. Those live in config-new's payload, which the *client app* fetches and the tunnel
+/// deliberately does not (#132: the tunnel does not fetch on its own behalf). So the app forwards
+/// the block it already has rather than the tunnel growing a second fetch path.
+///
+/// **Write-only, in both directions of the word.** The values travel client→service and are never
+/// echoed back: no response, event, or `Details` field exposes them (CLAUDE.md — proxy secrets live
+/// in the privileged store only). And the service treats them as a destination to *send* to, never
+/// as something to serve: it POSTs its own spool to fixed OTLP paths and reads nothing back but a
+/// status code.
+///
+/// **Trust note.** An authenticated peer choosing the collector host is not a new class of
+/// capability: the same peer can already `SetProfile` + `Connect` and route the machine's entire
+/// traffic through a server it names. Peer-cred auth remains the boundary that matters.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// OTLP ingest endpoint as `host:port` (radiance's convention, e.g.
+    /// `ingest.us.signoz.cloud:443`). Empty disables upload.
+    pub endpoint: String,
+    /// Headers attached verbatim to every upload — the ingestion key lives here. Opaque secrets:
+    /// never log the values (the [`Debug`] impl below redacts them).
+    pub headers: Vec<(String, String)>,
+    /// Sampling rate in **parts per million** (`1_000_000` = every device). Integer rather than the
+    /// `f64` the config block carries, because [`RequestPayload`] is `Eq` — and because a wire
+    /// format is better off without NaN and without float equality. Convert with
+    /// [`sample_rate_ppm`](Self::sample_rate_ppm) / [`sample_rate`](Self::sample_rate).
+    pub sample_rate_ppm: u32,
+    /// The `features["otel.logs"]` gate. False ships nothing — logs gate all uploads.
+    pub logs_enabled: bool,
+    /// The `features["otel.traces"]` gate.
+    pub traces_enabled: bool,
+    /// The app's device id, so the tunnel's records carry the SAME identity as the app's and the
+    /// config requests'. Also the input to sampling, which is what keeps a device either wholly in
+    /// or wholly out rather than reporting half a session.
+    pub device_id: String,
+    /// The server's geo view of this client (`country` in the config response), or empty. The
+    /// tunnel process has no config cache to read it from.
+    pub country: String,
+}
+
+impl TelemetryConfig {
+    /// Convert a `[0.0, 1.0]` sample rate to [`Self::sample_rate_ppm`], clamping out-of-range and
+    /// NaN inputs to the nearest valid rate. NaN maps to 0 (report nothing) rather than to
+    /// everything: a malformed rate should not silently enroll a device.
+    pub fn sample_rate_ppm(rate: f64) -> u32 {
+        if rate.is_nan() {
+            return 0;
+        }
+        (rate.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
+    }
+
+    /// This config's sampling rate as a `[0.0, 1.0]` fraction, the form the uploader's gate wants.
+    pub fn sample_rate(&self) -> f64 {
+        f64::from(self.sample_rate_ppm.min(1_000_000)) / 1_000_000.0
+    }
+}
+
+// Manual Debug: header values are ingestion keys, and `Request` derives Debug — so without this any
+// `{:?}` of a request frame (a trace line, a test failure, a panic message) would print the key.
+// Header NAMES stay visible: which headers are set is diagnostic signal, and none of it is secret.
+// Mirrors `core::config::lantern::OtelConfig`'s impl, for the same reason.
+impl std::fmt::Debug for TelemetryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, _)| (k.as_str(), "[redacted]"))
+            .collect();
+        f.debug_struct("TelemetryConfig")
+            .field("endpoint", &self.endpoint)
+            .field("headers", &headers)
+            .field("sample_rate_ppm", &self.sample_rate_ppm)
+            .field("logs_enabled", &self.logs_enabled)
+            .field("traces_enabled", &self.traces_enabled)
+            .field("device_id", &self.device_id)
+            .field("country", &self.country)
+            .finish()
+    }
+}
+
 /// A tunnel event delivered over a [`Push`] stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TunnelEvent {
@@ -385,5 +473,68 @@ mod tests {
     fn negotiate_rejects_below_minimum() {
         assert_eq!(negotiate(0, 1), None);
         assert_eq!(negotiate(1, 0), None);
+    }
+
+    fn telemetry(ppm: u32) -> TelemetryConfig {
+        TelemetryConfig {
+            endpoint: "ingest.example:443".into(),
+            headers: vec![("signoz-ingestion-key".into(), "s3cr3t-key-value".into())],
+            sample_rate_ppm: ppm,
+            logs_enabled: true,
+            traces_enabled: true,
+            device_id: "d".into(),
+            country: "US".into(),
+        }
+    }
+
+    /// The ingestion key must never appear in a formatted request frame. `Request` derives
+    /// `Debug`, so without the manual impl on `TelemetryConfig` any `{:?}` — a trace line, a
+    /// failing `assert_eq!`, a panic message — would print the key verbatim.
+    #[test]
+    fn debug_never_prints_a_header_value() {
+        let req = Request {
+            req_id: 1,
+            payload: RequestPayload::SetTelemetry(telemetry(1_000_000)),
+        };
+        let rendered = format!("{req:?}");
+        assert!(
+            !rendered.contains("s3cr3t-key-value"),
+            "header value leaked into Debug: {rendered}"
+        );
+        // The header NAME stays: knowing which headers are set is diagnostic signal, not a secret.
+        assert!(rendered.contains("signoz-ingestion-key"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+    }
+
+    /// The `[0.0, 1.0]` ⇄ ppm conversion, including the inputs a malformed config can produce.
+    #[test]
+    fn sample_rate_survives_the_ppm_round_trip() {
+        for rate in [0.0, 0.25, 0.5, 1.0] {
+            let ppm = TelemetryConfig::sample_rate_ppm(rate);
+            assert!(
+                (telemetry(ppm).sample_rate() - rate).abs() < 1e-6,
+                "{rate} round-tripped through {ppm} ppm"
+            );
+        }
+        // Out of range clamps to the nearest valid rate...
+        assert_eq!(TelemetryConfig::sample_rate_ppm(1.5), 1_000_000);
+        assert_eq!(TelemetryConfig::sample_rate_ppm(-1.0), 0);
+        // ...and NaN reports NOTHING rather than everything: a rate that failed to parse must not
+        // silently enroll a device at 100%.
+        assert_eq!(TelemetryConfig::sample_rate_ppm(f64::NAN), 0);
+        // A value beyond the encodable range still yields a legal fraction on the way back.
+        assert_eq!(telemetry(u32::MAX).sample_rate(), 1.0);
+    }
+
+    /// The v3 variant survives the postcard round-trip the control plane puts it through.
+    #[test]
+    fn set_telemetry_round_trips_through_the_codec() {
+        let req = Request {
+            req_id: 7,
+            payload: RequestPayload::SetTelemetry(telemetry(250_000)),
+        };
+        let bytes = crate::encode_message(&req).expect("encode");
+        let back: Request = crate::decode_message(&bytes).expect("decode");
+        assert_eq!(back, req);
     }
 }

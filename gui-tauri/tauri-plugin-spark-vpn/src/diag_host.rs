@@ -204,6 +204,18 @@ fn init_inner<R: Runtime>(app: &AppHandle<R>, base: &Path) {
         }
     });
 
+    // 5b. Hand the same block to the tunnel process. On Windows/Linux that is the privileged
+    //     `spark-service`, which has no config source of its own (#165 / service `diag_wire`):
+    //     it fetches nothing, so without this it captures diagnostics it can never send. macOS
+    //     and iOS are excluded because the NE reads the shared config cache directly, and
+    //     Android because its tunnel runs in-process.
+    #[cfg(all(
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
+    forward_to_service(cfg_rx.clone(), device_id.clone(), res.country.clone());
+
     // 6. The uploader. `local_opt_out = false`: the opt-out already gated init() —
     //    reaching this line means diagnostics are on for this launch.
     let queue = SpanQueue::new();
@@ -212,6 +224,122 @@ fn init_inner<R: Runtime>(app: &AppHandle<R>, base: &Path) {
         queue,
         _uploader: uploader,
     });
+}
+
+/// How long to wait before re-offering the telemetry config after a failed send.
+///
+/// A failure here is usually "the service isn't up yet" — the app can win the startup race, and a
+/// user can install the app before the service. Matches the config re-parse cadence, so a machine
+/// with no service running costs one failed round-trip a minute rather than a spin.
+// Compiled on the Apple targets too — never *used* there (the NE reads the shared config cache
+// itself), but built so this logic type-checks on the dev host, the same reason and the same
+// treatment `service_ipc` gets.
+#[cfg(not(target_os = "android"))]
+#[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
+const SERVICE_TELEMETRY_RETRY: Duration = Duration::from_secs(60);
+
+/// Keep the tunnel process pointed at the same collector this process uploads to.
+///
+/// Sends on every real change to the fetched `otel` block, and retries on a timer while the
+/// service is unreachable. In steady state — config unchanged, service reachable — it is silent:
+/// the service dedups an unchanged config anyway, but not sending beats sending and discarding.
+///
+/// Nothing is sent until there is something to say. A launch that never obtains an `otel` block
+/// makes no IPC calls at all, and the first send therefore always carries a real endpoint. The one
+/// exception is turning telemetry back **off**: once a real block has been sent, a later `None`
+/// must reach the service too, or a fleet-wide kill switch would stop the app's uploads while the
+/// tunnel process kept going.
+// Compiled on the Apple targets too — never *used* there (the NE reads the shared config cache
+// itself), but built so this logic type-checks on the dev host, the same reason and the same
+// treatment `service_ipc` gets.
+#[cfg(not(target_os = "android"))]
+#[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
+fn forward_to_service(
+    mut cfg_rx: tokio::sync::watch::Receiver<Option<OtelConfig>>,
+    device_id: String,
+    country: String,
+) {
+    use spark_ipc::message::RequestPayload;
+
+    let ipc = crate::service_ipc::IpcClient::new(crate::service_ipc::default_control_addr());
+    tauri::async_runtime::spawn(async move {
+        let mut sent_a_real_endpoint = false;
+        loop {
+            let otel = cfg_rx.borrow_and_update().clone();
+            // Nothing to say yet: wait for a block to arrive rather than telling the service
+            // "off" it never knew otherwise.
+            if otel.is_none() && !sent_a_real_endpoint {
+                if cfg_rx.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            let wire = telemetry_config(otel.as_ref(), &device_id, &country);
+            let carries_endpoint = !wire.endpoint.is_empty();
+            let ipc = ipc.clone();
+            // `IpcClient::request` blocks on a worker round-trip (up to 15s), so it must not run
+            // on the async runtime's thread.
+            let sent = tokio::task::spawn_blocking(move || {
+                ipc.request(RequestPayload::SetTelemetry(wire))
+            })
+            .await;
+
+            let ok = match sent {
+                // The service answers `Error` when it cannot upload at all — the user declined
+                // diagnostics there, or the build has no uploader. Both are settled states, not
+                // things a retry fixes, so treat them as delivered.
+                Ok(Ok(_)) => true,
+                Ok(Err(e)) => {
+                    tracing::debug!(err = %e, "diag: service telemetry handoff failed");
+                    false
+                }
+                Err(e) => {
+                    tracing::debug!(err = %e, "diag: service telemetry handoff task failed");
+                    false
+                }
+            };
+            if ok {
+                sent_a_real_endpoint |= carries_endpoint;
+                // Settled — sleep until the config actually changes.
+                if cfg_rx.changed().await.is_err() {
+                    return;
+                }
+            } else {
+                // Retry, but wake early if the config changes in the meantime.
+                tokio::select! {
+                    changed = cfg_rx.changed() => if changed.is_err() { return },
+                    _ = tokio::time::sleep(SERVICE_TELEMETRY_RETRY) => {}
+                }
+            }
+        }
+    });
+}
+
+/// Project the fetched `otel` block onto the control-plane type the service consumes.
+///
+/// `None` becomes an empty endpoint, which is how both radiance and `upload_allowed` spell
+/// "telemetry off" — so the off signal needs no separate variant on the wire.
+// Compiled on the Apple targets too — never *used* there (the NE reads the shared config cache
+// itself), but built so this logic type-checks on the dev host, the same reason and the same
+// treatment `service_ipc` gets.
+#[cfg(not(target_os = "android"))]
+#[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
+fn telemetry_config(
+    otel: Option<&OtelConfig>,
+    device_id: &str,
+    country: &str,
+) -> spark_ipc::message::TelemetryConfig {
+    spark_ipc::message::TelemetryConfig {
+        endpoint: otel.map(|o| o.endpoint.clone()).unwrap_or_default(),
+        headers: otel.map(|o| o.headers.clone()).unwrap_or_default(),
+        sample_rate_ppm: otel
+            .map(|o| spark_ipc::message::TelemetryConfig::sample_rate_ppm(o.sample_rate))
+            .unwrap_or(0),
+        logs_enabled: otel.is_some_and(|o| o.logs_enabled),
+        traces_enabled: otel.is_some_and(|o| o.traces_enabled),
+        device_id: device_id.to_string(),
+        country: country.to_string(),
+    }
 }
 
 /// Build the [`ResourceAttrs`] for this process (spec §C3's resource block).
@@ -475,5 +603,40 @@ mod tests {
             "disarm through the accessor must remove the marker"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The projection onto the control-plane type, including how "telemetry off" is spelled.
+    ///
+    /// `None` must become an EMPTY endpoint, not a zero sample rate or a cleared `logs_enabled`:
+    /// the empty endpoint is the one condition `upload_allowed` checks first and the service's
+    /// `otel_config` maps straight to "stop uploading". Getting this wrong would leave a tunnel
+    /// process still shipping after a fleet-wide kill switch.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn telemetry_config_projects_the_off_state_as_an_empty_endpoint() {
+        let off = telemetry_config(None, "dev", "US");
+        assert!(off.endpoint.is_empty());
+        assert!(off.headers.is_empty());
+        assert!(!off.logs_enabled);
+        assert!(!off.traces_enabled);
+        // Identity still travels: the service needs it whenever telemetry comes back on.
+        assert_eq!(off.device_id, "dev");
+        assert_eq!(off.country, "US");
+
+        let on = telemetry_config(
+            Some(&OtelConfig {
+                endpoint: "ingest.example:443".into(),
+                headers: vec![("signoz-ingestion-key".into(), "k".into())],
+                sample_rate: 0.5,
+                logs_enabled: true,
+                traces_enabled: false,
+            }),
+            "dev",
+            "US",
+        );
+        assert_eq!(on.endpoint, "ingest.example:443");
+        assert_eq!(on.sample_rate_ppm, 500_000);
+        assert!(on.logs_enabled);
+        assert!(!on.traces_enabled);
     }
 }
