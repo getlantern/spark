@@ -22,3 +22,28 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+# Telemetry export (issue #165), behind the `otlp` feature — see [features].
+serde_json = { workspace = true, optional = true }
+boring2 = { workspace = true, optional = true }
+tokio-boring2 = { workspace = true, optional = true }
+webpki-root-certs = { workspace = true, optional = true }
+
+[features]
+# `otlp` is **on by default here**, unlike `core`'s `anytls`.
+#
+# The difference is which binary ships. `core`'s gate is off-by-default because it feeds the
+# size-budgeted, C-free client that docs/GOAL.md's non-negotiable is written to protect. This crate
+# builds a *server* we deploy ourselves: it carries no size budget, and boring is the house TLS stack
+# (the client needs it for Chrome ClientHello mimicry, so it is what we build and audit anyway).
+# Making an operator remember `--features otlp` to get telemetry would mean the most likely outcome
+# of a redeploy is a server that silently reports nothing.
+default = ["otlp"]
+
+# OTLP metrics export. The gate still exists so a C-free build of this crate remains available via
+# `--no-default-features` — that is what keeps the GOAL.md exception satisfiable on demand.
+#
+# Only the *exporter* is gated. `metrics.rs` is pure std and always compiles, so the counters and the
+# instrumentation in `serve()` are present in every build; a `--no-default-features` build tallies
+# them and simply has nowhere to send them. That split keeps the feature flag off the tunnel's data
+# path entirely: enabling or disabling telemetry cannot change how the server relays traffic.
+otlp = ["dep:serde_json", "dep:boring2", "dep:tokio-boring2", "dep:webpki-root-certs"]

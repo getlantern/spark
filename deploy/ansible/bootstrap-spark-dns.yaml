@@ -24,6 +24,14 @@
   vars:
     bind: "0.0.0.0:5300"
     idle_secs: 300
+    # Telemetry (issue #165). Unset by default: no otel_host means the exporter never starts and the
+    # server makes no outbound connections. Turn it on with
+    #   -e otel_host=ingest.us.signoz.cloud -e otel_key=<key> -e otel_instance=dns-1
+    otel_host: ""
+    otel_key: ""
+    otel_instance: "dns-tunnel"
+    otel_port: 443
+    otel_interval_secs: 60
   tasks:
     - name: Require the tunnel zone
       assert:
@@ -45,6 +53,29 @@
         src: files/dns-tunnel-server
         dest: /usr/local/bin/dns-tunnel-server
         mode: "0755"
+      notify: Restart spark-dns
+
+    - name: Write the OTLP ingestion key (secret — root-only)
+      # A separate root-only file rather than an `Environment=` line in the unit: unit files are
+      # world-readable and `systemctl show` prints their environment, either of which would expose
+      # the key to any local user. `no_log` keeps it out of ansible's own output too.
+      copy:
+        content: "SPARK_OTEL_INGEST_KEY={{ otel_key }}\n"
+        dest: /etc/spark-dns/otel.env
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: otel_host | length > 0 and otel_key | length > 0
+      notify: Restart spark-dns
+
+    - name: Remove the OTLP ingestion key when telemetry is off
+      # Turning telemetry off must actually remove the secret, not leave it readable on disk for
+      # whoever next gets root on the box.
+      file:
+        path: /etc/spark-dns/otel.env
+        state: absent
+      when: otel_host | length == 0 or otel_key | length == 0
       notify: Restart spark-dns
 
     - name: Copy the server private key (secret — root-only)

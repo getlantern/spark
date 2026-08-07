@@ -8,8 +8,17 @@
 //! **Log hygiene (ADR 0011 / GOAL.md):** never log the tunnel zone, target addresses, or client/
 //! resolver IPs. Log only coarse, non-identifying events.
 
+// Only the exporter is feature-gated; `metrics` is pure std and always present, so every build
+// tallies the counters and a default build simply has nowhere to send them.
+#[cfg(feature = "otlp")]
+pub mod export;
+pub mod metrics;
+#[cfg(feature = "otlp")]
+pub mod otlp;
+
 use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dns_tunnel_core::addr::Target;
@@ -17,6 +26,8 @@ use dns_tunnel_core::session::{Config, Server};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
+
+use crate::metrics::Metrics;
 
 /// A session ConnectionID (matches `dns_tunnel_core`'s 8-byte id).
 type ConnId = [u8; 8];
@@ -69,7 +80,7 @@ const EGRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_STREAM_BACKLOG: usize = 256 * 1024;
 
 /// Run the server on `udp` until a fatal socket error. Does not return on the happy path.
-pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
+pub async fn serve(udp: UdpSocket, cfg: ServerConfig, metrics: Arc<Metrics>) -> io::Result<()> {
     let mut server = Server::new(&cfg.privkey, &cfg.zone, cfg.session)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let start = Instant::now();
@@ -82,9 +93,17 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
         tokio::select! {
             r = udp.recv_from(&mut buf) => {
                 let (n, from) = r?;
+                metrics.query_received();
                 let now = start.elapsed().as_millis() as u64;
                 if let Some(ans) = server.on_query(&buf[..n], now) {
-                    let _ = udp.send_to(&ans, from).await;
+                    // Counted only on a successful send. `queries - answers` is meant to measure the
+                    // share of queries the session layer declined (unparseable, unauthenticated,
+                    // replayed); counting a failed `send_to` would fold socket errors into that
+                    // number and hide them in the one metric that would otherwise reveal them.
+                    match udp.send_to(&ans, from).await {
+                        Ok(_) => metrics.answer_sent(),
+                        Err(e) => tracing::debug!(kind = %e.kind(), "answer send failed"),
+                    }
                 }
                 // Spawn TCP egress for any newly opened stream, then push each stream's uplink bytes.
                 for id in server.session_ids() {
@@ -97,13 +116,21 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
                         match dns_tunnel_core::addr::parse(&target) {
                             Ok(t) => {
                                 let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
-                                let task = tokio::spawn(egress_task(key, t, rx, egress_tx.clone()));
+                                let task = tokio::spawn(egress_task(
+                                    key,
+                                    t,
+                                    rx,
+                                    egress_tx.clone(),
+                                    Arc::clone(&metrics),
+                                ));
                                 egress.insert(key, EgressHandle { tx, task });
+                                metrics.stream_opened();
                             }
                             // An undecodable target: close just that stream (client sees the FIN).
                             Err(e) => {
                                 // `AddrError` names the defect, never the address.
                                 tracing::debug!(%e, "undecodable stream target, closing stream");
+                                metrics.undecodable_target();
                                 server.close_stream(&id, sid);
                             }
                         }
@@ -123,7 +150,9 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
                                 // Room in the queue: consume the ARQ bytes only now that we can hand
                                 // them off (infallible), so a full channel never loses data.
                                 Ok(permit) => {
-                                    permit.send(server.take_from_client(&id, sid).to_vec());
+                                    let bytes = server.take_from_client(&id, sid).to_vec();
+                                    metrics.uplink(bytes.len() as u64);
+                                    permit.send(bytes);
                                     continue;
                                 }
                                 // Jammed. Leaving bytes unread does not backpressure the client (the
@@ -135,13 +164,17 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
                             },
                         };
                         if should_drop {
+                            metrics.backlog_drop();
                             drop_stream(&mut server, &mut egress, (id, sid));
                         }
                     }
                 }
             }
             Some((key, msg)) = egress_rx.recv() => match msg {
-                Egress::Data(d) => server.deliver_to_client(&key.0, key.1, &d),
+                Egress::Data(d) => {
+                    metrics.downlink(d.len() as u64);
+                    server.deliver_to_client(&key.0, key.1, &d);
+                }
                 // The target closed: FIN the stream so the client sees EOF, and retire its egress.
                 Egress::Eof => {
                     server.close_stream(&key.0, key.1);
@@ -152,7 +185,9 @@ pub async fn serve(udp: UdpSocket, cfg: ServerConfig) -> io::Result<()> {
             },
             _ = sweep.tick() => {
                 let now = start.elapsed().as_millis() as u64;
-                for id in server.sweep_idle(now, cfg.idle_timeout_ms) {
+                let swept = server.sweep_idle(now, cfg.idle_timeout_ms);
+                metrics.sessions_swept(swept.len() as u64);
+                for id in swept {
                     // Abort every egress task belonging to the swept session.
                     egress.retain(|(cid, _), h| {
                         if *cid == id { h.task.abort(); false } else { true }
@@ -177,6 +212,7 @@ async fn egress_task(
     target: Target,
     mut rx: mpsc::Receiver<Vec<u8>>,
     etx: mpsc::Sender<(StreamKey, Egress)>,
+    metrics: Arc<Metrics>,
 ) {
     // A `Target::Domain` is resolved *here*, in this per-stream task, so the lookup cannot stall the
     // shared UDP loop. Resolving at the exit is the point of the domain form: the client never has to
@@ -194,11 +230,15 @@ async fn egress_task(
             // No target and no key: ADR 0011 log hygiene forbids logging target addresses, and a
             // ConnectionID correlates a session across lines. The kind of failure is the useful part.
             tracing::debug!(kind = %e.kind(), "egress connect failed");
+            // The kind, never the error's `Display`: a resolver error's message can carry the
+            // hostname it failed to resolve.
+            metrics.egress_connect_failed(e.kind());
             let _ = etx.send((key, Egress::Eof)).await;
             return;
         }
         Err(_) => {
             tracing::debug!("egress connect timed out");
+            metrics.connect_timeout();
             let _ = etx.send((key, Egress::Eof)).await;
             return;
         }

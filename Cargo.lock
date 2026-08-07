@@ -788,11 +788,15 @@ name = "dns-tunnel-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "boring2",
  "clap",
  "dns-tunnel-core",
+ "serde_json",
  "tokio",
+ "tokio-boring2",
  "tracing",
  "tracing-subscriber",
+ "webpki-root-certs",
 ]
 
 [[package]]

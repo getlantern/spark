@@ -8,7 +8,7 @@ use dns_tunnel_core::addr::{self, Target};
 use dns_tunnel_core::arq;
 use dns_tunnel_core::crypto::{server_public_from_pkcs8, ServerStatic};
 use dns_tunnel_core::session::{ClientSession, Config};
-use dns_tunnel_server::{serve, ServerConfig};
+use dns_tunnel_server::{metrics::Metrics, serve, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
@@ -77,6 +77,7 @@ async fn round_trip_to(target: Target) {
     // The server (authoritative UDP endpoint) doing real TCP egress to the client's target.
     let server_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = server_udp.local_addr().unwrap();
+    let metrics = std::sync::Arc::new(Metrics::new());
     tokio::spawn(serve(
         server_udp,
         ServerConfig {
@@ -85,6 +86,7 @@ async fn round_trip_to(target: Target) {
             session: test_cfg(),
             idle_timeout_ms: 60_000,
         },
+        std::sync::Arc::clone(&metrics),
     ));
 
     // Minimal client: drive a ClientSession over a connected UDP socket (authoritative mode).
@@ -121,4 +123,32 @@ async fn round_trip_to(target: Target) {
         got, payload,
         "payload round-trips to {target} through the DNS tunnel and the server's real TCP egress"
     );
+
+    // The counters must move on the live path, not merely compile. Instrumentation that is wired to
+    // the wrong branch — or to no branch — looks identical to working instrumentation from the unit
+    // tests, which only ever exercise `Metrics` directly.
+    let snap = metrics.snapshot();
+    assert!(snap.queries > 0, "queries counted");
+    assert!(snap.answers > 0, "answers counted");
+    assert_eq!(
+        snap.streams_opened, 1,
+        "one stream opened for this transfer"
+    );
+    assert!(
+        snap.bytes_uplink >= payload.len() as u64,
+        "uplink bytes counted: {} < {}",
+        snap.bytes_uplink,
+        payload.len()
+    );
+    assert!(
+        snap.bytes_downlink >= payload.len() as u64,
+        "downlink bytes counted: {} < {}",
+        snap.bytes_downlink,
+        payload.len()
+    );
+    // A clean transfer must not look like a failure anywhere.
+    assert_eq!(snap.undecodable_targets, 0);
+    assert_eq!(snap.backlog_drops, 0);
+    assert_eq!(snap.connect_timeouts, 0);
+    assert!(snap.connect_failures.is_empty());
 }

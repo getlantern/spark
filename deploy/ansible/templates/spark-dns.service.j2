@@ -5,6 +5,18 @@ Wants=network-online.target
 
 [Service]
 Environment=RUST_LOG=info
+{% if otel_host | default('') %}
+# Telemetry (issue #165). Off unless `otel_host` is set: with no host the process opens no outbound
+# connections at all. Only aggregate counters are exported — never a destination, client IP,
+# resolver IP, or ConnectionID (enforced by a test in `otlp.rs`).
+Environment=SPARK_OTEL_HOST={{ otel_host }}
+Environment=SPARK_OTEL_PORT={{ otel_port | default(443) }}
+Environment=SPARK_OTEL_INSTANCE={{ otel_instance | default('dns-tunnel') }}
+Environment=SPARK_OTEL_INTERVAL_SECS={{ otel_interval_secs | default(60) }}
+# The ingestion key is a secret and must NOT be an `Environment=` line: unit files are world-readable
+# and `systemctl show` would print it. A root-only EnvironmentFile keeps it out of both.
+EnvironmentFile=-/etc/spark-dns/otel.env
+{% endif %}
 # The static Ed25519 private key is read from a root-only file at start. Its public key is what
 # clients hold; forward secrecy comes from a per-session ephemeral exchange (ADR 0011 §2.4).
 # Log hygiene: the server emits only a content-free "listening" line — never the zone, key, or IPs.
