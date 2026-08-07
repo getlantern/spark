@@ -29,6 +29,67 @@ pub mod upload;
 
 pub use sink::{emit, emit_error, install, DiagSink};
 
+/// Whether diagnostics run this launch.
+///
+/// **On by default, with a documented way to decline** (`SPARK_DIAGNOSTICS=off`). Users are
+/// *informed* that diagnostics are collected; the disclosure is the product surface, and this is
+/// the escape hatch behind it.
+///
+/// An earlier revision made this opt-*in*. That was a misreading of "inform the user": requiring an
+/// explicit yes means a test build collects nothing from anyone who never set a variable, which is
+/// not informed consent so much as no data.
+///
+/// Only an explicit decline counts. Unset, empty, and typos all leave diagnostics **on**, so a
+/// malformed value cannot silently disable the signal a test build exists to gather.
+///
+/// Lives here rather than in either host so both share exactly one implementation — two gates that
+/// could drift is how one entry point keeps collecting by default. (`tunnel_host` is
+/// platform-gated, so it is not a home the service host can reach.)
+///
+/// `SPARK_DIAGNOSTICS` is the test-phase channel; the production one is the app's user-facing
+/// toggle, plumbed through `providerConfiguration`, which is the remaining piece. Declines are
+/// matched case- and whitespace-insensitively because this gets set by hand and by scripts, and a
+/// user's decline should not fail on capitalisation.
+pub fn diagnostics_enabled() -> bool {
+    !declined(&std::env::var("SPARK_DIAGNOSTICS").unwrap_or_default())
+}
+
+/// The parsing rule behind [`diagnostics_enabled`], split out so it is testable without mutating
+/// process-global env (which a parallel test run would race on).
+fn declined(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "off" | "0" | "false" | "no"
+    )
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::declined;
+
+    /// Diagnostics are **on by default**: only an explicit decline turns them off.
+    ///
+    /// The stay-on cases are the point. Unset (the overwhelming majority of launches), empty, and
+    /// a typo must all leave collection running — a malformed value silently disabling the signal
+    /// is the failure this guards against.
+    #[test]
+    fn only_an_explicit_decline_disables_diagnostics() {
+        for off in ["off", "OFF", "0", "false", "no", "  Off  "] {
+            assert!(declined(off), "{off:?} should disable");
+        }
+        for on in ["", "on", "1", "true", "yes", "maybe", "offf", " "] {
+            assert!(!declined(on), "{on:?} must leave diagnostics ON");
+        }
+    }
+
+    /// A user who never set the variable is enrolled — which is exactly why the **disclosure** is
+    /// the product requirement here, not the gate.
+    #[test]
+    fn an_unset_variable_leaves_diagnostics_on() {
+        assert!(!declined(""), "unset must not read as a decline");
+    }
+}
+
 /// Per-field byte cap for string values, applied in [`DiagEvent::insert_str`].
 ///
 /// Keeps any single spool line far below the uploader's 256 KiB batch budget: an
