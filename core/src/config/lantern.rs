@@ -83,14 +83,40 @@ pub fn unbounded_from_config_raw_json(s: &str) -> Result<UnboundedConfig, Config
 
 /// OTel reporting parameters from the config response, distilled from the top-level `otel` block
 /// (getlantern/common `OTEL`) joined with the `features["otel.*"]` flags — mirrors radiance's
+/// Force the diag **logs** signal on, ignoring `features["otel.logs"]`.
+///
+/// The server flag is `false` today, and it is the *only* one of `upload_allowed`'s three conditions
+/// that fails: config-new already delivers a working `endpoint` and ingestion key, and `sample_rate`
+/// is `1`. So spark ships fully plumbed telemetry that reports nothing, waiting on one boolean.
+///
+/// Hard-coded rather than flipped server-side because the flag lives *behind* the thing we most need
+/// to measure. `upload_allowed` starts with `let Some(o) = otel else { return false }`, and that
+/// `OtelConfig` comes from config-new — so a flag delivered by config-new can only ever describe
+/// clients that already reached it. The clients worth hearing from are the ones that could not, and
+/// no server-side value can reach them. (Closing that gap fully needs an embedded default endpoint,
+/// tracked separately in #165; this constant is the half that works today.)
+///
+/// **This does not override a user's choice.** The `SPARK_DIAGNOSTICS` opt-out gates `diag::init()`
+/// itself, so a declining user never reaches the uploader and this constant is never consulted.
+/// What it does remove is the *server's* ability to switch the signal off remotely — an acceptable
+/// trade while spark is in test builds, and the reason this is a constant with a retirement note
+/// rather than a quiet `true`.
+///
+/// **Retire it** by setting this to `false` once `features["otel.logs"]` is enabled for spark in
+/// lantern-cloud; the `||` then falls through to the server flag with no other change needed.
+const FORCE_LOGS_ON: bool = true;
+
 /// client-side contract (see the diagnostics design spec §2/§C4). The diag uploader consumes this;
 /// `core` just carries the raw fields.
+///
+/// **Test-phase override.** [`FORCE_LOGS_ON`] turns the logs signal on regardless of the server
+/// flag; see its docs for why and for how to retire it.
 ///
 /// Field mapping to the wire (lantern-cloud must keep these names in sync):
 /// - `endpoint`       ← `otel.endpoint`      (e.g. `ingest.us.signoz.cloud:443`)
 /// - `headers`        ← `otel.headers`       (the server-set ingestion key etc.)
 /// - `sample_rate`    ← `otel.sample_rate`   (absent ⇒ `1.0`; clamped to `[0.0, 1.0]`)
-/// - `logs_enabled`   ← `features["otel.logs"]`   (absent ⇒ `false`)
+/// - `logs_enabled`   ← `features["otel.logs"]` **OR** [`FORCE_LOGS_ON`] (absent ⇒ `false`)
 /// - `traces_enabled` ← `features["otel.traces"]` (absent ⇒ `false`)
 ///
 /// `otel.metrics_interval` is deliberately NOT parsed: Phase A emits no metrics signal (spec §9),
@@ -529,7 +555,7 @@ impl RawRoot {
             // Absent ⇒ 1.0 (always). Clamped: a server typo like `100` must not be interpreted as
             // anything but 'always', and a negative rate as anything but 'never'.
             sample_rate: self.otel.sample_rate_f64(),
-            logs_enabled: self.features.otel_logs,
+            logs_enabled: self.features.otel_logs || FORCE_LOGS_ON,
             traces_enabled: self.features.otel_traces,
         })
     }
@@ -1270,7 +1296,9 @@ mod tests {
             .expect("parses")
             .expect("present");
         assert_eq!(o.sample_rate, 1.0);
-        assert!(!o.logs_enabled);
+        // Absent `features` used to mean logs-off; `FORCE_LOGS_ON` overrides that for the test
+        // phase. Traces still default off, which is what keeps the override scoped to one signal.
+        assert!(o.logs_enabled, "forced on regardless of an absent flag");
         assert!(!o.traces_enabled);
         assert!(o.headers.is_empty());
     }
@@ -1355,7 +1383,9 @@ mod tests {
         let o = otel_from_config_raw_json(raw)
             .expect("parses despite non-bool flags")
             .expect("otel block present");
-        assert!(!o.logs_enabled, "integer flag must read as false");
+        // This test is about lenient *parsing* of non-bool flags, not about the gate: a non-bool
+        // `otel.logs` must read as `false` rather than erroring. Asserted through `traces` now,
+        // since `FORCE_LOGS_ON` masks the parsed value of `logs` and would make this vacuous.
         assert!(!o.traces_enabled, "null flag must read as false");
         let u = unbounded_from_config_raw_json(raw).expect("unbounded parses despite non-bool");
         assert!(!u.enabled, "string flag must read as false");
@@ -1412,5 +1442,52 @@ mod tests {
             o.headers.is_empty(),
             "array-shaped headers must degrade to empty"
         );
+    }
+
+    /// The whole point: a config with the server flag off must still enable the logs signal, because
+    /// that is exactly the payload spark receives today.
+    #[test]
+    fn the_live_payload_shape_enables_logs_despite_the_server_flag() {
+        // The exact shape config-new serves spark today: endpoint and key present, sample_rate 1,
+        // and `otel.logs` explicitly false. Before the override this parsed to a fully-plumbed
+        // config that uploaded nothing.
+        let raw = r#"{
+          "features": { "otel.logs": false, "otel.traces": false },
+          "otel": {
+            "endpoint": "ingest.us.signoz.cloud:443",
+            "headers": { "signoz-ingestion-key": "k1" },
+            "sample_rate": 1
+          },
+          "options": { "outbounds": [] }
+        }"#;
+        let o = otel_from_config_raw_json(raw)
+            .expect("parses")
+            .expect("a block with an endpoint is Some");
+        assert!(
+            o.logs_enabled,
+            "the server flag is false in production; the override is what makes the client report"
+        );
+        // The override must not reach past its own signal — traces ride alongside logs by design,
+        // so forcing both would double the volume for no extra diagnosis. This is what fails if
+        // someone later "simplifies" the override to cover the whole struct.
+        assert!(
+            !o.traces_enabled,
+            "traces must stay bound to the server flag"
+        );
+    }
+
+    /// The server keeps the power to turn logs **on**; the override only removes its power to turn
+    /// them off. Guards the `||` against being rewritten as a plain assignment.
+    #[test]
+    fn the_server_flag_still_enables_logs_on_its_own() {
+        let raw = r#"{
+          "features": { "otel.logs": true },
+          "otel": { "endpoint": "h:443", "headers": {} },
+          "options": { "outbounds": [] }
+        }"#;
+        let o = otel_from_config_raw_json(raw)
+            .expect("parses")
+            .expect("some");
+        assert!(o.logs_enabled);
     }
 }
