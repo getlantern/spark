@@ -376,6 +376,39 @@ mod tests {
         crate::diag::otlp::encode_spool_logs(&hygiene_res(), &spooled, |_| None)
     }
 
+    /// A root span plus a child, as `DiagSpanBuilder::finish` produces them — the shape the traces
+    /// signal actually ships.
+    fn spans() -> Vec<crate::diag::span::DiagSpan> {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("session".to_string(), Value::String("s1".into()));
+        vec![
+            crate::diag::span::DiagSpan {
+                trace_id: [1u8; 16],
+                span_id: [2u8; 8],
+                parent_span_id: None,
+                name: "unbounded.session",
+                start_unix_nano: 1_000,
+                end_unix_nano: 2_000,
+                // Redacted at construction in production; planted dirty here so the leak check
+                // above would catch a path that forgot to.
+                error: crate::redact::redact_all("dial 1.2.3.4:443 refused")
+                    .into_owned()
+                    .into(),
+                attrs,
+            },
+            crate::diag::span::DiagSpan {
+                trace_id: [1u8; 16],
+                span_id: [3u8; 8],
+                parent_span_id: Some([2u8; 8]),
+                name: "unbounded.ice_gathering",
+                start_unix_nano: 1_100,
+                end_unix_nano: 1_500,
+                error: None,
+                attrs: std::collections::BTreeMap::new(),
+            },
+        ]
+    }
+
     fn hygiene_res() -> crate::diag::otlp::ResourceAttrs {
         crate::diag::otlp::ResourceAttrs {
             service_version: "0.0.0".into(),
@@ -487,9 +520,19 @@ mod tests {
             "value",
         ];
 
-        let payload: Value = serde_json::from_slice(&encode_corpus()).expect("payload parses");
         let mut keys = Vec::new();
-        collect_attribute_keys(&payload, &mut keys);
+
+        let logs: Value = serde_json::from_slice(&encode_corpus()).expect("logs payload parses");
+        collect_attribute_keys(&logs, &mut keys);
+
+        // The TRACES signal too. It ships to the same backend from the same device, and
+        // `DiagSpan::attrs` is a public `BTreeMap` any caller can insert into — so checking only
+        // the logs encoder would leave the easier of the two paths unguarded.
+        let traces: Value =
+            serde_json::from_slice(&crate::diag::otlp::encode_spans(&hygiene_res(), &spans()))
+                .expect("traces payload parses");
+        collect_attribute_keys(&traces, &mut keys);
+
         assert!(!keys.is_empty(), "the walk must actually find keys");
         for key in keys {
             assert!(
