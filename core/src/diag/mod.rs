@@ -29,63 +29,64 @@ pub mod upload;
 
 pub use sink::{emit, emit_error, install, DiagSink};
 
-/// Whether this launch has the user's consent to collect diagnostics.
+/// Whether diagnostics run this launch.
 ///
-/// **Opt-in**: anything that is not an explicit yes is a no. A user who never saw the question, a
-/// launch that could not read the setting, or a typo all resolve to *off* — the failure direction
-/// that collects nothing, rather than the one that quietly collects from someone who never agreed.
+/// **On by default, with a documented way to decline** (`SPARK_DIAGNOSTICS=off`). Users are
+/// *informed* that diagnostics are collected; the disclosure is the product surface, and this is
+/// the escape hatch behind it.
 ///
-/// This inverts the earlier opt-*out*, where a user who never saw the question was enrolled by
-/// default and a config-server flag was enough to start their stream. Under opt-in the server can
-/// only ever *narrow* what an opted-in device sends; it cannot enroll anyone.
+/// An earlier revision made this opt-*in*. That was a misreading of "inform the user": requiring an
+/// explicit yes means a test build collects nothing from anyone who never set a variable, which is
+/// not informed consent so much as no data.
+///
+/// Only an explicit decline counts. Unset, empty, and typos all leave diagnostics **on**, so a
+/// malformed value cannot silently disable the signal a test build exists to gather.
 ///
 /// Lives here rather than in either host so both share exactly one implementation — two gates that
 /// could drift is how one entry point keeps collecting by default. (`tunnel_host` is
 /// platform-gated, so it is not a home the service host can reach.)
 ///
 /// `SPARK_DIAGNOSTICS` is the test-phase channel; the production one is the app's user-facing
-/// toggle, plumbed through `providerConfiguration`, which is the remaining piece. Affirmatives are
-/// matched case- and whitespace-insensitively because this gets set by hand and by scripts, and
-/// consent should not fail on capitalisation.
-pub fn opted_in() -> bool {
-    consented(&std::env::var("SPARK_DIAGNOSTICS").unwrap_or_default())
+/// toggle, plumbed through `providerConfiguration`, which is the remaining piece. Declines are
+/// matched case- and whitespace-insensitively because this gets set by hand and by scripts, and a
+/// user's decline should not fail on capitalisation.
+pub fn diagnostics_enabled() -> bool {
+    !declined(&std::env::var("SPARK_DIAGNOSTICS").unwrap_or_default())
 }
 
-/// The parsing rule behind [`opted_in`], split out so it is testable without mutating
+/// The parsing rule behind [`diagnostics_enabled`], split out so it is testable without mutating
 /// process-global env (which a parallel test run would race on).
-fn consented(value: &str) -> bool {
+fn declined(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "on" | "1" | "true" | "yes"
+        "off" | "0" | "false" | "no"
     )
 }
 
 #[cfg(test)]
 mod consent_tests {
-    use super::consented;
+    use super::declined;
 
-    /// Consent is opt-**in**: anything that is not an explicit yes is a no.
+    /// Diagnostics are **on by default**: only an explicit decline turns them off.
     ///
-    /// The declines matter more than the accepts. Unset (never asked), empty (unreadable), a typo,
-    /// and the *old* opt-out value must all resolve to off.
+    /// The stay-on cases are the point. Unset (the overwhelming majority of launches), empty, and
+    /// a typo must all leave collection running — a malformed value silently disabling the signal
+    /// is the failure this guards against.
     #[test]
-    fn only_an_explicit_yes_enables_diagnostics() {
-        for yes in ["on", "1", "true", "yes", "ON", "  True  "] {
-            assert!(consented(yes), "{yes:?} should enable");
+    fn only_an_explicit_decline_disables_diagnostics() {
+        for off in ["off", "OFF", "0", "false", "no", "  Off  "] {
+            assert!(declined(off), "{off:?} should disable");
         }
-        for no in ["", "off", "OFF", "0", "false", "no", "maybe", "onn", " "] {
-            assert!(
-                !consented(no),
-                "{no:?} must NOT enable — absence of yes is no"
-            );
+        for on in ["", "on", "1", "true", "yes", "maybe", "offf", " "] {
+            assert!(!declined(on), "{on:?} must leave diagnostics ON");
         }
     }
 
-    /// Under opt-in, the previous opt-out value and "never set" are the same answer. Pinned so the
-    /// old flag can never be read as an accidental enabler.
+    /// A user who never set the variable is enrolled — which is exactly why the **disclosure** is
+    /// the product requirement here, not the gate.
     #[test]
-    fn the_previous_opt_out_value_still_means_off() {
-        assert_eq!(consented("off"), consented(""), "both are a decline");
+    fn an_unset_variable_leaves_diagnostics_on() {
+        assert!(!declined(""), "unset must not read as a decline");
     }
 }
 

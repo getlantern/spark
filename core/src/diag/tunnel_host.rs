@@ -28,15 +28,15 @@
 //! fall back to deriving one from the data dir — which also *persists* it, and is why
 //! the supplied path must not fall through. See `docs/identity-unification-design.md`.
 //!
-//! ## Consent: opt-IN
-//! Diagnostics are **off unless explicitly enabled** ([`super::opted_in`]). The initial test
-//! phases collect extensive metrics, and extensive collection is only defensible from users
-//! who chose it — so the absence of a decision means no.
+//! ## Consent: informed, on by default
+//! Diagnostics run unless explicitly declined ([`super::diagnostics_enabled`]). The user is
+//! *told* that diagnostics are collected — the disclosure is the product surface — rather than
+//! being asked to switch them on, which in a test build would mean collecting from almost nobody.
 //!
-//! The tunnel still has no persisted toggle (the app owns the user-facing setting, and its
-//! persistence lives in an app container this process can't read), so consent arrives per
-//! launch. Plumbing that toggle through `providerConfiguration` alongside the unified device
-//! id is the production channel and the remaining piece.
+//! The tunnel has no persisted toggle (the app owns the user-facing setting, and its persistence
+//! lives in an app container this process can't read), so the decline arrives per launch via
+//! `SPARK_DIAGNOSTICS=off`. Plumbing the app's toggle through `providerConfiguration` alongside
+//! the unified device id is the production channel and the remaining piece.
 //!
 //! Init is infallible by design (same contract as the app host): every step degrades
 //! gracefully to less diagnostics, and internal failures log at `tracing::debug!`
@@ -107,8 +107,8 @@ fn lock_sentinel() -> MutexGuard<'static, Option<Arc<SessionSentinel>>> {
 /// fallback `fetch::device_id()` *creates and persists* a file — it is what keeps the
 /// tunnel from minting its own identity behind the fetch path's back.
 pub fn init(data_dir: &Path, version: &str, device_id: Option<&str>) {
-    // Consent gate — opt-in, shared with the service host so the two cannot drift.
-    if !super::opted_in() {
+    // Shared with the service host so the two cannot drift. On by default; see the module doc.
+    if !super::diagnostics_enabled() {
         return;
     }
     // A later session in this same process (the NE persists across
