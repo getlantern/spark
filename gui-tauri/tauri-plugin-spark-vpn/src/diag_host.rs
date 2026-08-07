@@ -271,9 +271,8 @@ fn forward_to_service(
             // Forwarding it from the app rather than having the service read it itself also keeps
             // ONE identity: the service has no device id of its own, and minting a dir-backed one
             // would split the tunnel's records off from the app's.
-            let otel = spark_core::config::lantern::effective_otel(
-                cfg_rx.borrow_and_update().clone(),
-            );
+            let otel =
+                spark_core::config::lantern::effective_otel(cfg_rx.borrow_and_update().clone());
             // Nothing to say yet: wait for a block to arrive rather than telling the service
             // "off" it never knew otherwise.
             if otel.is_none() && !sent_a_real_endpoint {
