@@ -187,7 +187,14 @@ jobs:
           $bindir = "target/$env:TARGET/release"
           New-Item -ItemType Directory -Force dist | Out-Null
           # WiX v5 (uses the v4 schema). ServiceInstall is core, so no extension is needed.
-          dotnet tool install --global wix
+          #
+          # PINNED, and it has to be. This install was unversioned, so it tracked whatever was
+          # latest — which became WiX v7, and v7 refuses to run without accepting the Open Source
+          # Maintenance Fee EULA (`error WIX7015`). That turned a green release into a failed one
+          # with no change on our side, and because this job is a dependency of `publish`, the whole
+          # release stopped shipping. Accepting a EULA is not a decision a build script should make
+          # on the project's behalf, so pin to the major this file was written for instead.
+          dotnet tool install --global wix --version 5.*
           wix build -arch x64 `
             -d "Version=$ver" `
             -d "BinDir=$bindir" `
