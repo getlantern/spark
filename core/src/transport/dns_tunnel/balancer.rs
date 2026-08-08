@@ -381,12 +381,34 @@ pub fn system_resolvers() -> Vec<String> {
 /// blockable list in every binary.
 pub fn parse_platform_resolvers(csv: &str) -> Vec<String> {
     csv.split(',')
-        .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+        .filter_map(|s| {
+            let s = s.trim();
+            // Strip an IPv6 zone/scope suffix before parsing. Android's
+            // `InetAddress.getHostAddress()` renders a scoped address as `fe80::1%wlan0`, and Rust's
+            // `IpAddr` parser rejects the `%zone` outright — so without this every annotated address
+            // is dropped, and an IPv6 network whose resolvers are all annotated yields an empty set
+            // and no DNS-tunnel member at all.
+            let bare = s.split('%').next().unwrap_or(s);
+            bare.parse::<IpAddr>().ok()
+        })
+        // Link-local resolvers are dropped DELIBERATELY, which is not the same as the accidental
+        // drop above. Reaching one requires carrying its scope all the way to the socket, and
+        // nothing downstream can: `SocketAddr` is parsed from these specs and Rust's parser takes no
+        // zone either. Keeping a de-scoped `fe80::…` would just seed the pool with an address that
+        // can never answer. Global addresses that merely arrived annotated are now kept, which is
+        // the case this filter is careful not to catch.
+        .filter(|ip| !is_link_local_v6(ip))
         .map(|ip| match ip {
             IpAddr::V4(v4) => format!("{v4}:53"),
             IpAddr::V6(v6) => format!("[{v6}]:53"),
         })
         .collect()
+}
+
+/// `fe80::/10` — the IPv6 link-local unicast block. Hand-rolled because
+/// `Ipv6Addr::is_unicast_link_local` is still unstable.
+fn is_link_local_v6(ip: &IpAddr) -> bool {
+    matches!(ip, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80)
 }
 
 /// Parse `nameserver` lines from `resolv.conf` content into pool specs (`ip:53`; IPv6 bracketed as
@@ -524,6 +546,34 @@ mod tests {
         // Nothing discoverable ⇒ nothing invented.
         assert!(parse_platform_resolvers("").is_empty());
         assert!(parse_platform_resolvers("  ,  ").is_empty());
+    }
+
+    /// Android renders scoped IPv6 addresses as `fe80::1%wlan0`, and Rust's `IpAddr` parser rejects
+    /// the `%zone`. A GLOBAL address that merely arrived annotated must survive; a LINK-LOCAL one is
+    /// dropped on purpose, since its scope cannot be carried to the socket.
+    ///
+    /// Without the zone strip both are lost, and an IPv6 network whose resolvers are all annotated
+    /// yields an empty set — no DNS-tunnel member at all, which is the failure this whole path
+    /// exists to prevent.
+    #[test]
+    fn platform_resolvers_handle_ipv6_zone_ids() {
+        // Global, annotated: keep it, without the zone.
+        assert_eq!(
+            parse_platform_resolvers("2001:4860:4860::8888%wlan0"),
+            vec!["[2001:4860:4860::8888]:53".to_string()]
+        );
+        // Link-local, annotated or not: dropped, and it must not take the usable one with it.
+        assert_eq!(
+            parse_platform_resolvers("fe80::1%wlan0,8.8.8.8,fe80::abcd"),
+            vec!["8.8.8.8:53".to_string()]
+        );
+        // The whole fe80::/10 block, not just fe80::.
+        assert!(parse_platform_resolvers("febf::1").is_empty());
+        // fec0:: is outside the block (site-local, deprecated) — not caught by the mask.
+        assert_eq!(
+            parse_platform_resolvers("fec0::1"),
+            vec!["[fec0::1]:53".to_string()]
+        );
     }
 
     /// A host-supplied list takes precedence over `/etc/resolv.conf`, and clearing it falls back.
