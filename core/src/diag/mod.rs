@@ -46,12 +46,48 @@ pub use sink::{emit, emit_error, install, DiagSink};
 /// could drift is how one entry point keeps collecting by default. (`tunnel_host` is
 /// platform-gated, so it is not a home the service host can reach.)
 ///
-/// `SPARK_DIAGNOSTICS` is the test-phase channel; the production one is the app's user-facing
-/// toggle, plumbed through `providerConfiguration`, which is the remaining piece. Declines are
-/// matched case- and whitespace-insensitively because this gets set by hand and by scripts, and a
-/// user's decline should not fail on capitalisation.
+/// **Two channels, and either one declining is a decline.** `SPARK_DIAGNOSTICS` is the test-phase
+/// escape hatch, set by hand or by scripts. [`set_host_consent`] is the production one: the app's
+/// user-facing toggle, handed to the tunnel process by its host. Declines are matched case- and
+/// whitespace-insensitively because the env var gets typed by people, and a user's decline should
+/// not fail on capitalisation.
+///
+/// The `&&` is the load-bearing part. Until the host channel existed, "declined" on a tunnel process
+/// meant whoever *launched* it, not the person using the app — the env var is not something a user
+/// can set. Consent is the one gate where the safe direction is obvious, so it requires both: the
+/// user has not switched it off, **and** the environment has not.
 pub fn diagnostics_enabled() -> bool {
-    !declined(&std::env::var("SPARK_DIAGNOSTICS").unwrap_or_default())
+    host_consent().unwrap_or(true)
+        && !declined(&std::env::var("SPARK_DIAGNOSTICS").unwrap_or_default())
+}
+
+/// Tri-state host consent: `-1` unset, `0` declined, `1` granted.
+///
+/// An atomic rather than a lock: it is read on a startup path that must not block and can never
+/// poison, and the value is one bit.
+static HOST_CONSENT: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+
+/// Record the user's diagnostics choice, as the controlling app knows it.
+///
+/// **Must be called before the host's `diag` init** (`tunnel_host::init` / `diag_wire::init`), which
+/// is where [`diagnostics_enabled`] is consulted — after that the sink is already installed and this
+/// only affects a later re-init. On the Apple NE that means before `spark_tunnel_run`.
+///
+/// Not calling it at all leaves the previous behaviour exactly: unset means "the host has no
+/// opinion", the env var alone decides, and diagnostics stay on by default. So a host that never
+/// learns to call this degrades to today rather than breaking — and a host that *does* call it can
+/// only ever turn diagnostics off relative to that baseline, never on against the user's wishes.
+pub fn set_host_consent(enabled: bool) {
+    HOST_CONSENT.store(i8::from(enabled), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The host's recorded choice, or `None` if it never expressed one.
+fn host_consent() -> Option<bool> {
+    match HOST_CONSENT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
 }
 
 /// The parsing rule behind [`diagnostics_enabled`], split out so it is testable without mutating
@@ -87,6 +123,42 @@ mod consent_tests {
     #[test]
     fn an_unset_variable_leaves_diagnostics_on() {
         assert!(!declined(""), "unset must not read as a decline");
+    }
+
+    /// Host consent and the env var are ANDed: either one declining is a decline.
+    ///
+    /// The `false` case is the whole reason this channel exists — before it, a tunnel process had
+    /// no way to hear a user's decline at all, because the env var is not something a person using
+    /// the app can set on a system extension. The `true` case matters differently: granting must
+    /// **not** override an environment that declined, or a host could re-enable collection against
+    /// a decision made outside it.
+    ///
+    /// Drives the process-global directly, so it owns the whole lifecycle rather than racing
+    /// another test that reads it (the same constraint the sentinel tests document). Restores the
+    /// unset state on the way out.
+    #[test]
+    fn host_consent_and_the_env_var_are_anded() {
+        use super::{host_consent, set_host_consent, HOST_CONSENT};
+        use std::sync::atomic::Ordering;
+
+        assert_eq!(host_consent(), None, "no host has spoken yet");
+
+        set_host_consent(false);
+        assert_eq!(host_consent(), Some(false));
+        // A declining host wins regardless of the env var — that is the gap this closes.
+        assert!(!(host_consent().unwrap_or(true) && !declined("")));
+        assert!(!(host_consent().unwrap_or(true) && !declined("off")));
+
+        set_host_consent(true);
+        assert_eq!(host_consent(), Some(true));
+        // A granting host does NOT override an env decline.
+        assert!(host_consent().unwrap_or(true) && !declined(""));
+        assert!(!(host_consent().unwrap_or(true) && !declined("off")));
+
+        // Silence from the host is not a decline: unset must behave exactly as before this existed.
+        HOST_CONSENT.store(-1, Ordering::Relaxed);
+        assert_eq!(host_consent(), None);
+        assert!(host_consent().unwrap_or(true) && !declined(""));
     }
 }
 

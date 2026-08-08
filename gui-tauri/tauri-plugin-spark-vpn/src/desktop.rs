@@ -318,6 +318,7 @@ mod ne_spike {
         routing_mode: Option<String>,
         app_bypass: Option<String>,
         ad_block: bool,
+        diagnostics: bool,
         identity: Option<String>,
     ) -> Result<(), String> {
         // macOS system extension must be activated + user-approved before a provider can start. iOS
@@ -341,6 +342,12 @@ mod ne_spike {
         // providerConfiguration values are strings, so pre-format the bool as "true"/"false"
         // (the NE parses "false" → off). Owned so the closure can stay `Fn`.
         let ad_block_str = if ad_block { "true" } else { "false" }.to_owned();
+        // The user's diagnostics toggle, same "true"/"false" encoding. This is the ONLY channel by
+        // which their choice reaches the NE: the core's other consent gate is the SPARK_DIAGNOSTICS
+        // env var, which nobody using the app can set on a system extension — so without this key
+        // "declined" meant whoever launched the process. Carried in the saved VPN profile like the
+        // rest, so it also governs on-demand and at-boot starts with no app running.
+        let diagnostics_str = if diagnostics { "true" } else { "false" }.to_owned();
         // The app's own device + account identity, handed to the NE so it fetches config as THIS user
         // instead of registering its own. Empty when the app hasn't fetched yet (identity is minted by
         // its first config fetch): the NE then refuses to start with a clear error rather than quietly
@@ -377,7 +384,7 @@ mod ne_spike {
                 unsafe {
                     proto.setProviderBundleIdentifier(Some(&NSString::from_str(TUNNEL_SYSEXT_ID)));
                     proto.setServerAddress(Some(ns_string!("Spark")));
-                    // Always include splitTunnel, routingMode, appBypass, and adBlock in
+                    // Always include splitTunnel, routingMode, appBypass, adBlock, and diagnostics in
                     // providerConfiguration so the NE can apply the user's domain bypass list,
                     // routing mode, app-bypass list, and ad-block toggle on every connect. Also
                     // include the optional dev-override config when present. providerConfiguration
@@ -394,6 +401,9 @@ mod ne_spike {
                         .into_super();
                     let adb_val: Retained<AnyObject> =
                         NSString::from_str(&ad_block_str).into_super().into_super();
+                    let diag_val: Retained<AnyObject> = NSString::from_str(&diagnostics_str)
+                        .into_super()
+                        .into_super();
                     let id_val: Retained<AnyObject> =
                         NSString::from_str(&identity_json).into_super().into_super();
                     let dict = if let Some(ref c) = config {
@@ -406,9 +416,10 @@ mod ne_spike {
                                 ns_string!("routingMode"),
                                 ns_string!("appBypass"),
                                 ns_string!("adBlock"),
+                                ns_string!("diagnostics"),
                                 ns_string!("identity"),
                             ],
-                            &[cfg_val, st_val, rm_val, ab_val, adb_val, id_val],
+                            &[cfg_val, st_val, rm_val, ab_val, adb_val, diag_val, id_val],
                         )
                     } else {
                         NSDictionary::from_retained_objects(
@@ -417,9 +428,10 @@ mod ne_spike {
                                 ns_string!("routingMode"),
                                 ns_string!("appBypass"),
                                 ns_string!("adBlock"),
+                                ns_string!("diagnostics"),
                                 ns_string!("identity"),
                             ],
-                            &[st_val, rm_val, ab_val, adb_val, id_val],
+                            &[st_val, rm_val, ab_val, adb_val, diag_val, id_val],
                         )
                     };
                     proto.setProviderConfiguration(Some(&dict));
@@ -833,8 +845,19 @@ impl TunnelControl for AppleControl {
                  to start rather than register a second account"
             );
         }
-        ne_spike::connect(config, split, mode, app_bypass, ad_block, identity)
-            .map_err(crate::Error::Platform)
+        // The user's diagnostics choice, from the same persisted toggle the app process reads at
+        // `diag_host::init`. Passing it is what makes one switch govern BOTH processes.
+        let diagnostics = crate::persist::load_diagnostics_enabled(&self.base);
+        ne_spike::connect(
+            config,
+            split,
+            mode,
+            app_bypass,
+            ad_block,
+            diagnostics,
+            identity,
+        )
+        .map_err(crate::Error::Platform)
     }
 
     fn disconnect(&self) -> crate::Result<()> {

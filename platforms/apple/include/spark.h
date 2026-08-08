@@ -125,6 +125,15 @@ int32_t spark_set_routing_mode(const char *mode);
  * applied; -1 if there is no active router (no tunnel, or one without smart-routing). */
 int32_t spark_set_ad_block_enabled(int32_t enabled);
 
+/* Record the user's diagnostics choice. MUST be called BEFORE `spark_tunnel_run` — diagnostics
+ * init happens early inside that call and is where the consent gate is read, so setting this
+ * afterwards only affects a later session in the same process.
+ *
+ * Not calling it leaves diagnostics on by default with only the SPARK_DIAGNOSTICS env var able to
+ * decline — and that var is not something a user of the app can set on a system extension, which
+ * is why the app's real toggle needs this path. Always returns 0; consent is not fallible. */
+int32_t spark_set_diagnostics_enabled(int32_t enabled);
+
 #ifdef __cplusplus
 }
 #endif
