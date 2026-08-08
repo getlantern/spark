@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "bip324-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bip324",
  "chacha20",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "dns-tunnel-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "lz4_flex",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "dns-tunnel-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "boring2",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "spark-android"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jni",
  "spark-core",
@@ -2422,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "spark-apple"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "spark-core",
  "tracing",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "spark-backend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "spark-ipc",
  "thiserror 2.0.18",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "spark-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2453,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "spark-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "async-trait",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "spark-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "spark-backend",
  "spark-ipc",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "spark-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "postcard",
  "serde",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "spark-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
