@@ -85,15 +85,31 @@ log "generating Spark.xcodeproj (xcodegen)"
 
 # --- 2. archive (Developer-ID, manual signing per project.yml) ----------------------------------
 log "xcodebuild archive ($SCHEME, Release, arm64)"
+# `CODE_SIGN_IDENTITY` is overridden with the resolved SHA-1 for the reason the hash was resolved in
+# the first place. project.yml sets it to the NAME ("Developer ID Application"), which is ambiguous
+# once a renewal leaves several such certs in the keychain: xcodebuild picks one, and if that is not
+# the cert embedded in the provisioning profile the archive fails with "Provisioning profile ...
+# doesn't include signing certificate". The hash was already being computed here — it was just not
+# reaching the step that actually needed it (the DMG codesign below got it; the archive did not).
 xcodebuild -project "$APPLE_DIR/Spark.xcodeproj" -scheme "$SCHEME" -configuration Release \
   -destination 'generic/platform=macOS' -archivePath "$ARCHIVE" \
   ARCHS=arm64 MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$(date +%s)" \
+  CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
   archive
 
 # --- 3. export the Developer-ID .app ------------------------------------------------------------
+# Same ambiguity as the archive step, one layer down: the committed ExportOptions.plist names the
+# certificate ("Developer ID Application"), which is correct on a CI runner that imports exactly one
+# and wrong on any machine holding a renewal alongside the old cert. Export a copy with the resolved
+# SHA-1 substituted rather than editing the committed file, so the repo keeps a plist that is
+# readable and machine-independent while this build gets a deterministic one.
+EXPORT_PLIST="$WORK/ExportOptions.plist"
+cp "$APPLE_DIR/ExportOptions.plist" "$EXPORT_PLIST"
+/usr/libexec/PlistBuddy -c "Set :signingCertificate $SIGN_IDENTITY" "$EXPORT_PLIST"
+
 log "xcodebuild -exportArchive (ExportOptions.plist → $APP_NAME)"
 xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportPath "$EXPORT_DIR" \
-  -exportOptionsPlist "$APPLE_DIR/ExportOptions.plist"
+  -exportOptionsPlist "$EXPORT_PLIST"
 [[ -d "$APP" ]] || { echo "export did not produce $APP" >&2; exit 1; }
 
 # --- 4. notarize + staple the .app --------------------------------------------------------------
