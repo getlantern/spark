@@ -29,6 +29,19 @@ fn main() {
     ];
     for var in PINNED {
         println!("cargo:rerun-if-env-changed={var}");
+        // Re-emit as `rustc-env`, which is the half that actually works. `rerun-if-env-changed`
+        // alone only reruns THIS SCRIPT; cargo decides whether to recompile the crate from whether
+        // the script's *output* changed, and a script that merely prints the same rerun lines every
+        // time has not changed its output. So the crate keeps its previously-expanded `option_env!`
+        // — stale, silently, with `Compiling spark-core` printed to make it look otherwise (that
+        // line is the build script, not the crate).
+        //
+        // Echoing the value into the output fixes both halves at once: the output now differs when
+        // the value differs, which forces the recompile, and `option_env!` reads the value from
+        // here. Verified with a canary zone that lands in the binary only with this line present.
+        if let Some(value) = std::env::var_os(var) {
+            println!("cargo:rustc-env={var}={}", value.to_string_lossy());
+        }
     }
 
     // `SPARK_GIT_SHA` stamps the OTLP resource block, so a field report says which build produced

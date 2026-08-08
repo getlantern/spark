@@ -1533,6 +1533,42 @@ mod tests {
     }
 
     /// **Diagnostic, not a test of spark.** Reports which member won and what it negotiated, so the
+    /// The bootstrap dns-tunnel member is registered **exactly when this build pinned a zone**.
+    ///
+    /// Guards the build-time plumbing end to end, in the crate that reads it, rather than by
+    /// grepping a linked binary — which is misleading here: `spark-service` never calls the fetch
+    /// path, so LTO strips `config_kindling` wholesale and the zone literal is absent from that
+    /// binary whether or not the build was configured correctly.
+    ///
+    /// The `option_env!` is read here for the same reason it is read in `bootstrap_dns_tunnel`:
+    /// it is fixed at compile time, so the test asserts the *relationship* between how this build
+    /// was configured and what the race carries. Run with the zone set to prove the wiring:
+    /// `SPARK_BOOTSTRAP_DNS_ZONE=t.example SPARK_BOOTSTRAP_DNS_PUBKEY=<b64> cargo test -p spark-core
+    /// --features prod bootstrap_dns_member`.
+    #[cfg(feature = "dns-tunnel")]
+    #[test]
+    fn bootstrap_dns_member_present_exactly_when_pinned() {
+        let env = FetchEnv::prod();
+        let count = config_kindling(&env, 0).transport_count();
+        // direct + fronted-scan always; proxyless and the embedded fronted list when available.
+        let mut expected = 2;
+        if cfg!(feature = "proxyless") {
+            expected += 1;
+        }
+        if fronted_dialer().is_some() {
+            expected += 1;
+        }
+        let pinned = option_env!("SPARK_BOOTSTRAP_DNS_ZONE").is_some_and(|z| !z.trim().is_empty())
+            && option_env!("SPARK_BOOTSTRAP_DNS_PUBKEY").is_some();
+        if pinned {
+            expected += 1;
+        }
+        assert_eq!(
+            count, expected,
+            "config race has {count} members, expected {expected} (bootstrap dns-tunnel pinned: {pinned})"
+        );
+    }
+
     /// dispatch in [`fetch_once_kindling`] can be checked against reality rather than reasoned about.
     /// Expect `direct`/(no ALPN) on an open network — proxyless is meant to lose there.
     ///
