@@ -154,6 +154,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // the router exists — mirrors how the app pushes live updates through handleAppMessage.
             let adBlockEnabled = (provider?["adBlock"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "false"
+            // Read the user's diagnostics choice from providerConfiguration["diagnostics"]
+            // ("true"/"false"); default on, matching the core's own default.
+            //
+            // This is the ONLY way the user's decision reaches this process. The core's other
+            // consent channel is the SPARK_DIAGNOSTICS env var, which a person using the app cannot
+            // set on a system extension — so before this key existed, "declined" here meant whoever
+            // launched the process, not the user. Applied immediately (not post-connect like
+            // adBlock) because diagnostics init runs early inside spark_tunnel_run, and a consent
+            // gate read after the fact would have already let a session through.
+            let diagnosticsEnabled = (provider?["diagnostics"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "false"
+            spark_set_diagnostics_enabled(diagnosticsEnabled ? 1 : 0)
+            self.log.notice("diagnostics consent=\(diagnosticsEnabled, privacy: .public)")
+
             // The device + account identity the app owns, as `{device_id,user_id,pro_token}` JSON.
             // REQUIRED whenever the core self-fetches: without it the core used to mint its own via
             // /user-create, which gave every install a second Lantern account — and because this

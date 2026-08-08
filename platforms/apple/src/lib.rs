@@ -300,6 +300,26 @@ mod ffi {
         }
     }
 
+    /// Record the user's diagnostics choice before starting the tunnel.
+    ///
+    /// **Call this before [`spark_tunnel_run`].** Diagnostics init happens early inside that call,
+    /// and it is where the consent gate is read — setting this afterwards only affects a later
+    /// session in the same process.
+    ///
+    /// Not calling it leaves the previous behaviour: diagnostics on by default, with only the
+    /// `SPARK_DIAGNOSTICS` env var able to decline. That var is not something a *user* can set on a
+    /// system extension, which is why the app's real toggle has to reach the tunnel process
+    /// somehow — see `providerConfiguration["diagnostics"]` in `PacketTunnelProvider`.
+    ///
+    /// A separate entry point rather than an eighth `spark_tunnel_run` argument: the ABI of the
+    /// blocking entry point stays put, and this matches the `spark_set_*` family already here.
+    /// Always returns 0 — there is no failure mode, and a host must not treat consent as fallible.
+    #[no_mangle]
+    pub extern "C" fn spark_set_diagnostics_enabled(enabled: c_int) -> c_int {
+        spark_core::diag::set_host_consent(enabled != 0);
+        0
+    }
+
     /// Free a string returned by [`spark_servers_json`].
     ///
     /// # Safety
