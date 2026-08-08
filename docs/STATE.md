@@ -5,7 +5,48 @@
 
 ## Current position
 
-**2026-08-07 — PICK UP HERE. Telemetry now reaches SigNoz from every client surface and by default
+**2026-08-08 — v0.1.0 IS RELEASED.** https://github.com/getlantern/spark/releases/tag/v0.1.0 —
+the repo's first versioned release, 12 assets: macOS tarballs (both arches), Linux tarball + `.deb`,
+Windows `.zip` + `.msi`, and a **notarized, stapled** `spark-0.1.0-macos-arm64.dmg` (app + embedded
+`org.getlantern.spark.tunnel.systemextension`).
+
+The DMG was built locally and uploaded, not built by CI: the `package macOS app (DMG)` job is gated
+on `vars.MACOS_APP_PACKAGING == 'true'` and the Apple signing secrets, and neither exists at repo or
+org level. Reproduce with:
+
+```
+SIGN_IDENTITY=<sha1 of the cert the profiles embed> NOTARY_PROFILE=spark-notary VERSION=0.1.0 \
+  SPARK_BOOTSTRAP_DNS_ZONE=… SPARK_BOOTSTRAP_DNS_PUBKEY=… packaging/macos/build-dmg.sh
+```
+
+**Facts that cost time and should not be re-derived:**
+
+- The notarytool keychain profile on the build Mac is **`spark-notary`** (not `spark`), and
+  `AC_USERNAME`/`AC_PASSWORD` are also already in the environment. Checking only for a profile named
+  `spark` led to a wrong "no notarization credentials" conclusion and an un-notarized build.
+- The keychain holds **three** identically-named `Developer ID Application … (ACZRKC3LQ9)` certs.
+  Only `FB8932C865187A03F620DA1624372365111F314B` is embedded in the `Spark macOS App` / `Spark
+  macOS Tunnel` provisioning profiles. Signing by name picks arbitrarily and fails with
+  "Provisioning profile … doesn't include signing certificate", which reads like a broken profile
+  and is not (`fdd7d55` makes the script pass the resolved hash to archive and export).
+- **Do not verify build-time-pinned values by grepping a built artifact.** Tried three times, wrong
+  each time: `grep` without `-a` silently finds nothing on macOS; `spark-service` never calls the
+  fetch path so LTO strips `config_kindling` wholesale; and rlibs are compressed archives. The test
+  `bootstrap_dns_member_present_exactly_when_pinned` is the answer — it measures **4 members
+  unpinned → 5 pinned**, confirmed on the host and on `aarch64-apple-darwin`.
+
+**⚠️ Untested and worth knowing before the next tag:** `4449cd2` moved the Windows MSI to WiX v7
+with `-acceptEula wix7`. The `Build MSI` step is gated `github.ref_type == 'tag'`, so **nothing but a
+tag exercises it** — v0.1.0 shipped on the v5 pin. The next release is the first run of the v7 path.
+The EULA acceptance also asserts a sponsorship of the `wixtoolset` GitHub org that a human still has
+to actually create (https://github.com/sponsors/wixtoolset/).
+
+**Still open from #165:** the `providerConfiguration` consent plumb for the Apple NE (so "declined"
+means the user, not whoever launched the process); the throwaway `secrets.SPARK_OTEL_INGEST_KEY` for
+the embedded pre-config path; dashboards. Client telemetry flows today for anything that reaches
+config-new, which already delivers a real `otel` block, with the logs signal forced on by #173.
+
+**2026-08-07 — Telemetry now reaches SigNoz from every client surface and by default
 from the deployed server (#165); tree green, branch `feat/tunnel-process-telemetry`, NOT yet merged.**
 
 Six commits, each independently green:
