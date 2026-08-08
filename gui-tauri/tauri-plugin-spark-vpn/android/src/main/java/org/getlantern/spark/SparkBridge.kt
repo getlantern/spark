@@ -41,6 +41,16 @@ object SparkBridge {
         dataDir: String?,
         splitTunnel: String?,
         routingMode: String?,
+        /**
+         * Comma-separated OS resolver IPs from
+         * `ConnectivityManager.getLinkProperties(underlying).getDnsServers()`.
+         *
+         * Android has no `/etc/resolv.conf`, so this is the only way the core can learn them — and
+         * without them the bootstrap DNS-tunnel member, the last-resort reachability tier, refuses
+         * to build and drops out of the config-fetch race. Null or empty is a working configuration:
+         * the device simply gets no DNS-tunnel member.
+         */
+        dnsServers: String?,
     ): Int
 
     /** Signal a running [nativeRun] to stop. */

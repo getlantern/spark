@@ -212,7 +212,11 @@ class SparkVpnService : VpnService() {
             // because the system stack has never been exercised on a real device — see
             // docs/android-system-stack-gate.md, which is the A/B this switch exists to make runnable.
             // The payoff is removing the concurrent-download collapse; the gate is proving it here.
-            val rc = SparkBridge.nativeRun(fd, MTU, addr, TUN_PREFIX, systemStack, config, dataDir, splitTunnel, routingMode)
+            val dnsServers = underlyingDnsServers()
+            val rc = SparkBridge.nativeRun(
+                fd, MTU, addr, TUN_PREFIX, systemStack, config, dataDir, splitTunnel, routingMode,
+                dnsServers,
+            )
             Log.i(TAG, "nativeRun returned $rc")
         }
         // Readiness gate (the Android analog of the Apple NE's). A VpnService has no completion
@@ -303,6 +307,39 @@ class SparkVpnService : VpnService() {
             }.joinToString("|").ifEmpty { "(no transports)" }
         }
         return "net=$network iface=$iface transports=$transports"
+    }
+
+    /**
+     * The OS resolver IPs of the UNDERLYING physical network, comma-separated, or null if none can
+     * be discovered.
+     *
+     * Android exposes the resolver list only through `LinkProperties` — there is no
+     * `/etc/resolv.conf` for the core to read — so without this the bootstrap DNS-tunnel member
+     * refuses to build and silently drops out of the config-fetch race. This is the same source
+     * sing-box uses for its platform interface.
+     *
+     * Reads the underlying network, never the VPN's own: `currentNet` is what the netwatch tracks,
+     * and the VPN's LinkProperties would report the tunnel's DNS, which would point the DNS tunnel
+     * back through itself. Falls back to `activeNetwork` for the first connect, before the netwatch
+     * has reported (adopting a network is asynchronous and the tunnel starts immediately).
+     *
+     * Returning null is a supported outcome, deliberately: no discoverable resolver means no
+     * DNS-tunnel member, rather than falling back to hardcoded public resolvers — those would be a
+     * fixed, blockable list in every binary and weaker under a shutdown than the OS one.
+     *
+     * Log hygiene: the COUNT only, never the addresses (spark rule: never log a resolver IP).
+     */
+    private fun underlyingDnsServers(): String? {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
+        val net = currentNet ?: cm.activeNetwork ?: return null
+        // Never source these from our own VPN — that would aim the DNS tunnel at the tunnel.
+        if (cm.getNetworkCapabilities(net)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) {
+            Log.i(TAG, "dns: underlying network is our own VPN; no resolvers reported")
+            return null
+        }
+        val servers = cm.getLinkProperties(net)?.dnsServers?.mapNotNull { it.hostAddress }.orEmpty()
+        Log.i(TAG, "dns: reporting ${servers.size} platform resolver(s) to the core")
+        return servers.takeIf { it.isNotEmpty() }?.joinToString(",")
     }
 
     /**

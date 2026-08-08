@@ -73,6 +73,7 @@ mod jni {
         data_dir: JString<'local>,
         split_tunnel: JString<'local>,
         routing_mode: JString<'local>,
+        dns_servers: JString<'local>,
     ) -> jint {
         crate::logcat::init();
         // `config` is fail-closed: a non-null string that won't decode is a caller error (an explicit
@@ -100,6 +101,33 @@ mod jni {
         // `routing_mode` is lenient: null or undecodable → None. A bad routing mode must not fail
         // the tunnel — callers pass null until the Compose UI wires up a real selection.
         let mode = read_jstring(&mut env, &routing_mode).ok().flatten();
+        // `dns_servers` is the comma-separated resolver list the Java side reads out of
+        // `ConnectivityManager.getLinkProperties(underlying).getDnsServers()`. Android has no
+        // `/etc/resolv.conf`, so this is the ONLY way the core can learn the OS resolvers — and
+        // without them the bootstrap DNS-tunnel member (the last-resort reachability tier) refuses
+        // to build and silently drops out of the config-fetch race.
+        //
+        // Lenient like the rest: null/undecodable/garbage → no resolvers → no DNS-tunnel member,
+        // which is the documented behaviour on a device where none can be discovered. Deliberately
+        // no fallback to public resolvers.
+        //
+        // Set before `run_fd_dispatch` so the self-fetch race, which builds the member, sees it.
+        // Re-pushed on every call: the service restarts the tunnel when the default network
+        // changes, which is exactly when the previous network's resolvers go stale.
+        //
+        // Log hygiene: the COUNT only — never a resolver IP (spark rule).
+        {
+            let csv = read_jstring(&mut env, &dns_servers).ok().flatten();
+            let resolvers = csv
+                .as_deref()
+                .map(spark_core::transport::dns_tunnel::balancer::parse_platform_resolvers)
+                .unwrap_or_default();
+            tracing::info!(
+                count = resolvers.len(),
+                "android: platform DNS resolvers installed"
+            );
+            spark_core::transport::dns_tunnel::balancer::set_platform_resolvers(resolvers);
+        }
         // The platform owns the interface reality: the VpnService addr/prefix + Android's kernel
         // (system) stack. The shared dispatch decides direct / relay / full-config / self-fetch.
         let tun_base = spark_core::fd_tunnel::fd_config(

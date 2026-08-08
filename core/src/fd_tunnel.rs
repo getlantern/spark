@@ -919,6 +919,18 @@ pub fn run_fd_lantern_api(
                     info!(interface = %iface, "lantern-api: pinning proxy sockets to physical interface (UDP/QUIC tunnel bypass)");
                     config.transport.protect_interface = Some(iface);
                 }
+                // Android needs no pinning: the VpnService excludes this app's own UID from the
+                // tunnel (`addDisallowedApplication(<self>)`), which covers UDP/QUIC as well as
+                // TCP, so the proxy's upstream dials already bypass it. `default_physical_interface`
+                // is a hardcoded `None` off macOS/Windows, so warning here fired on EVERY Android
+                // and Linux run and claimed something false — it read as evidence that hysteria2 was
+                // broken on Android when it is not. Verified on an emulator: QUIC connects, `/auth`
+                // returns `udp=true`, and the health probe answers 200 in ~600 ms.
+                #[cfg(target_os = "android")]
+                None => tracing::debug!(
+                    "lantern-api: no interface pinning on Android; app-UID exclusion already bypasses the tunnel"
+                ),
+                #[cfg(not(target_os = "android"))]
                 None => warn!(
                     "lantern-api: no physical interface found to pin to; UDP/QUIC transports may not egress"
                 ),
