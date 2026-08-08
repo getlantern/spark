@@ -232,8 +232,14 @@ pub fn default_physical_interface() -> Option<String> {
     None
 }
 
-/// Other non-macOS platforms: no discovery (the daemon/`spark run` paths configure
-/// `protect_interface` explicitly, and Android's `VpnService.protect` handles bypass).
+/// Other non-macOS platforms: no discovery, always `None`.
+///
+/// The daemon / `spark run` paths configure `protect_interface` explicitly. **Android needs no
+/// pinning at all**: the VpnService excludes this app's own UID from the tunnel
+/// (`addDisallowedApplication(<self>)` in `SparkVpnService`), which covers UDP/QUIC as well as TCP.
+/// An earlier version of this comment credited `VpnService.protect`, which the JNI bridge does not
+/// call and has never called — see the Kotlin doc, which is the accurate one. Verified on-device:
+/// hysteria2's QUIC handshake completes and its health probe returns 200.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn default_physical_interface() -> Option<String> {
     None

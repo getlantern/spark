@@ -55,6 +55,23 @@ val ndkVersionForCargo = "28.2.13676358"
 val ndkHome: String = System.getenv("ANDROID_NDK_HOME")
     ?: "${android.sdkDirectory}/ndk/$ndkVersionForCargo"
 
+// Dynamic-transport features (ADR 0013 §7), enabled exactly when a production module-signing public
+// key is pinned — the same rule and the same trigger as the Apple slice
+// (platforms/apple/build-xcframework.sh). `bip324` implies `wasm-transport`, giving the wasmi host
+// plus the secp256k1 primitives, so a signed bip324/obfs-xor module can be delivered by config with
+// no app release.
+//
+// This was previously absent here while Apple had it, which meant a remotely-specified wasm/bip324
+// transport worked on iOS and macOS and hard-failed on Android — the platform with most of the
+// users. Not a silent degrade: `from_config` errors at transport-build time when a pool entry names
+// a transport the build lacks, by design.
+//
+// Conditional rather than always-on for the reason Apple's is: a *release* build with
+// `wasm-transport` refuses the dev signing key (fail-closed), so an unpinned build must not carry it.
+val moduleSigningKey: String? = System.getenv("SPARK_MODULE_PUBKEY_HEX")
+val cargoFeatures: List<String> =
+    if (!moduleSigningKey.isNullOrBlank()) listOf("--features", "bip324") else emptyList()
+
 val cargoNdkBuild by tasks.registering(Exec::class) {
     group = "build"
     description = "Cross-compiles libspark_android.so for arm64-v8a + x86_64 via cargo-ndk."
@@ -62,11 +79,13 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     environment("ANDROID_NDK_HOME", ndkHome)
     // -P is cargo-ndk's --platform (Android API level); derive it from minSdk so the two can't drift.
     commandLine(
-        "cargo", "ndk",
-        "-t", "arm64-v8a", "-t", "x86_64", "-P", "${android.defaultConfig.minSdk}",
-        "-o", jniLibsDir.absolutePath,
-        // --locked: don't mutate Cargo.lock (declared as an input) — reproducible builds.
-        "build", "--release", "--locked", "-p", "spark-android"
+        listOf(
+            "cargo", "ndk",
+            "-t", "arm64-v8a", "-t", "x86_64", "-P", "${android.defaultConfig.minSdk}",
+            "-o", jniLibsDir.absolutePath,
+            // --locked: don't mutate Cargo.lock (declared as an input) — reproducible builds.
+            "build", "--release", "--locked", "-p", "spark-android"
+        ) + cargoFeatures
     )
     // Up-to-date check: re-run only when the Android crate, the core sources/manifest, or the
     // resolved dependency set (Cargo.lock) change.
@@ -75,6 +94,13 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     inputs.dir(File(repoRootDir, "core/src"))
     inputs.file(File(repoRootDir, "core/Cargo.toml"))
     inputs.file(File(repoRootDir, "Cargo.lock"))
+    // The feature list is an input too, or pinning the key against a warm build directory would
+    // leave the previously-built .so in place and quietly ship without the wasm runtime. Same class
+    // of staleness as `option_env!` without `rerun-if-env-changed` — see core/build.rs.
+    inputs.property("cargoFeatures", cargoFeatures)
+    // Likewise the key itself: `core/build.rs` bakes it via `option_env!`, so a changed key must
+    // rebuild even though no source file moved.
+    inputs.property("moduleSigningKey", moduleSigningKey ?: "")
     outputs.dir(jniLibsDir)
     doFirst {
         // Fail fast with a clear message for the common missing-NDK case.

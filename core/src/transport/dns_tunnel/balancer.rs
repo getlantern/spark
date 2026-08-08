@@ -310,13 +310,55 @@ impl ResolverPool {
     }
 }
 
-/// The OS-configured DNS resolver(s), as pool specs (`ip:53`, IPv6 as `[ip]:53`). On Unix this reads
-/// `/etc/resolv.conf`'s `nameserver` lines; other platforms return empty for now (a follow-up can add
-/// the Windows adapter API). Used to auto-include the local resolver — during a national shutdown the
-/// mandated local/ISP resolver is often the only one that still forwards DNS, so it's the lifeline.
+/// Resolvers supplied by the host platform, for systems where the OS list cannot be read from a
+/// file. Empty until a host sets it.
+///
+/// `RwLock`, not `OnceLock`: the set changes when the device roams between networks, and the host
+/// re-pushes it each time (on Android the tunnel restarts on every default-network change, so this
+/// is refreshed at exactly the moment the old list goes stale).
+static PLATFORM_RESOLVERS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Install the host platform's DNS resolvers, as pool specs (`ip:53`, IPv6 as `[ip]:53`).
+///
+/// **Android needs this and nothing else does.** Android has no `/etc/resolv.conf` — it resolves
+/// through netd, and the resolver list is only reachable via
+/// `ConnectivityManager.getLinkProperties(network).getDnsServers()` on the Java side. Without it
+/// [`system_resolvers`] returns empty, `dns_tunnel_transport` refuses to build for want of any
+/// resolver, and the bootstrap DNS-tunnel member — the last-resort reachability tier — silently
+/// drops out of the config-fetch race on every Android device. (sing-box solves the same problem the
+/// same way, via its platform interface; ours is one-way because the host already restarts the
+/// tunnel on network change.)
+///
+/// Passing an empty list is meaningful: it clears the previous one rather than keeping a stale
+/// network's resolvers.
+///
+/// **Log hygiene:** never log the values (spark rule: never a resolver IP). Log the count.
+pub fn set_platform_resolvers(resolvers: Vec<String>) {
+    match PLATFORM_RESOLVERS.write() {
+        Ok(mut slot) => *slot = resolvers,
+        // A poisoned lock means a writer panicked mid-swap; the Vec is still structurally sound, so
+        // take it over rather than lose resolver discovery for the process lifetime.
+        Err(poisoned) => *poisoned.into_inner() = resolvers,
+    }
+}
+
+/// The OS-configured DNS resolver(s), as pool specs (`ip:53`, IPv6 as `[ip]:53`).
+///
+/// Host-supplied list first ([`set_platform_resolvers`]) — on Android that is the only source. Then
+/// `/etc/resolv.conf`'s `nameserver` lines on Unix; other platforms return empty for now (a
+/// follow-up can add the Windows adapter API). Used to auto-include the local resolver — during a
+/// national shutdown the mandated local/ISP resolver is often the only one that still forwards DNS,
+/// so it's the lifeline.
 ///
 /// **Log hygiene:** callers must not log the returned IPs (spark rule: never log resolver IPs).
 pub fn system_resolvers() -> Vec<String> {
+    let platform = match PLATFORM_RESOLVERS.read() {
+        Ok(slot) => slot.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    if !platform.is_empty() {
+        return platform;
+    }
     #[cfg(unix)]
     {
         std::fs::read_to_string("/etc/resolv.conf")
@@ -327,6 +369,46 @@ pub fn system_resolvers() -> Vec<String> {
     {
         Vec::new()
     }
+}
+
+/// Parse a host-supplied resolver list — the comma-separated bare IPs the Android side reads out of
+/// `LinkProperties` — into pool specs. Invalid entries are dropped rather than failing the batch: a
+/// malformed one must not cost us the others, and the caller has no way to fix it.
+///
+/// Deliberately no fallback to public resolvers when the result is empty (author direction): a
+/// device with no discoverable resolver simply gets no DNS-tunnel member. Shipping hardcoded public
+/// resolvers would be weaker under a shutdown than the OS one anyway, and it would put a fixed,
+/// blockable list in every binary.
+pub fn parse_platform_resolvers(csv: &str) -> Vec<String> {
+    csv.split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            // Strip an IPv6 zone/scope suffix before parsing. Android's
+            // `InetAddress.getHostAddress()` renders a scoped address as `fe80::1%wlan0`, and Rust's
+            // `IpAddr` parser rejects the `%zone` outright — so without this every annotated address
+            // is dropped, and an IPv6 network whose resolvers are all annotated yields an empty set
+            // and no DNS-tunnel member at all.
+            let bare = s.split('%').next().unwrap_or(s);
+            bare.parse::<IpAddr>().ok()
+        })
+        // Link-local resolvers are dropped DELIBERATELY, which is not the same as the accidental
+        // drop above. Reaching one requires carrying its scope all the way to the socket, and
+        // nothing downstream can: `SocketAddr` is parsed from these specs and Rust's parser takes no
+        // zone either. Keeping a de-scoped `fe80::…` would just seed the pool with an address that
+        // can never answer. Global addresses that merely arrived annotated are now kept, which is
+        // the case this filter is careful not to catch.
+        .filter(|ip| !is_link_local_v6(ip))
+        .map(|ip| match ip {
+            IpAddr::V4(v4) => format!("{v4}:53"),
+            IpAddr::V6(v6) => format!("[{v6}]:53"),
+        })
+        .collect()
+}
+
+/// `fe80::/10` — the IPv6 link-local unicast block. Hand-rolled because
+/// `Ipv6Addr::is_unicast_link_local` is still unstable.
+fn is_link_local_v6(ip: &IpAddr) -> bool {
+    matches!(ip, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80)
 }
 
 /// Parse `nameserver` lines from `resolv.conf` content into pool specs (`ip:53`; IPv6 bracketed as
@@ -438,6 +520,73 @@ mod tests {
         // /16 is 65536 hosts; capped at max_hosts.
         let p = pool(&["10.0.0.0/16"], cfg);
         assert_eq!(p.len(), 100);
+    }
+
+    /// The Android path: a comma-separated `LinkProperties.getDnsServers()` list becomes pool specs.
+    ///
+    /// The empty case is the load-bearing one — it is what a device with no discoverable resolver
+    /// produces, and it must yield no resolvers (hence no DNS-tunnel member) rather than anything
+    /// invented. Author direction: no fallback to public resolvers.
+    #[test]
+    fn parses_platform_resolver_list() {
+        assert_eq!(
+            parse_platform_resolvers("8.8.8.8, 1.1.1.1 ,2606:4700:4700::1111"),
+            vec![
+                "8.8.8.8:53".to_string(),
+                "1.1.1.1:53".to_string(),
+                "[2606:4700:4700::1111]:53".to_string(),
+            ]
+        );
+        // A malformed entry is dropped, never the whole batch: the caller cannot fix it, and one
+        // bad address must not cost us the working ones.
+        assert_eq!(
+            parse_platform_resolvers("not-an-ip,9.9.9.9"),
+            vec!["9.9.9.9:53".to_string()]
+        );
+        // Nothing discoverable ⇒ nothing invented.
+        assert!(parse_platform_resolvers("").is_empty());
+        assert!(parse_platform_resolvers("  ,  ").is_empty());
+    }
+
+    /// Android renders scoped IPv6 addresses as `fe80::1%wlan0`, and Rust's `IpAddr` parser rejects
+    /// the `%zone`. A GLOBAL address that merely arrived annotated must survive; a LINK-LOCAL one is
+    /// dropped on purpose, since its scope cannot be carried to the socket.
+    ///
+    /// Without the zone strip both are lost, and an IPv6 network whose resolvers are all annotated
+    /// yields an empty set — no DNS-tunnel member at all, which is the failure this whole path
+    /// exists to prevent.
+    #[test]
+    fn platform_resolvers_handle_ipv6_zone_ids() {
+        // Global, annotated: keep it, without the zone.
+        assert_eq!(
+            parse_platform_resolvers("2001:4860:4860::8888%wlan0"),
+            vec!["[2001:4860:4860::8888]:53".to_string()]
+        );
+        // Link-local, annotated or not: dropped, and it must not take the usable one with it.
+        assert_eq!(
+            parse_platform_resolvers("fe80::1%wlan0,8.8.8.8,fe80::abcd"),
+            vec!["8.8.8.8:53".to_string()]
+        );
+        // The whole fe80::/10 block, not just fe80::.
+        assert!(parse_platform_resolvers("febf::1").is_empty());
+        // fec0:: is outside the block (site-local, deprecated) — not caught by the mask.
+        assert_eq!(
+            parse_platform_resolvers("fec0::1"),
+            vec!["[fec0::1]:53".to_string()]
+        );
+    }
+
+    /// A host-supplied list takes precedence over `/etc/resolv.conf`, and clearing it falls back.
+    ///
+    /// Android has no resolv.conf at all, so the override IS the source there; the precedence only
+    /// becomes visible on a Unix host, which is where this runs.
+    #[test]
+    fn platform_resolvers_override_and_clear() {
+        set_platform_resolvers(vec!["203.0.113.53:53".to_string()]);
+        assert_eq!(system_resolvers(), vec!["203.0.113.53:53".to_string()]);
+        // Clearing must not strand the previous network's resolvers.
+        set_platform_resolvers(Vec::new());
+        assert!(!system_resolvers().contains(&"203.0.113.53:53".to_string()));
     }
 
     #[test]

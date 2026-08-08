@@ -173,6 +173,19 @@
     color: var(--text-primary);
     -webkit-font-smoothing: antialiased;
     user-select: none;
+    /* Android WebView paints a translucent highlight over the BORDER BOX of whatever was tapped,
+       and does not follow border-radius — so tapping the 140x70 rounded VPN switch flashed a
+       rectangle around it on every connect and disconnect. Global rather than per-element: every
+       tappable thing in the app has the same problem, the switch was just the one big enough to
+       be obvious. Desktop is unaffected (no tap highlight there). */
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* Removing the tap highlight must not remove the KEYBOARD focus indicator, so the ring is
+     re-established on :focus-visible only — shown for keyboard navigation, not for pointer or
+     touch input, which is what produced the flash. */
+  :global(:focus-visible) {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
   }
   /* Edge-to-edge safe areas. On Android 15 (and iOS notch devices) the WebView draws behind
      the status bar + camera cutout + nav bar, so the app-bar collided with the system clock and
