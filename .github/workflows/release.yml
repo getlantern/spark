@@ -186,16 +186,22 @@ jobs:
           $ver = $env:VERSION
           $bindir = "target/$env:TARGET/release"
           New-Item -ItemType Directory -Force dist | Out-Null
-          # WiX v5 (uses the v4 schema). ServiceInstall is core, so no extension is needed.
+          # WiX v7, with the Open Source Maintenance Fee EULA accepted explicitly (`-acceptEula
+          # wix7`). v7 blocks every command until the EULA is accepted (`error WIX7015`), and
+          # accepting it is a licensing decision the project has made deliberately: Brave New
+          # Software sponsors the `wixtoolset` GitHub organization, which is what the OSMF requires
+          # of organizations over its US$10k annual-revenue threshold. Acceptance without that
+          # sponsorship would agree to terms we would then not be meeting.
           #
-          # PINNED, and it has to be. This install was unversioned, so it tracked whatever was
-          # latest — which became WiX v7, and v7 refuses to run without accepting the Open Source
-          # Maintenance Fee EULA (`error WIX7015`). That turned a green release into a failed one
-          # with no change on our side, and because this job is a dependency of `publish`, the whole
-          # release stopped shipping. Accepting a EULA is not a decision a build script should make
-          # on the project's behalf, so pin to the major this file was written for instead.
-          dotnet tool install --global wix --version 5.*
-          wix build -arch x64 `
+          # STILL PINNED, on the major. The unversioned install this replaced is what dragged us
+          # from v5 to v7 mid-release with no change on our side and, because `publish` depends on
+          # this job, stopped the project shipping entirely. Pinning is about not being moved by
+          # someone else's release schedule; it is independent of which major we chose.
+          #
+          # The v4 schema `packaging/windows/spark.wxs` uses is still supported. ServiceInstall is
+          # core, so no extension is needed.
+          dotnet tool install --global wix --version 7.*
+          wix build -acceptEula wix7 -arch x64 `
             -d "Version=$ver" `
             -d "BinDir=$bindir" `
             -d "ConfigSrc=packaging/config.example.toml" `
