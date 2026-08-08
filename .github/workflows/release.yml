@@ -214,8 +214,11 @@ jobs:
           name: spark-${{ matrix.target }}
           path: dist/*
 
-  # Notarized macOS app DMG (Model A — ADR 0005): the controlling app + embedded NE system extension,
-  # built by packaging/macos/build-dmg.sh (the source-of-truth script). Gated behind a repo VARIABLE
+  # Notarized macOS app DMG (Model A — ADR 0005): the Tauri app + embedded NE system extension,
+  # built by packaging/macos/build-tauri-dmg.sh — the macOS PRODUCT script. It previously called
+  # build-dmg.sh, which packaged the bare Xcode `SparkApp.app` (the NE harness, no product UI) and
+  # was the pre-Tauri path left behind when the Flutter GUI was removed. Enabling this job would
+  # have shipped that as the macOS product. Gated behind a repo VARIABLE
   # so the rest of the release still works before the signing secrets are configured — set
   # `vars.MACOS_APP_PACKAGING = 'true'` once these repo SECRETS exist:
   #   MACOS_CERT_P12 / MACOS_CERT_PASSWORD       base64 of the "Developer ID Application" .p12 + its password
@@ -234,6 +237,14 @@ jobs:
           targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: brew install xcodegen
+      # The product DMG bundles the Tauri UI, so this job needs the JS toolchain the CLI/service
+      # jobs do not.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install UI dependencies
+        working-directory: gui-tauri
+        run: npm ci
 
       - name: Import Developer ID signing certificate
         env:
@@ -276,8 +287,8 @@ jobs:
           # build-time-pinned value has to reach THIS step, not just the CLI/service one above.
           # They previously reached only that one, which meant the shipped macOS app had no
           # bootstrap dns-tunnel race member at all — the last-resort tier was present in the CLI
-          # and absent from the product. Env inherits down build-dmg.sh → build-xcframework.sh →
-          # cargo, so listing them here is all that is needed.
+          # and absent from the product. Env inherits down build-tauri-dmg.sh →
+          # build-xcframework.sh → cargo, so listing them here is all that is needed.
           #
           # Unset stays a working configuration for all of these: the dns-tunnel member is simply
           # absent and the race runs on direct + proxyless + fronted, and no embedded otel block
@@ -291,13 +302,20 @@ jobs:
           SPARK_OTEL_INGEST_KEY: ${{ secrets.SPARK_OTEL_INGEST_KEY }}
         run: |
           export VERSION="${REF_NAME#v}"
-          packaging/macos/build-dmg.sh
+          packaging/macos/build-tauri-dmg.sh
+          # The script emits an unversioned Spark.dmg (the .app inside is always Spark.app so it
+          # installs under one name regardless of arch). Rename on the way out so the release asset
+          # carries the version, matching every other artifact.
+          mv dist/Spark.dmg "dist/spark-$VERSION-macos-arm64.dmg"
+          shasum -a 256 "dist/spark-$VERSION-macos-arm64.dmg" > "dist/spark-$VERSION-macos-arm64.dmg.sha256"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: spark-macos-app
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
 
   nightly:
     name: publish nightly prerelease

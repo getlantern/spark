@@ -34,7 +34,7 @@ the GitHub Release:
 | Platform | Artifact | Built by |
 | --- | --- | --- |
 | macOS (arm64 + x86_64) | `spark-<ver>-<target>.tar.gz` (+ `.sha256`) — the CLI/daemon binaries | `tar` in the workflow |
-| **macOS app (arm64)** | `spark-<ver>-macos-arm64.dmg` — notarized GUI app + embedded NE system extension | `packaging/macos/build-dmg.sh` (gated CI job) |
+| **macOS app (arm64)** | `spark-<ver>-macos-arm64.dmg` — notarized Tauri app + embedded NE system extension | `packaging/macos/build-tauri-dmg.sh` (gated CI job) |
 | Linux (x86_64) | `spark_<ver>_amd64.deb` + tarball | `packaging/debian/build-deb.sh` (hand-rolled `dpkg-deb`) |
 | Windows (x86_64) | `spark-<ver>-<target>.zip` (binaries + example config) | `Compress-Archive` in the workflow |
 
@@ -54,7 +54,7 @@ system extension embedded** (`platforms/apple`), drag-installed to `/Application
 [ADR 0005](../docs/adr/0005-macos-distribution-and-privileged-component.md). The CLI/daemon tarball
 (above) remains the Homebrew/enterprise channel.
 
-`packaging/macos/build-dmg.sh` is the source of truth (the CI job calls it): build the
+`packaging/macos/build-tauri-dmg.sh` is the source of truth (the CI job calls it): build the
 `SparkCore.xcframework` → `xcodegen` → `xcodebuild archive` → `-exportArchive` with the Developer-ID
 `platforms/apple/ExportOptions.plist` → notarize + staple the `.app` → build the DMG (`hdiutil`,
 drag-to-`/Applications` layout) → sign + notarize + staple the DMG → verify (`codesign`/`spctl`/
@@ -62,11 +62,11 @@ drag-to-`/Applications` layout) → sign + notarize + staple the DMG → verify 
 
 ```bash
 # Local dry run — build + sign + DMG + verify, NO notarization (no Apple creds needed):
-SKIP_NOTARIZE=1 packaging/macos/build-dmg.sh            # -> dist/spark-<ver>-macos-arm64.dmg
+SKIP_NOTARIZE=1 packaging/macos/build-tauri-dmg.sh      # -> dist/Spark.dmg
 
 # Full run — notarize + staple (pick ONE credential source):
-NOTARY_PROFILE=<notarytool-keychain-profile> VERSION=0.1.0 packaging/macos/build-dmg.sh
-AC_USERNAME=<apple-id> AC_PASSWORD=<app-specific-pw> VERSION=0.1.0 packaging/macos/build-dmg.sh
+NOTARY_PROFILE=<notarytool-keychain-profile> packaging/macos/build-tauri-dmg.sh
+AC_USERNAME=<apple-id> AC_PASSWORD=<app-specific-pw> packaging/macos/build-tauri-dmg.sh
 ```
 
 **One-time prerequisites** (human; see `platforms/apple/README.md`): the *Developer ID Application*
@@ -80,17 +80,24 @@ adding the repo secrets `MACOS_CERT_P12`/`MACOS_CERT_PASSWORD` (base64 `.p12` + 
 `MACOS_PROFILE_APP`/`MACOS_PROFILE_TUNNEL` (base64 profiles), and `AC_USERNAME`/`AC_PASSWORD`
 (notarytool). The job uploads the DMG to the same GitHub Release.
 
-### macOS product DMG (Tauri)
+### macOS product DMG (Tauri) — the only macOS DMG
 
-`build-dmg.sh` above packages the `platforms/apple` **SwiftUI harness** (lean, ~1 MB — useful for
-testing the sysext in isolation). The **product** macOS DMG is the **Tauri `gui-tauri` app** as the
-controlling app (ADR 0008), built by **`packaging/macos/build-tauri-dmg.sh`**: it builds the signed
-system extension via the platforms/apple archive, builds the Tauri release app, embeds the sysext,
-re-signs the bundle (hardened runtime, notarizable), then DMG → notarize+staple → verify. Same
-env/creds as `build-dmg.sh`.
+**`packaging/macos/build-tauri-dmg.sh`** builds the **Tauri `gui-tauri` app** as the controlling app
+(ADR 0008): it builds the signed system extension via the platforms/apple archive, builds the Tauri
+release app, embeds the sysext, re-signs the bundle (hardened runtime, notarizable), then DMG →
+notarize+staple → verify.
 
-> The former Flutter `gui/` controlling-app DMG and its `build-gui-dmg.sh` were **removed** — Tauri is
+There is exactly **one** macOS DMG script, deliberately. Two predecessors were removed:
+
+> The Flutter `gui/` controlling-app DMG and its `build-gui-dmg.sh` were removed when Tauri became
 > the single cross-platform UI (desktop Win/macOS/Linux + Android + iOS). See `docs/STATE.md`.
+>
+> `build-dmg.sh` was removed later, for the same reason one step further on. It packaged the
+> `platforms/apple` SwiftUI harness — the NE test shell, no product UI — as a DMG, and the release
+> workflow still called it, so enabling the gated CI job would have shipped that as the macOS
+> product. Its stated use (exercising the sysext in isolation) is still available without it:
+> `xcodebuild -project platforms/apple/Spark.xcodeproj -scheme SparkApp` archives the same harness,
+> which is exactly what `build-tauri-dmg.sh` does to source the sysext.
 
 ## Linux — systemd
 

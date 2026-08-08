@@ -16,7 +16,7 @@ org level. Reproduce with:
 
 ```
 SIGN_IDENTITY=<sha1 of the cert the profiles embed> NOTARY_PROFILE=spark-notary VERSION=0.1.0 \
-  SPARK_BOOTSTRAP_DNS_ZONE=… SPARK_BOOTSTRAP_DNS_PUBKEY=… packaging/macos/build-dmg.sh
+  SPARK_BOOTSTRAP_DNS_ZONE=… SPARK_BOOTSTRAP_DNS_PUBKEY=… packaging/macos/build-tauri-dmg.sh
 ```
 
 **Facts that cost time and should not be re-derived:**
