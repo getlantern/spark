@@ -17,7 +17,7 @@ members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/appl
 exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing", "modules/obfs-xor", "modules/bip324"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
