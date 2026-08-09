@@ -19,12 +19,17 @@ use crate::config::{RouteAction, RuleSetRef, SmartRoutingConfig};
 /// Decides the [`Action`] for each flow: a small, live-swappable user **bypass** matcher checked
 /// first (any match => `Direct`, absolute), then the immutable base matcher from the fetched rules.
 pub struct Router {
-    base: Matcher,
+    /// The compiled base matcher. Behind an `RwLock` so a rule-set refresh can swap it into the
+    /// LIVE router: the flow hooks and the DNS ad-block closure both capture this exact `Arc`
+    /// (`fd_tunnel`), so replacing the router wholesale via `set_active_router` would leave them on
+    /// the old one. Read once per flow-open, never per packet, and never held across an `.await` —
+    /// the same contract as the knobs below.
+    base: RwLock<Matcher>,
     /// The ad-block rule-sets, compiled to their own matcher (Reject) so they can be toggled
     /// independently of `base` (which also carries inline config Reject rules that must stay in
     /// force regardless). Checked before `base` when [`ad_block_enabled`](Self::ad_block_enabled)
-    /// is set — this preserves the "ad-block wins" precedence. Immutable after build.
-    ad_block: Matcher,
+    /// is set — this preserves the "ad-block wins" precedence. Swappable by a refresh, like `base`.
+    ad_block: RwLock<Matcher>,
     /// Whether ad-block is applied. User-controllable (Settings toggle); default on. Swapped live
     /// via [`set_ad_block_enabled`](Router::set_ad_block_enabled), like `mode`/`user_bypass`.
     ad_block_enabled: RwLock<bool>,
@@ -52,11 +57,11 @@ impl Router {
     /// empty; seed it with [`set_user_bypass`](Router::set_user_bypass).
     pub fn new(base: Matcher) -> Self {
         Self {
-            base,
+            base: RwLock::new(base),
             // No separate ad-block matcher for the bare constructor; callers that want the toggle
             // (production) go through [`build`], which populates it. Any ad-block Reject entries a
             // `new` caller folded into `base` are still honored by `decide`, just not toggleable.
-            ad_block: Matcher::build(Vec::new()),
+            ad_block: RwLock::new(Matcher::build(Vec::new())),
             ad_block_enabled: RwLock::new(true),
             user_bypass: RwLock::new(None),
             mode: RwLock::new(crate::routing_mode::RoutingMode::default()),
@@ -175,14 +180,47 @@ impl Router {
             }
         }
         Self {
-            base: Matcher::build(entries),
-            ad_block: Matcher::build(ad_block_entries),
+            base: RwLock::new(Matcher::build(entries)),
+            ad_block: RwLock::new(Matcher::build(ad_block_entries)),
             ad_block_enabled: RwLock::new(true),
             user_bypass: RwLock::new(None),
             mode: RwLock::new(crate::routing_mode::RoutingMode::default()),
             app_bypass: RwLock::new(None),
             resolver: RwLock::new(None),
         }
+    }
+
+    /// Recompile the rule matchers in place, from whatever `load` now returns.
+    ///
+    /// **Why in place.** The rule-set files are fetched *asynchronously*, so on a first run the
+    /// router is built from an empty cache and every rule-set is skipped — ad-block and smart
+    /// routing then have no rules for the whole session, silently, while the UI reports Smart
+    /// Routing as active. They only worked from the second launch, once the cache happened to be
+    /// warm at build time.
+    ///
+    /// Swapping in a freshly-built `Router` cannot fix that: `fd_tunnel` hands the *same* `Arc` to
+    /// the flow hooks and the DNS ad-block closure, so they would keep the old one. Mutating the
+    /// matchers behind their locks updates every holder at once.
+    ///
+    /// Keeps the live user knobs (`mode`, `user_bypass`, `app_bypass`, `ad_block_enabled`)
+    /// untouched — a rule refresh must not silently re-enable ad-block for someone who turned it
+    /// off, or drop a split-tunnel bypass.
+    pub fn reload_rules(
+        &self,
+        sr: &SmartRoutingConfig,
+        load: impl FnMut(&RuleSetRef) -> Option<Vec<u8>>,
+    ) {
+        let fresh = Self::build(sr, load);
+        // Take the fresh matchers out rather than rebuilding them again.
+        let (base, ad_block) = (
+            fresh.base.into_inner().unwrap_or_else(|e| e.into_inner()),
+            fresh
+                .ad_block
+                .into_inner()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        *self.base.write().unwrap_or_else(|e| e.into_inner()) = base;
+        *self.ad_block.write().unwrap_or_else(|e| e.into_inner()) = ad_block;
     }
 
     /// The action for a flow. The live user **bypass** wins (absolute) — any match => `Direct`;
@@ -250,7 +288,13 @@ impl Router {
             .ad_block_enabled
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            && matches!(self.ad_block.lookup(domain, ip), Some(Action::Reject))
+            && matches!(
+                self.ad_block
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .lookup(domain, ip),
+                Some(Action::Reject)
+            )
         {
             return Action::Reject;
         }
@@ -258,7 +302,12 @@ impl Router {
             *self.mode.read().unwrap_or_else(|e| e.into_inner()),
             crate::routing_mode::RoutingMode::Full
         );
-        match self.base.lookup(domain, ip) {
+        match self
+            .base
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .lookup(domain, ip)
+        {
             Some(Action::Reject) => Action::Reject, // inline config Reject (not ad-block) — always honored
             Some(a) if !full => a,                  // Smart: base decides
             _ => Action::Proxy,                     // Full (or unmatched) → Proxy
@@ -278,6 +327,8 @@ impl Router {
             .unwrap_or_else(|e| e.into_inner())
             && matches!(
                 self.ad_block
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
                     .lookup(Some(domain), IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
                 Some(Action::Reject)
             )
@@ -694,6 +745,94 @@ mod tests {
         // …and re-enabling restores it.
         r.set_ad_block_enabled(true);
         assert!(r.is_ad_blocked("doubleclick.net"));
+    }
+
+    /// A router built from an EMPTY cache starts matching once the rules arrive.
+    ///
+    /// This is the cold-start bug: rule-sets are fetched asynchronously, so on a first run the
+    /// router is built before any `.srs` exists, every rule-set is skipped, and ad-block plus smart
+    /// routing have no rules for the whole session — silently, while the UI reports Smart Routing
+    /// as active. It only worked from the second launch, once the cache was warm at build time.
+    ///
+    /// Reloading in place (rather than building a replacement router) is what makes the update
+    /// reach live traffic: `fd_tunnel` hands the same `Arc` to the flow hooks and the DNS ad-block
+    /// closure, so a swapped-in router would leave both on the old rules.
+    #[test]
+    fn reload_rules_makes_a_cold_started_router_start_matching() {
+        use crate::config::{RouteAction, RuleSetRef, SmartRoutingConfig};
+        let sr = SmartRoutingConfig {
+            rule_sets: vec![RuleSetRef {
+                action: RouteAction::Reject,
+                tag: "common".into(),
+                url: "u".into(),
+                ad_block: false,
+            }],
+            inline_ip_rules: Vec::new(),
+        };
+        let load_real = |rs: &RuleSetRef| {
+            let name = match rs.tag.as_str() {
+                "common" => "common_v3",
+                _ => return None,
+            };
+            std::fs::read(format!("tests/fixtures/srs/{name}.srs")).ok()
+        };
+        // Whatever domain the fixture rejects, established against a warm-cache router so the test
+        // cannot silently pass on a fixture that matches nothing.
+        let warm = Router::build(&sr, load_real);
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let src: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let proto = crate::process::Protocol::Tcp;
+        let rejected = "app.discord.com";
+        assert_eq!(
+            warm.decide(ip, Some(rejected), src, proto),
+            Action::Reject,
+            "fixture must reject this domain, or the reload assertion below proves nothing"
+        );
+
+        // Cold start: nothing on disk yet, so every rule-set is skipped.
+        let cold = Router::build(&sr, |_| None);
+        assert_eq!(
+            cold.decide(ip, Some(rejected), src, proto),
+            Action::Proxy,
+            "an empty cache yields no rules — this is the state a first run is stuck in"
+        );
+
+        // The refresh lands and pushes the rules into the SAME router.
+        cold.reload_rules(&sr, load_real);
+        assert_eq!(
+            cold.decide(ip, Some(rejected), src, proto),
+            Action::Reject,
+            "after a reload the cold-started router must apply the refreshed rules"
+        );
+    }
+
+    /// A rule reload must not disturb the live user knobs.
+    ///
+    /// A refresh fires on a timer, so silently re-enabling ad-block for someone who switched it
+    /// off — or dropping their routing mode — would be a user-visible regression arriving on its
+    /// own schedule.
+    #[test]
+    fn reload_rules_preserves_user_knobs() {
+        use crate::config::SmartRoutingConfig;
+        let sr = SmartRoutingConfig {
+            rule_sets: Vec::new(),
+            inline_ip_rules: Vec::new(),
+        };
+        let r = Router::build(&sr, |_| None);
+        r.set_ad_block_enabled(false);
+        r.set_mode(crate::routing_mode::RoutingMode::Full);
+
+        r.reload_rules(&sr, |_| None);
+
+        assert!(
+            !*r.ad_block_enabled.read().unwrap(),
+            "a timed rule refresh must not re-enable ad-block behind the user"
+        );
+        assert_eq!(
+            *r.mode.read().unwrap(),
+            crate::routing_mode::RoutingMode::Full,
+            "a timed rule refresh must not reset the routing mode"
+        );
     }
 
     #[test]
