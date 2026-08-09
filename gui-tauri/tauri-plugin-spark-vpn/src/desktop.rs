@@ -1241,8 +1241,19 @@ mod servers_cache_tests {
         );
 
         // A real rewrite moves the mtime, and the new — empty — pool must win over the memo.
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // The new mtime is set explicitly rather than slept for: filesystems with coarse timestamp
+        // granularity (1s on HFS+ and some network mounts) would leave a short sleep's mtime
+        // unchanged, so the memo would legitimately hit and this assertion would fail on a correct
+        // implementation. Same mechanism as the pin above, in the opposite direction.
         std::fs::write(&path, r#"{"options":{"outbounds":[]}}"#).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(pinned + std::time::Duration::from_secs(2)),
+            )
+            .unwrap();
         assert!(
             servers_from_cache(&dir).is_empty(),
             "a changed mtime must re-parse; config_fetch rewrites this file expecting exactly that"
