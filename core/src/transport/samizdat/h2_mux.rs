@@ -24,6 +24,27 @@ fn to_io<E: std::error::Error + Send + Sync + 'static>(e: E) -> io::Error {
     io::Error::other(e)
 }
 
+/// Convert an [`h2::Error`], distinguishing **stream-level** failures from connection-level ones.
+///
+/// A single stream must never cost the shared connection. `SamizdatTransport` multiplexes every
+/// tunnel over one `H2Conn`, and it retires that connection whenever a dial fails with anything
+/// except `ConnectionRefused` — so mapping a stream reset to a generic error made one refused or
+/// reset destination tear down the connection that all the *other* live tunnels were riding, which
+/// surfaces on them as `h2 send stream closed`. Getting a burst of those from one bad stream is the
+/// failure this classification exists to prevent.
+///
+/// `RST_STREAM` is the stream-level case and is tagged `ConnectionRefused` — the kind the transport
+/// already treats as "the connection is healthy, surface this to the caller" for a non-200 CONNECT.
+/// `GOAWAY` and I/O errors genuinely are connection-level and stay generic, so the transport still
+/// retires a dead connection (the symmetric bug the Go client hit and fixed in `59fc825`, where a
+/// dead transport was handed out until a cleanup tick).
+fn h2_to_io(e: h2::Error) -> io::Error {
+    if e.is_reset() {
+        return io::Error::new(io::ErrorKind::ConnectionRefused, e);
+    }
+    io::Error::other(e)
+}
+
 /// An established HTTP/2 connection to a Samizdat server, multiplexing CONNECT tunnels.
 pub struct H2Conn {
     send_request: SendRequest<Bytes>,
@@ -74,8 +95,13 @@ impl H2Conn {
             .map_err(to_io)?;
 
         let mut send_request = self.send_request.clone().ready().await.map_err(to_io)?;
-        let (response, send) = send_request.send_request(request, false).map_err(to_io)?;
-        let response = response.await.map_err(to_io)?;
+        // `h2_to_io`, not `to_io`: both of these can fail with a RST_STREAM that concerns only
+        // this stream. `ready()` above stays `to_io` — it waits on the CONNECTION, so a failure
+        // there really is connection-level.
+        let (response, send) = send_request
+            .send_request(request, false)
+            .map_err(h2_to_io)?;
+        let response = response.await.map_err(h2_to_io)?;
         if response.status() != StatusCode::OK {
             // A non-200 is a stream-level rejection — the connection itself is healthy. Tag it
             // distinctly (`ConnectionRefused`) so the transport doesn't tear down the shared
@@ -235,6 +261,69 @@ mod tests {
                 let _ = w.shutdown().await;
             });
         }
+    }
+
+    /// A server that RST_STREAMs the FIRST CONNECT and serves every later one normally.
+    async fn reset_first_then_echo_server(listener: TcpListener) {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut conn = h2::server::handshake(tcp).await.unwrap();
+        let mut first = true;
+        while let Some(accepted) = conn.accept().await {
+            let (request, mut respond) = accepted.unwrap();
+            if first {
+                first = false;
+                // Reject just this stream. The connection stays open and usable.
+                respond.send_reset(h2::Reason::REFUSED_STREAM);
+                continue;
+            }
+            let recv = request.into_body();
+            let send = respond
+                .send_response(Response::builder().status(200).body(()).unwrap(), false)
+                .unwrap();
+            tokio::spawn(async move {
+                let (mut r, mut w) = tokio::io::split(H2Stream::new(send, recv));
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+                let _ = w.shutdown().await;
+            });
+        }
+    }
+
+    /// A reset stream must be reported as `ConnectionRefused` — the kind `SamizdatTransport` treats
+    /// as "the shared connection is healthy" — and the connection must keep working afterwards.
+    ///
+    /// This is the regression that matters: every tunnel is multiplexed over one `H2Conn`, and the
+    /// transport retires that connection on any dial error except `ConnectionRefused`. Before the
+    /// classification in `h2_to_io`, a single reset stream came back as a generic error, so one bad
+    /// destination tore down the connection all the *other* live tunnels were riding — and they saw
+    /// it as a burst of `h2 send stream closed`.
+    #[tokio::test]
+    async fn a_reset_stream_is_stream_level_and_leaves_the_connection_usable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(reset_first_then_echo_server(listener));
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let conn = H2Conn::handshake(tcp).await.unwrap();
+
+        let Err(err) = conn.connect("rejected.example:443").await else {
+            panic!("the server reset this stream; connect must not succeed")
+        };
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::ConnectionRefused,
+            "a RST_STREAM is stream-level; anything else makes the transport retire the shared \
+             connection and kill every sibling tunnel: {err}"
+        );
+
+        // The connection survived the reset and still serves other tunnels — the whole point.
+        let Ok(mut stream) = conn.connect("ok.example:443").await else {
+            panic!("the connection must still be usable after one stream was reset")
+        };
+        stream.write_all(b"still alive").await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut got = Vec::new();
+        stream.read_to_end(&mut got).await.unwrap();
+        assert_eq!(&got, b"still alive");
     }
 
     #[tokio::test]

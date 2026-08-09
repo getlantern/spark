@@ -281,13 +281,25 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
     if let Some(v) = raw.stall_trial_flows {
         cfg.transport.stall_trial_flows = v;
     }
+    // Outbounds this build can't represent, tallied by `kind` rather than logged one-by-one.
+    //
+    // Per-outbound warnings drowned the log: a pool of a dozen unsupported entries produced a dozen
+    // lines on every parse, and the config is re-parsed on the poll loop — so the interesting
+    // events around it (the fetch outcome, the tunnel coming up) scrolled past in a wall of
+    // near-identical text. A `BTreeMap` so the summary is ordered and stable across parses, which is
+    // what makes a change in it noticeable.
+    let mut skipped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for ob in &raw.options.outbounds {
         let Some(spec) = map_outbound(ob) else {
-            tracing::warn!(
+            // The `tag` deliberately does NOT go in the summary. It is per-server and high
+            // cardinality — the useful question is "which kinds is this build missing, and how
+            // many", which the count answers. Tags stay available at DEBUG for a specific hunt.
+            tracing::debug!(
                 tag = %ob.tag,
                 kind = %ob.kind,
                 "config_raw: skipping outbound spark can't represent"
             );
+            *skipped.entry(ob.kind.clone()).or_default() += 1;
             continue;
         };
         let loc = raw.outbound_locations.get(&ob.tag);
@@ -302,6 +314,24 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
             longitude: loc.and_then(|l| l.longitude),
         });
     }
+    // One line per parse instead of one per outbound, and only when something was actually skipped.
+    // Kept at WARN: these are servers the pool offered and this build cannot use, which is worth
+    // seeing — the goal was to stop it repeating, not to hide it.
+    if !skipped.is_empty() {
+        let total: usize = skipped.values().sum();
+        let by_kind = skipped
+            .iter()
+            .map(|(kind, n)| format!("{kind}×{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            skipped = total,
+            kept = cfg.transport.servers.len(),
+            by_kind = %by_kind,
+            "config_raw: outbounds this build can't represent were skipped"
+        );
+    }
+
     // An empty pool would make `from_config` fall back to direct (untunneled) forwarding, silently
     // running unprotected despite a config_raw.json being supplied — fail loudly instead.
     if cfg.transport.servers.is_empty() {
