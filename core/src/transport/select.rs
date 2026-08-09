@@ -484,7 +484,7 @@ impl SelectingTransport {
     /// re-ranks properly (a truly-dead server fails its health check and drops out). Allocates a
     /// new `Arc<[usize]>` — demote is the cold error path, so this is acceptable.
     fn demote(&self, member: usize) {
-        demote_in(&self.selection, &self.reprobe, member);
+        let _reordered = demote_in(&self.selection, &self.reprobe, member);
     }
 
     /// A point-in-time view of every pool member — metadata, last-probe latency/health, and which
@@ -1089,17 +1089,30 @@ impl Drop for SelectingTransport {
 /// The body of [`SelectingTransport::demote`], as a free function so the starvation watchdog can
 /// reach it without holding an `Arc<SelectingTransport>` (which would outlive the transport and keep
 /// the task alive past `Drop`).
-fn demote_in(selection: &Mutex<Selection>, reprobe: &tokio::sync::Notify, member: usize) {
+/// Returns whether the ranking actually changed, so repeat callers can stay quiet.
+///
+/// A member that is absent or already last is left alone and the prober is **not** woken. That
+/// matters because `Notify::notify_one` stores a permit when nobody is waiting, so the prober's
+/// `select!` completes the instant it comes back round: without this guard, a starved member whose
+/// stuck flows keep writing would re-trigger every watchdog tick and drive a full pool re-probe
+/// every `starve_check_secs` for as long as it lasted. The dial path had the same latent
+/// amplification — a member failing every dial re-demoting on each failure.
+fn demote_in(selection: &Mutex<Selection>, reprobe: &tokio::sync::Notify, member: usize) -> bool {
     {
         let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
-        let mut v = sel.ranked.to_vec();
-        if let Some(pos) = v.iter().position(|&i| i == member) {
-            v.remove(pos);
-            v.push(member);
-            sel.ranked = v.into();
+        let Some(pos) = sel.ranked.iter().position(|&i| i == member) else {
+            return false;
+        };
+        if pos + 1 == sel.ranked.len() {
+            return false; // already last — the reorder would be a no-op
         }
+        let mut v = sel.ranked.to_vec();
+        v.remove(pos);
+        v.push(member);
+        sel.ranked = v.into();
     }
     reprobe.notify_one();
+    true
 }
 
 /// Watches each member's byte counters for the starvation signature — bytes going out, nothing
@@ -1139,14 +1152,20 @@ async fn starvation_watchdog(
         for (i, ((out, inbound), (p_out, p_in))) in now.iter().zip(prev.iter()).enumerate() {
             let out_delta = out.saturating_sub(*p_out);
             let in_delta = inbound.saturating_sub(*p_in);
-            if looks_starved(out_delta, in_delta, min_bytes) {
+            if !looks_starved(out_delta, in_delta, min_bytes) {
+                continue;
+            }
+            // Warn only on the transition. A member stays starved for as long as its stuck flows keep
+            // writing, so logging every tick would bury the one line that marks when it went bad.
+            if demote_in(&selection, &reprobe, i) {
                 tracing::warn!(
                     member = i,
                     bytes_out = out_delta,
                     window_secs = check.as_secs(),
                     "pool member starved: traffic going out, nothing coming back; demoting and re-probing"
                 );
-                demote_in(&selection, &reprobe, i);
+            } else {
+                tracing::debug!(member = i, bytes_out = out_delta, "member still starved");
             }
         }
         prev = now;
@@ -1361,6 +1380,40 @@ fn next_order(
 mod tests {
     use super::*;
     use crate::transport::{PacketSink, PacketSource};
+
+    /// A demotion that cannot change the order must not wake the prober. Without this, a starved
+    /// member re-flagged on every watchdog tick would drive a full off-cycle re-probe each time, for
+    /// as long as its stuck flows kept writing.
+    #[test]
+    fn demote_is_a_no_op_once_the_member_is_already_last() {
+        let selection = Mutex::new(Selection {
+            ranked: vec![0usize, 1].into(),
+            latest: vec![None; 2],
+            pinned: None,
+        });
+        let reprobe = tokio::sync::Notify::new();
+
+        assert!(
+            demote_in(&selection, &reprobe, 0),
+            "moving member 0 to the back is a real reorder"
+        );
+        assert_eq!(
+            selection
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .ranked
+                .to_vec(),
+            vec![1, 0]
+        );
+        assert!(
+            !demote_in(&selection, &reprobe, 0),
+            "member 0 is already last — no reorder, so no probe wakeup"
+        );
+        assert!(
+            !demote_in(&selection, &reprobe, 99),
+            "a member absent from the ranking cannot be demoted"
+        );
+    }
 
     /// Drive the real `starvation_watchdog` over hand-made counters and report the resulting order.
     ///
