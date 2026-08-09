@@ -183,14 +183,24 @@ pub fn set_routing_mode(_mode: &str) -> bool {
     false
 }
 
+/// The router the running tunnel is actually using, or `None` when no tunnel is up.
+///
+/// This is the SAME `Arc` the flow hooks and the DNS ad-block closure hold, which is what makes an
+/// in-place update (`Router::reload_rules`, `set_ad_block_enabled`) reach live traffic — replacing
+/// the router wholesale would not.
+#[cfg(feature = "smart-routing")]
+pub fn live_router() -> Option<Arc<crate::rules::router::Router>> {
+    active_router()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// Enable/disable ad-block on the running tunnel live (no reconnect). Returns true if applied,
 /// false if no router is active. Called across the platform FFI.
 #[cfg(feature = "smart-routing")]
 pub fn set_ad_block_enabled(enabled: bool) -> bool {
-    let router = active_router()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let router = live_router();
     match router {
         Some(r) => {
             r.set_ad_block_enabled(enabled);
@@ -994,7 +1004,7 @@ pub fn run_fd_lantern_api(
                     tokio::spawn(crate::rules::ruleset::run_refresh_loop(
                         fetcher,
                         data_dir.clone(),
-                        config.smart_routing.rule_sets.clone(),
+                        config.smart_routing.clone(),
                         RULESET_REFRESH_INTERVAL,
                         Arc::clone(&waiter),
                     ));

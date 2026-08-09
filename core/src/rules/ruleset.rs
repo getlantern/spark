@@ -173,12 +173,13 @@ pub async fn refresh_all(
 pub async fn run_refresh_loop(
     fetcher: Arc<dyn RuleSetFetcher>,
     data_dir: PathBuf,
-    rule_sets: Vec<RuleSetRef>,
+    sr: crate::config::SmartRoutingConfig,
     interval: Duration,
     stop: Arc<tokio::sync::Notify>,
 ) {
     loop {
-        let stale: Vec<RuleSetRef> = rule_sets
+        let stale: Vec<RuleSetRef> = sr
+            .rule_sets
             .iter()
             .filter(|r| is_stale(&cache_path(&data_dir, &r.tag), interval))
             .cloned()
@@ -190,6 +191,15 @@ pub async fn run_refresh_loop(
                 stale = stale.len(),
                 "ruleset: refresh cycle complete"
             );
+            // Push the freshly-cached rules into the LIVE router. Without this the download was
+            // pure disk I/O: on a first run the router is built from an empty cache, every
+            // rule-set is skipped, and ad-block plus smart routing then have no rules for the
+            // entire session — silently, with the UI still reporting Smart Routing as active.
+            // They only started working on the *next* launch, when the cache happened to be warm
+            // at build time.
+            if updated > 0 {
+                reload_live_router(&sr, &data_dir);
+            }
         }
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
@@ -197,6 +207,32 @@ pub async fn run_refresh_loop(
         }
     }
 }
+
+/// Push freshly-cached rules into the router the tunnel is actually using.
+///
+/// Gated to the platforms that own a tun fd, because the live-router registry lives in
+/// `fd_tunnel` — which only exists there. That is not a limitation in practice: the same module is
+/// the only thing that builds a router or spawns this refresh loop, so on desktop there is neither
+/// a loop running nor a router to update. Compiling the call unconditionally is what broke
+/// Linux/Windows CI, on a path my macOS-only local checks never built.
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+fn reload_live_router(sr: &crate::config::SmartRoutingConfig, data_dir: &Path) {
+    match crate::fd_tunnel::live_router() {
+        Some(router) => {
+            router.reload_rules(sr, |r| std::fs::read(cache_path(data_dir, &r.tag)).ok());
+            info!(
+                rule_sets = sr.rule_sets.len(),
+                "ruleset: live router reloaded with refreshed rules"
+            );
+        }
+        // No tunnel up: the cache is still warm for the next build, the pre-existing behaviour.
+        None => tracing::debug!("ruleset: no live router to reload; cache updated for next start"),
+    }
+}
+
+/// No-op off the tun-fd platforms — see the gated twin above.
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+fn reload_live_router(_sr: &crate::config::SmartRoutingConfig, _data_dir: &Path) {}
 
 /// Whether the cache at `path` is missing or older than `max_age` — i.e. worth re-fetching. A file
 /// whose mtime is unreadable or in the future is treated as stale (fetch to be safe).
