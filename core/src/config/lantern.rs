@@ -288,7 +288,9 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
     // events around it (the fetch outcome, the tunnel coming up) scrolled past in a wall of
     // near-identical text. A `BTreeMap` so the summary is ordered and stable across parses, which is
     // what makes a change in it noticeable.
-    let mut skipped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    // Borrowed keys: `raw` outlives the summary below, and the kinds are its own strings — cloning
+    // them would allocate on every parse, and the config is re-parsed on the poll loop.
+    let mut skipped: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for ob in &raw.options.outbounds {
         let Some(spec) = map_outbound(ob) else {
             // The `tag` deliberately does NOT go in the summary. It is per-server and high
@@ -299,7 +301,7 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
                 kind = %ob.kind,
                 "config_raw: skipping outbound spark can't represent"
             );
-            *skipped.entry(ob.kind.clone()).or_default() += 1;
+            *skipped.entry(ob.kind.as_str()).or_default() += 1;
             continue;
         };
         let loc = raw.outbound_locations.get(&ob.tag);
