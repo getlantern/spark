@@ -756,7 +756,30 @@ fn identity_json(base: &std::path::Path) -> Option<String> {
 /// `servers()` returns the NE's live snapshot directly (no overlay).
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn servers_from_cache(base: &std::path::Path) -> Vec<ServerInfo> {
-    let raw = match std::fs::read_to_string(app_config_cache_dir(base).join("config_raw.json")) {
+    let path = app_config_cache_dir(base).join("config_raw.json");
+    // Re-parse only when the file actually changed. The UI polls `servers()` every 2s and, while
+    // disconnected, every one of those ticks landed here — so this read the file and ran the FULL
+    // `config_raw.json` → pool mapping twice a minute forever, including its per-outbound warnings.
+    // Those warnings are captured by the diag layer, so an idle app was also filling the spool (and
+    // the telemetry channel, and its ingestion quota) with the same lines on a 2s cadence; that is
+    // how this was noticed. A `stat` is microseconds against a parse of the whole config.
+    //
+    // Keyed on mtime, which preserves the original intent exactly — `config_fetch` rewrites this
+    // file and expects the next `servers()` pull to see it (see its module doc).
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    if let Some(mtime) = mtime {
+        if let Some((cached_at, list)) = servers_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if *cached_at == mtime {
+                return list.clone();
+            }
+        }
+    }
+
+    let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         // A missing cache is the normal pre-first-fetch state — silent.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -765,13 +788,31 @@ fn servers_from_cache(base: &std::path::Path) -> Vec<ServerInfo> {
             return Vec::new();
         }
     };
-    match spark_core::config::lantern::from_config_raw_json(&raw) {
+    let list = match spark_core::config::lantern::from_config_raw_json(&raw) {
         Ok(cfg) => servers_from_pool(&cfg),
         Err(e) => {
             ne_spike::ne_debug(&format!("servers_from_cache: parse failed: {e}"));
             Vec::new()
         }
+    };
+    // Store even an empty result: a config whose outbounds spark can't represent parses to nothing,
+    // and re-deriving that every 2s is the case this exists to stop. An unreadable mtime skips the
+    // store, so the next call simply re-parses — correctness over the optimisation.
+    if let Some(mtime) = mtime {
+        *servers_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some((mtime, list.clone()));
     }
+    list
+}
+
+/// A [`servers_from_cache`] result together with the `config_raw.json` mtime it was built from.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+type CachedServers = Option<(std::time::SystemTime, Vec<ServerInfo>)>;
+
+/// Memoised [`servers_from_cache`] result, keyed on the `config_raw.json` mtime it was built from.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn servers_cache() -> &'static std::sync::Mutex<CachedServers> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<CachedServers>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 /// Map a parsed config's server pool to the UI location list — the same members/order the live NE
@@ -1135,5 +1176,78 @@ impl TunnelControl for ServiceControl {
         Err(crate::Error::Platform(
             "per-app split tunneling is not supported by the desktop service yet".into(),
         ))
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "ios")))]
+mod servers_cache_tests {
+    use super::*;
+
+    /// A `config_raw.json` with one representable outbound, so the mapping yields a pool.
+    /// `hysteria2` needs only `server`/`server_port`/`password` — the least fixture for a pool entry.
+    fn config_json(port: u16) -> String {
+        format!(
+            r#"{{"options":{{"outbounds":[
+                {{"tag":"a","type":"hysteria2","server":"1.2.3.4","server_port":{port},"password":"p"}}
+            ]}}}}"#
+        )
+    }
+
+    fn write_config(dir: &std::path::Path, body: &str) {
+        let cache = app_config_cache_dir(dir);
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("config_raw.json"), body).unwrap();
+    }
+
+    /// The list is memoised on the file's mtime, and a genuine rewrite is picked up.
+    ///
+    /// Proven by **pinning the mtime across a content change**: the body changes to one with no
+    /// representable outbound, but the timestamp is restored. A working memo keeps returning the
+    /// old list; a broken one re-parses and returns empty. Asserting only that repeated calls agree
+    /// would pass either way — the memo has to be observable, not merely plausible.
+    ///
+    /// Why it matters: the UI polls `servers()` every 2s and, while disconnected, every tick ran
+    /// the full `config_raw.json` → pool mapping. Its per-outbound warnings are captured by the diag
+    /// layer, so an idle app filled the spool — and the telemetry channel — on a 2s cadence.
+    #[test]
+    fn servers_are_memoised_until_the_config_file_changes() {
+        let dir = std::env::temp_dir().join(format!("spark-servers-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Start from a known-empty memo: it is a process-global another test could have populated.
+        *servers_cache().lock().unwrap() = None;
+
+        let path = app_config_cache_dir(&dir).join("config_raw.json");
+        write_config(&dir, &config_json(443));
+        assert_eq!(
+            servers_from_cache(&dir).len(),
+            1,
+            "the representable outbound became a pool entry"
+        );
+        let pinned = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        // Swap in a config with NOTHING representable, then restore the mtime so the memo's key is
+        // unchanged. This is what makes the memo observable.
+        std::fs::write(&path, r#"{"options":{"outbounds":[]}}"#).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(pinned))
+            .unwrap();
+        assert_eq!(
+            servers_from_cache(&dir).len(),
+            1,
+            "unchanged mtime must serve the memo, not re-parse (the whole point)"
+        );
+
+        // A real rewrite moves the mtime, and the new — empty — pool must win over the memo.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&path, r#"{"options":{"outbounds":[]}}"#).unwrap();
+        assert!(
+            servers_from_cache(&dir).is_empty(),
+            "a changed mtime must re-parse; config_fetch rewrites this file expecting exactly that"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
