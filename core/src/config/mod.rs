@@ -446,6 +446,23 @@ pub struct TransportConfig {
     /// the breaker (it needs a non-zero count *and* window to arm).
     #[serde(default = "default_dial_failure_window_secs")]
     pub dial_failure_window_secs: u64,
+    /// Seconds between starvation checks: how often the watchdog samples each member's byte counters
+    /// looking for "we're writing, nothing is coming back". `0` disables the detector.
+    ///
+    /// **Default 15 (ON).** This is the signal that covers the gap between the dial-failure breaker
+    /// (which needs an *errored* dial) and the prober (which only runs every `probe_interval_secs`):
+    /// a member that still completes handshakes but blackholes payload traffic. It ships armed where
+    /// the v1 `stall_window_secs` signal does not, because it demotes rather than quarantines —
+    /// see `starve_min_bytes`.
+    #[serde(default = "default_starve_check_secs")]
+    pub starve_check_secs: u64,
+    /// Bytes a member must have carried outbound within one `starve_check_secs` window, with zero
+    /// bytes returned, before it is considered starved. `0` disables the detector.
+    ///
+    /// The floor exists so a single small request legitimately awaiting a slow reply (a long-poll, a
+    /// streaming subscribe) cannot trip the detector by itself; real payload traffic clears it easily.
+    #[serde(default = "default_starve_min_bytes")]
+    pub starve_min_bytes: u64,
 }
 
 fn default_stall_window_secs() -> u64 {
@@ -471,6 +488,12 @@ fn default_dial_failure_count() -> u32 {
 }
 fn default_dial_failure_window_secs() -> u64 {
     30
+}
+fn default_starve_check_secs() -> u64 {
+    15
+}
+fn default_starve_min_bytes() -> u64 {
+    64 * 1024
 }
 
 impl Default for TransportConfig {
@@ -499,6 +522,8 @@ impl Default for TransportConfig {
             stall_trial_flows: default_stall_trial_flows(),
             dial_failure_count: default_dial_failure_count(),
             dial_failure_window_secs: default_dial_failure_window_secs(),
+            starve_check_secs: default_starve_check_secs(),
+            starve_min_bytes: default_starve_min_bytes(),
         }
     }
 }
@@ -1170,6 +1195,8 @@ mod tests {
                     stack: StackKind::System,
                 },
                 transport: TransportConfig {
+                    starve_check_secs: default_starve_check_secs(),
+                    starve_min_bytes: default_starve_min_bytes(),
                     server: Some("[2001:db8::1]:443".parse().unwrap()),
                     protect_interface: Some("en0".into()),
                     anytls: None,

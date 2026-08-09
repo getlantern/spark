@@ -13,7 +13,8 @@ use async_trait::async_trait;
 
 use crate::transport::probe::{CallbackUrl, ProbeOutcome};
 use crate::transport::stall::{
-    PacketSinkGuard, PacketSourceGuard, StallSink, StallTracker, StreamStallGuard,
+    looks_starved, MemberActivity, MeteredSink, MeteredSource, MeteredStream, PacketSinkGuard,
+    PacketSourceGuard, StallSink, StallTracker, StreamStallGuard,
 };
 use crate::transport::{
     Address, BoxedPacketSink, BoxedPacketSource, MemberStatus, PoolControl, ServerMeta, Transport,
@@ -35,6 +36,8 @@ pub(crate) struct StallConfig {
     pub(crate) trial_flows: u32,
     pub(crate) dial_failure_count: u32,
     pub(crate) dial_failure_window: std::time::Duration,
+    pub(crate) starve_check: std::time::Duration,
+    pub(crate) starve_min_bytes: u64,
 }
 
 impl StallConfig {
@@ -47,6 +50,13 @@ impl StallConfig {
     /// direct observation and needs no such caution.
     pub(crate) fn breaker_enabled(&self) -> bool {
         self.dial_failure_count > 0 && !self.dial_failure_window.is_zero()
+    }
+
+    /// Whether the starvation watchdog is armed. Like the breaker it ships on, because its verdict
+    /// only *demotes* (a reorder that wakes the prober for an authoritative re-probe) rather than
+    /// quarantining — so a false positive costs one probe instead of shrinking the pool.
+    pub(crate) fn starve_enabled(&self) -> bool {
+        !self.starve_check.is_zero() && self.starve_min_bytes > 0
     }
 }
 
@@ -180,6 +190,13 @@ pub struct SelectingTransport {
     /// back at `dial_ms=0`), so real flow outcomes are the only evidence that a member can still serve
     /// a NEW flow, and the ranking/health verdict has to see them.
     health: Arc<Mutex<Vec<MemberHealth>>>,
+    /// Per-member byte counters feeding the starvation watchdog. Kept parallel to `members` and
+    /// replaced wholesale by [`Self::reload`], so a flow holding an `Arc<MemberActivity>` from the
+    /// previous generation keeps counting into an orphaned cell rather than into the wrong member's.
+    activity: Arc<Mutex<Arc<Vec<Arc<MemberActivity>>>>>,
+    /// The starvation watchdog task, aborted on drop alongside the prober. `None` when the detector
+    /// is disabled.
+    watchdog: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Epoch base for computing millis-since-pool-start in stall timestamps.
     health_base: tokio::time::Instant,
     /// Weak self-reference so the guard helpers can obtain an `Arc<Self>` for the `StallSink` impl
@@ -216,6 +233,9 @@ impl SelectingTransport {
         let epoch = Arc::new(AtomicU64::new(0));
         let health = Arc::new(Mutex::new((0..len).map(|_| MemberHealth::new()).collect()));
         let health_base = tokio::time::Instant::now();
+        let activity = Arc::new(Mutex::new(Arc::new(
+            (0..len).map(|_| Arc::new(MemberActivity::new())).collect(),
+        )));
         // Clamp to ≥1s so a misconfigured `probe_interval_secs = 0` can't spin the prober.
         let interval = interval.max(std::time::Duration::from_secs(1));
         let task = tokio::spawn(prober_loop(
@@ -229,7 +249,18 @@ impl SelectingTransport {
             health_base,
             stall,
         ));
+        let watchdog = stall.starve_enabled().then(|| {
+            tokio::spawn(starvation_watchdog(
+                Arc::clone(&activity),
+                Arc::clone(&selection),
+                Arc::clone(&reprobe),
+                stall.starve_check,
+                stall.starve_min_bytes,
+            ))
+        });
         SelectingTransport {
+            watchdog: Mutex::new(watchdog),
+            activity,
             members,
             selection,
             epoch,
@@ -250,8 +281,27 @@ impl SelectingTransport {
         self.me.get().and_then(|w| w.upgrade())
     }
 
-    /// Wrap a member's TCP stream in a stall guard (no-op when disabled).
+    /// The byte counters for `member` in the current pool generation, if the starvation detector is
+    /// armed and the index is still in range (a concurrent `reload` may have shrunk the pool).
+    fn activity_for(&self, member: usize) -> Option<Arc<MemberActivity>> {
+        if !self.stall.starve_enabled() {
+            return None;
+        }
+        self.activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(member)
+            .cloned()
+    }
+
+    /// Wrap a member's TCP stream in its guards: byte metering for the starvation watchdog (always,
+    /// when armed) and the v1 per-flow stall guard (only when explicitly enabled). Both are no-ops
+    /// when their respective signal is off.
     fn guard_stream(self: &Arc<Self>, member: usize, s: BoxedStream) -> BoxedStream {
+        let s: BoxedStream = match self.activity_for(member) {
+            Some(a) => Box::new(MeteredStream::new(s, a)),
+            None => s,
+        };
         if !self.stall.enabled() {
             return s;
         }
@@ -260,13 +310,21 @@ impl SelectingTransport {
         Box::new(StreamStallGuard::new(s, tracker, self.stall.window))
     }
 
-    /// Wrap a member's datagram halves in stall guards (no-op when disabled).
+    /// Datagram counterpart of [`Self::guard_stream`].
     fn guard_udp(
         self: &Arc<Self>,
         member: usize,
         sink_half: BoxedPacketSink,
         source_half: BoxedPacketSource,
     ) -> (BoxedPacketSink, BoxedPacketSource) {
+        let (sink_half, source_half): (BoxedPacketSink, BoxedPacketSource) =
+            match self.activity_for(member) {
+                Some(a) => (
+                    Box::new(MeteredSink::new(sink_half, Arc::clone(&a))),
+                    Box::new(MeteredSource::new(source_half, a)),
+                ),
+                None => (sink_half, source_half),
+            };
         if !self.stall.enabled() {
             return (sink_half, source_half);
         }
@@ -426,16 +484,7 @@ impl SelectingTransport {
     /// re-ranks properly (a truly-dead server fails its health check and drops out). Allocates a
     /// new `Arc<[usize]>` — demote is the cold error path, so this is acceptable.
     fn demote(&self, member: usize) {
-        {
-            let mut sel = self.selection.lock().unwrap_or_else(|e| e.into_inner());
-            let mut v = sel.ranked.to_vec();
-            if let Some(pos) = v.iter().position(|&i| i == member) {
-                v.remove(pos);
-                v.push(member);
-                sel.ranked = v.into();
-            }
-        }
-        self.reprobe.notify_one();
+        demote_in(&self.selection, &self.reprobe, member);
     }
 
     /// A point-in-time view of every pool member — metadata, last-probe latency/health, and which
@@ -643,6 +692,10 @@ impl SelectingTransport {
         // above) so health and selection are never held at the same time.
         *self.health.lock().unwrap_or_else(|e| e.into_inner()) =
             (0..n).map(|_| MemberHealth::new()).collect();
+        // Fresh counters for the new generation: indices name different servers now, and carrying a
+        // stale baseline across would attribute one member's traffic to another.
+        *self.activity.lock().unwrap_or_else(|e| e.into_inner()) =
+            Arc::new((0..n).map(|_| Arc::new(MemberActivity::new())).collect());
         tracing::info!(members = n, "pool reloaded from refreshed config");
         self.reprobe.notify_one();
     }
@@ -1022,6 +1075,81 @@ impl Drop for SelectingTransport {
         if let Some(h) = self.prober.lock().unwrap_or_else(|e| e.into_inner()).take() {
             h.abort();
         }
+        if let Some(h) = self
+            .watchdog
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            h.abort();
+        }
+    }
+}
+
+/// The body of [`SelectingTransport::demote`], as a free function so the starvation watchdog can
+/// reach it without holding an `Arc<SelectingTransport>` (which would outlive the transport and keep
+/// the task alive past `Drop`).
+fn demote_in(selection: &Mutex<Selection>, reprobe: &tokio::sync::Notify, member: usize) {
+    {
+        let mut sel = selection.lock().unwrap_or_else(|e| e.into_inner());
+        let mut v = sel.ranked.to_vec();
+        if let Some(pos) = v.iter().position(|&i| i == member) {
+            v.remove(pos);
+            v.push(member);
+            sel.ranked = v.into();
+        }
+    }
+    reprobe.notify_one();
+}
+
+/// Watches each member's byte counters for the starvation signature — bytes going out, nothing
+/// coming back — and demotes any member that shows it.
+///
+/// Demotion (reorder + wake the prober), **not** quarantine, is the whole reason this can ship armed
+/// where the v1 stall signal could not: it moves new flows off the suspect member immediately while
+/// leaving it in the pool, so a false positive costs one off-cycle probe instead of shrinking the
+/// pool toward the fail-open-to-direct floor that leaks the user's real IP. The probe it wakes is the
+/// authority: a genuinely dead member fails its health check and drops out of the ranking, and a
+/// healthy one is simply re-ranked on the next round.
+///
+/// Deltas are differenced against the previous sample rather than reset, so counting stays lock-free
+/// on the data path. A pool `reload` swaps the whole activity vec; the length change is detected here
+/// and the baseline re-seeded, since old and new indices name different servers.
+async fn starvation_watchdog(
+    activity: Arc<Mutex<Arc<Vec<Arc<MemberActivity>>>>>,
+    selection: Arc<Mutex<Selection>>,
+    reprobe: Arc<tokio::sync::Notify>,
+    check: std::time::Duration,
+    min_bytes: u64,
+) {
+    let mut prev: Vec<(u64, u64)> = Vec::new();
+    loop {
+        tokio::time::sleep(check).await;
+        let members = {
+            let g = activity.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(&g)
+        };
+        let now: Vec<(u64, u64)> = members.iter().map(|a| a.sample()).collect();
+        // A reload replaced the pool: indices no longer refer to the same servers, so re-seed the
+        // baseline and judge nothing this round.
+        if prev.len() != now.len() {
+            prev = now;
+            continue;
+        }
+        for (i, ((out, inbound), (p_out, p_in))) in now.iter().zip(prev.iter()).enumerate() {
+            let out_delta = out.saturating_sub(*p_out);
+            let in_delta = inbound.saturating_sub(*p_in);
+            if looks_starved(out_delta, in_delta, min_bytes) {
+                tracing::warn!(
+                    member = i,
+                    bytes_out = out_delta,
+                    window_secs = check.as_secs(),
+                    "pool member starved: traffic going out, nothing coming back; demoting and re-probing"
+                );
+                demote_in(&selection, &reprobe, i);
+            }
+        }
+        prev = now;
     }
 }
 
@@ -1234,6 +1362,77 @@ mod tests {
     use super::*;
     use crate::transport::{PacketSink, PacketSource};
 
+    /// Drive the real `starvation_watchdog` over hand-made counters and report the resulting order.
+    ///
+    /// The first tick only seeds the baseline (deltas need two samples), so traffic is applied
+    /// *after* it — mirroring production, where the pool is already running when a member goes dark.
+    async fn run_watchdog(apply_traffic: impl Fn(&[Arc<MemberActivity>])) -> Vec<usize> {
+        let check = std::time::Duration::from_secs(5);
+        let cells: Vec<Arc<MemberActivity>> =
+            (0..2).map(|_| Arc::new(MemberActivity::new())).collect();
+        let activity = Arc::new(Mutex::new(Arc::new(cells.clone())));
+        let selection = Arc::new(Mutex::new(Selection {
+            ranked: vec![0usize, 1].into(),
+            latest: vec![None; 2],
+            pinned: None,
+        }));
+        let reprobe = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(starvation_watchdog(
+            Arc::clone(&activity),
+            Arc::clone(&selection),
+            Arc::clone(&reprobe),
+            check,
+            64 * 1024,
+        ));
+
+        tokio::time::sleep(check + std::time::Duration::from_secs(1)).await; // tick 1: seed
+        apply_traffic(&cells);
+        tokio::time::sleep(check + std::time::Duration::from_secs(1)).await; // tick 2: judge
+
+        task.abort();
+        let order = selection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ranked
+            .to_vec();
+        order
+    }
+
+    /// Member 0 is pushing real traffic and getting nothing back — the blackhole case that the
+    /// dial-failure breaker cannot see (its dials still succeed) and that the 300s prober would
+    /// otherwise sit on. It must lose its place at the head of the order.
+    #[tokio::test(start_paused = true)]
+    async fn a_member_writing_with_no_replies_is_demoted() {
+        let order = run_watchdog(|c| {
+            c[0].add_out(256 * 1024); // talking into the void
+            c[1].add_out(256 * 1024);
+            c[1].add_in(128 * 1024);
+        })
+        .await;
+        assert_eq!(order, vec![1, 0], "starved member 0 should be demoted");
+    }
+
+    /// The other half of the pin: a healthy pool must be left alone. Without this, a detector that
+    /// simply demoted everything every tick would pass the test above.
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_pool_is_left_in_place() {
+        let order = run_watchdog(|c| {
+            c[0].add_out(256 * 1024);
+            c[0].add_in(128 * 1024);
+            c[1].add_out(256 * 1024);
+            c[1].add_in(128 * 1024);
+        })
+        .await;
+        assert_eq!(order, vec![0, 1], "healthy members must not be reordered");
+    }
+
+    /// An entirely idle pool must not be touched either — the v1 false positive, at pool scope.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_pool_is_left_in_place() {
+        let order = run_watchdog(|_| {}).await;
+        assert_eq!(order, vec![0, 1], "idle members must not be reordered");
+    }
+
     fn test_stall_cfg() -> StallConfig {
         StallConfig {
             window: std::time::Duration::from_secs(15),
@@ -1244,6 +1443,10 @@ mod tests {
             trial_flows: 2,
             dial_failure_count: 3,
             dial_failure_window: std::time::Duration::from_secs(30),
+            // Off in the shared helper so the watchdog can't demote underneath tests that assert on
+            // ranking; the starvation tests opt in explicitly.
+            starve_check: std::time::Duration::ZERO,
+            starve_min_bytes: 64 * 1024,
         }
     }
 
@@ -1445,6 +1648,10 @@ mod tests {
             direct_udp,
             stall: test_stall_cfg(),
             health: Arc::new(Mutex::new((0..n).map(|_| MemberHealth::new()).collect())),
+            activity: Arc::new(Mutex::new(Arc::new(
+                (0..n).map(|_| Arc::new(MemberActivity::new())).collect(),
+            ))),
+            watchdog: Mutex::new(None),
             health_base: tokio::time::Instant::now(),
             me: std::sync::OnceLock::new(),
         }
