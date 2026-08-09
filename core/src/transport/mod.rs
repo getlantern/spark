@@ -505,6 +505,8 @@ fn build_selecting(
         dial_failure_window: std::time::Duration::from_secs(
             config.transport.dial_failure_window_secs,
         ),
+        starve_check: std::time::Duration::from_secs(config.transport.starve_check_secs),
+        starve_min_bytes: config.transport.starve_min_bytes,
     };
     let st = Arc::new(SelectingTransport::new(
         members,

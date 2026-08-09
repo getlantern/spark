@@ -10,6 +10,64 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 
+/// Aggregate byte accounting for one pool member, shared by every flow riding it.
+///
+/// This is the *starvation* signal: the evidence that a member still accepts writes but has stopped
+/// returning anything. It is deliberately member-wide rather than per-flow. The v1 per-flow signal
+/// above ("this flow saw no progress in EITHER direction for N seconds") cannot tell a throttled
+/// tunnel from an idle HTTP/2 keep-alive, which is why it false-positived, quarantined healthy
+/// members and shipped disabled. A byte *delta* can: an idle connection contributes zero outbound
+/// bytes, so it never even enters the test.
+///
+/// Counters are monotonic and only ever incremented on the data path (one relaxed add per I/O);
+/// the watchdog derives deltas by differencing successive samples.
+pub(crate) struct MemberActivity {
+    out: AtomicU64,
+    inbound: AtomicU64,
+}
+
+impl MemberActivity {
+    pub(crate) fn new() -> Self {
+        Self {
+            out: AtomicU64::new(0),
+            inbound: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn add_out(&self, n: u64) {
+        self.out.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub(crate) fn add_in(&self, n: u64) {
+        self.inbound.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// `(bytes_out, bytes_in)` so far. The two loads are independent, so a sample taken mid-write can
+    /// straddle an update — harmless, since the watchdog needs a *sustained* imbalance across a whole
+    /// window and one misattributed byte cannot manufacture one.
+    pub(crate) fn sample(&self) -> (u64, u64) {
+        (
+            self.out.load(Ordering::Relaxed),
+            self.inbound.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Whether a member's traffic over one watchdog window looks starved: we pushed at least
+/// `min_bytes` out and got **nothing** back.
+///
+/// The `in_delta == 0` test is deliberately absolute rather than a ratio. A blackholed or
+/// DPI-dropped tunnel returns literally nothing, and requiring zero is what makes a false positive
+/// essentially impossible — any reply traffic at all, on any flow, clears the member. The cost is
+/// that a *throttled-but-trickling* member is not detected here; that case is left to the prober's
+/// latency ranking.
+///
+/// `min_bytes` keeps a lone small request that is legitimately awaiting a slow reply (a long-poll,
+/// a streaming subscribe) from tripping the detector on its own.
+pub(crate) fn looks_starved(out_delta: u64, in_delta: u64, min_bytes: u64) -> bool {
+    out_delta >= min_bytes && in_delta == 0
+}
+
 /// The pool's per-member outcome recorder. Implemented by `SelectingTransport`.
 pub(crate) trait StallSink: Send + Sync {
     /// A flow through `member` stalled (was active, then flatlined past the window).
@@ -268,6 +326,165 @@ impl PacketSource for PacketSourceGuard {
                 }
             }
         }
+    }
+}
+
+/// Counts bytes through a member's TCP stream into its [`MemberActivity`]. Pure accounting — it
+/// never errors, never times out, and imposes one relaxed atomic add per completed read/write, so
+/// unlike [`StreamStallGuard`] it is cheap enough to install on every flow unconditionally.
+pub(crate) struct MeteredStream<S> {
+    inner: S,
+    activity: Arc<MemberActivity>,
+}
+
+impl<S> MeteredStream<S> {
+    pub(crate) fn new(inner: S, activity: Arc<MemberActivity>) -> Self {
+        Self { inner, activity }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for MeteredStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let r = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &r {
+            let n = buf.filled().len().saturating_sub(before);
+            if n > 0 {
+                this.activity.add_in(n as u64);
+            }
+        }
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for MeteredStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let r = Pin::new(&mut this.inner).poll_write(cx, data);
+        if let Poll::Ready(Ok(n)) = &r {
+            this.activity.add_out(*n as u64);
+        }
+        r
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// [`MeteredStream`]'s outbound-datagram counterpart.
+pub(crate) struct MeteredSink {
+    inner: BoxedPacketSink,
+    activity: Arc<MemberActivity>,
+}
+
+impl MeteredSink {
+    pub(crate) fn new(inner: BoxedPacketSink, activity: Arc<MemberActivity>) -> Self {
+        Self { inner, activity }
+    }
+}
+
+#[async_trait]
+impl PacketSink for MeteredSink {
+    async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
+        let r = self.inner.send(payload).await;
+        if r.is_ok() {
+            self.activity.add_out(payload.len() as u64);
+        }
+        r
+    }
+}
+
+/// [`MeteredStream`]'s inbound-datagram counterpart.
+pub(crate) struct MeteredSource {
+    inner: BoxedPacketSource,
+    activity: Arc<MemberActivity>,
+}
+
+impl MeteredSource {
+    pub(crate) fn new(inner: BoxedPacketSource, activity: Arc<MemberActivity>) -> Self {
+        Self { inner, activity }
+    }
+}
+
+#[async_trait]
+impl PacketSource for MeteredSource {
+    async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let r = self.inner.recv(buf).await;
+        if let Ok(n) = &r {
+            self.activity.add_in(*n as u64);
+        }
+        r
+    }
+}
+
+#[cfg(test)]
+mod starvation_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const MIN: u64 = 64 * 1024;
+
+    /// The regression that took the v1 signal out of service. An idle HTTP/2 keep-alive is silent in
+    /// both directions, and v1 read that as a stall — quarantining healthy members. The byte-delta
+    /// signal cannot: with nothing written, the member never enters the test at all.
+    #[test]
+    fn an_idle_connection_is_not_starved() {
+        assert!(!looks_starved(0, 0, MIN));
+    }
+
+    #[test]
+    fn traffic_flowing_both_ways_is_not_starved() {
+        assert!(!looks_starved(1_000_000, 500_000, MIN));
+    }
+
+    /// Any reply at all clears the member — the test is zero-inbound, not a ratio.
+    #[test]
+    fn a_single_byte_back_clears_a_heavily_writing_member() {
+        assert!(!looks_starved(10_000_000, 1, MIN));
+    }
+
+    /// One small request awaiting a slow reply (long-poll, streaming subscribe) is below the floor,
+    /// so it cannot trip the detector on its own.
+    #[test]
+    fn a_lone_small_request_awaiting_a_reply_is_not_starved() {
+        assert!(!looks_starved(500, 0, MIN));
+    }
+
+    /// The case this whole detector exists for: real payload going out, nothing coming back.
+    #[test]
+    fn sustained_writes_with_no_reply_are_starved() {
+        assert!(looks_starved(MIN, 0, MIN));
+        assert!(looks_starved(MIN * 10, 0, MIN));
+    }
+
+    /// The counters must actually move, or the watchdog samples zeros forever and the whole detector
+    /// is inert while looking wired up.
+    #[tokio::test]
+    async fn metered_stream_counts_both_directions() {
+        let (mut peer, near) = tokio::io::duplex(1024);
+        let activity = Arc::new(MemberActivity::new());
+        let mut m = MeteredStream::new(near, Arc::clone(&activity));
+
+        m.write_all(b"hello").await.expect("write");
+        peer.write_all(b"worldly").await.expect("peer write");
+        let mut buf = [0u8; 7];
+        m.read_exact(&mut buf).await.expect("read");
+
+        assert_eq!(activity.sample(), (5, 7), "(bytes_out, bytes_in)");
     }
 }
 
