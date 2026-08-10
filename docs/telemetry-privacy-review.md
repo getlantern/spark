@@ -49,6 +49,32 @@ One key deserves a note on sight: **`target` is the *tracing* target** (a module
 `spark_core::config`), **not** a network destination. The name collides with the forbidden class; the
 allow-list comment says not to repurpose it.
 
+### 2.1 Performance events (`transport.probe_result`, `proxy.flow_completed`)
+
+These two exist so that *slowness* is measurable. The numbers were already being logged, but the diag
+layer forwards only the `message` field and renders the rest into the body string, so latency and
+byte counts arrived as prose — readable, but impossible to chart, alert on, or take a percentile of.
+Both reuse keys already in the closed set; neither adds one.
+
+| event | fields | verdict |
+| --- | --- | --- |
+| `transport.probe_result` | `slot`, `kind`, `result`, `latency_ms` | ✅ identifies a pool member by **index and protocol**, never by address |
+| `proxy.flow_completed` | `duration_ms`, `bytes_up`, `bytes_down` | ✅ **no destination** — describes the tunnel, not where the user went |
+
+Two choices are load-bearing:
+
+- **The probe event carries no server label.** The `tracing` line it mirrors prints
+  `server="samizdat 1.2.3.4:31464"`; that address is only kept off the wire by the `redact_all`
+  backstop. Passing the pool index and protocol instead means there is no proxy address to redact in
+  the first place. A hygiene-corpus entry feeds the constructor the log-style label to prove a caller
+  reaching for it cannot leak one.
+- **The flow event names no destination.** Duration and byte counts answer "is the tunnel slow"
+  without recording what was visited, which is the whole reason a destination is in the forbidden
+  class.
+
+`proxy.flow_completed` fires once per proxied TCP flow, so it is emitted at `Debug` — a level the
+server can switch off, and one that sampling applies to.
+
 ## 3. Client — spans (traces signal)
 
 `encode_spans`. Span `name` is `&'static str` — compile-time constants only. Attributes are the same

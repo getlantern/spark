@@ -163,8 +163,21 @@ async fn forward(
     // Wrap the upstream half so writes (app→upstream) count as `up` and reads (upstream→app) as
     // `down`. `&mut *stream` derefs the box to the `dyn` stream `copy_bidirectional` accepts.
     let mut upstream = Counting::new(upstream, metrics);
+    // Timed so the flow's *throughput* is recoverable, not just its size. Byte counts alone cannot
+    // answer "is the tunnel slow" — the question telemetry kept being asked and could not settle.
+    let started = std::time::Instant::now();
     match copy_bidirectional(&mut *stream, &mut upstream).await {
-        Ok((to_upstream, to_app)) => info!(to_upstream, to_app, "tcp flow completed"),
+        Ok((to_upstream, to_app)) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            info!(to_upstream, to_app, duration_ms, "tcp flow completed");
+            // Structured twin of the line above: the diag layer forwards only `message`, so these
+            // numbers reach the collector as prose unless they are emitted as real fields.
+            crate::diag::emit(crate::diag::events::proxy_flow_completed(
+                duration_ms,
+                to_upstream,
+                to_app,
+            ));
+        }
         Err(e) => warn!(error = %e, "tcp flow error"),
     }
 }
