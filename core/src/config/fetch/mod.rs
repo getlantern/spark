@@ -397,6 +397,9 @@ async fn fetch_once_kindling(
         // timed out" says the path is blackholed; "they failed five different ways" says the members
         // failed for their own reasons. Consolidating the avenues into the race lost that distinction
         // once already (#162) — this is what restores it.
+        // Timed around the race alone, not the whole fetch: this is "how long until a member won",
+        // which is the number that says whether the fast avenues are being crowded out.
+        let race_started = std::time::Instant::now();
         let conn = kindling
             .connect(&env.host)
             .await
@@ -405,6 +408,14 @@ async fn fetch_once_kindling(
         // themselves — they hand back bytes and know nothing about HTTP — but the race reports the
         // winner's name, and this is the layer where HTTP exists.
         let attribution = KindlingHeaders::method(&conn.transport);
+        // Record the same winner for ourselves. It was already being told to the server via the
+        // header above and to nobody else, so "which member is actually carrying config fetches"
+        // had no answer in our own telemetry — `config.fetch_outcome`'s `avenue` is hardcoded to
+        // `"kindling"` for every path.
+        crate::diag::emit(crate::diag::events::config_race_winner(
+            &conn.transport,
+            race_started.elapsed().as_millis() as u64,
+        ));
         if conn.is_h2() {
             let oneshot = build_oneshot_request(&env.path, req, cond, attribution)
                 .map_err(std::io::Error::other)?;
