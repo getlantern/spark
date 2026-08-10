@@ -37,7 +37,7 @@ No IP address, no hostname, no network identifier of any kind.
 ## 2. Client — log records
 
 `build_record`. Attributes are `kind`, `session` when present, and the event's own fields — all keys
-from the closed set (33 entries; see the test). Values:
+from the closed set (37 entries; see the test). Values:
 
 - **Numeric fields** (durations, counts, byte totals, slots) — aggregate by nature. ✅
 - **String fields** — every one passes through `DiagEvent::insert_str`, which applies
@@ -54,12 +54,18 @@ allow-list comment says not to repurpose it.
 These two exist so that *slowness* is measurable. The numbers were already being logged, but the diag
 layer forwards only the `message` field and renders the rest into the body string, so latency and
 byte counts arrived as prose — readable, but impossible to chart, alert on, or take a percentile of.
-All fields but one reuse keys already in the closed set; `protocol` is added to it.
+All fields but three reuse keys already in the closed set; `protocol`, `member`, and `throughput_bps`
+are added to it.
+
+`throughput_bps` is derived on-device from the flow's own duration and byte counts, so it discloses
+nothing those two do not — it exists because `p50(duration_ms)` and `p50(bytes_down)` are drawn from
+different flows, making their ratio nobody's throughput.
 
 | event | fields | verdict |
 | --- | --- | --- |
 | `transport.probe_result` | `slot`, `protocol`, `result`, `latency_ms` | ✅ identifies a pool member by **index and protocol**, never by address |
-| `proxy.flow_completed` | `duration_ms`, `bytes_up`, `bytes_down` | ✅ **no destination** — describes the tunnel, not where the user went |
+| `proxy.flow_completed` | `duration_ms`, `bytes_up`, `bytes_down`, `bytes_total`, `throughput_bps` | ✅ **no destination** — describes the tunnel, not where the user went |
+| `config.race_winner` | `member`, `latency_ms` | ✅ names the winning race member (`direct`, `proxyless`, `fronted-tls`, …), never a host or address |
 
 Two choices are load-bearing:
 
