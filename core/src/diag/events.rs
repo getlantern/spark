@@ -147,6 +147,50 @@ pub fn config_fetch_outcome(result: &str, avenue: &str, latency_ms: u64) -> Diag
     ev
 }
 
+/// One pool member's probe verdict, as a *queryable* latency sample.
+///
+/// The equivalent `tracing` line already carried this number, but the diag layer keeps only the
+/// `message` field and renders everything else into the body string — readable as prose, impossible
+/// to chart, alert on, or take a p95 of. This constructor promotes it to a real field.
+///
+/// Identifies the member by `slot` (its pool index) and `protocol`, never by address. The label used
+/// in logs embeds the server IP; carrying it here would push a proxy address onto the wire on every
+/// probe round, and index plus protocol is enough to tell members apart on a chart.
+///
+/// The protocol goes under `protocol`, **not** `kind`: `build_record` pushes `kind` itself as a
+/// structural attribute naming the event, so a field by that name would emit the key twice and let
+/// the backend pick one arbitrarily — losing whichever it dropped. `no_constructor_shadows_a_structural_key`
+/// guards the general case.
+pub fn transport_probe_result(
+    slot: usize,
+    protocol: &str,
+    result: &str,
+    latency_ms: u64,
+) -> DiagEvent {
+    let mut ev = DiagEvent::new(DiagLevel::Debug, "tunnel", "transport.probe_result");
+    ev.fields.insert("slot".into(), (slot as u64).into());
+    ev.insert_str("protocol", protocol);
+    ev.insert_str("result", result);
+    ev.fields.insert("latency_ms".into(), latency_ms.into());
+    ev
+}
+
+/// A finished proxied TCP flow: how long it ran and how much it moved.
+///
+/// `duration_ms` is the point of this event. The existing log line records byte counts with no
+/// elapsed time, so throughput — which is what "the connection feels slow" actually means — could
+/// not be derived from telemetry at all.
+///
+/// Deliberately carries **no destination**: bytes and duration describe the tunnel's performance
+/// without revealing where the user went.
+pub fn proxy_flow_completed(duration_ms: u64, bytes_up: u64, bytes_down: u64) -> DiagEvent {
+    let mut ev = DiagEvent::new(DiagLevel::Debug, "tunnel", "proxy.flow_completed");
+    ev.fields.insert("duration_ms".into(), duration_ms.into());
+    ev.fields.insert("bytes_up".into(), bytes_up.into());
+    ev.fields.insert("bytes_down".into(), bytes_down.into());
+    ev
+}
+
 /// Diagnostic ring overflowed; `count` events were dropped since the last report.
 pub fn diag_buffer_dropped(count: u64) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Warn, "app", "diag.buffer_dropped");
@@ -298,6 +342,16 @@ mod tests {
                 "config_fetch_outcome",
                 config_fetch_outcome("ok", "direct from 1.2.3.4", 100),
             ),
+            (
+                "transport_probe_result",
+                // Dirty `protocol`/`result`: a caller that reached for the log-style label
+                // (`"samizdat 1.2.3.4:31464"`) must still not put that address on the wire.
+                transport_probe_result(2, "samizdat 1.2.3.4:31464", "healthy via 10.0.0.1", 1754),
+            ),
+            (
+                "proxy_flow_completed",
+                proxy_flow_completed(4200, 1551, 6282),
+            ),
             ("diag_buffer_dropped", diag_buffer_dropped(7)),
             ("diag_lock_poisoned", diag_lock_poisoned("at 172.16.0.1")),
             (
@@ -424,6 +478,25 @@ mod tests {
         }
     }
 
+    /// `build_record` pushes `kind` and `session` itself, *before* iterating `fields`. A constructor
+    /// that also inserts a field by either name emits the attribute twice, and the backend keeps one
+    /// arbitrarily — so the event kind or the shadowing field silently disappears, with a
+    /// well-formed payload either way. Nothing else catches that: the closed-set test passes,
+    /// because both keys are legitimately in the set as *structural* keys.
+    #[test]
+    fn no_constructor_shadows_a_structural_key() {
+        const STRUCTURAL: &[&str] = &["kind", "session"];
+        for (name, ev) in dirty_events() {
+            for key in STRUCTURAL {
+                assert!(
+                    !ev.fields.contains_key(*key),
+                    "`{name}` inserts a field named `{key}`, which `build_record` already emits as \
+                     a structural attribute — the payload would carry `{key}` twice"
+                );
+            }
+        }
+    }
+
     /// [`dirty_events`] covers every constructor in this module — enforced against the source
     /// rather than against a reviewer's memory.
     ///
@@ -503,6 +576,7 @@ mod tests {
             "prev_last_alive_ms",
             "prev_started_ms",
             "prev_version",
+            "protocol",
             "reason",
             "result",
             "selected_pair_type",

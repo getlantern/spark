@@ -1261,6 +1261,22 @@ async fn prober_loop(
             }
             continue;
         }
+        // Promote each verdict to a structured event. The tracing lines carry these same numbers,
+        // but the diag layer keeps only the `message` field and renders the rest into the body
+        // string, so latency reaches the collector as prose — readable, but impossible to chart or
+        // alert on. Emitted outside the selection lock (nothing is held here).
+        for (i, o) in &outcomes {
+            // An unhealthy outcome carries `Duration::MAX` as a sentinel rather than a measurement,
+            // so clamp to the probe deadline to keep the series bounded; `result` is what
+            // distinguishes the two, and latency charts should filter on it.
+            let latency_ms = o.latency.min(per_probe).as_millis() as u64;
+            crate::diag::emit(crate::diag::events::transport_probe_result(
+                *i,
+                members.get(*i).map_or("", |m| m.protocol.as_str()),
+                if o.healthy { "healthy" } else { "unhealthy" },
+                latency_ms,
+            ));
+        }
         let probe_healthy = outcomes.iter().filter(|(_, o)| o.healthy).count();
         // Members the probe called healthy while their real flows are failing. This contradiction is
         // the signature of a caching transport whose cached connection still works but whose
