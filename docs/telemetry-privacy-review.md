@@ -37,7 +37,7 @@ No IP address, no hostname, no network identifier of any kind.
 ## 2. Client — log records
 
 `build_record`. Attributes are `kind`, `session` when present, and the event's own fields — all keys
-from the closed set (32 entries; see the test). Values:
+from the closed set (33 entries; see the test). Values:
 
 - **Numeric fields** (durations, counts, byte totals, slots) — aggregate by nature. ✅
 - **String fields** — every one passes through `DiagEvent::insert_str`, which applies
@@ -54,11 +54,11 @@ allow-list comment says not to repurpose it.
 These two exist so that *slowness* is measurable. The numbers were already being logged, but the diag
 layer forwards only the `message` field and renders the rest into the body string, so latency and
 byte counts arrived as prose — readable, but impossible to chart, alert on, or take a percentile of.
-Both reuse keys already in the closed set; neither adds one.
+All fields but one reuse keys already in the closed set; `protocol` is added to it.
 
 | event | fields | verdict |
 | --- | --- | --- |
-| `transport.probe_result` | `slot`, `kind`, `result`, `latency_ms` | ✅ identifies a pool member by **index and protocol**, never by address |
+| `transport.probe_result` | `slot`, `protocol`, `result`, `latency_ms` | ✅ identifies a pool member by **index and protocol**, never by address |
 | `proxy.flow_completed` | `duration_ms`, `bytes_up`, `bytes_down` | ✅ **no destination** — describes the tunnel, not where the user went |
 
 Two choices are load-bearing:
@@ -74,6 +74,13 @@ Two choices are load-bearing:
 
 `proxy.flow_completed` fires once per proxied TCP flow, so it is emitted at `Debug` — a level the
 server can switch off, and one that sampling applies to.
+
+The protocol travels under `protocol` rather than `kind` for an encoding reason worth recording:
+`build_record` emits `kind` and `session` itself, as structural attributes, *before* iterating
+`fields`. A constructor that also inserts a field by either name puts the key on the wire twice, and
+the backend keeps one arbitrarily — so either the event kind or the shadowing field vanishes, with a
+well-formed payload either way. The closed-set test cannot see this, since both names are legitimately
+in the set as structural keys; `no_constructor_shadows_a_structural_key` covers it instead.
 
 ## 3. Client — spans (traces signal)
 

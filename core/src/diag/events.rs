@@ -156,6 +156,11 @@ pub fn config_fetch_outcome(result: &str, avenue: &str, latency_ms: u64) -> Diag
 /// Identifies the member by `slot` (its pool index) and `protocol`, never by address. The label used
 /// in logs embeds the server IP; carrying it here would push a proxy address onto the wire on every
 /// probe round, and index plus protocol is enough to tell members apart on a chart.
+///
+/// The protocol goes under `protocol`, **not** `kind`: `build_record` pushes `kind` itself as a
+/// structural attribute naming the event, so a field by that name would emit the key twice and let
+/// the backend pick one arbitrarily — losing whichever it dropped. `no_constructor_shadows_a_structural_key`
+/// guards the general case.
 pub fn transport_probe_result(
     slot: usize,
     protocol: &str,
@@ -164,7 +169,7 @@ pub fn transport_probe_result(
 ) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Debug, "tunnel", "transport.probe_result");
     ev.fields.insert("slot".into(), (slot as u64).into());
-    ev.insert_str("kind", protocol);
+    ev.insert_str("protocol", protocol);
     ev.insert_str("result", result);
     ev.fields.insert("latency_ms".into(), latency_ms.into());
     ev
@@ -480,6 +485,26 @@ mod tests {
     /// the failure mode a hand-maintained corpus always has. A new `pub fn` here fails this test
     /// until it is exercised above.
     #[test]
+    /// `build_record` pushes `kind` and `session` itself, *before* iterating `fields`. A constructor
+    /// that also inserts a field by either name emits the attribute twice, and the backend keeps one
+    /// arbitrarily — so the event kind or the shadowing field silently disappears, with a
+    /// well-formed payload either way. Nothing else catches that: the closed-set test passes,
+    /// because both keys are legitimately in the set as *structural* keys.
+    #[test]
+    fn no_constructor_shadows_a_structural_key() {
+        const STRUCTURAL: &[&str] = &["kind", "session"];
+        for (name, ev) in dirty_events() {
+            for key in STRUCTURAL {
+                assert!(
+                    !ev.fields.contains_key(*key),
+                    "`{name}` inserts a field named `{key}`, which `build_record` already emits as \
+                     a structural attribute — the payload would carry `{key}` twice"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_constructor_is_covered() {
         let covered: Vec<&str> = dirty_events().into_iter().map(|(name, _)| name).collect();
         let declared: Vec<&str> = include_str!("events.rs")
@@ -552,6 +577,7 @@ mod tests {
             "prev_last_alive_ms",
             "prev_started_ms",
             "prev_version",
+            "protocol",
             "reason",
             "result",
             "selected_pair_type",
