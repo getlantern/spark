@@ -175,6 +175,25 @@ pub fn transport_probe_result(
     ev
 }
 
+/// Which member won the kindling connection race, and how long it took to win.
+///
+/// The race already names its winner — `TransportConnection::transport` — and the fetch path already
+/// uses it to attribute the request to the server. It just never reached our own telemetry, so
+/// "which avenue is actually carrying config fetches" and "is any member never winning" were both
+/// unanswerable from SigNoz. `config.fetch_outcome` could not answer them either: its `avenue` is
+/// hardcoded to `"kindling"` for every path, because the interesting question moved from *which
+/// avenue ran* to *which member won* and the field never followed.
+///
+/// `member` is the transport's own name (`direct`, `proxyless`, `fronted-tls`, the scanner, the
+/// bootstrap dns-tunnel) — a fixed set of build-time labels, not a host or an address. Redacted
+/// anyway via `insert_str`, since a future transport could build its name from something dialled.
+pub fn config_race_winner(member: &str, latency_ms: u64) -> DiagEvent {
+    let mut ev = DiagEvent::new(DiagLevel::Info, "app", "config.race_winner");
+    ev.insert_str("member", member);
+    ev.fields.insert("latency_ms".into(), latency_ms.into());
+    ev
+}
+
 /// A finished proxied TCP flow: how long it ran and how much it moved.
 ///
 /// `duration_ms` is the point of this event. The existing log line records byte counts with no
@@ -183,11 +202,35 @@ pub fn transport_probe_result(
 ///
 /// Deliberately carries **no destination**: bytes and duration describe the tunnel's performance
 /// without revealing where the user went.
+///
+/// `throughput_bps` (bits/second) is computed **here, per flow**, because it cannot be recovered
+/// downstream: `p50(duration_ms)` and `p50(bytes_down)` are drawn from different flows, so their
+/// ratio is not any flow's throughput. Observed live — a p50 of 61s against a p50 of 5.8 KB, which
+/// reads as catastrophic but was mostly idle keep-alives.
+///
+/// It is emitted for every flow, idle ones included, and is only meaningful with a floor on
+/// `bytes_total`: an idle keep-alive genuinely has near-zero throughput, and averaging those in
+/// describes the connection pool rather than the transfer speed anyone noticed. Query it as
+/// `p50(throughput_bps) where bytes_total > <floor>`. `bytes_total` is emitted alongside so that
+/// filter is possible without summing two fields at query time.
 pub fn proxy_flow_completed(duration_ms: u64, bytes_up: u64, bytes_down: u64) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Debug, "tunnel", "proxy.flow_completed");
     ev.fields.insert("duration_ms".into(), duration_ms.into());
     ev.fields.insert("bytes_up".into(), bytes_up.into());
     ev.fields.insert("bytes_down".into(), bytes_down.into());
+    let bytes_total = bytes_up.saturating_add(bytes_down);
+    ev.fields.insert("bytes_total".into(), bytes_total.into());
+    // Sub-millisecond flows would divide by zero; they also moved their bytes instantly, so any
+    // throughput number for them is noise rather than signal. Omit the field instead of inventing
+    // one — `Option`-shaped omission is the established pattern here.
+    if duration_ms > 0 {
+        let bps = bytes_total
+            .saturating_mul(8)
+            .saturating_mul(1000)
+            .checked_div(duration_ms)
+            .unwrap_or(0);
+        ev.fields.insert("throughput_bps".into(), bps.into());
+    }
     ev
 }
 
@@ -352,6 +395,12 @@ mod tests {
                 "proxy_flow_completed",
                 proxy_flow_completed(4200, 1551, 6282),
             ),
+            (
+                "config_race_winner",
+                // Dirty member name: a transport whose name embeds what it dialled must not
+                // put that address on the wire.
+                config_race_winner("fronted-tls via 1.2.3.4", 812),
+            ),
             ("diag_buffer_dropped", diag_buffer_dropped(7)),
             ("diag_lock_poisoned", diag_lock_poisoned("at 172.16.0.1")),
             (
@@ -478,6 +527,56 @@ mod tests {
         }
     }
 
+    fn f(ev: &DiagEvent, key: &str) -> Option<u64> {
+        ev.fields.get(key).and_then(|v| v.as_u64())
+    }
+
+    /// The reason `throughput_bps` is computed per flow rather than derived at query time:
+    /// `p50(duration_ms)` and `p50(bytes_down)` come from *different* flows, so their ratio is not
+    /// any flow's throughput.
+    #[test]
+    fn throughput_is_bits_per_second_over_the_flow() {
+        // 1 MB down + 0 up over 8s => 8 Mbit / 8s = 1_000_000 bps.
+        let ev = proxy_flow_completed(8_000, 0, 1_000_000);
+        assert_eq!(f(&ev, "throughput_bps"), Some(1_000_000));
+        assert_eq!(f(&ev, "bytes_total"), Some(1_000_000));
+    }
+
+    #[test]
+    fn bytes_total_is_both_directions() {
+        let ev = proxy_flow_completed(1_000, 1_551, 6_282);
+        assert_eq!(f(&ev, "bytes_total"), Some(7_833));
+        // 7833 B * 8 bits * 1000ms / 1000ms
+        assert_eq!(f(&ev, "throughput_bps"), Some(62_664));
+    }
+
+    /// The observation that made this field necessary: a 61s flow carrying 5.8 KB is an idle
+    /// keep-alive, not a slow transfer. Its throughput must come out *low*, so that filtering on
+    /// `bytes_total` separates it from real transfers instead of it dragging the median.
+    #[test]
+    fn an_idle_keepalive_reports_low_throughput_not_a_slow_transfer() {
+        let idle = proxy_flow_completed(61_723, 0, 5_791);
+        let real = proxy_flow_completed(8_000, 0, 4_611_901);
+        let idle_bps = f(&idle, "throughput_bps").expect("idle throughput");
+        let real_bps = f(&real, "throughput_bps").expect("real throughput");
+        assert!(
+            idle_bps < 1_000,
+            "idle keep-alive should be ~750 bps, got {idle_bps}"
+        );
+        assert!(
+            real_bps > idle_bps * 1_000,
+            "a real transfer must dwarf an idle keep-alive: {real_bps} vs {idle_bps}"
+        );
+    }
+
+    /// A sub-millisecond flow would divide by zero. Omit rather than invent a number.
+    #[test]
+    fn a_zero_duration_flow_omits_throughput() {
+        let ev = proxy_flow_completed(0, 100, 200);
+        assert_eq!(f(&ev, "throughput_bps"), None);
+        assert_eq!(f(&ev, "bytes_total"), Some(300), "bytes still recorded");
+    }
+
     /// `build_record` pushes `kind` and `session` itself, *before* iterating `fields`. A constructor
     /// that also inserts a field by either name emits the attribute twice, and the backend keeps one
     /// arbitrarily — so the event kind or the shadowing field silently disappears, with a
@@ -570,6 +669,7 @@ mod tests {
             "knob",
             "latency_ms",
             "location",
+            "member",
             "message",
             "nat_traversal_ms",
             "peer_region",
@@ -588,6 +688,7 @@ mod tests {
             // repurpose this key, and do not read its presence as a leak.
             "target",
             "task",
+            "throughput_bps",
             "total_helped",
             "source",
             "state",
