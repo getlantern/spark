@@ -137,8 +137,8 @@ pub(crate) const KINDLING_METHOD_HEADER: &str = "X-Kindling-Method";
 /// client population to accommodate a client population of roughly zero, so the translation belongs
 /// here.
 ///
-/// Only the two names whose meanings line up exactly are mapped. The rest are deliberately left
-/// alone:
+/// Only the two names whose meanings line up exactly are mapped — `proxyless` and `fronted-tls`.
+/// The rest are deliberately left alone:
 ///
 /// - `fronted-scan` is the vantage-point scanner. It is domain-fronted, but calling it
 ///   `domainfront` would merge a self-healing discovery path with a static embedded list — a
@@ -149,10 +149,14 @@ pub(crate) const KINDLING_METHOD_HEADER: &str = "X-Kindling-Method";
 ///
 /// This is the **wire** vocabulary only. Our own `config.race_winner` events keep the flint names,
 /// which are finer-grained than the server taxonomy can express.
+/// The names on the left are the `ConnectionTransport::name()` values of the members
+/// `config_kindling` actually registers — `proxyless` (`flint-kindling/src/proxyless.rs`) and
+/// `fronted-tls` (`flint-fronted/src/lib.rs`, what `with_fronted_tls` registers). Matching on a name
+/// no member reports is a silent no-op, since the fallback arm passes anything through unchanged.
 fn wire_method(member: &str) -> Cow<'_, str> {
     match member {
         "proxyless" => Cow::Borrowed("smart"),
-        "fronted" => Cow::Borrowed("domainfront"),
+        "fronted-tls" => Cow::Borrowed("domainfront"),
         other => Cow::Borrowed(other),
     }
 }
@@ -341,8 +345,9 @@ mod tests {
         .unwrap();
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("X-Kindling-App: flint\r\n"), "{text}");
+        // `domainfront`, not `fronted-tls`: the wire carries the server's vocabulary (`wire_method`).
         assert!(
-            text.contains("X-Kindling-Method: fronted-tls\r\n"),
+            text.contains("X-Kindling-Method: domainfront\r\n"),
             "{text}"
         );
     }
@@ -499,7 +504,7 @@ mod tests {
     #[test]
     fn the_two_aligned_members_go_out_in_go_kindlings_vocabulary() {
         assert_eq!(wire_method("proxyless"), "smart");
-        assert_eq!(wire_method("fronted"), "domainfront");
+        assert_eq!(wire_method("fronted-tls"), "domainfront");
     }
 
     /// The non-mappings are choices, not omissions, so they are pinned too — otherwise a later
@@ -508,6 +513,9 @@ mod tests {
     fn the_other_members_are_left_alone_on_purpose() {
         // Domain-fronted, but the self-healing scanner is worth distinguishing from a static list.
         assert_eq!(wire_method("fronted-scan"), "fronted-scan");
+        // Not a member any transport reports — `with_fronted_tls` registers a dialer whose `name()`
+        // is `fronted-tls`. Mapping this instead would have been a silent no-op.
+        assert_eq!(wire_method("fronted"), "fronted");
         // A different protocol from dnstt — mapping it would file spark under a wire format it
         // does not speak.
         assert_eq!(wire_method("dns-tunnel"), "dns-tunnel");
