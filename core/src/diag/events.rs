@@ -194,6 +194,48 @@ pub fn config_race_winner(member: &str, latency_ms: u64) -> DiagEvent {
     ev
 }
 
+/// One race member's outcome, emitted for **every** member of a kindling race — not just the winner.
+///
+/// [`config_race_winner`] answers "who carried this fetch". It cannot answer "is any of our avenues
+/// dead", because a member that fails every single race and one that is merely slower both look
+/// identical from the winner alone: they never appear. That is the quiet failure — an avenue can rot
+/// for months while the race keeps succeeding on a faster sibling, and nothing says so.
+///
+/// `result` distinguishes the states the race reports, and the distinction is the whole point:
+///
+/// - `won` — carried the connection
+/// - `failed` — errored *before* the winner finished; `error_kind` says how. **The health signal.**
+/// - `pending` — still in flight when the winner returned: slower, **not** broken
+/// - `not_started` — the concurrency window never reached it; says nothing about the member
+///
+/// Reading `pending` as unhealthy would mark most of a healthy pool dead on every fast race, so a
+/// consumer has to keep them apart. `failed` is meaningful despite the race returning early because
+/// failures are typically fast (refused, no route, DNS), so a genuinely broken member has usually
+/// settled by the time a working one connects.
+pub fn config_race_member(
+    member: &str,
+    result: &str,
+    error_kind: Option<std::io::ErrorKind>,
+) -> DiagEvent {
+    // `Info`, matching `config.fetch_outcome` and `config.race_winner` — one event per member per
+    // fetch, the same cadence, not the per-flow volume that justifies `Debug` elsewhere. At `Debug`
+    // the capture knob would drop this the moment a server turned verbosity down, taking the
+    // avenue-health signal with it precisely when someone was trying to reduce noise from a client
+    // that might be in trouble.
+    let mut ev = DiagEvent::new(DiagLevel::Info, "app", "config.race_member");
+    ev.insert_str("member", member);
+    ev.insert_str("result", result);
+    // Takes `io::ErrorKind`, not a string, and formats it here. A `&str` parameter would accept
+    // `e.to_string()` at some future call site, and an OS error message can name the host it failed
+    // to reach — which `insert_str` does *not* strip, since bare hostnames are indistinguishable
+    // from ordinary words by shape (privacy review §5.2). The closed set becomes a property of the
+    // type rather than a convention the next caller has to know.
+    if let Some(kind) = error_kind {
+        ev.insert_str("error_kind", &format!("{kind:?}"));
+    }
+    ev
+}
+
 /// A finished proxied TCP flow: how long it ran and how much it moved.
 ///
 /// `duration_ms` is the point of this event. The existing log line records byte counts with no
@@ -394,6 +436,16 @@ mod tests {
             (
                 "proxy_flow_completed",
                 proxy_flow_completed(4200, 1551, 6282),
+            ),
+            (
+                "config_race_member",
+                // `member` is still fed dirty. `error_kind` no longer *can* be: it takes an
+                // `io::ErrorKind`, so the leak this once guarded against is unrepresentable.
+                config_race_member(
+                    "fronted-tls via 1.2.3.4",
+                    "failed",
+                    Some(std::io::ErrorKind::ConnectionRefused),
+                ),
             ),
             (
                 "config_race_winner",
