@@ -1,6 +1,8 @@
 //! The `config-new` request: the JSON body (`ConfigRequest`) + the HTTP request bytes (request line,
 //! `X-Lantern-*` + conditional headers, body). Mirrors radiance `common.ConfigRequest` + headers.go.
 
+use std::borrow::Cow;
+
 use flint_fronted::OneshotRequest;
 use serde::Serialize;
 
@@ -125,6 +127,36 @@ pub(crate) const KINDLING_APP: &str = "flint";
 /// Header naming the winning race member (`direct`, `proxyless`, `fronted-tls`, …).
 pub(crate) const KINDLING_METHOD_HEADER: &str = "X-Kindling-Method";
 
+/// Translate a flint member name into the vocabulary the API already classifies on.
+///
+/// The `X-Kindling-Method` taxonomy is **Go kindling's**, not ours: `lantern-cloud`'s
+/// `util.ConnectMethod` switches on `domainfront` / `dnstt` / `amp` / `smart`, which are exactly the
+/// `TransportName` constants in `getlantern/kindling`. Every shipped Lantern client speaks it, so
+/// the server is right and spark is the odd one out — flint arrived at the same concepts under
+/// different names. Renaming server-side to match us would risk misclassifying the entire real
+/// client population to accommodate a client population of roughly zero, so the translation belongs
+/// here.
+///
+/// Only the two names whose meanings line up exactly are mapped. The rest are deliberately left
+/// alone:
+///
+/// - `fronted-scan` is the vantage-point scanner. It is domain-fronted, but calling it
+///   `domainfront` would merge a self-healing discovery path with a static embedded list — a
+///   distinction worth more than the classification it would buy.
+/// - `dns-tunnel` is *not* mapped to `dnstt`: they are different protocols, and equating them would
+///   file spark's traffic under a wire format it does not speak.
+/// - `direct` has no enum to hit and already lands on the server's `Direct` fallback correctly.
+///
+/// This is the **wire** vocabulary only. Our own `config.race_winner` events keep the flint names,
+/// which are finer-grained than the server taxonomy can express.
+fn wire_method(member: &str) -> Cow<'_, str> {
+    match member {
+        "proxyless" => Cow::Borrowed("smart"),
+        "fronted" => Cow::Borrowed("domainfront"),
+        other => Cow::Borrowed(other),
+    }
+}
+
 /// Which kindling member carried this request, for the server to attribute it to.
 ///
 /// A `ConnectionTransport` hands back bytes and knows nothing about HTTP, so it cannot set a header
@@ -148,7 +180,8 @@ impl<'a> KindlingHeaders<'a> {
         }
     }
 
-    /// The member name, CR/LF-stripped, or `None` when there is nothing to attribute.
+    /// The member name in the server's vocabulary, CR/LF-stripped, or `None` when there is nothing
+    /// to attribute.
     ///
     /// Returns an `Option` rather than an empty string so both builders make the same
     /// something-to-attribute decision from one place; an empty value is not a weaker attribution,
@@ -157,16 +190,21 @@ impl<'a> KindlingHeaders<'a> {
     /// Stripped because the name originates from a transport's `name()` — a static string today, but
     /// it arrives here as ordinary data.
     fn method_value(&self) -> Option<String> {
-        self.method.map(|m| header_safe(m).into_owned())
+        self.method
+            .map(|m| header_safe(wire_method(m).as_ref()).into_owned())
     }
 
     /// The HTTP/1.1 header lines, or empty when there is nothing to attribute.
+    /// Goes through [`Self::method_value`] rather than reading `self.method` directly, so this path
+    /// and the h2 one cannot disagree about what goes on the wire. They already did once: the
+    /// vocabulary translation was added to `method_value` alone, and HTTP/1.1 requests kept sending
+    /// flint's untranslated name while h2 requests sent the server's — the same member attributed
+    /// two different ways depending on which protocol the winner happened to negotiate.
     fn http1_lines(&self) -> String {
-        match self.method {
+        match self.method_value() {
             None => String::new(),
             Some(m) => format!(
-                "{KINDLING_APP_HEADER}: {KINDLING_APP}\r\n{KINDLING_METHOD_HEADER}: {}\r\n",
-                header_safe(m)
+                "{KINDLING_APP_HEADER}: {KINDLING_APP}\r\n{KINDLING_METHOD_HEADER}: {m}\r\n"
             ),
         }
     }
@@ -368,10 +406,29 @@ mod tests {
                 .any(|(hk, hv)| hk.eq_ignore_ascii_case(k) && hv == v)
         };
         assert!(has("X-Kindling-App", "flint"), "{:?}", oneshot.headers);
+        // `smart`, not `proxyless`: the wire carries the server's vocabulary (see `wire_method`).
+        assert!(has("X-Kindling-Method", "smart"), "{:?}", oneshot.headers);
+    }
+
+    /// Both protocols must attribute a given member identically. Otherwise the same winner is filed
+    /// two different ways depending on whether the winning edge happened to negotiate h2 — which is
+    /// exactly what happened when the translation was added to only one of the two builders.
+    #[test]
+    fn http1_and_h2_agree_on_the_attributed_name() {
+        let req = ConfigRequest::new("dev".into());
+        let headers = KindlingHeaders::method("proxyless");
+        let h1 = headers.http1_lines();
+        let oneshot =
+            build_oneshot_request("/p", &req, &Conditional::default(), headers).expect("oneshot");
+        let h2 = oneshot
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("X-Kindling-Method"))
+            .map(|(_, v)| v.clone())
+            .expect("h2 method header");
         assert!(
-            has("X-Kindling-Method", "proxyless"),
-            "{:?}",
-            oneshot.headers
+            h1.contains(&format!("{KINDLING_METHOD_HEADER}: {h2}\r\n")),
+            "h1 {h1:?} disagrees with h2 {h2:?}"
         );
     }
 
@@ -434,6 +491,43 @@ mod tests {
     fn local_timezone_returns_nonempty() {
         // Real value is environment-dependent; just assert it produces something usable.
         assert!(!local_timezone().is_empty());
+    }
+
+    /// The two names whose meanings line up exactly with Go kindling's taxonomy — the one the API
+    /// actually switches on (`lantern-cloud` `util.ConnectMethod`). Sent under flint's own names
+    /// these fell through the server's switch entirely and were misfiled as generic `Direct`/`Proxy`.
+    #[test]
+    fn the_two_aligned_members_go_out_in_go_kindlings_vocabulary() {
+        assert_eq!(wire_method("proxyless"), "smart");
+        assert_eq!(wire_method("fronted"), "domainfront");
+    }
+
+    /// The non-mappings are choices, not omissions, so they are pinned too — otherwise a later
+    /// "finish the job" edit would silently merge distinctions we decided to keep.
+    #[test]
+    fn the_other_members_are_left_alone_on_purpose() {
+        // Domain-fronted, but the self-healing scanner is worth distinguishing from a static list.
+        assert_eq!(wire_method("fronted-scan"), "fronted-scan");
+        // A different protocol from dnstt — mapping it would file spark under a wire format it
+        // does not speak.
+        assert_eq!(wire_method("dns-tunnel"), "dns-tunnel");
+        // No enum to hit; already lands on the server's Direct fallback correctly.
+        assert_eq!(wire_method("direct"), "direct");
+        assert_eq!(wire_method("something-new"), "something-new");
+    }
+
+    /// The mapping has to reach the actual bytes, not just the helper.
+    #[test]
+    fn the_emitted_header_carries_the_translated_name() {
+        let lines = KindlingHeaders::method("proxyless").http1_lines();
+        assert!(
+            lines.contains(&format!("{KINDLING_METHOD_HEADER}: smart\r\n")),
+            "expected translated method header, got {lines:?}"
+        );
+        assert!(
+            !lines.contains("proxyless"),
+            "flint's own name must not reach the wire: {lines:?}"
+        );
     }
 
     #[test]
