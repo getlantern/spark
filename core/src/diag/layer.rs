@@ -329,11 +329,6 @@ mod tests {
     use crate::diag::sink::DiagSink;
     use crate::diag::DiagLevel;
 
-    /// Serializes tests that mutate the process-global CAPTURE_LEVEL. Any test that calls
-    /// `set_capture_level` with a non-default value must hold this lock for the duration of
-    /// its mutation window, so concurrent tests that depend on the default (Debug) don't race.
-    use super::KNOB_LOCK;
-
     /// The knob has to govern **structured** events too, not just `tracing` output.
     ///
     /// Structured events reach the sink through `diag::emit`, never through this layer, so for a
@@ -343,7 +338,7 @@ mod tests {
     /// proxied TCP flow. Nothing held that claim; this is the test that does.
     #[test]
     fn the_capture_knob_governs_structured_events_and_never_drops_errors() {
-        let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_knob_lock();
 
         // Default (Debug): everything passes.
         set_capture_level(DiagLevel::Debug);
@@ -411,7 +406,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(layer);
 
         {
-            let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_knob_lock();
             tracing::subscriber::with_default(subscriber, || {
                 tracing::debug!(target: "spark_core::x", "a-msg");
                 tracing::debug!(target: "hyper::y", "b-msg");
@@ -450,7 +445,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(layer);
 
         {
-            let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_knob_lock();
             tracing::subscriber::with_default(subscriber, || {
                 tracing::info!(target: "hyper::y", "c-msg");
             });
@@ -484,7 +479,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(layer);
 
         {
-            let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_knob_lock();
             tracing::subscriber::with_default(subscriber, || {
                 tracing::error!(target: "spark_core::x", "boom");
             });
@@ -522,7 +517,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(layer);
 
         {
-            let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_knob_lock();
             tracing::subscriber::with_default(subscriber, || {
                 tracing::warn!(target: "spark_core::x", "dial 1.2.3.4");
             });
@@ -557,7 +552,7 @@ mod tests {
         // Hold the knob lock for the full mutation window (set → emit → restore) so concurrent
         // tests that depend on the default Debug level don't race on the global.
         {
-            let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_knob_lock();
             set_capture_level(DiagLevel::Error);
             // Drop-based restore: a panic mid-test must not leave the process-global
             // knob at Error, which would spuriously filter the other tests' events.
@@ -611,7 +606,7 @@ mod tests {
 
     #[test]
     fn capture_decision_matrix() {
-        let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = test_knob_lock();
 
         // TRACE: never captured, spark or foreign.
         assert_eq!(capture_decision(&Level::TRACE, "spark_core::x"), None);
@@ -681,7 +676,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(layer);
 
         {
-            let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = test_knob_lock();
             tracing::subscriber::with_default(subscriber, || {
                 tracing::debug!(target: "spark_core::diag::sink", "internal");
             });
