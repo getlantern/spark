@@ -81,8 +81,11 @@ every structured `events::*` record reaches the sink through `diag::emit` instea
 level down reduced log lines and left the per-flow events flowing. The claim above was asserted as
 the mitigation for the highest-volume event in the system and nothing tested it — in a document
 whose Method section promises an enumeration cross-checked against tests rather than a reading of
-intent. `emit` now applies the same check (errors still always pass, §C2a), held by
-`the_capture_knob_governs_structured_events_and_never_drops_errors`.
+intent. `emit` now applies the same check (errors still always pass, §C2a). Two tests hold it:
+`the_capture_knob_governs_structured_events_and_never_drops_errors` pins the predicate, and
+`the_emit_path_applies_the_capture_knob_and_never_drops_errors` drives the emit path itself and reads
+the spool — the second exists because the first alone did not catch deleting the guard from `emit`,
+which is the same shape of hole as the claim above.
 
 The protocol travels under `protocol` rather than `kind` for an encoding reason worth recording:
 `build_record` emits `kind` and `session` itself, as structural attributes, *before* iterating
