@@ -73,7 +73,16 @@ Two choices are load-bearing:
   class.
 
 `proxy.flow_completed` fires once per proxied TCP flow, so it is emitted at `Debug` — a level the
-server can switch off, and one that sampling applies to.
+server can switch off (`§C4` capture knob), and one that sampling applies to.
+
+That mitigation did not hold when it was first written, and the gap is worth recording rather than
+quietly fixing. The capture knob was enforced only inside `DiagLayer`, which sees `tracing` output;
+every structured `events::*` record reaches the sink through `diag::emit` instead, so turning the
+level down reduced log lines and left the per-flow events flowing. The claim above was asserted as
+the mitigation for the highest-volume event in the system and nothing tested it — in a document
+whose Method section promises an enumeration cross-checked against tests rather than a reading of
+intent. `emit` now applies the same check (errors still always pass, §C2a), held by
+`the_capture_knob_governs_structured_events_and_never_drops_errors`.
 
 The protocol travels under `protocol` rather than `kind` for an encoding reason worth recording:
 `build_record` emits `kind` and `session` itself, as structural attributes, *before* iterating

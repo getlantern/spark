@@ -458,7 +458,19 @@ pub fn installed() -> bool {
 
 /// [`DiagSink::push`] on the global sink; a no-op until [`install`] has run, so core
 /// code can emit unconditionally (startup, tests, non-diag processes).
+///
+/// Honours the remote capture knob (§C4), which for a long time it did not: the level check lived
+/// only in [`DiagLayer`](crate::diag::layer::DiagLayer), so it governed `tracing` output while every
+/// structured `events::*` event — which reaches the sink through here, not through the layer — was
+/// uploaded regardless. Turning the level down did not reduce them. That was survivable while the
+/// direct emitters were a handful of per-fetch `Info` events, and stopped being survivable with
+/// `proxy.flow_completed`, which fires once per proxied TCP flow.
+///
+/// `Error` events always pass (§C2a) — see [`passes_capture_level`].
 pub fn emit(ev: DiagEvent) {
+    if !crate::diag::layer::passes_capture_level(ev.level) {
+        return;
+    }
     if let Some(sink) = SINK.get() {
         sink.push(ev);
     }

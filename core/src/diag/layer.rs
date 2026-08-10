@@ -82,6 +82,28 @@ pub fn capture_level() -> DiagLevel {
     u8_to_diag_level(CAPTURE_LEVEL.load(Ordering::Relaxed))
 }
 
+/// Whether an event of `level` survives the current capture knob (§C4). `Error` always passes
+/// (§C2a: errors are never dropped).
+///
+/// Lives here, beside [`CAPTURE_LEVEL`] and the `u8` mapping, because "higher u8 = less severe" is
+/// an invariant of *this* encoding — a second comparison written elsewhere would be free to drift
+/// from it and would fail silently in the direction of shipping more, not less.
+///
+/// Applies to structured events emitted straight through [`crate::diag::emit`], which is how every
+/// `events::*` constructor reaches the sink. Those never pass through [`DiagLayer`], so until this
+/// existed the knob governed only `tracing` output — a server that turned the level down still
+/// received every structured event, including the per-flow ones.
+pub(crate) fn passes_capture_level(level: DiagLevel) -> bool {
+    // Redundant today — `LEVEL_ERROR` is 0, so the comparison below already lets errors through at
+    // every knob setting. Kept because §C2a is a guarantee, not a consequence: it should survive a
+    // renumbering of the `u8` mapping rather than silently depending on `Error` sorting first.
+    // (A mutation test cannot tell these two apart while the encoding holds, which is the point.)
+    if matches!(level, DiagLevel::Error) {
+        return true;
+    }
+    diag_level_to_u8(level) <= CAPTURE_LEVEL.load(Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // Shared capture policy
 // ---------------------------------------------------------------------------
@@ -298,6 +320,46 @@ mod tests {
     /// `set_capture_level` with a non-default value must hold this lock for the duration of
     /// its mutation window, so concurrent tests that depend on the default (Debug) don't race.
     static KNOB_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The knob has to govern **structured** events too, not just `tracing` output.
+    ///
+    /// Structured events reach the sink through `diag::emit`, never through this layer, so for a
+    /// long time turning the capture level down reduced log lines and left every `events::*` record
+    /// flowing. The privacy review asserted the opposite — that a `Debug` event is "a level the
+    /// server can switch off" — as the stated mitigation for `proxy.flow_completed` firing once per
+    /// proxied TCP flow. Nothing held that claim; this is the test that does.
+    #[test]
+    fn the_capture_knob_governs_structured_events_and_never_drops_errors() {
+        let _guard = KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Default (Debug): everything passes.
+        set_capture_level(DiagLevel::Debug);
+        for l in [
+            DiagLevel::Debug,
+            DiagLevel::Info,
+            DiagLevel::Warn,
+            DiagLevel::Error,
+        ] {
+            assert!(passes_capture_level(l), "{l:?} should pass at Debug");
+        }
+
+        // Server turns the volume down to Warn: Debug/Info stop, Warn/Error continue.
+        set_capture_level(DiagLevel::Warn);
+        assert!(
+            !passes_capture_level(DiagLevel::Debug),
+            "a per-flow Debug event must stop when the server turns the level down — the whole \
+             point of the knob"
+        );
+        assert!(!passes_capture_level(DiagLevel::Info));
+        assert!(passes_capture_level(DiagLevel::Warn));
+
+        // §C2a: errors are never dropped, even at the most restrictive setting.
+        set_capture_level(DiagLevel::Error);
+        assert!(passes_capture_level(DiagLevel::Error));
+        assert!(!passes_capture_level(DiagLevel::Warn));
+
+        set_capture_level(DiagLevel::Debug); // restore the default for other tests
+    }
 
     /// Unique per-test scratch dir keyed by pid + call-site line.
     fn test_dir(line: u32) -> std::path::PathBuf {
