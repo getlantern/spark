@@ -37,7 +37,7 @@ No IP address, no hostname, no network identifier of any kind.
 ## 2. Client — log records
 
 `build_record`. Attributes are `kind`, `session` when present, and the event's own fields — all keys
-from the closed set (33 entries; see the test). Values:
+from the closed set (37 entries; see the test). Values:
 
 - **Numeric fields** (durations, counts, byte totals, slots) — aggregate by nature. ✅
 - **String fields** — every one passes through `DiagEvent::insert_str`, which applies
@@ -54,12 +54,18 @@ allow-list comment says not to repurpose it.
 These two exist so that *slowness* is measurable. The numbers were already being logged, but the diag
 layer forwards only the `message` field and renders the rest into the body string, so latency and
 byte counts arrived as prose — readable, but impossible to chart, alert on, or take a percentile of.
-All fields but one reuse keys already in the closed set; `protocol` is added to it.
+All fields but three reuse keys already in the closed set; `protocol`, `member`, and `throughput_bps`
+are added to it.
+
+`throughput_bps` is derived on-device from the flow's own duration and byte counts, so it discloses
+nothing those two do not — it exists because `p50(duration_ms)` and `p50(bytes_down)` are drawn from
+different flows, making their ratio nobody's throughput.
 
 | event | fields | verdict |
 | --- | --- | --- |
 | `transport.probe_result` | `slot`, `protocol`, `result`, `latency_ms` | ✅ identifies a pool member by **index and protocol**, never by address |
-| `proxy.flow_completed` | `duration_ms`, `bytes_up`, `bytes_down` | ✅ **no destination** — describes the tunnel, not where the user went |
+| `proxy.flow_completed` | `duration_ms`, `bytes_up`, `bytes_down`, `bytes_total`, `throughput_bps` | ✅ **no destination** — describes the tunnel, not where the user went |
+| `config.race_winner` | `member`, `latency_ms` | ✅ names the winning race member (`direct`, `proxyless`, `fronted-tls`, …), never a host or address |
 
 Two choices are load-bearing:
 
@@ -73,7 +79,19 @@ Two choices are load-bearing:
   class.
 
 `proxy.flow_completed` fires once per proxied TCP flow, so it is emitted at `Debug` — a level the
-server can switch off, and one that sampling applies to.
+server can switch off (`§C4` capture knob), and one that sampling applies to.
+
+That mitigation did not hold when it was first written, and the gap is worth recording rather than
+quietly fixing. The capture knob was enforced only inside `DiagLayer`, which sees `tracing` output;
+every structured `events::*` record reaches the sink through `diag::emit` instead, so turning the
+level down reduced log lines and left the per-flow events flowing. The claim above was asserted as
+the mitigation for the highest-volume event in the system and nothing tested it — in a document
+whose Method section promises an enumeration cross-checked against tests rather than a reading of
+intent. `emit` now applies the same check (errors still always pass, §C2a). Two tests hold it:
+`the_capture_knob_governs_structured_events_and_never_drops_errors` pins the predicate, and
+`the_emit_path_applies_the_capture_knob_and_never_drops_errors` drives the emit path itself and reads
+the spool — the second exists because the first alone did not catch deleting the guard from `emit`,
+which is the same shape of hole as the claim above.
 
 The protocol travels under `protocol` rather than `kind` for an encoding reason worth recording:
 `build_record` emits `kind` and `session` itself, as structural attributes, *before* iterating
