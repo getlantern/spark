@@ -72,7 +72,7 @@ different flows, making their ratio nobody's throughput.
 | `transport.probe_result` | `slot`, `protocol`, `result`, `latency_ms` | ✅ identifies a pool member by **index and protocol**, never by address |
 | `proxy.flow_completed` | `duration_ms`, `bytes_up`, `bytes_down`, `bytes_total`, `throughput_bps` | ✅ **no destination** — describes the tunnel, not where the user went |
 | `config.race_winner` | `member`, `latency_ms` | ✅ names the winning race member (`direct`, `proxyless`, `fronted-tls`, …), never a host or address |
-| `config.race_member` | `member`, `result`, `error_kind` | ✅ one per race member; same fixed member names, and `error_kind` is an `io::ErrorKind` debug string, not an OS message |
+| `config.race_member` | `member`, `result`, `error_kind` | ✅ one per race member; same fixed member names, and `error_kind` is typed as `io::ErrorKind` — an OS message is unrepresentable, not merely discouraged |
 
 Two choices are load-bearing:
 

@@ -425,7 +425,7 @@ async fn fetch_once_kindling(
             crate::diag::emit(crate::diag::events::config_race_member(
                 &attempt.name,
                 result,
-                kind.as_deref(),
+                kind,
             ));
         }
         if conn.is_h2() {
@@ -465,10 +465,14 @@ async fn fetch_once_kindling(
 /// `Pending` maps to its own label, never to a failure. A race returns on the first success, so on a
 /// healthy pool *most* members are pending every time — folding that into "failed" would report the
 /// whole pool as broken on exactly the races that went well, which is worse than emitting nothing.
-fn race_result_labels(outcome: flint_transport::AttemptOutcome) -> (&'static str, Option<String>) {
+fn race_result_labels(
+    outcome: flint_transport::AttemptOutcome,
+) -> (&'static str, Option<std::io::ErrorKind>) {
     match outcome {
         flint_transport::AttemptOutcome::Won => ("won", None),
-        flint_transport::AttemptOutcome::Failed(k) => ("failed", Some(format!("{k:?}"))),
+        // Hand the kind on as a kind. Formatting it to a string here and passing that would put the
+        // event back on a `&str` parameter, which is the thing the constructor now refuses.
+        flint_transport::AttemptOutcome::Failed(k) => ("failed", Some(k)),
         flint_transport::AttemptOutcome::Pending => ("pending", None),
         flint_transport::AttemptOutcome::NotStarted => ("not_started", None),
     }
@@ -856,7 +860,7 @@ mod tests {
             std::io::ErrorKind::ConnectionRefused,
         ));
         assert_eq!(result, "failed");
-        assert_eq!(kind.as_deref(), Some("ConnectionRefused"));
+        assert_eq!(kind, Some(std::io::ErrorKind::ConnectionRefused));
     }
 
     #[test]

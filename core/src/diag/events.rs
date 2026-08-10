@@ -212,12 +212,26 @@ pub fn config_race_winner(member: &str, latency_ms: u64) -> DiagEvent {
 /// consumer has to keep them apart. `failed` is meaningful despite the race returning early because
 /// failures are typically fast (refused, no route, DNS), so a genuinely broken member has usually
 /// settled by the time a working one connects.
-pub fn config_race_member(member: &str, result: &str, error_kind: Option<&str>) -> DiagEvent {
-    let mut ev = DiagEvent::new(DiagLevel::Debug, "app", "config.race_member");
+pub fn config_race_member(
+    member: &str,
+    result: &str,
+    error_kind: Option<std::io::ErrorKind>,
+) -> DiagEvent {
+    // `Info`, matching `config.fetch_outcome` and `config.race_winner` — one event per member per
+    // fetch, the same cadence, not the per-flow volume that justifies `Debug` elsewhere. At `Debug`
+    // the capture knob would drop this the moment a server turned verbosity down, taking the
+    // avenue-health signal with it precisely when someone was trying to reduce noise from a client
+    // that might be in trouble.
+    let mut ev = DiagEvent::new(DiagLevel::Info, "app", "config.race_member");
     ev.insert_str("member", member);
     ev.insert_str("result", result);
+    // Takes `io::ErrorKind`, not a string, and formats it here. A `&str` parameter would accept
+    // `e.to_string()` at some future call site, and an OS error message can name the host it failed
+    // to reach — which `insert_str` does *not* strip, since bare hostnames are indistinguishable
+    // from ordinary words by shape (privacy review §5.2). The closed set becomes a property of the
+    // type rather than a convention the next caller has to know.
     if let Some(kind) = error_kind {
-        ev.insert_str("error_kind", kind);
+        ev.insert_str("error_kind", &format!("{kind:?}"));
     }
     ev
 }
@@ -425,12 +439,12 @@ mod tests {
             ),
             (
                 "config_race_member",
-                // Dirty on every string: a member name or error text embedding an address must
-                // still not put one on the wire.
+                // `member` is still fed dirty. `error_kind` no longer *can* be: it takes an
+                // `io::ErrorKind`, so the leak this once guarded against is unrepresentable.
                 config_race_member(
                     "fronted-tls via 1.2.3.4",
                     "failed",
-                    Some("refused by 10.0.0.1"),
+                    Some(std::io::ErrorKind::ConnectionRefused),
                 ),
             ),
             (
