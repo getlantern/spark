@@ -108,9 +108,18 @@ fn emit_git_rerun() {
     }
 }
 
-/// Absolute location of a path inside the git dir, resolved for the current worktree.
+/// Location of a path inside the git dir, resolved for the current worktree.
+///
+/// Prefers an absolute path, then falls back to the plain `--git-path` form for git < 2.31, which
+/// predates `--path-format` (Debian bullseye still ships 2.30). Without the fallback the whole
+/// function would bail on those systems and quietly restore the staleness it exists to prevent.
+///
+/// The relative fallback is still correct: `--git-path` emits a path relative to the process's
+/// working directory, a build script runs in the package root, and cargo resolves a relative
+/// `rerun-if-changed` against that same package root — so the two bases coincide.
 fn git_path(rel: &str) -> Option<String> {
     run_git(&["rev-parse", "--path-format=absolute", "--git-path", rel])
+        .or_else(|| run_git(&["rev-parse", "--git-path", rel]))
 }
 
 /// Run `git` with `args` and return trimmed stdout, or `None` if git is absent, errors, or the
