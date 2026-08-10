@@ -466,14 +466,24 @@ pub fn installed() -> bool {
 /// direct emitters were a handful of per-fetch `Info` events, and stopped being survivable with
 /// `proxy.flow_completed`, which fires once per proxied TCP flow.
 ///
-/// `Error` events always pass (§C2a) — see [`passes_capture_level`].
+/// `Error` events always pass (§C2a) — see `layer::passes_capture_level`.
 pub fn emit(ev: DiagEvent) {
+    if let Some(sink) = SINK.get() {
+        push_filtered(sink, ev);
+    }
+}
+
+/// The filtering half of [`emit`], against an explicit sink.
+///
+/// Split out so the check can be tested on the path that actually runs. [`SINK`] is a `OnceLock`, so
+/// a test that installed a sink would fix it for the whole test binary and make ordering matter;
+/// testing the predicate alone instead leaves the *call* untested, which is how the first version of
+/// this fix shipped — removing the guard from `emit` broke no test at all.
+pub(crate) fn push_filtered(sink: &DiagSink, ev: DiagEvent) {
     if !crate::diag::layer::passes_capture_level(ev.level) {
         return;
     }
-    if let Some(sink) = SINK.get() {
-        sink.push(ev);
-    }
+    sink.push(ev);
 }
 
 /// [`DiagSink::push_error`] on the global sink; a no-op until [`install`] has run.
@@ -501,6 +511,56 @@ mod tests {
         let mut ev = DiagEvent::new(DiagLevel::Info, "wrong-component", "test.event");
         ev.fields.insert("i".to_string(), i.into());
         ev
+    }
+
+    /// The capture knob has to be applied *by the emit path*, not merely be applicable.
+    ///
+    /// Testing `passes_capture_level` alone leaves the call untested — which is exactly how the
+    /// first version of this fix shipped: deleting the guard from `emit` broke no test at all. This
+    /// drives the real filtering path and reads the spool, so the guard's presence is what makes it
+    /// pass.
+    #[tokio::test]
+    async fn the_emit_path_applies_the_capture_knob_and_never_drops_errors() {
+        let dir = test_dir(line!());
+        let sink = DiagSink::new(&dir, "app").unwrap();
+
+        // Scoped so the knob lock is released before the `.await` below: holding a `MutexGuard`
+        // across an await point is forbidden (CLAUDE.md) and clippy enforces it. Nothing is lost —
+        // `push_filtered` is synchronous, so every filtering decision happens inside this block;
+        // the flush that follows only drains what those pushes already decided.
+        {
+            let _guard = crate::diag::layer::test_knob_lock();
+            crate::diag::layer::set_capture_level(DiagLevel::Warn);
+            let mut debug_ev = ev(1);
+            debug_ev.level = DiagLevel::Debug; // a per-flow event: must be dropped
+            let mut warn_ev = ev(2);
+            warn_ev.level = DiagLevel::Warn; // at the knob: must pass
+            let mut error_ev = ev(3);
+            error_ev.level = DiagLevel::Error; // §C2a: always passes
+            push_filtered(&sink, debug_ev);
+            push_filtered(&sink, warn_ev);
+            push_filtered(&sink, error_ev);
+            crate::diag::layer::set_capture_level(DiagLevel::Debug); // restore for other tests
+        }
+        sink.flush_writer().await;
+
+        let spooled: Vec<u64> = read_lines(&dir.join(SPOOL_NAME))
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v["fields"]["i"].as_u64())
+            .collect();
+        assert!(
+            !spooled.contains(&1),
+            "a Debug event must not reach the spool when the knob is at Warn; spooled={spooled:?}"
+        );
+        assert!(
+            spooled.contains(&2),
+            "Warn should pass; spooled={spooled:?}"
+        );
+        assert!(
+            spooled.contains(&3),
+            "errors are never dropped (§C2a); spooled={spooled:?}"
+        );
     }
 
     fn read_lines(path: &Path) -> Vec<String> {

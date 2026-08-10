@@ -305,10 +305,23 @@ fn tracing_level_to_diag(level: &Level) -> DiagLevel {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Serializes every test that mutates the process-global [`CAPTURE_LEVEL`].
+///
+/// Module-level rather than inside `mod tests` because `diag::sink`'s tests mutate the same global —
+/// two independent locks would not serialize anything, and the failure would look like a flaky test
+/// rather than a missing lock.
+#[cfg(test)]
+pub(crate) static KNOB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`KNOB_LOCK`], recovering from poisoning (a panicking test must not wedge the rest).
+#[cfg(test)]
+pub(crate) fn test_knob_lock() -> std::sync::MutexGuard<'static, ()> {
+    KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::Mutex;
 
     use tracing_subscriber::prelude::*;
 
@@ -319,7 +332,7 @@ mod tests {
     /// Serializes tests that mutate the process-global CAPTURE_LEVEL. Any test that calls
     /// `set_capture_level` with a non-default value must hold this lock for the duration of
     /// its mutation window, so concurrent tests that depend on the default (Debug) don't race.
-    static KNOB_LOCK: Mutex<()> = Mutex::new(());
+    use super::KNOB_LOCK;
 
     /// The knob has to govern **structured** events too, not just `tracing` output.
     ///
