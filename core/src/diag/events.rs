@@ -478,13 +478,6 @@ mod tests {
         }
     }
 
-    /// [`dirty_events`] covers every constructor in this module — enforced against the source
-    /// rather than against a reviewer's memory.
-    ///
-    /// Without this, the leak tests silently stop covering each newly added event kind, which is
-    /// the failure mode a hand-maintained corpus always has. A new `pub fn` here fails this test
-    /// until it is exercised above.
-    #[test]
     /// `build_record` pushes `kind` and `session` itself, *before* iterating `fields`. A constructor
     /// that also inserts a field by either name emits the attribute twice, and the backend keeps one
     /// arbitrarily — so the event kind or the shadowing field silently disappears, with a
@@ -504,6 +497,12 @@ mod tests {
         }
     }
 
+    /// [`dirty_events`] covers every constructor in this module — enforced against the source
+    /// rather than against a reviewer's memory.
+    ///
+    /// Without this, the leak tests silently stop covering each newly added event kind, which is
+    /// the failure mode a hand-maintained corpus always has. A new `pub fn` here fails this test
+    /// until it is exercised above.
     #[test]
     fn every_constructor_is_covered() {
         let covered: Vec<&str> = dirty_events().into_iter().map(|(name, _)| name).collect();
