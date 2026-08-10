@@ -49,6 +49,17 @@ fn main() {
     // git dir at all), then fall back to asking git, then to "unknown" — `diag` already treats that
     // as a legitimate value, so a build outside a checkout must not fail here.
     if std::env::var_os("SPARK_GIT_SHA").is_none() {
+        // Watch the files a commit/checkout touches, or the sha goes stale exactly like the env
+        // vars above — and far more quietly, since nothing about it is an env var to change.
+        //
+        // Emitting ANY `rerun-if-*` line (the loop above emits several) switches off cargo's
+        // default "re-run this script when any file in the package changes". From then on the
+        // script runs only when a listed condition fires, so a moved HEAD re-ran nothing: cargo
+        // reused the previous run's cached output, `git_sha()` never executed, and the crate kept
+        // an `option_env!` expansion from an earlier commit. Observed: a local build stamped
+        // `9bf9a4e` while containing code that only exists as of `8af3cce` — current binary,
+        // previous label, on the one field whose entire purpose is naming the build.
+        emit_git_rerun();
         if let Some(sha) = git_sha() {
             println!("cargo:rustc-env=SPARK_GIT_SHA={sha}");
         }
@@ -66,15 +77,63 @@ fn main() {
     }
 }
 
-/// The short HEAD sha, or `None` outside a checkout / without git. Never fails the build.
-fn git_sha() -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
+/// Tell cargo which git files invalidate the stamped sha.
+///
+/// `HEAD` covers checkouts and detached-HEAD moves (the file holds the sha directly). When `HEAD` is
+/// a symbolic ref, the ref file it names must be watched too — committing on a branch rewrites
+/// `refs/heads/<branch>` and leaves `HEAD` itself untouched, which is the common case.
+///
+/// Both paths come from `git rev-parse --git-path` rather than being joined onto one git dir,
+/// because the two do not live in the same place in a **linked worktree**: `HEAD` is per-worktree
+/// (`.git/worktrees/<name>/HEAD`) while the branch ref stays in the common dir
+/// (`.git/refs/heads/<branch>`). Joining both onto `--absolute-git-dir` yields a ref path that does
+/// not exist in a worktree, so the watch never fires and the staleness this function exists to
+/// prevent survives there. `--git-path` knows that rule; encoding it here would only duplicate it.
+///
+/// `--path-format=absolute` because cargo resolves relative paths against the package dir
+/// (`core/`), not the workspace root.
+///
+/// Silent no-op outside a checkout: a tarball build legitimately has no git dir, and `SPARK_GIT_SHA`
+/// falls through to `"unknown"` rather than failing.
+fn emit_git_rerun() {
+    let Some(head) = git_path("HEAD") else {
+        return; // not a checkout
+    };
+    println!("cargo:rerun-if-changed={head}");
+    // Fails on a detached HEAD, where `HEAD` above is already the whole story.
+    if let Some(head_ref) = run_git(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(ref_path) = git_path(&head_ref) {
+            println!("cargo:rerun-if-changed={ref_path}");
+        }
+    }
+}
+
+/// Location of a path inside the git dir, resolved for the current worktree.
+///
+/// Prefers an absolute path, then falls back to the plain `--git-path` form for git < 2.31, which
+/// predates `--path-format` (Debian bullseye still ships 2.30). Without the fallback the whole
+/// function would bail on those systems and quietly restore the staleness it exists to prevent.
+///
+/// The relative fallback is still correct: `--git-path` emits a path relative to the process's
+/// working directory, a build script runs in the package root, and cargo resolves a relative
+/// `rerun-if-changed` against that same package root — so the two bases coincide.
+fn git_path(rel: &str) -> Option<String> {
+    run_git(&["rev-parse", "--path-format=absolute", "--git-path", rel])
+        .or_else(|| run_git(&["rev-parse", "--git-path", rel]))
+}
+
+/// Run `git` with `args` and return trimmed stdout, or `None` if git is absent, errors, or the
+/// output is empty.
+fn run_git(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let sha = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    (!sha.is_empty()).then_some(sha)
+    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The short HEAD sha, or `None` outside a checkout / without git. Never fails the build.
+fn git_sha() -> Option<String> {
+    run_git(&["rev-parse", "--short", "HEAD"])
 }
