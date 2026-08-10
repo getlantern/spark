@@ -416,6 +416,18 @@ async fn fetch_once_kindling(
             &conn.transport,
             race_started.elapsed().as_millis() as u64,
         ));
+        // ...and one event per member, so a member that never wins can be told apart from one that
+        // is broken. The winner alone cannot say that: a losing member simply never appears, whether
+        // it failed instantly or was merely a few ms slower. `pending` is explicitly NOT a failure —
+        // see `events::config_race_member`.
+        for attempt in &conn.attempts {
+            let (result, kind) = race_result_labels(attempt.outcome);
+            crate::diag::emit(crate::diag::events::config_race_member(
+                &attempt.name,
+                result,
+                kind.as_deref(),
+            ));
+        }
         if conn.is_h2() {
             let oneshot = build_oneshot_request(&env.path, req, cond, attribution)
                 .map_err(std::io::Error::other)?;
@@ -446,6 +458,20 @@ async fn fetch_once_kindling(
     .await
     .map_err(|_| std::io::Error::other("config-new kindling fetch timed out"))??;
     map_response(status, etag, body)
+}
+
+/// Map a race member's outcome onto the `result` / `error_kind` pair `config.race_member` reports.
+///
+/// `Pending` maps to its own label, never to a failure. A race returns on the first success, so on a
+/// healthy pool *most* members are pending every time — folding that into "failed" would report the
+/// whole pool as broken on exactly the races that went well, which is worse than emitting nothing.
+fn race_result_labels(outcome: flint_transport::AttemptOutcome) -> (&'static str, Option<String>) {
+    match outcome {
+        flint_transport::AttemptOutcome::Won => ("won", None),
+        flint_transport::AttemptOutcome::Failed(k) => ("failed", Some(format!("{k:?}"))),
+        flint_transport::AttemptOutcome::Pending => ("pending", None),
+        flint_transport::AttemptOutcome::NotStarted => ("not_started", None),
+    }
 }
 
 /// Wrap the fetch so its outcome (ok / not_modified / error) and latency land in the diagnostics
@@ -806,6 +832,42 @@ async fn sleep_or_stop<Stop: Fn() -> bool>(d: Duration, should_stop: &Stop) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use flint_transport::AttemptOutcome;
+
+    /// `pending` must never be reported as a failure.
+    ///
+    /// A race returns on the first success, so on a *healthy* pool most members are still pending
+    /// every single time. Folding that into "failed" would report the whole pool as broken on
+    /// exactly the races that went well — worse than emitting nothing, because it would look like
+    /// data.
+    #[test]
+    fn a_pending_member_is_not_reported_as_a_failure() {
+        let (result, kind) = race_result_labels(AttemptOutcome::Pending);
+        assert_eq!(result, "pending");
+        assert_eq!(kind, None, "pending carries no error kind");
+        assert_ne!(result, "failed");
+    }
+
+    /// The health signal: a member that errored before the winner finished, and how.
+    #[test]
+    fn a_failed_member_carries_its_error_kind() {
+        let (result, kind) = race_result_labels(AttemptOutcome::Failed(
+            std::io::ErrorKind::ConnectionRefused,
+        ));
+        assert_eq!(result, "failed");
+        assert_eq!(kind.as_deref(), Some("ConnectionRefused"));
+    }
+
+    #[test]
+    fn the_winner_and_unstarted_members_are_distinguishable() {
+        assert_eq!(race_result_labels(AttemptOutcome::Won), ("won", None));
+        assert_eq!(
+            race_result_labels(AttemptOutcome::NotStarted),
+            ("not_started", None),
+            "never started says nothing about the member — not the same as pending"
+        );
+    }
 
     #[test]
     fn device_id_is_stable_and_persisted() {

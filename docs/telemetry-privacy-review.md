@@ -57,6 +57,12 @@ byte counts arrived as prose — readable, but impossible to chart, alert on, or
 All fields but three reuse keys already in the closed set; `protocol`, `member`, and `throughput_bps`
 are added to it.
 
+`config.race_member` adds no key at all — `member`, `result`, and `error_kind` were already in the
+set. It exists because the winner alone cannot answer "is any of our avenues dead": a member that
+fails every race and one that is merely slower both simply never appear. `result` keeps `pending`
+(slower) distinct from `failed` (the health signal), because a race returns on first success, so on
+a healthy pool most members are pending every time.
+
 `throughput_bps` is derived on-device from the flow's own duration and byte counts, so it discloses
 nothing those two do not — it exists because `p50(duration_ms)` and `p50(bytes_down)` are drawn from
 different flows, making their ratio nobody's throughput.
@@ -66,6 +72,7 @@ different flows, making their ratio nobody's throughput.
 | `transport.probe_result` | `slot`, `protocol`, `result`, `latency_ms` | ✅ identifies a pool member by **index and protocol**, never by address |
 | `proxy.flow_completed` | `duration_ms`, `bytes_up`, `bytes_down`, `bytes_total`, `throughput_bps` | ✅ **no destination** — describes the tunnel, not where the user went |
 | `config.race_winner` | `member`, `latency_ms` | ✅ names the winning race member (`direct`, `proxyless`, `fronted-tls`, …), never a host or address |
+| `config.race_member` | `member`, `result`, `error_kind` | ✅ one per race member; same fixed member names, and `error_kind` is an `io::ErrorKind` debug string, not an OS message |
 
 Two choices are load-bearing:
 

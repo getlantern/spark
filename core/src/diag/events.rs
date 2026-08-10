@@ -194,6 +194,34 @@ pub fn config_race_winner(member: &str, latency_ms: u64) -> DiagEvent {
     ev
 }
 
+/// One race member's outcome, emitted for **every** member of a kindling race — not just the winner.
+///
+/// [`config_race_winner`] answers "who carried this fetch". It cannot answer "is any of our avenues
+/// dead", because a member that fails every single race and one that is merely slower both look
+/// identical from the winner alone: they never appear. That is the quiet failure — an avenue can rot
+/// for months while the race keeps succeeding on a faster sibling, and nothing says so.
+///
+/// `result` distinguishes the states the race reports, and the distinction is the whole point:
+///
+/// - `won` — carried the connection
+/// - `failed` — errored *before* the winner finished; `error_kind` says how. **The health signal.**
+/// - `pending` — still in flight when the winner returned: slower, **not** broken
+/// - `not_started` — the concurrency window never reached it; says nothing about the member
+///
+/// Reading `pending` as unhealthy would mark most of a healthy pool dead on every fast race, so a
+/// consumer has to keep them apart. `failed` is meaningful despite the race returning early because
+/// failures are typically fast (refused, no route, DNS), so a genuinely broken member has usually
+/// settled by the time a working one connects.
+pub fn config_race_member(member: &str, result: &str, error_kind: Option<&str>) -> DiagEvent {
+    let mut ev = DiagEvent::new(DiagLevel::Debug, "app", "config.race_member");
+    ev.insert_str("member", member);
+    ev.insert_str("result", result);
+    if let Some(kind) = error_kind {
+        ev.insert_str("error_kind", kind);
+    }
+    ev
+}
+
 /// A finished proxied TCP flow: how long it ran and how much it moved.
 ///
 /// `duration_ms` is the point of this event. The existing log line records byte counts with no
@@ -394,6 +422,16 @@ mod tests {
             (
                 "proxy_flow_completed",
                 proxy_flow_completed(4200, 1551, 6282),
+            ),
+            (
+                "config_race_member",
+                // Dirty on every string: a member name or error text embedding an address must
+                // still not put one on the wire.
+                config_race_member(
+                    "fronted-tls via 1.2.3.4",
+                    "failed",
+                    Some("refused by 10.0.0.1"),
+                ),
             ),
             (
                 "config_race_winner",
