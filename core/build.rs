@@ -81,21 +81,36 @@ fn main() {
 ///
 /// `HEAD` covers checkouts and detached-HEAD moves (the file holds the sha directly). When `HEAD` is
 /// a symbolic ref, the ref file it names must be watched too — committing on a branch rewrites
-/// `refs/heads/<branch>` and leaves `HEAD` itself untouched, which is the common case and the one
-/// that bit us. Absolute paths, because cargo resolves relative ones against the package dir
+/// `refs/heads/<branch>` and leaves `HEAD` itself untouched, which is the common case.
+///
+/// Both paths come from `git rev-parse --git-path` rather than being joined onto one git dir,
+/// because the two do not live in the same place in a **linked worktree**: `HEAD` is per-worktree
+/// (`.git/worktrees/<name>/HEAD`) while the branch ref stays in the common dir
+/// (`.git/refs/heads/<branch>`). Joining both onto `--absolute-git-dir` yields a ref path that does
+/// not exist in a worktree, so the watch never fires and the staleness this function exists to
+/// prevent survives there. `--git-path` knows that rule; encoding it here would only duplicate it.
+///
+/// `--path-format=absolute` because cargo resolves relative paths against the package dir
 /// (`core/`), not the workspace root.
 ///
 /// Silent no-op outside a checkout: a tarball build legitimately has no git dir, and `SPARK_GIT_SHA`
 /// falls through to `"unknown"` rather than failing.
 fn emit_git_rerun() {
-    let Some(git_dir) = run_git(&["rev-parse", "--absolute-git-dir"]) else {
-        return;
+    let Some(head) = git_path("HEAD") else {
+        return; // not a checkout
     };
-    println!("cargo:rerun-if-changed={git_dir}/HEAD");
+    println!("cargo:rerun-if-changed={head}");
     // Fails on a detached HEAD, where `HEAD` above is already the whole story.
     if let Some(head_ref) = run_git(&["symbolic-ref", "-q", "HEAD"]) {
-        println!("cargo:rerun-if-changed={git_dir}/{head_ref}");
+        if let Some(ref_path) = git_path(&head_ref) {
+            println!("cargo:rerun-if-changed={ref_path}");
+        }
     }
+}
+
+/// Absolute location of a path inside the git dir, resolved for the current worktree.
+fn git_path(rel: &str) -> Option<String> {
+    run_git(&["rev-parse", "--path-format=absolute", "--git-path", rel])
 }
 
 /// Run `git` with `args` and return trimmed stdout, or `None` if git is absent, errors, or the
