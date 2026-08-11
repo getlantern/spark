@@ -1426,18 +1426,17 @@ pub fn snapshot_to_json(members: &[MemberStatus]) -> String {
 /// or forwards the name itself.
 #[async_trait]
 pub trait Transport: Send + Sync {
-    /// Open a stream to `target`. The returned stream relays application bytes
+    /// Open a stream to an already-resolved `target`. The returned stream relays application bytes
     /// transparently in both directions.
-    /// Dial a resolved address. Derived from [`dial_addr`](Self::dial_addr); override when the
-    /// transport has a cheaper IP-only path.
+    ///
+    /// Derived from [`dial_addr`](Self::dial_addr) — override it when the transport has a cheaper
+    /// IP-only path than wrapping the address and going through the general one.
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
         self.dial_addr(Address::Ip(target)).await
     }
 
     /// Open a stream to a target that may be an unresolved **domain** — the fake-IP proxy path,
     /// where a flow's real destination is a name recovered from its fake IP (smart-routing/M4).
-    ///
-    /// Dial `target`, which may be a **domain**.
     ///
     /// Required, with no default, and that is the point. A proxy transport must hand the name to the
     /// exit so the exit resolves it — resolving client-side would put the destination in a local DNS

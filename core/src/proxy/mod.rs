@@ -90,7 +90,6 @@ pub struct RouteHooks {
     /// It is a known disclosure while it lasts: a proxied UDP flow to a name resolves locally, which
     /// puts the destination in a DNS lookup on the local network.
     pub proxy_resolver: Option<Arc<dyn FlowResolver>>,
-    /// Resolves a Proxy flow's domain to a real IP client-side when the transport can't carry a name
     /// The proxyless transport (ADR 0014) for [`Decision::Proxyless`] flows. `None` → such flows are
     /// **rejected**, not silently downgraded (see [`Decision::Proxyless`]).
     ///

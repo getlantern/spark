@@ -157,7 +157,9 @@ module-signer = ["wasm-transport"]
 # Un-poisoned control-plane DNS for startup (design: docs/bootstrap-resolver-design.md). Pulls
 # flint-dns/flint-dial with their boring Chrome-mimicry connector, so a proxy `server` can be a
 # hostname resolved before the tunnel exists. Off by default — the base build stays boring/cmake-free.
-bootstrap-dns = ["dep:flint-dial", "dep:flint-dns", "flint-dial/boring", "flint-dns/boring"]
+# `dep:webpki-root-certs` because the DoH dial pins its own trust anchors: empty roots mean
+# BoringSSL's `set_default_paths()`, which finds nothing on Android/iOS.
+bootstrap-dns = ["dep:flint-dial", "dep:flint-dns", "flint-dial/boring", "flint-dns/boring", "dep:webpki-root-certs", "dep:boring2"]
 # Samizdat transport (ADR 0007): REALITY-style auth in the TLS SessionID + H2 CONNECT mux,
 # interoperable with deployed lantern-box `"samizdat"` servers. `auth.rs` needs only `ring`; the
 # `session_id.rs` kID-injection seam pulls the boring TLS backend + its FFI; `h2`/`http` provide the

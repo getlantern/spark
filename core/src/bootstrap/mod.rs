@@ -59,6 +59,26 @@ impl NameResolver for RacingResolver {
     }
 }
 
+/// The dial policy every client-side DoH lookup uses: spark's standard opening-handshake shaping,
+/// plus pinned trust anchors.
+///
+/// Shaping is **not** optional here and does not read `[transport.shaping]`. A DoH lookup is a TLS
+/// handshake to a well-known resolver with its hostname in the SNI — the single easiest thing on the
+/// wire for a censor to match, and it happens before any transport can help. `default_shaping`
+/// fragments the ClientHello so the SNI straddles both a TLS-record and a TCP-segment boundary, and
+/// falls back to a single record when there is no locatable SNI, so it is never worse than none.
+///
+/// Applying it unconditionally also means censored and uncensored users exercise the *same* code
+/// path, which is what makes a working uncensored test say anything about the censored case.
+///
+/// Roots are pinned rather than left to the platform: empty roots mean BoringSSL's
+/// `set_default_paths()`, which finds nothing on Android and iOS (their trust stores live where
+/// OpenSSL cannot see them) — the same trap `ProxylessTransport::new` documents.
+pub(crate) fn doh_dial_policy() -> flint_dns::DialPolicy {
+    flint_dns::DialPolicy::shaped(crate::transport::default_shaping())
+        .with_roots(crate::transport::probe::webpki_roots_pem())
+}
+
 /// The always-available strategy: resolve over `flint_dns`'s un-poisoned DoH pool (the inner race).
 /// Takes the first validated A record. The per-network winner cache is intentionally **not** used
 /// here (design §3.1) — bootstrap is infrequent and a stale cached winner could eat a timeout.
@@ -80,14 +100,9 @@ impl NameResolver for DohResolver {
         // Shaped like every other client-side DoH lookup (`dns::resolver::doh_dial_policy`). This
         // one matters most: it runs before any transport exists, so if it is blocked spark never
         // starts, and there is nothing to fall back to.
-        let ips = flint_dns::resolve_with(
-            host,
-            flint_dns::TYPE_A,
-            &self.pool,
-            &crate::dns::resolver::doh_dial_policy(),
-        )
-        .await
-        .map_err(io::Error::other)?;
+        let ips = flint_dns::resolve_with(host, flint_dns::TYPE_A, &self.pool, &doh_dial_policy())
+            .await
+            .map_err(io::Error::other)?;
         let ip = ips
             .into_iter()
             .next()

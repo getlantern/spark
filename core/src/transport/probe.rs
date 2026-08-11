@@ -307,10 +307,14 @@ where
 ///
 /// Built once: parsing ~150 certificates per dial would be absurd, and the search dials often.
 ///
-/// Gated on `proxyless` alone, not `any(proxyless, config-fetch)`: every caller is a proxyless
-/// search space, so the `config-fetch` arm only made the function dead code in a `config-fetch`-only
-/// build — which fails `-D warnings`. Widen this the day a non-proxyless caller exists, not before.
-#[cfg(all(feature = "anytls", feature = "proxyless"))]
+/// Gated on the features that actually have a caller — widened from `all(anytls, proxyless)` when
+/// `bootstrap::doh_dial_policy` became the first non-proxyless one. The rule the old comment set out
+/// still holds: widen when a caller appears, not in anticipation of one, so a build that cannot
+/// reach this does not carry it and trip `-D warnings`.
+#[cfg(any(
+    all(feature = "anytls", feature = "proxyless"),
+    feature = "bootstrap-dns"
+))]
 pub(crate) fn webpki_roots_pem() -> std::sync::Arc<[String]> {
     use std::sync::OnceLock;
     static ROOTS: OnceLock<std::sync::Arc<[String]>> = OnceLock::new();
