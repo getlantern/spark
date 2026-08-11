@@ -695,7 +695,6 @@ fn setup_routing_and_udp(
             router: router as Arc<dyn proxy::FlowRouter>,
             recoverer: Some(Arc::new(dns::server::FakeIpRecoverer::new(pool.clone()))),
             direct_resolver: dns::resolver::direct_resolver(&config.dns),
-            proxy_resolver: dns::resolver::proxy_resolver(&config.dns),
             proxyless_transport,
             proxyless_udp,
         });

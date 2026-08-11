@@ -1641,6 +1641,14 @@ mod tests {
         ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
             Err(io::Error::other("no udp"))
         }
+
+        /// Address-agnostic: this double answers the same way for a name as for an IP.
+        async fn dial_udp_addr(
+            &self,
+            _target: Address,
+        ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            Err(io::Error::other("no udp"))
+        }
     }
     // A UDP transport whose dial always succeeds with no-op sink/source halves — used as the
     // fail-open direct fallback in the UDP tests.
@@ -1650,6 +1658,14 @@ mod tests {
         async fn dial_udp(
             &self,
             _t: SocketAddr,
+        ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            Ok((Box::new(NopSink), Box::new(NopSource)))
+        }
+
+        /// Address-agnostic: this double answers the same way for a name as for an IP.
+        async fn dial_udp_addr(
+            &self,
+            _target: Address,
         ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
             Ok((Box::new(NopSink), Box::new(NopSource)))
         }

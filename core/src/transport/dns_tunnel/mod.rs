@@ -227,6 +227,18 @@ impl Transport for DnsTunnelTransport {
 
 #[async_trait]
 impl UdpTransport for DnsTunnelTransport {
+    /// The same refusal as [`dial_udp`](Self::dial_udp): this transport has no UDP at all, so a
+    /// domain target is no more supported than an IP one. Spelled out rather than delegated,
+    /// because `dial_udp_addr` has no default — a transport must state what it can carry.
+    async fn dial_udp_addr(
+        &self,
+        _target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        Err(io::Error::other(
+            "dns-tunnel: UDP-over-tunnel is unsupported in this build (TCP only, ADR 0011 v1)",
+        ))
+    }
+
     async fn dial_udp(
         &self,
         _target: SocketAddr,

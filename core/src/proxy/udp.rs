@@ -285,7 +285,7 @@ async fn open_association(
                         }
                     }
                 }
-                open_udp_proxy(proxy, h, dom, dst).await
+                open_udp_proxy(proxy, dom, dst).await
             }
             None => dial_udp_or_log(direct, dst).await, // real-IP flow → direct as-is
         },
@@ -314,7 +314,7 @@ async fn open_association(
             }
         },
         Decision::Proxy => match domain.as_deref() {
-            Some(dom) => open_udp_proxy(proxy, h, dom, dst).await,
+            Some(dom) => open_udp_proxy(proxy, dom, dst).await,
             None => dial_udp_or_log(proxy, dst).await, // real-IP flow → proxy by IP
         },
     }
@@ -325,31 +325,29 @@ async fn open_association(
 /// un-poisoned DoH and dial by IP.
 async fn open_udp_proxy(
     proxy: &Arc<dyn UdpTransport>,
-    hooks: &RouteHooks,
     dom: &str,
     dst: SocketAddr,
 ) -> Option<(BoxedPacketSink, BoxedPacketSource)> {
-    if let Ok(addr) = Address::domain(dom, dst.port()) {
-        match proxy.dial_udp_addr(addr).await {
-            Ok(halves) => return Some(halves),
-            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                debug!(domain = %dom, "udp: transport can't carry a domain; trying client-side resolution if a resolver is configured");
-            }
-            Err(e) => {
-                warn!(error = %e, "udp: proxy dial-by-name failed");
-                return None;
-            }
+    // Hand the domain to the exit so *it* resolves. No client-side fallback, for the same reason as
+    // the TCP path: resolving here would put the destination into a local DNS lookup.
+    // `UdpTransport::dial_udp_addr` is a required method, so a transport cannot opt out of carrying
+    // the name and silently land us here.
+    let addr = match Address::domain(dom, dst.port()) {
+        Ok(a) => a,
+        Err(e) => {
+            debug!(domain = %dom, "udp: unusable domain target");
+            warn!(error = %e, "udp: unusable domain target");
+            return None;
+        }
+    };
+    match proxy.dial_udp_addr(addr).await {
+        Ok(halves) => Some(halves),
+        Err(e) => {
+            debug!(domain = %dom, "udp: proxy dial-by-name failed");
+            warn!(error = %e, "udp: proxy dial-by-name failed");
+            None
         }
     }
-    if let Some(res) = hooks.proxy_resolver.as_deref() {
-        if let Ok(ips) = res.resolve(dom).await {
-            if let Some(ip) = crate::proxy::tcp::pick_ip(&ips, dst.ip()) {
-                return dial_udp_or_log(proxy, SocketAddr::new(ip, dst.port())).await;
-            }
-        }
-    }
-    warn!(domain = %dom, "udp: neither dial-by-name nor client-side resolution succeeded");
-    None
 }
 
 /// Open a UDP association, logging + swallowing a dial error into `None`.
@@ -637,7 +635,6 @@ mod tests {
             router: Arc::new(FixedRouter(Decision::Proxy)),
             recoverer: None,
             direct_resolver: None,
-            proxy_resolver: None,
             proxyless_transport: None,
             proxyless_udp: None,
         };
@@ -664,7 +661,6 @@ mod tests {
             router: Arc::new(FixedRouter(Decision::Proxy)),
             recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
             direct_resolver: None,
-            proxy_resolver: None,
             proxyless_transport: None,
             proxyless_udp: None,
         };
@@ -687,10 +683,15 @@ mod tests {
         );
     }
 
-    /// When the proxy transport can't carry a name (`Unsupported`), the flow is resolved client-side
-    /// over the un-poisoned resolver and dialed by the resulting IP.
+    /// A transport that cannot carry a UDP name must make the flow **fail**, never fall back to a
+    /// client-side lookup.
+    ///
+    /// This test previously asserted the opposite — that the association falls back to dialing a
+    /// client-resolved IP. `UdpTransport::dial_udp_addr` is now required, so that fallback is gone:
+    /// resolving here would put the destination into a DNS lookup on the local network, which is the
+    /// disclosure proxying exists to prevent.
     #[tokio::test]
-    async fn open_association_falls_back_to_client_resolve() {
+    async fn a_udp_transport_that_cannot_carry_a_name_fails_rather_than_resolving() {
         let proxy_rec = Arc::new(RecordingUdp {
             reject_domain: true,
             ..Default::default()
@@ -698,12 +699,10 @@ mod tests {
         let direct_rec = Arc::new(RecordingUdp::default());
         let proxy: Arc<dyn UdpTransport> = proxy_rec.clone();
         let direct: Arc<dyn UdpTransport> = direct_rec.clone();
-        let resolved: IpAddr = "1.2.3.4".parse().unwrap();
         let hooks = RouteHooks {
             router: Arc::new(FixedRouter(Decision::Proxy)),
             recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
             direct_resolver: None,
-            proxy_resolver: Some(Arc::new(FixedResolver(resolved))),
             proxyless_transport: None,
             proxyless_udp: None,
         };
@@ -712,12 +711,12 @@ mod tests {
         assert!(
             open_association(&proxy, &direct, Some(&hooks), dst, test_src())
                 .await
-                .is_some()
+                .is_none(),
+            "a name the transport cannot carry must drop the association"
         );
-        assert_eq!(
-            *proxy_rec.dial_udp_targets.lock().unwrap(),
-            vec![SocketAddr::new(resolved, 443)],
-            "falls back to dialing the client-resolved IP on the proxy"
+        assert!(
+            proxy_rec.dial_udp_targets.lock().unwrap().is_empty(),
+            "no IP dial may happen: that would mean something resolved client-side"
         );
     }
 
@@ -733,7 +732,6 @@ mod tests {
             router: Arc::new(FixedRouter(Decision::Direct)),
             recoverer: Some(Arc::new(FixedRecoverer("example.com"))),
             direct_resolver: Some(Arc::new(FixedResolver(resolved))),
-            proxy_resolver: None,
             proxyless_transport: None,
             proxyless_udp: None,
         };

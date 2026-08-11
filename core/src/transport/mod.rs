@@ -1480,30 +1480,31 @@ pub type BoxedPacketSource = Box<dyn PacketSource>;
 /// reply pump owns the source.
 #[async_trait]
 pub trait UdpTransport: Send + Sync {
-    /// Open a connected UDP association to `target`, returning its split halves.
+    /// Open a connected UDP association to an already-resolved target, returning its split halves.
+    ///
+    /// Derived from [`dial_udp_addr`](Self::dial_udp_addr); override when there is a cheaper IP-only
+    /// path. An override must **not** delegate back to `dial_udp_addr` for the `Ip` case, or the two
+    /// defaults call each other forever.
     async fn dial_udp(
         &self,
         target: SocketAddr,
-    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)>;
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        self.dial_udp_addr(Address::Ip(target)).await
+    }
 
     /// Open a connected UDP association to a target that may be an unresolved **domain** — the
-    /// fake-IP path, where a flow's real destination is a name recovered from its fake IP. The
-    /// default handles only [`Address::Ip`] (delegating to [`dial_udp`](Self::dial_udp)) and rejects
-    /// a domain as `Unsupported`, so the forwarder can tell "this transport can't carry a UDP name"
-    /// from a real dial failure. Transports whose UDP frame carries an address (UoT, hysteria2,
-    /// shadowsocks, wasm, the plain tunnel) override this so the **exit** resolves — no client DNS.
+    /// fake-IP path, where a flow's real destination is a name recovered from its fake IP.
+    /// Transports whose UDP frame carries an address (UoT, hysteria2, shadowsocks, wasm, the plain
+    /// tunnel) send the name so the **exit** resolves — no client DNS.
+    ///
+    /// Required, with no default, for the same reason as [`Transport::dial_addr`]: the default used
+    /// to reject a domain with `Unsupported`, and the forwarder answered that by resolving
+    /// client-side — so a transport leaked every destination it carried simply by not implementing a
+    /// method. A transport with no UDP at all still states that here, explicitly.
     async fn dial_udp_addr(
         &self,
         target: Address,
-    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        match target {
-            Address::Ip(sa) => self.dial_udp(sa).await,
-            Address::Domain { host, port } => Err(io::Error::new(io::ErrorKind::Unsupported, {
-                let _ = (&host, port);
-                "transport does not support UDP domain targets"
-            })),
-        }
-    }
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)>;
 }
 
 /// Connects/sends straight to the target with no tunnel — the direct behavior, expressed as
@@ -1597,6 +1598,39 @@ impl Transport for DirectTransport {
 
 #[async_trait]
 impl UdpTransport for DirectTransport {
+    /// Resolves a domain locally, then sends to it — the UDP twin of
+    /// [`Transport::dial_addr`](Transport::dial_addr) on this type, and correct for the same reason:
+    /// a direct flow is not hidden from the local network, so the lookup discloses nothing the
+    /// datagrams themselves would not.
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        let (host, port) = match target {
+            Address::Ip(sa) => return self.dial_udp(sa).await,
+            Address::Domain { host, port } => (host, port),
+        };
+        // Destination-free errors: these surface through the forwarder's `warn!(error = %e, …)`.
+        let Some(resolver) = self.resolver.as_deref() else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "direct transport has no resolver for domain targets",
+            ));
+        };
+        let ips = resolver.resolve(&host).await?;
+        let mut last = io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "no reachable address among the resolved candidates",
+        );
+        for ip in ips {
+            match self.dial_udp(SocketAddr::new(ip, port)).await {
+                Ok(halves) => return Ok(halves),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
     async fn dial_udp(
         &self,
         target: SocketAddr,

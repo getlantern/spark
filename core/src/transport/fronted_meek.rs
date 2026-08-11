@@ -200,6 +200,18 @@ fn address_to_target(target: Address) -> socks5::Target {
 
 #[async_trait]
 impl UdpTransport for FrontedMeekTransport {
+    /// The same refusal as [`dial_udp`](Self::dial_udp): this transport has no UDP at all, so a
+    /// domain target is no more supported than an IP one. Spelled out rather than delegated,
+    /// because `dial_udp_addr` has no default — a transport must state what it can carry.
+    async fn dial_udp_addr(
+        &self,
+        _target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        Err(io::Error::other(
+            "fronted-meek: UDP is not supported (meek is a TCP polling tunnel)",
+        ))
+    }
+
     async fn dial_udp(
         &self,
         _target: SocketAddr,
