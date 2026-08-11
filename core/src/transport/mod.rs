@@ -1483,8 +1483,7 @@ pub trait UdpTransport: Send + Sync {
     /// Open a connected UDP association to an already-resolved target, returning its split halves.
     ///
     /// Derived from [`dial_udp_addr`](Self::dial_udp_addr); override when there is a cheaper IP-only
-    /// path. An override must **not** delegate back to `dial_udp_addr` for the `Ip` case, or the two
-    /// defaults call each other forever.
+    /// path. See that method for the recursion this default participates in.
     async fn dial_udp(
         &self,
         target: SocketAddr,
@@ -1501,6 +1500,11 @@ pub trait UdpTransport: Send + Sync {
     /// to reject a domain with `Unsupported`, and the forwarder answered that by resolving
     /// client-side — so a transport leaked every destination it carried simply by not implementing a
     /// method. A transport with no UDP at all still states that here, explicitly.
+    ///
+    /// **Do not** answer the [`Address::Ip`] case with `self.dial_udp(sa)` unless you also override
+    /// [`dial_udp`](Self::dial_udp) with a real implementation. `dial_udp`'s default calls *this*
+    /// method, so the pair would call each other until the stack runs out. Every impl in the tree
+    /// overrides `dial_udp`, which is why the delegation is safe where it appears today.
     async fn dial_udp_addr(
         &self,
         target: Address,

@@ -320,18 +320,19 @@ async fn open_association(
     }
 }
 
-/// Proxy a UDP flow to a recovered `dom`: carry the name to the exit via `dial_udp_addr` (the exit
-/// resolves — no client DNS). If the transport can't (`Unsupported`), resolve client-side over the
-/// un-poisoned DoH and dial by IP.
+/// Proxy a UDP flow to a recovered `dom`: carry the name to the exit via `dial_udp_addr`, so the
+/// **exit** resolves it and no client DNS happens.
+///
+/// There is deliberately no client-side fallback, for the same reason as the TCP path: resolving
+/// here would put the destination into a DNS lookup on the local network, which is the disclosure
+/// proxying exists to prevent. A transport cannot opt out and silently land us there either —
+/// [`UdpTransport::dial_udp_addr`] is a required method, so "can't carry a name" is a failure the
+/// flow takes, not a fallback the forwarder papers over.
 async fn open_udp_proxy(
     proxy: &Arc<dyn UdpTransport>,
     dom: &str,
     dst: SocketAddr,
 ) -> Option<(BoxedPacketSink, BoxedPacketSource)> {
-    // Hand the domain to the exit so *it* resolves. No client-side fallback, for the same reason as
-    // the TCP path: resolving here would put the destination into a local DNS lookup.
-    // `UdpTransport::dial_udp_addr` is a required method, so a transport cannot opt out of carrying
-    // the name and silently land us here.
     let addr = match Address::domain(dom, dst.port()) {
         Ok(a) => a,
         Err(e) => {
