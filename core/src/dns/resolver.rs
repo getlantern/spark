@@ -144,9 +144,10 @@ impl FlowResolver for DohResolver {
     async fn resolve(&self, host: &str) -> io::Result<Vec<IpAddr>> {
         // Return **both** families (A first) so the caller's `pick_ip` can select the family the flow
         // needs — returning only A would strand a v6-requesting flow (or a v6-only network).
+        let policy = crate::bootstrap::doh_dial_policy();
         let (a, aaaa) = tokio::join!(
-            flint_dns::resolve(host, flint_dns::TYPE_A, &self.pool),
-            flint_dns::resolve(host, flint_dns::TYPE_AAAA, &self.pool),
+            flint_dns::resolve_with(host, flint_dns::TYPE_A, &self.pool, &policy),
+            flint_dns::resolve_with(host, flint_dns::TYPE_AAAA, &self.pool, &policy),
         );
         let mut ips = Vec::new();
         if let Ok(v) = a {
@@ -164,6 +165,45 @@ impl FlowResolver for DohResolver {
 
 #[cfg(test)]
 mod tests {
+    /// Every client-side DoH lookup must be shaped, and the shaping must be the SNI-straddling kind.
+    ///
+    /// This is the property the whole change exists for: a DoH handshake carries the resolver's
+    /// hostname in the SNI, which is the easiest thing on the wire for a censor to match. An
+    /// unshaped policy here is not a degraded mode — it is the failure.
+    #[cfg(feature = "bootstrap-dns")]
+    #[test]
+    fn every_doh_lookup_is_shaped_and_sni_straddled() {
+        let policy = crate::bootstrap::doh_dial_policy();
+        assert!(
+            !policy.wire.is_noop(),
+            "DoH must never dial with an unshaped plan"
+        );
+        // `RecordFragment` isn't `PartialEq` (it carries a `Vec` variant), so match rather than compare.
+        assert!(
+            matches!(
+                policy.wire.record_fragment,
+                flint_shaping::RecordFragment::SniStraddle
+            ),
+            "the ClientHello must be cut so the SNI straddles a TLS record boundary, got {:?}",
+            policy.wire.record_fragment
+        );
+        assert!(
+            policy.wire.tcp_nodelay,
+            "without TCP_NODELAY the kernel may coalesce the split back into one packet"
+        );
+    }
+
+    /// Trust anchors are pinned, not left to the platform: empty roots mean BoringSSL's
+    /// `set_default_paths()`, which finds nothing on Android/iOS.
+    #[cfg(feature = "bootstrap-dns")]
+    #[test]
+    fn doh_pins_its_trust_anchors() {
+        assert!(
+            !crate::bootstrap::doh_dial_policy().roots.is_empty(),
+            "empty roots silently fall back to a store that does not exist on mobile"
+        );
+    }
+
     use super::*;
 
     #[cfg(not(feature = "bootstrap-dns"))]

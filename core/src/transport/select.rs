@@ -995,7 +995,11 @@ impl Transport for SelectingTransport {
                 self.direct_tcp.dial(sa).await
             }
             Address::Domain { host, port } => Err(last_err.unwrap_or_else(|| {
-                io::Error::other(format!("no pool member could serve {host}:{port}"))
+                // Destination-free: `proxy::tcp::dial_proxy` logs this at `warn`, where the
+                // module's hygiene rule allows no destination. The domain is already at `debug`
+                // there. (`host`/`port` stay bound for the match arm's shape.)
+                let _ = (&host, port);
+                io::Error::other("no pool member could serve the flow")
             })),
         }
     }
@@ -1532,6 +1536,17 @@ mod tests {
             });
             Ok(Box::new(client))
         }
+
+        /// Address-agnostic double: a domain dials exactly as an IP does.
+        async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+            match target {
+                Address::Ip(sa) => self.dial(sa).await,
+                Address::Domain { port, .. } => {
+                    self.dial(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                        .await
+                }
+            }
+        }
     }
     fn member_serving_204() -> Member {
         Member {
@@ -1603,6 +1618,17 @@ mod tests {
                 Ok(Box::new(tokio::io::duplex(16).0))
             } else {
                 Err(io::Error::other("down"))
+            }
+        }
+
+        /// Address-agnostic double: a domain dials exactly as an IP does.
+        async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+            match target {
+                Address::Ip(sa) => self.dial(sa).await,
+                Address::Domain { port, .. } => {
+                    self.dial(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                        .await
+                }
             }
         }
     }

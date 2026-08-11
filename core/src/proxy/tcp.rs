@@ -153,9 +153,7 @@ async fn forward(
                 None
             }
         },
-        Decision::Proxy => {
-            dial_proxy(&proxy_transport, hooks, domain.as_deref(), original_dst).await
-        }
+        Decision::Proxy => dial_proxy(&proxy_transport, domain.as_deref(), original_dst).await,
     };
     let Some(upstream) = upstream else {
         return; // dial failed (already logged)
@@ -211,52 +209,48 @@ async fn dial_direct(
     }
     // No resolver, resolution failed, or the direct dial failed: never dial the fake IP — proxy it.
     debug!(domain = %dom, "direct egress unavailable; proxying instead");
-    dial_proxy(proxy, hooks, domain, original_dst).await
+    dial_proxy(proxy, domain, original_dst).await
 }
 
-/// Dial a Proxy flow. For a **domain** flow behind a fake IP we prefer **dial-by-name**: carry the
-/// domain to the exit so it resolves (no client DNS leak, exit-optimal CDN IPs) — every proxy
-/// transport carries a domain target. Only if a transport can't (its `dial_addr` returns
-/// `Unsupported`) do we fall back to **client-side** resolution (resilient un-poisoned DoH) +
-/// dial-by-IP, which works for every transport. A **real-IP** flow is proxied by IP (today's behavior).
+/// Dial a Proxy flow. A **domain** flow behind a fake IP is dialed **by name**: the domain goes to
+/// the exit so *it* resolves — no client DNS lookup, and exit-optimal CDN IPs.
+///
+/// There is no client-side fallback. `Transport::dial_addr` is a required method, so every proxy
+/// transport carries a name; one that cannot fails the flow rather than resolving here, because a
+/// client-side lookup would put the destination into a DNS query on the local network — the
+/// disclosure proxying exists to prevent. A **real-IP** flow has no name to carry and is proxied by
+/// IP.
 async fn dial_proxy(
     proxy: &Arc<dyn Transport>,
-    hooks: Option<&RouteHooks>,
     domain: Option<&str>,
     original_dst: SocketAddr,
 ) -> Option<BoxedStream> {
     let Some(dom) = domain else {
         return dial_or_log(proxy, original_dst).await; // real-IP flow → proxy by IP
     };
-    // Preferred: hand the domain to the exit. Only fall through to client-side resolution when the
-    // transport genuinely can't carry a name (`Unsupported`) — on a real dial failure we fail fast
-    // rather than leak a client-side DNS lookup and then re-dial the same (failing) proxy.
-    if let Ok(addr) = Address::domain(dom, original_dst.port()) {
-        match proxy.dial_addr(addr).await {
-            Ok(s) => return Some(s),
-            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                debug!(domain = %dom, "transport can't carry a domain; resolving client-side")
-            }
-            Err(e) => {
-                // Log hygiene: no destination at warn level (see the module docs); domain at debug.
-                debug!(domain = %dom, "proxy dial-by-name failed");
-                warn!(error = %e, "proxy dial-by-name failed");
-                return None;
-            }
+    // Hand the domain to the exit so *it* resolves. There is deliberately no client-side fallback:
+    // resolving here would put the destination into a local DNS lookup, which is the disclosure
+    // proxying exists to prevent. `Transport::dial_addr` is a required method precisely so a
+    // transport cannot opt out of carrying the name and silently land us here.
+    let addr = match Address::domain(dom, original_dst.port()) {
+        Ok(a) => a,
+        Err(e) => {
+            // The error names the defect, never the destination — so it is safe at warn, and the
+            // failure stays diagnosable without the domain.
+            debug!(domain = %dom, "proxy: unusable domain target");
+            warn!(error = %e, "proxy: unusable domain target");
+            return None;
+        }
+    };
+    match proxy.dial_addr(addr).await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            // Log hygiene: no destination at warn level (see the module docs); domain at debug.
+            debug!(domain = %dom, "proxy dial-by-name failed");
+            warn!(error = %e, "proxy dial-by-name failed");
+            None
         }
     }
-    // Fallback (transport can't carry a domain): resolve ourselves (un-poisoned DoH, bypassing the
-    // TUN) and dial the real IP.
-    if let Some(res) = hooks.and_then(|h| h.proxy_resolver.as_deref()) {
-        if let Ok(ips) = res.resolve(dom).await {
-            if let Some(ip) = pick_ip(&ips, original_dst.ip()) {
-                return dial_or_log(proxy, SocketAddr::new(ip, original_dst.port())).await;
-            }
-        }
-    }
-    debug!(domain = %dom, "proxy: no route for domain");
-    warn!("proxy: neither dial-by-name nor client-side resolution succeeded");
-    None
 }
 
 /// Pick a resolved IP whose family matches `want` (the flow's fake destination family — i.e. what the
@@ -441,6 +435,20 @@ mod tests {
             Err(std::io::Error::other(
                 "recording transport does not connect",
             ))
+        }
+
+        /// Address-agnostic double: a domain dials exactly as an IP does.
+        async fn dial_addr(
+            &self,
+            target: crate::transport::Address,
+        ) -> std::io::Result<crate::BoxedStream> {
+            match target {
+                crate::transport::Address::Ip(sa) => self.dial(sa).await,
+                crate::transport::Address::Domain { port, .. } => {
+                    self.dial(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                        .await
+                }
+            }
         }
     }
 
@@ -706,13 +714,17 @@ mod tests {
         );
     }
 
-    /// Proxy + a recovered domain: with a proxy resolver present, the domain is resolved client-side
-    /// and the real IP is dialed through the proxy transport (works for every transport).
+    /// A transport that cannot carry a name must make the flow **fail**, never fall back to a
+    /// client-side lookup.
+    ///
+    /// `DirectTransport` with no resolver is the one thing that still reports `Unsupported` for a
+    /// domain, which makes it the only way to reach the branch the old fallback lived on. A
+    /// `proxy_resolver` is wired here deliberately: if the fallback ever comes back, this test sees
+    /// it consulted and fails, rather than the leak returning silently because nothing looks.
     #[tokio::test]
-    async fn proxy_domain_flow_resolves_client_side_then_dials() {
+    async fn a_transport_that_cannot_carry_a_name_fails_rather_than_resolving() {
         let echo = spawn_echo().await;
         let resolved = Arc::new(AtomicBool::new(false));
-        let direct = Arc::new(RecordingTransport::default());
         let hooks = Arc::new(RouteHooks {
             proxyless_transport: None,
             proxyless_udp: None,
@@ -727,8 +739,59 @@ mod tests {
         let (mut app, netstack) = one_flow(fake_dst_for(echo));
         tokio::spawn(run(
             netstack,
+            // No resolver → `dial_addr` reports `Unsupported` for the domain.
             Arc::new(DirectTransport::default()),
-            direct.clone() as Arc<dyn Transport>,
+            Arc::new(RecordingTransport::default()) as Arc<dyn Transport>,
+            Some(hooks),
+            Arc::new(Metrics::default()),
+        ));
+        // The flow must not carry data: it is dropped, not silently rerouted through a local lookup.
+        let mut buf = [0u8; 4];
+        let _ = app.write_all(b"ping").await;
+        assert_eq!(
+            app.read(&mut buf).await.unwrap_or(0),
+            0,
+            "a name the transport cannot carry must drop the flow"
+        );
+        assert!(
+            !resolved.load(Ordering::SeqCst),
+            "the destination must never reach a client-side resolver for a proxied flow"
+        );
+    }
+
+    /// Proxy + a recovered domain: the **exit** resolves. The name rides `dial_addr` to the
+    /// transport, and no client-side lookup happens.
+    #[tokio::test]
+    async fn a_proxied_domain_flow_hands_the_name_to_the_exit() {
+        let echo = spawn_echo().await;
+        // Wired but must stay untouched: a proxied flow resolving here would put the destination
+        // into a local DNS lookup, which is the disclosure proxying exists to prevent. This test
+        // previously asserted the opposite — that the resolver *is* consulted — because the
+        // forwarder fell back to client-side resolution whenever a transport reported it could not
+        // carry a name. `Transport::dial_addr` is now required, so that fallback is gone.
+        let resolved = Arc::new(AtomicBool::new(false));
+        let by_name = Arc::new(AtomicBool::new(false));
+        let proxy = Arc::new(DomainDialTransport {
+            echo,
+            dialed_by_name: Arc::clone(&by_name),
+        });
+        let hooks = Arc::new(RouteHooks {
+            proxyless_transport: None,
+            proxyless_udp: None,
+            router: Arc::new(StubRouter(Decision::Proxy)),
+            recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
+            direct_resolver: None,
+            proxy_resolver: Some(Arc::new(StubResolver {
+                ip: echo.ip(),
+                resolved: Arc::clone(&resolved),
+            })),
+        });
+        let (mut app, netstack) = one_flow(fake_dst_for(echo));
+        tokio::spawn(run(
+            netstack,
+            // `run` takes (proxy, direct) in that order — the proxy is the one under test here.
+            proxy as Arc<dyn Transport>,
+            Arc::new(DirectTransport::default()),
             Some(hooks),
             Arc::new(Metrics::default()),
         ));
@@ -737,12 +800,12 @@ mod tests {
         app.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"ping");
         assert!(
-            resolved.load(Ordering::SeqCst),
-            "the proxy resolver is consulted"
+            by_name.load(Ordering::SeqCst),
+            "the exit must receive the domain, not a client-resolved IP"
         );
         assert!(
-            !direct.dialed.load(Ordering::SeqCst),
-            "the direct transport must not be dialed for a Proxy flow"
+            !resolved.load(Ordering::SeqCst),
+            "no client-side lookup may happen for a proxied flow"
         );
     }
 
@@ -768,7 +831,16 @@ mod tests {
         // proxy transport dials the resolved IP; the (recording) direct transport must stay unused.
         tokio::spawn(run(
             netstack,
-            Arc::new(DirectTransport::default()),
+            // The "proxy" slot here is a direct transport, and it now resolves for itself: a
+            // direct dial has no exit to delegate to, so a local lookup is correct rather than a
+            // leak. Before `dial_addr` was required, this test reached the same place via the
+            // forwarder's client-side fallback, which no longer exists.
+            Arc::new(
+                DirectTransport::default().with_resolver(Some(Arc::new(StubResolver {
+                    ip: echo.ip(),
+                    resolved: Arc::clone(&resolved),
+                }))),
+            ),
             direct.clone() as Arc<dyn Transport>,
             Some(hooks),
             Arc::new(Metrics::default()),
@@ -812,7 +884,16 @@ mod tests {
         // proxy transport reaches the echo; the direct transport is the failing recorder.
         tokio::spawn(run(
             netstack,
-            Arc::new(DirectTransport::default()),
+            // The "proxy" slot here is a direct transport, and it now resolves for itself: a
+            // direct dial has no exit to delegate to, so a local lookup is correct rather than a
+            // leak. Before `dial_addr` was required, this test reached the same place via the
+            // forwarder's client-side fallback, which no longer exists.
+            Arc::new(
+                DirectTransport::default().with_resolver(Some(Arc::new(StubResolver {
+                    ip: echo.ip(),
+                    resolved: Arc::clone(&resolved),
+                }))),
+            ),
             direct.clone() as Arc<dyn Transport>,
             Some(hooks),
             Arc::new(Metrics::default()),
@@ -1021,7 +1102,9 @@ mod tests {
         let direct = Arc::new(RecordingTransport::default());
         let mut app = drive(
             "example-unlisted-xyz.test",
-            Arc::new(DirectTransport::default()),
+            // The proxy slot is a direct transport, so it needs its own resolver now: with
+            // `dial_addr` required there is no forwarder-side fallback to resolve on its behalf.
+            Arc::new(DirectTransport::default().with_resolver(Some(to(echo.ip())))),
             direct.clone() as Arc<dyn Transport>,
             echo,
             Arc::clone(&pool),
