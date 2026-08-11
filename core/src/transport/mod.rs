@@ -1498,10 +1498,10 @@ pub trait UdpTransport: Send + Sync {
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         match target {
             Address::Ip(sa) => self.dial_udp(sa).await,
-            Address::Domain { host, port } => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("transport does not support UDP domain targets ({host}:{port})"),
-            )),
+            Address::Domain { host, port } => Err(io::Error::new(io::ErrorKind::Unsupported, {
+                let _ = (&host, port);
+                "transport does not support UDP domain targets"
+            })),
         }
     }
 }
@@ -1646,7 +1646,7 @@ mod dial_addr_tests {
     /// `Unsupported` is now the end of the road, not a signal to resolve client-side: the forwarder
     /// has no fallback, so an incapable transport drops the flow rather than leaking a lookup.
     #[tokio::test]
-    async fn default_dial_addr_delegates_ip_and_rejects_domain() {
+    async fn a_resolverless_direct_transport_delegates_ip_and_rejects_domain() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let direct = DirectTransport::new(None);

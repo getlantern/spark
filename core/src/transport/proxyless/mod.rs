@@ -426,7 +426,7 @@ impl Transport for ProxylessTransport {
                     }
                 }
                 Err(last.unwrap_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, format!("no address for {host}"))
+                    io::Error::new(io::ErrorKind::NotFound, "resolver returned no address")
                 }))
             }
         }

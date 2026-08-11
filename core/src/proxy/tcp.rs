@@ -212,11 +212,14 @@ async fn dial_direct(
     dial_proxy(proxy, domain, original_dst).await
 }
 
-/// Dial a Proxy flow. For a **domain** flow behind a fake IP we prefer **dial-by-name**: carry the
-/// domain to the exit so it resolves (no client DNS leak, exit-optimal CDN IPs) — every proxy
-/// transport carries a domain target. Only if a transport can't (its `dial_addr` returns
-/// `Unsupported`) do we fall back to **client-side** resolution (resilient un-poisoned DoH) +
-/// dial-by-IP, which works for every transport. A **real-IP** flow is proxied by IP (today's behavior).
+/// Dial a Proxy flow. A **domain** flow behind a fake IP is dialed **by name**: the domain goes to
+/// the exit so *it* resolves — no client DNS lookup, and exit-optimal CDN IPs.
+///
+/// There is no client-side fallback. `Transport::dial_addr` is a required method, so every proxy
+/// transport carries a name; one that cannot fails the flow rather than resolving here, because a
+/// client-side lookup would put the destination into a DNS query on the local network — the
+/// disclosure proxying exists to prevent. A **real-IP** flow has no name to carry and is proxied by
+/// IP.
 async fn dial_proxy(
     proxy: &Arc<dyn Transport>,
     domain: Option<&str>,
