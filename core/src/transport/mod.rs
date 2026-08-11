@@ -1565,13 +1565,29 @@ impl Transport for DirectTransport {
             ));
         };
         let ips = resolver.resolve(&host).await?;
-        let ip = ips.first().copied().ok_or_else(|| {
-            io::Error::new(
+        if ips.is_empty() {
+            return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("no addresses for {host}:{port}"),
-            )
-        })?;
-        self.dial(SocketAddr::new(ip, port)).await
+            ));
+        }
+        // Try every candidate, not just the first. The resolver returns both families (A and AAAA)
+        // and can return several records per family, so stopping at `ips[0]` fails the whole dial on
+        // one unreachable address — and on a v6-less network the first address is exactly the one
+        // that will not connect. The forwarder's old client-side path avoided this by choosing on
+        // address family (`pick_ip`); `dial_addr` has no flow to compare against, so it tries them
+        // in turn instead.
+        let mut last = io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("no reachable address for {host}:{port}"),
+        );
+        for ip in ips {
+            match self.dial(SocketAddr::new(ip, port)).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
     }
 }
 
@@ -1620,9 +1636,11 @@ mod dial_addr_tests {
     use super::*;
     use tokio::net::TcpListener;
 
-    /// The default [`Transport::dial_addr`] delegates an `Ip` target to `dial`, and rejects a
-    /// `Domain` (a transport whose wire protocol can't carry a name — the forwarder resolves those
-    /// client-side and retries by IP). Transports that *can* carry a domain override the default.
+    /// A resolver-less [`DirectTransport`] delegates an `Ip` target to `dial` and reports
+    /// `Unsupported` for a `Domain`.
+    ///
+    /// `Unsupported` is now the end of the road, not a signal to resolve client-side: the forwarder
+    /// has no fallback, so an incapable transport drops the flow rather than leaking a lookup.
     #[tokio::test]
     async fn default_dial_addr_delegates_ip_and_rejects_domain() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -1637,7 +1655,47 @@ mod dial_addr_tests {
                 .dial_addr(Address::domain("example.com", 80).expect("domain"))
                 .await
                 .is_err(),
-            "the default impl can't carry a domain target"
+            "a resolver-less direct transport can't carry a domain target"
+        );
+    }
+
+    /// Every resolved address is tried, not just the first.
+    ///
+    /// The resolver returns both families and can return several records per family, so stopping at
+    /// `ips[0]` fails the whole dial on one unreachable address — and on a v6-less network the first
+    /// address is often exactly the one that cannot connect. The client-side path this replaced
+    /// chose by address family (`pick_ip`); `dial_addr` has no flow to compare against, so it has to
+    /// try them in turn instead.
+    #[tokio::test]
+    async fn a_domain_dial_tries_every_resolved_address() {
+        use crate::proxy::FlowResolver;
+        use std::net::IpAddr;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let reachable = listener.local_addr().expect("addr");
+
+        /// AAAA first, then A — the ordering a dual-stack resolver actually returns.
+        struct AaaaThenA;
+        #[async_trait]
+        impl FlowResolver for AaaaThenA {
+            async fn resolve(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
+                // The listener below is IPv4-only, so `::1` has nothing listening and is refused in
+                // ~4ms. An unroutable address (TEST-NET, RFC 5737) would express the same idea but
+                // hang until the TCP connect timeout — 75s for this one test, measured.
+                Ok(vec![
+                    "::1".parse().expect("v6 loopback"),
+                    "127.0.0.1".parse().expect("v4 loopback"),
+                ])
+            }
+        }
+
+        let direct = DirectTransport::new(None).with_resolver(Some(std::sync::Arc::new(AaaaThenA)));
+        assert!(
+            direct
+                .dial_addr(Address::domain("example.com", reachable.port()).expect("domain"))
+                .await
+                .is_ok(),
+            "the A record must be tried after the AAAA one is refused"
         );
     }
 }
