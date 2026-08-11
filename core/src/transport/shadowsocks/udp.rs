@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::io;
+// Test-only: the server→client packet builder echoes a real source IP, which is never a domain.
+#[cfg(test)]
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -12,7 +14,10 @@ use crate::config::SsMethod;
 use crate::transport::{PacketSink, PacketSource};
 
 use super::crypto::{session_subkey, AesBlock, Cipher, CryptoError};
-use super::{now_secs, read_socks_addr, write_socks_addr};
+#[cfg(test)]
+use super::write_socks_addr;
+use super::{now_secs, read_socks_addr, write_socks_target};
+use crate::transport::Address;
 
 const PKT_TYPE_CLIENT: u8 = 0;
 const PKT_TYPE_SERVER: u8 = 1;
@@ -31,7 +36,7 @@ fn build_client_packet_with(
     cipher: &Cipher,
     session_id: [u8; 8],
     packet_id: u64,
-    target: &SocketAddr,
+    target: &Address,
     payload: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     let mut sep = [0u8; 16];
@@ -42,7 +47,10 @@ fn build_client_packet_with(
     body.push(PKT_TYPE_CLIENT);
     body.extend_from_slice(&now_secs().to_be_bytes());
     body.extend_from_slice(&0u16.to_be_bytes()); // no padding for connected single-target flows
-    write_socks_addr(target, &mut body);
+                                                 // The same SOCKS5 address format the TCP path already writes, and the reason a domain can
+                                                 // ride here at all: SIP022 §3.1.3 puts a full SOCKS5 address in the datagram, so ATYP 3 is
+                                                 // legal on the wire. Only spark's own plumbing was IP-only.
+    write_socks_target(target, &mut body);
     body.extend_from_slice(payload);
 
     let mut nonce = [0u8; 12];
@@ -65,7 +73,7 @@ pub fn build_client_packet(
     psk: &[u8],
     session_id: [u8; 8],
     packet_id: u64,
-    target: &SocketAddr,
+    target: &Address,
     payload: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     let block = AesBlock::new(psk)?;
@@ -205,7 +213,7 @@ pub fn build_server_packet_for_test(
 /// Send half of an SS-2022 UDP association (AES methods).
 pub struct ShadowsocksUdpSink {
     socket: Arc<UdpSocket>,
-    target: SocketAddr,
+    target: Address,
     session_id: [u8; 8],
     packet_id: u64,
     block: AesBlock,
@@ -217,7 +225,7 @@ impl ShadowsocksUdpSink {
         socket: Arc<UdpSocket>,
         method: SsMethod,
         psk: &[u8],
-        target: SocketAddr,
+        target: Address,
         session_id: [u8; 8],
     ) -> Result<Self, CryptoError> {
         let block = AesBlock::new(psk)?;
@@ -452,8 +460,14 @@ mod tests {
         let client = Arc::new(client);
 
         let session_id = [7u8; 8];
-        let mut sink =
-            ShadowsocksUdpSink::new(Arc::clone(&client), method, &psk, target, session_id).unwrap();
+        let mut sink = ShadowsocksUdpSink::new(
+            Arc::clone(&client),
+            method,
+            &psk,
+            Address::Ip(target),
+            session_id,
+        )
+        .unwrap();
         let mut source =
             ShadowsocksUdpSource::new(Arc::clone(&client), method, psk.clone(), session_id)
                 .unwrap();
@@ -519,6 +533,54 @@ mod tests {
         );
     }
 
+    /// A domain target reaches the wire as SOCKS5 ATYP 3, so the **server** resolves it.
+    ///
+    /// SIP022 §3.1.3 always allowed this — the TCP path has carried domains since it was written,
+    /// while UDP was IP-only, which left the forwarder resolving client-side for proxied UDP flows.
+    /// This asserts the encoded bytes, not just that the call compiles.
+    #[test]
+    fn a_domain_target_is_encoded_as_atyp3_in_the_datagram() {
+        let method = SsMethod::Aes256Gcm;
+        let psk = vec![9u8; 32];
+        let session_id = [3u8; 8];
+        let host = "example.com";
+        let pkt = build_client_packet(
+            method,
+            &psk,
+            session_id,
+            0,
+            &Address::domain(host, 443).expect("domain"),
+            b"q",
+        )
+        .expect("build");
+
+        // Decrypt the way the server does: AES-ECB the separate header, then AEAD-open the body.
+        let block = AesBlock::new(&psk).unwrap();
+        let mut sep = [0u8; 16];
+        sep.copy_from_slice(&pkt[..16]);
+        block.decrypt(&mut sep);
+        let cipher = Cipher::new(method, &session_subkey(method, &psk, &sep[..8])).unwrap();
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&sep[4..16]);
+        let mut buf = pkt[16..].to_vec();
+        let body = cipher.open(nonce, &mut buf).expect("open");
+
+        // type(1) ‖ time(8) ‖ padding_len(2) ‖ ATYP ...
+        let atyp_at = 1 + 8 + 2;
+        assert_eq!(
+            body[atyp_at],
+            0x03,
+            "a domain must be ATYP 3, not a client-resolved IP: {:?}",
+            &body[..atyp_at + 4]
+        );
+        assert_eq!(body[atyp_at + 1] as usize, host.len(), "domain length byte");
+        assert_eq!(
+            &body[atyp_at + 2..atyp_at + 2 + host.len()],
+            host.as_bytes(),
+            "the hostname itself must be on the wire"
+        );
+    }
+
     #[test]
     fn client_packet_parses_as_a_server_would() {
         let method = SsMethod::Aes256Gcm;
@@ -526,7 +588,8 @@ mod tests {
         let target: SocketAddr = "1.2.3.4:53".parse().unwrap();
         let session_id = [1u8; 8];
 
-        let pkt = build_client_packet(method, &psk, session_id, 0, &target, b"query").unwrap();
+        let pkt = build_client_packet(method, &psk, session_id, 0, &Address::Ip(target), b"query")
+            .unwrap();
 
         // Server side: AES-ECB-decrypt the header, derive subkey, AES-GCM-open the body.
         let block = AesBlock::new(&psk).unwrap();
