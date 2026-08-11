@@ -1428,28 +1428,28 @@ pub fn snapshot_to_json(members: &[MemberStatus]) -> String {
 pub trait Transport: Send + Sync {
     /// Open a stream to `target`. The returned stream relays application bytes
     /// transparently in both directions.
-    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream>;
+    /// Dial a resolved address. Derived from [`dial_addr`](Self::dial_addr); override when the
+    /// transport has a cheaper IP-only path.
+    async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
+        self.dial_addr(Address::Ip(target)).await
+    }
 
     /// Open a stream to a target that may be an unresolved **domain** — the fake-IP proxy path,
     /// where a flow's real destination is a name recovered from its fake IP (smart-routing/M4).
     ///
-    /// The default handles only [`Address::Ip`] (delegating to [`dial`](Self::dial)) and rejects a
-    /// domain. Transports whose wire protocol carries a domain to the exit (so the exit resolves —
-    /// no client DNS) override this: the plain tunnel, shadowsocks, and hysteria2 (and the selecting
-    /// pool, which delegates to whichever members it holds). For transports that can't, the forwarder
-    /// falls back to client-side resolution + dial-by-IP.
-    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
-        match target {
-            Address::Ip(sa) => self.dial(sa).await,
-            // `Unsupported` (not a generic error) so callers like `SelectingTransport::dial_addr` can
-            // tell "this transport can't carry a domain" from a real dial failure and not demote an
-            // otherwise-healthy member.
-            Address::Domain { host, port } => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("transport does not support domain targets ({host}:{port})"),
-            )),
-        }
-    }
+    /// Dial `target`, which may be a **domain**.
+    ///
+    /// Required, with no default, and that is the point. A proxy transport must hand the name to the
+    /// exit so the exit resolves it — resolving client-side would put the destination in a local DNS
+    /// lookup, which is the thing proxying exists to prevent. When this had a default that rejected
+    /// domains with `Unsupported`, the forwarder answered that rejection by resolving locally and
+    /// dialing by IP: a transport could leak every destination it handled simply by not implementing
+    /// a method. Making it required turns that from a silent runtime fallback into a compile error.
+    ///
+    /// A transport with no exit to delegate to (`DirectTransport`) resolves locally on purpose — a
+    /// direct flow is not hidden from the local network, so the lookup discloses nothing the
+    /// connection itself does not.
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream>;
 }
 
 /// The send half of a connected UDP association: datagrams to the negotiated target.
@@ -1513,12 +1513,31 @@ pub trait UdpTransport: Send + Sync {
 #[derive(Default)]
 pub struct DirectTransport {
     protector: Option<SocketProtector>,
+    /// Resolver for domain targets. `None` = this transport cannot reach a name, and
+    /// [`Transport::dial_addr`] reports `Unsupported` for one.
+    ///
+    /// A direct dial has no exit to delegate to, so a name has to be resolved *here* — and unlike
+    /// the proxied path that is not a leak: a direct flow is by definition not hidden from the local
+    /// network, so a local lookup discloses nothing the connection itself won't.
+    resolver: Option<Arc<dyn crate::proxy::FlowResolver>>,
 }
 
 impl DirectTransport {
     /// A direct transport, optionally pinning outbound sockets to a physical interface.
+    ///
+    /// No resolver: domain targets report `Unsupported`. Callers that dial names use
+    /// [`with_resolver`](Self::with_resolver).
     pub fn new(protector: Option<SocketProtector>) -> Self {
-        Self { protector }
+        Self {
+            protector,
+            resolver: None,
+        }
+    }
+
+    /// Attach the resolver used for domain targets (builder style).
+    pub fn with_resolver(mut self, resolver: Option<Arc<dyn crate::proxy::FlowResolver>>) -> Self {
+        self.resolver = resolver;
+        self
     }
 }
 
@@ -1527,6 +1546,33 @@ impl Transport for DirectTransport {
     async fn dial(&self, target: SocketAddr) -> io::Result<BoxedStream> {
         let stream = protected_tcp_connect(target, self.protector.as_ref()).await?;
         Ok(Box::new(stream))
+    }
+
+    /// Resolves a domain target locally, then dials it.
+    ///
+    /// The resolution that used to live in `proxy::tcp::dial_direct`, moved next to the transport
+    /// that needs it. Keeping it in the caller meant every dial site had to remember to resolve
+    /// first, and the transport's own contract said "IP only" while the system as a whole dialed
+    /// names — so the two paths were shaped differently for no reason a reader could see.
+    async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+        let (host, port) = match target {
+            Address::Ip(sa) => return self.dial(sa).await,
+            Address::Domain { host, port } => (host, port),
+        };
+        let Some(resolver) = self.resolver.as_deref() else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("direct transport has no resolver for domain targets ({host}:{port})"),
+            ));
+        };
+        let ips = resolver.resolve(&host).await?;
+        let ip = ips.first().copied().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no addresses for {host}:{port}"),
+            )
+        })?;
+        self.dial(SocketAddr::new(ip, port)).await
     }
 }
 

@@ -1532,6 +1532,17 @@ mod tests {
             });
             Ok(Box::new(client))
         }
+
+        /// Address-agnostic double: a domain dials exactly as an IP does.
+        async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+            match target {
+                Address::Ip(sa) => self.dial(sa).await,
+                Address::Domain { port, .. } => {
+                    self.dial(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                        .await
+                }
+            }
+        }
     }
     fn member_serving_204() -> Member {
         Member {
@@ -1603,6 +1614,17 @@ mod tests {
                 Ok(Box::new(tokio::io::duplex(16).0))
             } else {
                 Err(io::Error::other("down"))
+            }
+        }
+
+        /// Address-agnostic double: a domain dials exactly as an IP does.
+        async fn dial_addr(&self, target: Address) -> io::Result<BoxedStream> {
+            match target {
+                Address::Ip(sa) => self.dial(sa).await,
+                Address::Domain { port, .. } => {
+                    self.dial(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                        .await
+                }
             }
         }
     }

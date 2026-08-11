@@ -77,9 +77,17 @@ impl Default for DohResolver {
 #[async_trait]
 impl NameResolver for DohResolver {
     async fn resolve(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
-        let ips = flint_dns::resolve(host, flint_dns::TYPE_A, &self.pool)
-            .await
-            .map_err(io::Error::other)?;
+        // Shaped like every other client-side DoH lookup (`dns::resolver::doh_dial_policy`). This
+        // one matters most: it runs before any transport exists, so if it is blocked spark never
+        // starts, and there is nothing to fall back to.
+        let ips = flint_dns::resolve_with(
+            host,
+            flint_dns::TYPE_A,
+            &self.pool,
+            &crate::dns::resolver::doh_dial_policy(),
+        )
+        .await
+        .map_err(io::Error::other)?;
         let ip = ips
             .into_iter()
             .next()

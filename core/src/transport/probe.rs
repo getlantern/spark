@@ -387,6 +387,17 @@ mod tests {
             });
             Ok(Box::new(client))
         }
+
+        /// Address-agnostic double: a domain dials exactly as an IP does.
+        async fn dial_addr(&self, target: crate::transport::Address) -> io::Result<BoxedStream> {
+            match target {
+                crate::transport::Address::Ip(sa) => self.dial(sa).await,
+                crate::transport::Address::Domain { port, .. } => {
+                    self.dial(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                        .await
+                }
+            }
+        }
     }
 
     #[tokio::test]
