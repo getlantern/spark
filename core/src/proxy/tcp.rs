@@ -229,10 +229,15 @@ async fn dial_proxy(
     // resolving here would put the destination into a local DNS lookup, which is the disclosure
     // proxying exists to prevent. `Transport::dial_addr` is a required method precisely so a
     // transport cannot opt out of carrying the name and silently land us here.
-    let Ok(addr) = Address::domain(dom, original_dst.port()) else {
-        debug!(domain = %dom, "proxy: unusable domain target");
-        warn!("proxy: unusable domain target");
-        return None;
+    let addr = match Address::domain(dom, original_dst.port()) {
+        Ok(a) => a,
+        Err(e) => {
+            // The error names the defect, never the destination — so it is safe at warn, and the
+            // failure stays diagnosable without the domain.
+            debug!(domain = %dom, "proxy: unusable domain target");
+            warn!(error = %e, "proxy: unusable domain target");
+            return None;
+        }
     };
     match proxy.dial_addr(addr).await {
         Ok(s) => Some(s),

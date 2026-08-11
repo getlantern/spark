@@ -1558,17 +1558,21 @@ impl Transport for DirectTransport {
             Address::Ip(sa) => return self.dial(sa).await,
             Address::Domain { host, port } => (host, port),
         };
+        // Every error below is destination-free on purpose. `proxy::tcp::dial_proxy` logs the error
+        // at `warn` and the domain only at `debug`, so a `host:port` in the message would put the
+        // destination at warn level — the exact log-hygiene property that module documents, and one
+        // this transport is otherwise built to protect.
         let Some(resolver) = self.resolver.as_deref() else {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("direct transport has no resolver for domain targets ({host}:{port})"),
+                "direct transport has no resolver for domain targets",
             ));
         };
         let ips = resolver.resolve(&host).await?;
         if ips.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no addresses for {host}:{port}"),
+                "resolver returned no addresses",
             ));
         }
         // Try every candidate, not just the first. The resolver returns both families (A and AAAA)
@@ -1579,7 +1583,7 @@ impl Transport for DirectTransport {
         // in turn instead.
         let mut last = io::Error::new(
             io::ErrorKind::AddrNotAvailable,
-            format!("no reachable address for {host}:{port}"),
+            "no reachable address among the resolved candidates",
         );
         for ip in ips {
             match self.dial(SocketAddr::new(ip, port)).await {
