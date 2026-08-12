@@ -1023,6 +1023,18 @@ impl UdpTransport for SelectingTransport {
                         None => p,
                     });
                 }
+                // `Unsupported` is a statement about what this member *can carry*, not about its
+                // health — mirroring `dial_udp_addr`, which has always drawn this line. Demoting
+                // for it conflates the two, and the conflation is unrecoverable: a capability does
+                // not come back, so the penalty is permanent, and the ranking it feeds is shared
+                // with TCP. Observed in the field: both shadowsocks members
+                // (`2022-blake3-chacha20-poly1305`, whose UDP needs XChaCha20 and is unimplemented
+                // here) answered every UDP dial with `Unsupported`, were demoted for it, and were
+                // then ranked last for the TCP they served perfectly well — a 5-member pool
+                // running on 3.
+                Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                    tracing::debug!(member = i, "pool member can't carry UDP; trying next");
+                }
                 Err(e) => {
                     self.record_dial_failure(i);
                     self.demote(i);
@@ -1040,8 +1052,10 @@ impl UdpTransport for SelectingTransport {
 
     /// UDP dial-by-name counterpart. A member that can't carry a UDP domain (`Unsupported`) is
     /// skipped without demotion (mirrors [`dial_addr`]); a real failure demotes + fails over. If no
-    /// member can carry the name, fall through to direct — which returns `Unsupported` for a domain,
-    /// letting the UDP forwarder resolve client-side.
+    /// member can carry the name, fall through to direct, which resolves it locally — correct there
+    /// because a direct flow is not hidden from the local network anyway. The forwarder no longer
+    /// resolves client-side for a *proxied* flow: `UdpTransport::dial_udp_addr` is required, so
+    /// "cannot carry a name" is a failure the flow takes rather than a lookup it leaks (#199).
     async fn dial_udp_addr(
         &self,
         target: Address,
@@ -1670,6 +1684,25 @@ mod tests {
             Ok((Box::new(NopSink), Box::new(NopSource)))
         }
     }
+    // A UDP transport that declines by capability rather than failing — what a shadowsocks member
+    // with a chacha method reports today.
+    struct UnsupportedUdp;
+    #[async_trait]
+    impl UdpTransport for UnsupportedUdp {
+        async fn dial_udp(
+            &self,
+            _t: SocketAddr,
+        ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            Err(io::Error::new(io::ErrorKind::Unsupported, "no udp here"))
+        }
+
+        async fn dial_udp_addr(
+            &self,
+            _target: Address,
+        ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            Err(io::Error::new(io::ErrorKind::Unsupported, "no udp here"))
+        }
+    }
     struct NopSink;
     #[async_trait]
     impl PacketSink for NopSink {
@@ -1686,6 +1719,23 @@ mod tests {
     }
     fn member(ok: bool) -> Member {
         member_with_meta(ok, ServerMeta::default())
+    }
+    /// A member whose TCP is fine but whose UDP reports `Unsupported` — a real shape, not a
+    /// contrived one: a `2022-blake3-chacha20-poly1305` shadowsocks member answers exactly this
+    /// until XChaCha20 UDP is implemented.
+    fn member_without_udp() -> Member {
+        Member {
+            udp: Arc::new(UnsupportedUdp),
+            ..member(true)
+        }
+    }
+    /// A member that can actually serve a UDP flow. The default `member()` wires `NoUdp`, which
+    /// always errors, so a test needing a UDP *winner* must say so explicitly.
+    fn member_with_udp() -> Member {
+        Member {
+            udp: Arc::new(OkUdp),
+            ..member(true)
+        }
     }
     fn member_with_meta(ok: bool, meta: ServerMeta) -> Member {
         Member {
@@ -1800,6 +1850,43 @@ mod tests {
             Arc::new(NoUdp),
         );
         assert!(t.dial("1.2.3.4:80".parse().unwrap()).await.is_err());
+    }
+
+    /// A member that simply cannot carry UDP must not be demoted for saying so.
+    ///
+    /// `Unsupported` is a capability, not a health signal, and the ranking it feeds is shared with
+    /// TCP — so demoting for it takes a member out of TCP rotation for something TCP does not care
+    /// about, permanently, because a capability never recovers. Field evidence: both shadowsocks
+    /// members (`2022-blake3-chacha20-poly1305`) answered every UDP dial `Unsupported`, were
+    /// demoted, and the selector then logged "probe reports healthy but recent dials failed —
+    /// ranking these last members=[2, 4]" for TCP they served fine.
+    ///
+    /// `dial_udp_addr` has always drawn this line; only this IP path did not.
+    #[tokio::test]
+    async fn a_member_that_cannot_do_udp_at_all_is_not_demoted_for_it() {
+        let t = selecting(vec![member_without_udp(), member_with_udp()], vec![0, 1]);
+        // Fails over to member 1 for the UDP flow itself — the flow still has to be served.
+        assert!(t.dial_udp("1.2.3.4:80".parse().unwrap()).await.is_ok());
+        assert_eq!(
+            &*t.order(),
+            &[0usize, 1][..],
+            "an `Unsupported` UDP capability must leave the TCP ranking untouched"
+        );
+    }
+
+    /// The contrast that keeps the test above honest: a member whose UDP *fails* (rather than
+    /// declining) is still demoted, so the fix cannot be "stop demoting on UDP errors".
+    #[tokio::test]
+    async fn a_member_whose_udp_actually_fails_is_still_demoted() {
+        // `member(false)` wires `NoUdp`, which errors with `Other` — a real failure, not a declined
+        // capability. Member 1 must actually serve UDP, or both demote and the contrast is lost.
+        let t = selecting(vec![member(false), member_with_udp()], vec![0, 1]);
+        assert!(t.dial_udp("1.2.3.4:80".parse().unwrap()).await.is_ok());
+        assert_eq!(
+            &*t.order(),
+            &[1usize, 0][..],
+            "a real UDP dial failure is a health signal and must still demote"
+        );
     }
 
     #[tokio::test]
