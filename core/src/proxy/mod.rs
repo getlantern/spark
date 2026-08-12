@@ -79,17 +79,6 @@ pub struct RouteHooks {
     /// Resolves a Direct flow's domain to its real (best local CDN) IP. `None` → Direct domain flows
     /// fall back to Proxy (never dial a fake IP directly).
     pub direct_resolver: Option<Arc<dyn FlowResolver>>,
-    /// Client-side resolver for a **UDP** flow whose transport cannot carry a domain
-    /// (`dial_udp_addr` → `Unsupported`): shadowsocks, dns-tunnel, proxyless, fronted-meek.
-    ///
-    /// The TCP equivalent is gone. `Transport::dial_addr` is now a required method, so every TCP
-    /// transport hands the name to the exit and a client-side lookup for a proxied TCP flow is
-    /// unrepresentable. `UdpTransport::dial_udp_addr` still has an `Unsupported` default, so this
-    /// remains until those four carry a UDP domain — at which point it should be deleted with it.
-    ///
-    /// It is a known disclosure while it lasts: a proxied UDP flow to a name resolves locally, which
-    /// puts the destination in a DNS lookup on the local network.
-    pub proxy_resolver: Option<Arc<dyn FlowResolver>>,
     /// The proxyless transport (ADR 0014) for [`Decision::Proxyless`] flows. `None` → such flows are
     /// **rejected**, not silently downgraded (see [`Decision::Proxyless`]).
     ///

@@ -6,17 +6,18 @@
 //! (`flint_dns`) whose sockets bypass the TUN (`addDisallowedApplication` / NE bypass). Distinct from
 //! control-plane bootstrap resolution ([`crate::bootstrap`]).
 //!
-//! Two per-action seams, both honoring the config's `options.dns`:
-//! - [`direct_resolver`] — the Direct action. Uses the config's `dns_local` DoH **alone** (racing it
-//!   against foreign resolvers would defeat "best local IPs"). Poisoning isn't a concern — a Direct
-//!   domain is unblocked, which is *why* it's direct.
-//! - [`proxy_resolver`] — the Proxy client-side fallback (only for transports that can't carry a
-//!   domain to the exit). These are the poisoning-risk lookups, so the config's `dns_remote` races
-//!   *alongside* the resilient un-poisoned pool.
+//! One seam, honoring the config's `options.dns`: [`direct_resolver`], the Direct action. It uses the
+//! config's `dns_local` DoH **alone** — racing it against foreign resolvers would defeat "best local
+//! IPs" — and poisoning isn't a concern, because a Direct domain is unblocked, which is *why* it's
+//! direct.
 //!
-//! Both fall back to `flint_dns`'s built-in diverse pool when the config has no usable endpoint, and
-//! return `None` without the `bootstrap-dns` feature (the forwarder then degrades: Direct→Proxy,
-//! Proxy→dial-by-name).
+//! There is deliberately **no proxy resolver**. A proxied flow's name goes to the exit
+//! (`Transport::dial_addr` takes an `Address`, so every transport must carry one), and resolving it
+//! here instead would put the destination into a lookup on the censored network — exactly the
+//! disclosure proxying exists to prevent.
+//!
+//! Falls back to `flint_dns`'s built-in diverse pool when the config has no usable endpoint, and
+//! returns `None` without the `bootstrap-dns` feature (the forwarder then degrades Direct→Proxy).
 
 use std::sync::Arc;
 
@@ -41,26 +42,9 @@ pub fn direct_resolver(dns: &DnsConfig) -> Option<Arc<dyn FlowResolver>> {
     Some(Arc::new(DohResolver { pool }))
 }
 
-/// The Proxy client-side-resolution fallback: the config's `dns_remote` DoH raced alongside the
-/// resilient un-poisoned pool.
-#[cfg(feature = "bootstrap-dns")]
-pub fn proxy_resolver(dns: &DnsConfig) -> Option<Arc<dyn FlowResolver>> {
-    let mut pool = flint_dns::default_pool();
-    if let Some(r) = dns.remote.as_ref().and_then(endpoint_to_resolver) {
-        pool.insert(0, r); // configured remote leads, the diverse pool backs it up
-    }
-    Some(Arc::new(DohResolver { pool }))
-}
-
 /// Without `bootstrap-dns` there is no DoH stack.
 #[cfg(not(feature = "bootstrap-dns"))]
 pub fn direct_resolver(_dns: &DnsConfig) -> Option<Arc<dyn FlowResolver>> {
-    None
-}
-
-/// Without `bootstrap-dns` there is no DoH stack.
-#[cfg(not(feature = "bootstrap-dns"))]
-pub fn proxy_resolver(_dns: &DnsConfig) -> Option<Arc<dyn FlowResolver>> {
     None
 }
 
@@ -210,7 +194,6 @@ mod tests {
     #[test]
     fn no_resolvers_without_bootstrap_dns() {
         assert!(direct_resolver(&DnsConfig::default()).is_none());
-        assert!(proxy_resolver(&DnsConfig::default()).is_none());
     }
 
     #[cfg(feature = "bootstrap-dns")]
@@ -293,10 +276,8 @@ mod tests {
                 remote: Some(ep("1.1.1.1")),
             };
             assert!(direct_resolver(&dns).is_some());
-            assert!(proxy_resolver(&dns).is_some());
             // Empty config → still Some (falls back to the built-in pool).
             assert!(direct_resolver(&DnsConfig::default()).is_some());
-            assert!(proxy_resolver(&DnsConfig::default()).is_some());
         }
     }
 }

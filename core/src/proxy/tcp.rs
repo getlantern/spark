@@ -392,7 +392,6 @@ mod tests {
             router: Arc::new(StubRouter(decision)),
             recoverer: None,
             direct_resolver: None,
-            proxy_resolver: None,
             proxyless_transport: None,
             proxyless_udp: None,
         })
@@ -647,10 +646,6 @@ mod tests {
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
             // Present, but must NOT be consulted when dial-by-name succeeds.
-            proxy_resolver: Some(Arc::new(StubResolver {
-                ip: echo.ip(),
-                resolved: Arc::clone(&resolved),
-            })),
         });
         let (mut app, netstack) = one_flow(fake_dst_for(echo));
         tokio::spawn(run(
@@ -690,7 +685,6 @@ mod tests {
                 ip: echo.ip(),
                 resolved: Arc::clone(&resolved),
             })),
-            proxy_resolver: None,
         });
         let (mut app, netstack) = one_flow(fake_dst_for(echo));
         tokio::spawn(run(
@@ -718,9 +712,9 @@ mod tests {
     /// client-side lookup.
     ///
     /// `DirectTransport` with no resolver is the one thing that still reports `Unsupported` for a
-    /// domain, which makes it the only way to reach the branch the old fallback lived on. A
-    /// `proxy_resolver` is wired here deliberately: if the fallback ever comes back, this test sees
-    /// it consulted and fails, rather than the leak returning silently because nothing looks.
+    /// domain, which makes it the only way to reach the branch the old fallback lived on. The
+    /// resolver flag is watched deliberately: if the fallback ever comes back, this test sees a
+    /// lookup happen and fails, rather than the leak returning silently because nothing looks.
     #[tokio::test]
     async fn a_transport_that_cannot_carry_a_name_fails_rather_than_resolving() {
         let echo = spawn_echo().await;
@@ -731,10 +725,6 @@ mod tests {
             router: Arc::new(StubRouter(Decision::Proxy)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
-            proxy_resolver: Some(Arc::new(StubResolver {
-                ip: echo.ip(),
-                resolved: Arc::clone(&resolved),
-            })),
         });
         let (mut app, netstack) = one_flow(fake_dst_for(echo));
         tokio::spawn(run(
@@ -781,10 +771,6 @@ mod tests {
             router: Arc::new(StubRouter(Decision::Proxy)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
-            proxy_resolver: Some(Arc::new(StubResolver {
-                ip: echo.ip(),
-                resolved: Arc::clone(&resolved),
-            })),
         });
         let (mut app, netstack) = one_flow(fake_dst_for(echo));
         tokio::spawn(run(
@@ -822,10 +808,6 @@ mod tests {
             router: Arc::new(StubRouter(Decision::Direct)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
-            proxy_resolver: Some(Arc::new(StubResolver {
-                ip: echo.ip(),
-                resolved: Arc::clone(&resolved),
-            })),
         });
         let (mut app, netstack) = one_flow(fake_dst_for(echo));
         // proxy transport dials the resolved IP; the (recording) direct transport must stay unused.
@@ -874,10 +856,6 @@ mod tests {
             direct_resolver: Some(Arc::new(StubResolver {
                 ip: echo.ip(),
                 resolved: Arc::new(AtomicBool::new(false)),
-            })),
-            proxy_resolver: Some(Arc::new(StubResolver {
-                ip: echo.ip(),
-                resolved: Arc::clone(&resolved),
             })),
         });
         let (mut app, netstack) = one_flow(fake_dst_for(echo));
@@ -940,10 +918,6 @@ mod tests {
             router: Arc::new(StubRouter(Decision::Proxy)),
             recoverer: Some(Arc::new(StubRecoverer("cdn.example.com"))),
             direct_resolver: None,
-            proxy_resolver: Some(Arc::new(StubResolver {
-                ip: "1.2.3.4".parse().unwrap(),
-                resolved: Arc::clone(&resolved),
-            })),
         });
         let (mut app, netstack) = one_flow("198.18.0.9:443".parse().unwrap());
         tokio::spawn(run(
@@ -1042,7 +1016,6 @@ mod tests {
                 router,
                 recoverer: Some(Arc::new(FakeIpRecoverer::new(pool))),
                 direct_resolver: Some(to(echo.ip())),
-                proxy_resolver: Some(to(echo.ip())),
             });
             // Flow to the fake IP on the echo's port, so a resolved (echo.ip, port) dial reaches it.
             let (app, netstack) = one_flow(SocketAddr::new(fake, echo.port()));

@@ -321,6 +321,19 @@ mod tests {
                 }),
             ))
         }
+
+        /// Address-agnostic: this double answers the same way for a name as for an IP.
+        async fn dial_udp_addr(
+            &self,
+            _target: crate::transport::Address,
+        ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+            Ok((
+                Box::new(FakeSink),
+                Box::new(FakeSource {
+                    response: self.response.clone(),
+                }),
+            ))
+        }
     }
     struct FakeSink;
     #[async_trait]

@@ -93,6 +93,20 @@ impl UdpTransport for ShadowsocksTransport {
         &self,
         target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        self.dial_udp_addr(Address::Ip(target)).await
+    }
+
+    /// Carries a **domain** to the exit, so the shadowsocks server resolves it — no client-side DNS
+    /// for a proxied UDP flow.
+    ///
+    /// SIP022 §3.1.3 puts a full SOCKS5 address in each datagram, so ATYP 3 was always legal here;
+    /// the TCP path has carried domains since it was written. Only this side was IP-only, which left
+    /// the forwarder resolving client-side for proxied UDP — the disclosure the TCP path was fixed to
+    /// avoid.
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
         if !self.method.is_aes() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,

@@ -351,6 +351,52 @@ impl ProxylessTransport {
             wire.clone(),
         )))
     }
+
+    /// Resolve `host` through the chosen un-poisoned resolver, returning every address found.
+    ///
+    /// Shared by the TCP and UDP paths so they cannot drift: both must resolve through the strategy's
+    /// resolver rather than whatever the network would answer, and both must feed a resolver failure
+    /// back into re-selection. Returns both families (A first) — asking only for A strands a v6-only
+    /// network — and treats only the empty union as an error, since a missing AAAA is normal.
+    async fn resolve_via_strategy(
+        &self,
+        chosen: &Strategy,
+        host: &str,
+    ) -> io::Result<Vec<std::net::IpAddr>> {
+        let (a, aaaa) = tokio::join!(
+            flint_dns::resolve_one_with(&chosen.resolver, host, flint_dns::TYPE_A, &chosen.policy),
+            flint_dns::resolve_one_with(
+                &chosen.resolver,
+                host,
+                flint_dns::TYPE_AAAA,
+                &chosen.policy
+            ),
+        );
+        // Keep the failures rather than discarding them: whether they indict the *resolver* or
+        // merely say the *name* does not resolve is what decides re-selection.
+        let mut addrs = Vec::new();
+        let mut failure: Option<io::Error> = None;
+        for result in [a, aaaa] {
+            match result {
+                Ok(found) => addrs.extend(found),
+                Err(e) => {
+                    if outranks(failure.as_ref(), &e) {
+                        failure = Some(e);
+                    }
+                }
+            }
+        }
+        if addrs.is_empty() {
+            // Destination-free: `proxy::tcp::dial_proxy` logs this at `warn`, where the module's
+            // hygiene rule allows no destination.
+            let err = failure.unwrap_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "resolver returned no address")
+            });
+            self.note_resolution_failure(chosen, &err);
+            return Err(err);
+        }
+        Ok(addrs)
+    }
 }
 
 #[async_trait]
@@ -369,50 +415,7 @@ impl Transport for ProxylessTransport {
                 // The path where proxyless is fully itself: resolve through the chosen un-poisoned
                 // resolver rather than whatever the network would have answered.
                 let chosen = self.strategy().await?;
-                // Both families, A first — asking only for A would strand a v6-only network, the same
-                // reason `crate::dns::DohResolver` queries both. Either query may legitimately fail
-                // (no AAAA record is normal), so only the empty union is an error.
-                let (a, aaaa) = tokio::join!(
-                    flint_dns::resolve_one_with(
-                        &chosen.resolver,
-                        &host,
-                        flint_dns::TYPE_A,
-                        &chosen.policy
-                    ),
-                    flint_dns::resolve_one_with(
-                        &chosen.resolver,
-                        &host,
-                        flint_dns::TYPE_AAAA,
-                        &chosen.policy
-                    ),
-                );
-                // Keep the failures rather than discarding them: whether they indict the *resolver*
-                // or merely say the *name* does not resolve is what decides re-selection below.
-                let mut addrs = Vec::new();
-                let mut failure: Option<io::Error> = None;
-                for result in [a, aaaa] {
-                    match result {
-                        Ok(found) => addrs.extend(found),
-                        Err(e) => {
-                            if outranks(failure.as_ref(), &e) {
-                                failure = Some(e);
-                            }
-                        }
-                    }
-                }
-                if addrs.is_empty() {
-                    let err = failure.unwrap_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!(
-                                "proxyless resolver {} returned no address for {host}",
-                                chosen.resolver.name
-                            ),
-                        )
-                    });
-                    self.note_resolution_failure(&chosen, &err);
-                    return Err(err);
-                }
+                let addrs = self.resolve_via_strategy(&chosen, &host).await?;
                 // Try each in order rather than committing to the first: on a single-stack network the
                 // wrong family is unreachable, and the resolver cannot know which stack this host has.
                 let mut last = None;
@@ -435,6 +438,34 @@ impl Transport for ProxylessTransport {
 
 #[async_trait]
 impl UdpTransport for ProxylessTransport {
+    /// Resolves a domain through the strategy's un-poisoned resolver, then sends to it directly.
+    ///
+    /// Local resolution is correct here, not a leak: proxyless UDP *is* a direct socket — there is no
+    /// exit to delegate to, so the destination is already visible to the network by definition. What
+    /// this buys is the same thing the TCP path buys, an answer the local resolver did not get to
+    /// poison.
+    async fn dial_udp_addr(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        let (host, port) = match target {
+            Address::Ip(sa) => return self.dial_udp(sa).await,
+            Address::Domain { host, port } => (host, port),
+        };
+        let chosen = self.strategy().await?;
+        let addrs = self.resolve_via_strategy(&chosen, &host).await?;
+        // Try each in order: on a single-stack network the wrong family is unreachable, and the
+        // resolver cannot know which stack this host has.
+        let mut last = io::Error::new(io::ErrorKind::AddrNotAvailable, "no reachable address");
+        for ip in addrs {
+            match self.dial_udp(SocketAddr::new(ip, port)).await {
+                Ok(halves) => return Ok(halves),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
     /// UDP goes straight out, unshaped.
     ///
     /// The shaping axis is TCP-segment and TLS-record framing, neither of which exists for a datagram,
