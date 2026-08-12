@@ -212,7 +212,11 @@ proxyless = ["anytls", "dep:flint-proxyless", "dep:flint-dns"]
 # deployed shadowsocks-rust servers. `ring` provides the AEADs; `blake3` derives session subkeys and
 # `aes` provides the raw block cipher for the UDP separate-header. Off by default so the base build
 # stays rustls/ring-only and cmake-free. See docs/shadowsocks-design.md.
-shadowsocks = ["dep:blake3", "dep:aes"]
+# `chacha20` is for the UDP half of `2022-blake3-chacha20-poly1305`, whose SS-2022 UDP packets are
+# sealed with XChaCha20-Poly1305 — a 24-byte-nonce variant `ring` does not provide. Only the HChaCha20
+# key-derivation step comes from here; the AEAD itself is still ring's `CHACHA20_POLY1305`. Not a new
+# dependency: `wasm-transport` already pulls the same crate and pin.
+shadowsocks = ["dep:blake3", "dep:aes", "dep:chacha20"]
 # Hysteria 2 transport (ADR 0010): QUIC (quinn/rustls-ring) client interoperable with apernet/hysteria,
 # with Salamander+Gecko obfuscation. Off by default so the base build pulls no QUIC stack.
 hysteria2 = ["dep:quinn", "dep:quinn-udp", "dep:blake2", "dep:webpki-roots"]

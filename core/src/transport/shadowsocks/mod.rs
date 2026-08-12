@@ -1,6 +1,11 @@
 //! Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel, wire-interoperable
-//! with deployed shadowsocks-rust / sing-box SS-2022 servers. TCP (three `2022-blake3-*` ciphers) +
-//! UDP (the two AES methods). See `docs/shadowsocks-design.md`.
+//! with deployed shadowsocks-rust / sing-box SS-2022 servers. TCP and UDP, all three
+//! `2022-blake3-*` ciphers. See `docs/shadowsocks-design.md`.
+//!
+//! UDP has two envelopes, not one parameterised by cipher: the AES methods encrypt a separate
+//! header with a PSK-keyed block cipher and seal the body under a per-session subkey, while
+//! `2022-blake3-chacha20-poly1305` puts a cleartext 24-byte nonce in front and seals everything
+//! after it — session id included — with XChaCha20-Poly1305 under the PSK. See `udp::SinkSeal`.
 
 mod crypto;
 mod tcp;
@@ -107,12 +112,6 @@ impl UdpTransport for ShadowsocksTransport {
         &self,
         target: Address,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        if !self.method.is_aes() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Shadowsocks UDP is supported only for the AES methods in this build (chacha UDP needs XChaCha20)",
-            ));
-        }
         let socket = protected_udp_socket(self.server, self.protector.as_ref())?;
         let socket = UdpSocket::from_std(socket.into())?;
         socket.connect(self.server).await?;
@@ -220,8 +219,15 @@ mod transport_tests {
         assert_eq!(got, 32 + 11 + 16);
     }
 
+    /// Chacha UDP now dials rather than refusing — the gate this replaces returned `Unsupported`
+    /// for every `2022-blake3-chacha20-poly1305` datagram.
+    ///
+    /// Asserts only that it gets past the method check: the dial targets a closed port, so what
+    /// comes back is a connect/socket outcome, never the old "supported only for the AES methods".
+    /// The wire format itself is covered by the frame tests in `udp.rs`, which decrypt the packet
+    /// the way the server does.
     #[tokio::test]
-    async fn dial_udp_rejects_chacha_method() {
+    async fn dial_udp_no_longer_refuses_the_chacha_method() {
         let t = ShadowsocksTransport::new(
             "127.0.0.1:1".parse().unwrap(),
             SsMethod::Chacha20Poly1305,
@@ -229,12 +235,13 @@ mod transport_tests {
             None,
         );
         let target = "1.2.3.4:53".parse().unwrap();
-        let err = t
-            .dial_udp(target)
-            .await
-            .err()
-            .expect("chacha udp must error");
-        assert!(err.to_string().contains("UDP"));
+        if let Err(e) = t.dial_udp(target).await {
+            assert!(
+                !e.to_string().contains("only for the AES methods"),
+                "the method gate must be gone, got: {e}"
+            );
+            assert_ne!(e.kind(), std::io::ErrorKind::Unsupported);
+        }
     }
 }
 
