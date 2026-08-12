@@ -1422,6 +1422,47 @@ mod tests {
         }
     }
 
+    /// A build that pinned an endpoint must actually carry it — opt in with
+    /// `SPARK_REQUIRE_EMBEDDED_OTEL=1`.
+    ///
+    /// [`without_a_fetched_block_the_embedded_one_is_used_when_present`] deliberately passes whether
+    /// or not this build pinned anything, which makes it useless for answering "did my
+    /// `SPARK_OTEL_*` reach the compiler?" — the question that matters when shipping, and the one
+    /// `build.rs`'s stale-cache trap silently answers wrong. This is the assertion that can fail:
+    /// set the variable on any build that is supposed to report, and a binary that would have
+    /// shipped mute fails here instead of in the field.
+    ///
+    /// Deliberately opt-in rather than keyed off `debug_assertions`: a developer build with no
+    /// endpoint is a legitimate configuration, so the requirement has to be stated, not inferred.
+    #[test]
+    fn a_pinned_endpoint_reaches_the_binary() {
+        if option_env!("SPARK_REQUIRE_EMBEDDED_OTEL").map(str::trim) != Some("1") {
+            return;
+        }
+        let block = embedded_otel().expect(
+            "SPARK_REQUIRE_EMBEDDED_OTEL=1 but embedded_otel() is None — SPARK_OTEL_ENDPOINT did \
+             not reach this compile (see core/build.rs on the stale-cache trap)",
+        );
+        // The endpoint is our own ingest host, not a user destination, so naming it here is within
+        // the hygiene rule. The ingestion key is NOT asserted on: its presence is checked by shape
+        // only, so a failure message can never carry it.
+        assert!(
+            !block.endpoint.trim().is_empty(),
+            "pinned endpoint is empty after trimming"
+        );
+        assert!(
+            block.logs_enabled,
+            "logs gate ALL uploads — an embedded block with logs off ships nothing"
+        );
+        assert!(
+            block
+                .headers
+                .iter()
+                .any(|(k, _)| k == "signoz-ingestion-key"),
+            "no ingestion-key header: SPARK_OTEL_INGEST_KEY did not reach this compile"
+        );
+    }
+
     #[test]
     fn otel_defaults() {
         // Endpoint only: sample_rate defaults to 1.0 (always), both flags default off when the

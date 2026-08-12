@@ -102,6 +102,10 @@ jobs:
           SPARK_BOOTSTRAP_DNS_RESOLVERS: ${{ vars.SPARK_BOOTSTRAP_DNS_RESOLVERS }}
           SPARK_OTEL_ENDPOINT: ${{ vars.SPARK_OTEL_ENDPOINT }}
           SPARK_OTEL_INGEST_KEY: ${{ secrets.SPARK_OTEL_INGEST_KEY }}
+          # Fail the build rather than ship a release that cannot report before config-new.
+          # `build.rs` turns this into a hard error when the endpoint is missing; the release
+          # workflow runs no tests, so this is the only thing guarding the shipped artifact.
+          SPARK_REQUIRE_EMBEDDED_OTEL: "1"
         run: |
           features=prod
           if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then features="$features,bip324"; fi
@@ -290,16 +294,21 @@ jobs:
           # and absent from the product. Env inherits down build-tauri-dmg.sh →
           # build-xcframework.sh → cargo, so listing them here is all that is needed.
           #
-          # Unset stays a working configuration for all of these: the dns-tunnel member is simply
-          # absent and the race runs on direct + proxyless + fronted, and no embedded otel block
-          # means the config-delivered one is the only source. Only the server's PUBLIC key and a
-          # public hostname are ever in CI.
+          # Unset stays a working configuration for the bootstrap values: the dns-tunnel member is
+          # simply absent and the race runs on direct + proxyless + fronted. It is NOT acceptable
+          # for the otel endpoint any more — see SPARK_REQUIRE_EMBEDDED_OTEL below, which makes a
+          # release that could not report before config-new fail the build instead. Only the
+          # server's PUBLIC key and a public hostname are ever in CI.
           SPARK_BOOTSTRAP_DNS_ZONE: ${{ vars.SPARK_BOOTSTRAP_DNS_ZONE }}
           SPARK_BOOTSTRAP_DNS_PUBKEY: ${{ vars.SPARK_BOOTSTRAP_DNS_PUBKEY }}
           SPARK_BOOTSTRAP_DNS_RESOLVERS: ${{ vars.SPARK_BOOTSTRAP_DNS_RESOLVERS }}
           SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
           SPARK_OTEL_ENDPOINT: ${{ vars.SPARK_OTEL_ENDPOINT }}
           SPARK_OTEL_INGEST_KEY: ${{ secrets.SPARK_OTEL_INGEST_KEY }}
+          # Fail the build rather than ship a release that cannot report before config-new.
+          # `build.rs` turns this into a hard error when the endpoint is missing; the release
+          # workflow runs no tests, so this is the only thing guarding the shipped artifact.
+          SPARK_REQUIRE_EMBEDDED_OTEL: "1"
         run: |
           export VERSION="${REF_NAME#v}"
           packaging/macos/build-tauri-dmg.sh
