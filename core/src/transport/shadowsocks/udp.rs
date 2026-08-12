@@ -746,13 +746,17 @@ mod tests {
         )
         .expect("build");
 
-        assert!(pkt.len() > PACKET_NONCE + TAG);
-        // The nonce is in the clear; the rest must not be.
-        let nonce: [u8; 24] = pkt[..24].try_into().unwrap();
-        assert!(
-            !pkt[24..].windows(host.len()).any(|w| w == host.as_bytes()),
-            "the hostname must not appear outside the seal"
+        // Structural, not a substring scan: the packet is exactly the nonce plus the sealed
+        // plaintext plus the tag, which proves there is no cleartext anywhere but the nonce. A
+        // scan for the hostname would be probabilistic — the nonce is random, so the ciphertext
+        // differs every run.
+        let plain_len = 8 + 8 + 1 + 8 + 2 + (1 + 1 + host.len() + 2) + b"hello".len();
+        assert_eq!(
+            pkt.len(),
+            PACKET_NONCE + plain_len + TAG,
+            "nonce ‖ sealed(plaintext) ‖ tag, with nothing else in the clear"
         );
+        let nonce: [u8; 24] = pkt[..24].try_into().unwrap();
 
         let mut body = pkt[PACKET_NONCE..].to_vec();
         let plain = x
