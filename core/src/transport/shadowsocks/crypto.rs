@@ -17,6 +17,7 @@ pub enum CryptoError {
     },
     #[error("AEAD authentication failed")]
     Auth,
+    #[cfg(feature = "shadowsocks-native-udp")]
     #[error("AES key must be 16 or 32 bytes, got {got}")]
     AesKeyLength { got: usize },
     #[error("OS RNG unavailable")]
@@ -177,6 +178,7 @@ impl Cipher {
     }
 }
 
+#[cfg(feature = "shadowsocks-native-udp")]
 /// XChaCha20-Poly1305 keyed by the PSK directly — the whole-packet seal SS-2022 UDP uses for
 /// `2022-blake3-chacha20-poly1305` (SIP022 §3.2.2).
 ///
@@ -197,6 +199,7 @@ impl Cipher {
 /// because a wrong round count here would produce a plausible key and silently wrong ciphertext.
 pub struct XChaCha([u8; 32]);
 
+#[cfg(feature = "shadowsocks-native-udp")]
 impl XChaCha {
     /// Key from a 32-byte PSK. The chacha method's key/salt length is always 32 (SIP022 §2.1).
     pub fn new(psk: &[u8]) -> Result<Self, CryptoError> {
@@ -233,17 +236,20 @@ impl XChaCha {
     }
 }
 
+#[cfg(feature = "shadowsocks-native-udp")]
 /// A raw AES block cipher keyed by the PSK directly — used only for the SS-2022 UDP separate-header
 /// (a single ECB block; SIP022 §3.2.1). AES methods only.
 #[derive(Clone)]
 pub struct AesBlock(AesKind);
 
+#[cfg(feature = "shadowsocks-native-udp")]
 #[derive(Clone)]
 enum AesKind {
     A128(Box<aes::Aes128>),
     A256(Box<aes::Aes256>),
 }
 
+#[cfg(feature = "shadowsocks-native-udp")]
 impl AesBlock {
     /// Build from a 16- or 32-byte key.
     pub fn new(key: &[u8]) -> Result<Self, CryptoError> {
@@ -283,6 +289,7 @@ impl AesBlock {
 #[cfg(test)]
 mod tests {
 
+    #[cfg(feature = "shadowsocks-native-udp")]
     /// Pins HChaCha20 against the XChaCha draft's own vector (§2.2.1).
     ///
     /// The round count is the failure this guards. `hchacha::<U10>` is XChaCha20; a different `R`
@@ -313,6 +320,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "shadowsocks-native-udp")]
     /// XChaCha round-trips, and a tampered nonce fails rather than returning garbage.
     #[test]
     fn xchacha_seals_and_opens_and_rejects_a_wrong_nonce() {
@@ -331,6 +339,7 @@ mod tests {
         assert_eq!(opened, b"the quick brown fox");
     }
 
+    #[cfg(feature = "shadowsocks-native-udp")]
     /// A 32-byte PSK is the only legal one for this method; anything else is a config error, not a
     /// silent truncation.
     #[test]
@@ -427,6 +436,7 @@ mod tests {
         assert!(cipher.open([0u8; 12], &mut buf).is_err());
     }
 
+    #[cfg(feature = "shadowsocks-native-udp")]
     #[test]
     fn aes_block_round_trips_fips197_vector() {
         // FIPS-197 AES-128 example: key 000102..0f, plaintext 00112233..ff, ciphertext 69c4e0d8...

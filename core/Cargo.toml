@@ -216,7 +216,12 @@ proxyless = ["anytls", "dep:flint-proxyless", "dep:flint-dns"]
 # sealed with XChaCha20-Poly1305 — a 24-byte-nonce variant `ring` does not provide. Only the HChaCha20
 # key-derivation step comes from here; the AEAD itself is still ring's `CHACHA20_POLY1305`. Not a new
 # dependency: `wasm-transport` already pulls the same crate and pin.
-shadowsocks = ["dep:blake3", "dep:aes", "dep:chacha20"]
+shadowsocks = ["dep:blake3", "dep:aes"]
+# Native SIP022 UDP (the on-wire datagram envelopes), OFF by default: the deployed fleet answers
+# native UDP with ICMP port-unreachable, so shadowsocks tunnels UDP over its TCP stream (UoT) instead.
+# Kept because it is correct, tested, and the right path the moment a server does open UDP — the
+# `chacha20` dependency is only for that build's XChaCha20-Poly1305 envelope.
+shadowsocks-native-udp = ["shadowsocks", "dep:chacha20"]
 # Hysteria 2 transport (ADR 0010): QUIC (quinn/rustls-ring) client interoperable with apernet/hysteria,
 # with Salamander+Gecko obfuscation. Off by default so the base build pulls no QUIC stack.
 hysteria2 = ["dep:quinn", "dep:quinn-udp", "dep:blake2", "dep:webpki-roots"]
