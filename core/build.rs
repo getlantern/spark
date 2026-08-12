@@ -12,8 +12,14 @@
 //! checkouts), which is precisely why it could sit unnoticed for anyone building a release by hand.
 //!
 //! **2. Say so when a release build is missing one.** A `cargo:warning` on a release build with no
-//! bootstrap zone, because "shipped without the last-resort transport" should not be a silent
-//! outcome. Debug builds stay quiet — nobody pins these locally.
+//! bootstrap zone or no diagnostics endpoint, because "shipped without the last-resort transport"
+//! and "shipped unable to report" should not be silent outcomes. Debug builds stay quiet — nobody
+//! pins these locally.
+//!
+//! **3. Refuse to build when a required value is missing.** `SPARK_REQUIRE_EMBEDDED_OTEL=1` turns
+//! the diagnostics warning into a hard error. It exists because the release workflow runs no tests,
+//! so `a_pinned_endpoint_reaches_the_binary` — the test covering the same property — cannot protect
+//! the shipped artifact; only a build-time failure can.
 
 fn main() {
     // Every build-time-pinned value this crate reads. Adding an `option_env!` anywhere in `core`
@@ -87,13 +93,27 @@ fn main() {
     // config-new is exactly the one worth hearing from, and it goes silent with no symptom. The
     // release workflow runs no tests, so the test that covers this
     // (`a_pinned_endpoint_reaches_the_binary`) cannot protect the shipped artifact; this can.
-    let has_endpoint = std::env::var_os("SPARK_OTEL_ENDPOINT").is_some_and(|v| !v.is_empty());
-    if std::env::var("SPARK_REQUIRE_EMBEDDED_OTEL").as_deref() == Ok("1") && !has_endpoint {
+    let has_endpoint = pinned("SPARK_OTEL_ENDPOINT");
+    let has_key = pinned("SPARK_OTEL_INGEST_KEY");
+    if std::env::var("SPARK_REQUIRE_EMBEDDED_OTEL").as_deref() == Ok("1")
+        && !(has_endpoint && has_key)
+    {
+        // Name which half is missing, never its value — this message reaches CI logs, and one of
+        // the two halves is the ingestion key.
+        let missing = match (has_endpoint, has_key) {
+            (false, false) => "SPARK_OTEL_ENDPOINT and SPARK_OTEL_INGEST_KEY are",
+            (false, true) => "SPARK_OTEL_ENDPOINT is",
+            _ => "SPARK_OTEL_INGEST_KEY is",
+        };
         // Panicking in a build script fails the build with this message attached.
         panic!(
-            "SPARK_REQUIRE_EMBEDDED_OTEL=1 but SPARK_OTEL_ENDPOINT is unset or empty — this build \
-             would ship unable to report before config-new. Set SPARK_OTEL_ENDPOINT (and \
-             SPARK_OTEL_INGEST_KEY), or clear the requirement."
+            "SPARK_REQUIRE_EMBEDDED_OTEL=1 but {missing} unset or blank — this build would ship \
+             unable to report before config-new. Set both, or clear the requirement.\n\nThe key is \
+             required by this gate even though `embedded_otel()` accepts a block without one: a \
+             keyless block is legitimate for a self-hosted collector on a private network, but \
+             against an authenticating endpoint it uploads nothing, which is the outcome the \
+             requirement exists to rule out. Matches `a_pinned_endpoint_reaches_the_binary`, which \
+             asserts the header is present."
         );
     }
     if shippable && !has_endpoint {
@@ -103,6 +123,15 @@ fn main() {
              block, never before. Set SPARK_OTEL_ENDPOINT/_INGEST_KEY to include it."
         );
     }
+}
+
+/// Whether `var` holds a value that will survive into an embedded otel block.
+///
+/// Mirrors `config::lantern::embedded_otel`, which trims and treats whitespace-only as absent. A
+/// gate testing `OsString::is_empty()` instead would accept `"   "` and pass a build whose block is
+/// `None` — the exact mute release it exists to stop.
+fn pinned(var: &str) -> bool {
+    std::env::var_os(var).is_some_and(|v| !v.to_string_lossy().trim().is_empty())
 }
 
 /// Tell cargo which git files invalidate the stamped sha.
