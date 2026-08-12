@@ -24,6 +24,10 @@ fn main() {
         "SPARK_BOOTSTRAP_DNS_RESOLVERS",
         "SPARK_OTEL_ENDPOINT",
         "SPARK_OTEL_INGEST_KEY",
+        // Not a pinned *value* — the opt-in that turns "this build must carry an embedded otel
+        // block" into a test failure rather than a mute binary. Listed here for the same reason as
+        // the rest: without it, flipping the requirement on would not recompile the assertion.
+        "SPARK_REQUIRE_EMBEDDED_OTEL",
         "SPARK_MODULE_PUBKEY_HEX",
         "SPARK_GIT_SHA",
     ];
@@ -66,13 +70,37 @@ fn main() {
     }
 
     // Only release builds are shippable, so only they are worth warning about.
-    if std::env::var("PROFILE").as_deref() == Ok("release")
-        && std::env::var_os("SPARK_BOOTSTRAP_DNS_ZONE").is_none()
-    {
+    let shippable = std::env::var("PROFILE").as_deref() == Ok("release");
+    if shippable && std::env::var_os("SPARK_BOOTSTRAP_DNS_ZONE").is_none() {
         println!(
             "cargo:warning=SPARK_BOOTSTRAP_DNS_ZONE is unset — this release build has no bootstrap \
              dns-tunnel race member, so config-fetch runs on direct + proxyless + fronted only. \
              Set SPARK_BOOTSTRAP_DNS_ZONE/_PUBKEY/_RESOLVERS to include it."
+        );
+    }
+
+    // The same warning for diagnostics, plus a way to make it fatal.
+    //
+    // A release without an endpoint is not merely quieter: `upload_allowed` opens with
+    // `let Some(o) = otel else { return false }` and that block comes from config-new, so such a
+    // build can never report from the pre-config phase — the population that failed to reach
+    // config-new is exactly the one worth hearing from, and it goes silent with no symptom. The
+    // release workflow runs no tests, so the test that covers this
+    // (`a_pinned_endpoint_reaches_the_binary`) cannot protect the shipped artifact; this can.
+    let has_endpoint = std::env::var_os("SPARK_OTEL_ENDPOINT").is_some_and(|v| !v.is_empty());
+    if std::env::var("SPARK_REQUIRE_EMBEDDED_OTEL").as_deref() == Ok("1") && !has_endpoint {
+        // Panicking in a build script fails the build with this message attached.
+        panic!(
+            "SPARK_REQUIRE_EMBEDDED_OTEL=1 but SPARK_OTEL_ENDPOINT is unset or empty — this build \
+             would ship unable to report before config-new. Set SPARK_OTEL_ENDPOINT (and \
+             SPARK_OTEL_INGEST_KEY), or clear the requirement."
+        );
+    }
+    if shippable && !has_endpoint {
+        println!(
+            "cargo:warning=SPARK_OTEL_ENDPOINT is unset — this release build has no build-time \
+             diagnostics endpoint, so it can only report once config-new has delivered an `otel` \
+             block, never before. Set SPARK_OTEL_ENDPOINT/_INGEST_KEY to include it."
         );
     }
 }
