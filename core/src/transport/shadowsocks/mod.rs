@@ -1,31 +1,39 @@
 //! Shadowsocks 2022 (SIP022) transport (ADR 0009): a pre-shared-key AEAD tunnel, wire-interoperable
-//! with deployed shadowsocks-rust / sing-box SS-2022 servers. TCP (three `2022-blake3-*` ciphers) +
-//! UDP (the two AES methods). See `docs/shadowsocks-design.md`.
+//! with deployed shadowsocks-rust / sing-box SS-2022 servers. TCP and UDP, all three
+//! `2022-blake3-*` ciphers. See `docs/shadowsocks-design.md`.
+//!
+//! UDP has two envelopes, not one parameterised by cipher: the AES methods encrypt a separate
+//! header with a PSK-keyed block cipher and seal the body under a per-session subkey, while
+//! `2022-blake3-chacha20-poly1305` puts a cleartext 24-byte nonce in front and seals everything
+//! after it — session id included — with XChaCha20-Poly1305 under the PSK. See `udp::SinkSeal`.
 
 mod crypto;
 mod tcp;
+/// Native SIP022 UDP datagram codec. Off by default — see `shadowsocks-native-udp` in Cargo.toml and
+/// [`ShadowsocksTransport::dial_udp_addr`], which tunnels UDP over the TCP stream instead.
+#[cfg(feature = "shadowsocks-native-udp")]
 mod udp;
 
 pub(crate) use crypto::decode_psk;
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::net::SocketAddr;
+#[cfg(any(test, feature = "shadowsocks-native-udp"))]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use ring::rand::{SecureRandom, SystemRandom};
 use tokio::io::AsyncWriteExt;
-use tokio::net::UdpSocket;
 
 use crate::config::SsMethod;
 use crate::net::SocketProtector;
+#[cfg(not(feature = "shadowsocks-native-udp"))]
+use crate::transport::uot::{self, UOT_MAGIC};
 use crate::transport::{
-    protected_tcp_connect, protected_udp_socket, Address, BoxedPacketSink, BoxedPacketSource,
-    BoxedStream, Transport, UdpTransport,
+    protected_tcp_connect, Address, BoxedPacketSink, BoxedPacketSource, BoxedStream, Transport,
+    UdpTransport,
 };
 use tcp::{encode_request, ShadowsocksStream};
-use udp::{ShadowsocksUdpSink, ShadowsocksUdpSource};
 
 /// Current Unix time in seconds (SIP022 timestamps). Shared by the TCP and UDP codecs.
 pub(super) fn now_secs() -> u64 {
@@ -58,6 +66,44 @@ impl ShadowsocksTransport {
             psk,
             protector,
         }
+    }
+}
+
+#[cfg(feature = "shadowsocks-native-udp")]
+impl ShadowsocksTransport {
+    /// Native SIP022 UDP: a real UDP socket to the server, datagrams in the on-wire envelope.
+    ///
+    /// Correct per the spec and covered by `udp.rs`'s frame tests, but not what the deployed fleet
+    /// accepts — see [`UdpTransport::dial_udp_addr`].
+    async fn dial_udp_native(
+        &self,
+        target: Address,
+    ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
+        use ring::rand::{SecureRandom, SystemRandom};
+        use std::sync::Arc;
+        use udp::{ShadowsocksUdpSink, ShadowsocksUdpSource};
+
+        let socket = crate::transport::protected_udp_socket(self.server, self.protector.as_ref())?;
+        let socket = tokio::net::UdpSocket::from_std(socket.into())?;
+        socket.connect(self.server).await?;
+        let socket = Arc::new(socket);
+
+        let mut session_id = [0u8; 8];
+        SystemRandom::new()
+            .fill(&mut session_id)
+            .map_err(|_| io::Error::other("rng"))?;
+
+        let sink = ShadowsocksUdpSink::new(
+            Arc::clone(&socket),
+            self.method,
+            &self.psk,
+            target,
+            session_id,
+        )
+        .map_err(io::Error::other)?;
+        let source = ShadowsocksUdpSource::new(socket, self.method, self.psk.clone(), session_id)
+            .map_err(io::Error::other)?;
+        Ok((Box::new(sink), Box::new(source)))
     }
 }
 
@@ -96,44 +142,42 @@ impl UdpTransport for ShadowsocksTransport {
         self.dial_udp_addr(Address::Ip(target)).await
     }
 
-    /// Carries a **domain** to the exit, so the shadowsocks server resolves it — no client-side DNS
-    /// for a proxied UDP flow.
+    /// UDP rides **over the TCP tunnel** (sing-box UoT v2), not over SS-2022's native UDP.
     ///
-    /// SIP022 §3.1.3 puts a full SOCKS5 address in each datagram, so ATYP 3 was always legal here;
-    /// the TCP path has carried domains since it was written. Only this side was IP-only, which left
-    /// the forwarder resolving client-side for proxied UDP — the disclosure the TCP path was fixed to
-    /// avoid.
+    /// Native SIP022 UDP needs the server to listen on UDP and the path to it to pass UDP. Neither
+    /// holds for the deployed fleet: every native association was answered with `Connection refused`
+    /// (an ICMP port-unreachable, not an authentication failure), so the datagrams never reached a
+    /// decryptor. UoT needs no UDP anywhere — it is an ordinary SS-2022 TCP stream addressed to
+    /// [`UOT_MAGIC`], which a sing-box shadowsocks inbound turns into a UDP association on its side.
+    ///
+    /// **No server-side change is required.** Every shadowsocks inbound builds a `uot.NewRouter`
+    /// unconditionally (`protocol/shadowsocks/inbound{,_multi,_relay}.go`); `udp_over_tcp` is an
+    /// *outbound* option, i.e. a statement about what a client does, not something a server enables.
+    /// Note this works only because the inbound handles it — global UoT at the router was removed in
+    /// sing-box v1.7.0, which rejects the magic address outright.
+    ///
+    /// `target` may be a domain: it rides in the UoT request, so the **exit** resolves it and a
+    /// proxied UDP flow still costs no client DNS — the same property the native path had.
     async fn dial_udp_addr(
         &self,
         target: Address,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        if !self.method.is_aes() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Shadowsocks UDP is supported only for the AES methods in this build (chacha UDP needs XChaCha20)",
-            ));
+        // Port 0: the magic host is a signal, not a destination — nothing dials it. Matches what
+        // samizdat and AnyTLS send.
+        #[cfg(not(feature = "shadowsocks-native-udp"))]
+        {
+            let magic = Address::domain(UOT_MAGIC, 0).map_err(io::Error::other)?;
+            let stream = self.dial_target(&magic).await?;
+            uot::associate(stream, target).await
         }
-        let socket = protected_udp_socket(self.server, self.protector.as_ref())?;
-        let socket = UdpSocket::from_std(socket.into())?;
-        socket.connect(self.server).await?;
-        let socket = Arc::new(socket);
-
-        let mut session_id = [0u8; 8];
-        SystemRandom::new()
-            .fill(&mut session_id)
-            .map_err(|_| io::Error::other("rng"))?;
-
-        let sink = ShadowsocksUdpSink::new(
-            Arc::clone(&socket),
-            self.method,
-            &self.psk,
-            target,
-            session_id,
-        )
-        .map_err(io::Error::other)?;
-        let source = ShadowsocksUdpSource::new(socket, self.method, self.psk.clone(), session_id)
-            .map_err(io::Error::other)?;
-        Ok((Box::new(sink), Box::new(source)))
+        // `shadowsocks-native-udp` selects the on-wire SIP022 datagram path instead. Opt-in at build
+        // time rather than a runtime fallback: which one works is a property of the deployment, not
+        // of the flow, so discovering it per association would spend a failed round trip on every
+        // one. Flip it for a fleet whose servers do listen on UDP.
+        #[cfg(feature = "shadowsocks-native-udp")]
+        {
+            self.dial_udp_native(target).await
+        }
     }
 }
 
@@ -169,6 +213,7 @@ pub(super) fn write_socks_addr(addr: &SocketAddr, out: &mut Vec<u8>) {
     out.extend_from_slice(&addr.port().to_be_bytes());
 }
 
+#[cfg(any(test, feature = "shadowsocks-native-udp"))]
 /// Parse a SOCKS5 address from the front of `buf`, returning the address and bytes consumed.
 /// Returns `None` if truncated or the ATYP is a domain (`0x03`) — the server echoes the IP we sent,
 /// so we never expect a domain on the response path.
@@ -220,8 +265,15 @@ mod transport_tests {
         assert_eq!(got, 32 + 11 + 16);
     }
 
+    /// Chacha UDP now dials rather than refusing — the gate this replaces returned `Unsupported`
+    /// for every `2022-blake3-chacha20-poly1305` datagram.
+    ///
+    /// Asserts only that it gets past the method check: the dial targets a closed port, so what
+    /// comes back is a connect/socket outcome, never the old "supported only for the AES methods".
+    /// The wire format itself is covered by the frame tests in `udp.rs`, which decrypt the packet
+    /// the way the server does.
     #[tokio::test]
-    async fn dial_udp_rejects_chacha_method() {
+    async fn dial_udp_no_longer_refuses_the_chacha_method() {
         let t = ShadowsocksTransport::new(
             "127.0.0.1:1".parse().unwrap(),
             SsMethod::Chacha20Poly1305,
@@ -229,12 +281,13 @@ mod transport_tests {
             None,
         );
         let target = "1.2.3.4:53".parse().unwrap();
-        let err = t
-            .dial_udp(target)
-            .await
-            .err()
-            .expect("chacha udp must error");
-        assert!(err.to_string().contains("UDP"));
+        if let Err(e) = t.dial_udp(target).await {
+            assert!(
+                !e.to_string().contains("only for the AES methods"),
+                "the method gate must be gone, got: {e}"
+            );
+            assert_ne!(e.kind(), std::io::ErrorKind::Unsupported);
+        }
     }
 }
 

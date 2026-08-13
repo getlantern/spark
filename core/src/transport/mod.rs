@@ -268,9 +268,10 @@ pub mod tcp_tunnel;
 /// flow's fake IP and dials it by name so the exit resolves (no client DNS). Re-exported from the
 /// tunnel header, which already encodes it on the wire.
 pub use tcp_tunnel::header::Address;
-/// UDP-over-TCP v2 (sing-box UoT) framing, shared by the stream transports that tunnel UDP over a
-/// reliable stream (AnyTLS, Samizdat). Gated on those transports so the base build pulls no UoT code.
-#[cfg(any(feature = "anytls", feature = "samizdat"))]
+/// UDP-over-TCP v2 (sing-box UoT) framing, shared by the transports that tunnel UDP over a reliable
+/// stream (AnyTLS, Samizdat, and shadowsocks — whose deployed servers accept UoT on the TCP port but
+/// refuse native UDP). Gated on those transports so the base build pulls no UoT code.
+#[cfg(any(feature = "anytls", feature = "samizdat", feature = "shadowsocks"))]
 pub(crate) mod uot;
 /// Path B dynamic transport (ADR 0003): a `wasmi`-hosted byte-transform module, behind the
 /// `wasm-transport` feature so the base build carries no WASM runtime.

@@ -17,6 +17,7 @@ pub enum CryptoError {
     },
     #[error("AEAD authentication failed")]
     Auth,
+    #[cfg(feature = "shadowsocks-native-udp")]
     #[error("AES key must be 16 or 32 bytes, got {got}")]
     AesKeyLength { got: usize },
     #[error("OS RNG unavailable")]
@@ -177,17 +178,78 @@ impl Cipher {
     }
 }
 
+#[cfg(feature = "shadowsocks-native-udp")]
+/// XChaCha20-Poly1305 keyed by the PSK directly — the whole-packet seal SS-2022 UDP uses for
+/// `2022-blake3-chacha20-poly1305` (SIP022 §3.2.2).
+///
+/// The chacha method's UDP construction is not the AES one with a different cipher. AES encrypts a
+/// 16-byte separate header with [`AesBlock`] and seals the body under a *session subkey*; chacha
+/// puts a random 24-byte nonce in the clear and seals **everything after it**, session id included,
+/// under the PSK itself. Different framing, so [`Cipher`] cannot serve here.
+///
+/// `ring` has no 24-byte-nonce variant, but it does not need one: XChaCha20-Poly1305 is defined
+/// (draft-irtf-cfrg-xchacha) as HChaCha20 key derivation followed by ordinary ChaCha20-Poly1305
+/// with a 12-byte nonce of four zero bytes ‖ the nonce's last eight. So the derivation comes from
+/// `chacha20::hchacha` — a library function, already a dependency via `wasm-transport` — and the
+/// AEAD stays ring's audited `CHACHA20_POLY1305`. Nothing about the AEAD itself is hand-rolled.
+///
+/// `hchacha::<U10>` is the 20-round variant: the crate defines
+/// `XChaCha20 = StreamCipherCoreWrapper<XChaChaCore<U10>>`, so `U10` (ten double-rounds) is what
+/// XChaCha20 means. `hchacha20_matches_the_rfc_vector` pins that against the draft's own vector,
+/// because a wrong round count here would produce a plausible key and silently wrong ciphertext.
+pub struct XChaCha([u8; 32]);
+
+#[cfg(feature = "shadowsocks-native-udp")]
+impl XChaCha {
+    /// Key from a 32-byte PSK. The chacha method's key/salt length is always 32 (SIP022 §2.1).
+    pub fn new(psk: &[u8]) -> Result<Self, CryptoError> {
+        let key: [u8; 32] = psk.try_into().map_err(|_| CryptoError::KeyLength {
+            method: SsMethod::Chacha20Poly1305,
+            got: psk.len(),
+            want: 32,
+        })?;
+        Ok(XChaCha(key))
+    }
+
+    /// Split a 24-byte nonce into the (subkey, 12-byte nonce) pair the composition calls for.
+    fn derive(&self, nonce: &[u8; 24]) -> Result<(Cipher, [u8; 12]), CryptoError> {
+        use chacha20::cipher::generic_array::GenericArray;
+        let subkey = chacha20::hchacha::<chacha20::cipher::consts::U10>(
+            GenericArray::from_slice(&self.0),
+            GenericArray::from_slice(&nonce[..16]),
+        );
+        let mut n = [0u8; 12];
+        n[4..].copy_from_slice(&nonce[16..]);
+        Ok((Cipher::new(SsMethod::Chacha20Poly1305, &subkey)?, n))
+    }
+
+    /// Seal in place, appending the tag. `nonce` is the cleartext 24 bytes that precede the packet.
+    pub fn seal(&self, nonce: &[u8; 24], buf: &mut Vec<u8>) -> Result<(), CryptoError> {
+        let (cipher, n) = self.derive(nonce)?;
+        cipher.seal(n, buf)
+    }
+
+    /// Open in place: `buf` is ciphertext ‖ tag; returns the plaintext slice on success.
+    pub fn open<'a>(&self, nonce: &[u8; 24], buf: &'a mut [u8]) -> Result<&'a [u8], CryptoError> {
+        let (cipher, n) = self.derive(nonce)?;
+        cipher.open(n, buf)
+    }
+}
+
+#[cfg(feature = "shadowsocks-native-udp")]
 /// A raw AES block cipher keyed by the PSK directly — used only for the SS-2022 UDP separate-header
 /// (a single ECB block; SIP022 §3.2.1). AES methods only.
 #[derive(Clone)]
 pub struct AesBlock(AesKind);
 
+#[cfg(feature = "shadowsocks-native-udp")]
 #[derive(Clone)]
 enum AesKind {
     A128(Box<aes::Aes128>),
     A256(Box<aes::Aes256>),
 }
 
+#[cfg(feature = "shadowsocks-native-udp")]
 impl AesBlock {
     /// Build from a 16- or 32-byte key.
     pub fn new(key: &[u8]) -> Result<Self, CryptoError> {
@@ -226,6 +288,66 @@ impl AesBlock {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(feature = "shadowsocks-native-udp")]
+    /// Pins HChaCha20 against the XChaCha draft's own vector (§2.2.1).
+    ///
+    /// The round count is the failure this guards. `hchacha::<U10>` is XChaCha20; a different `R`
+    /// still compiles, still returns 32 plausible-looking bytes, and yields ciphertext the server
+    /// rejects as an auth failure — indistinguishable from a wrong PSK. A known vector is the only
+    /// thing that tells those apart.
+    #[test]
+    fn hchacha20_matches_the_rfc_vector() {
+        use chacha20::cipher::generic_array::GenericArray;
+        let key: [u8; 32] = (0u8..32).collect::<Vec<_>>().try_into().unwrap();
+        let input: [u8; 16] = [
+            0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x4a, 0x00, 0x00, 0x00, 0x00, 0x31, 0x41,
+            0x59, 0x27,
+        ];
+        let want: [u8; 32] = [
+            0x82, 0x41, 0x3b, 0x42, 0x27, 0xb2, 0x7b, 0xfe, 0xd3, 0x0e, 0x42, 0x50, 0x8a, 0x87,
+            0x7d, 0x73, 0xa0, 0xf9, 0xe4, 0xd5, 0x8a, 0x74, 0xa8, 0x53, 0xc1, 0x2e, 0xc4, 0x13,
+            0x26, 0xd3, 0xec, 0xdc,
+        ];
+        let got = chacha20::hchacha::<chacha20::cipher::consts::U10>(
+            GenericArray::from_slice(&key),
+            GenericArray::from_slice(&input),
+        );
+        assert_eq!(
+            got.as_slice(),
+            &want[..],
+            "HChaCha20 must match the draft vector"
+        );
+    }
+
+    #[cfg(feature = "shadowsocks-native-udp")]
+    /// XChaCha round-trips, and a tampered nonce fails rather than returning garbage.
+    #[test]
+    fn xchacha_seals_and_opens_and_rejects_a_wrong_nonce() {
+        let x = XChaCha::new(&[7u8; 32]).expect("32-byte psk");
+        let nonce = [3u8; 24];
+        let mut buf = b"the quick brown fox".to_vec();
+        x.seal(&nonce, &mut buf).expect("seal");
+        assert_ne!(&buf[..19], b"the quick brown fox", "must not be plaintext");
+
+        let mut wrong = buf.clone();
+        let mut other = nonce;
+        other[0] ^= 1;
+        assert!(x.open(&other, &mut wrong).is_err(), "wrong nonce must fail");
+
+        let opened = x.open(&nonce, &mut buf).expect("open");
+        assert_eq!(opened, b"the quick brown fox");
+    }
+
+    #[cfg(feature = "shadowsocks-native-udp")]
+    /// A 32-byte PSK is the only legal one for this method; anything else is a config error, not a
+    /// silent truncation.
+    #[test]
+    fn xchacha_rejects_a_psk_of_the_wrong_length() {
+        assert!(XChaCha::new(&[0u8; 16]).is_err());
+        assert!(XChaCha::new(&[0u8; 33]).is_err());
+        assert!(XChaCha::new(&[0u8; 32]).is_ok());
+    }
     use super::*;
 
     #[test]
@@ -314,6 +436,7 @@ mod tests {
         assert!(cipher.open([0u8; 12], &mut buf).is_err());
     }
 
+    #[cfg(feature = "shadowsocks-native-udp")]
     #[test]
     fn aes_block_round_trips_fips197_vector() {
         // FIPS-197 AES-128 example: key 000102..0f, plaintext 00112233..ff, ciphertext 69c4e0d8...

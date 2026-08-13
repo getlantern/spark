@@ -774,10 +774,6 @@ impl SsMethod {
     pub fn salt_len(self) -> usize {
         self.key_len()
     }
-    /// Whether this is an AES-GCM method (the UDP-capable family in v1).
-    pub fn is_aes(self) -> bool {
-        matches!(self, SsMethod::Aes128Gcm | SsMethod::Aes256Gcm)
-    }
 }
 
 /// Shadowsocks 2022 (SIP022) transport configuration (ADR 0009). A pre-shared-key AEAD tunnel,
@@ -1493,9 +1489,7 @@ mod tests {
         assert_eq!(SsMethod::Aes128Gcm.key_len(), 16);
         assert_eq!(SsMethod::Aes128Gcm.salt_len(), 16);
         assert_eq!(SsMethod::Aes256Gcm.key_len(), 32);
-        assert!(SsMethod::Aes256Gcm.is_aes());
         assert_eq!(SsMethod::Chacha20Poly1305.key_len(), 32);
-        assert!(!SsMethod::Chacha20Poly1305.is_aes());
     }
 
     #[test]

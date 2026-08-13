@@ -8,12 +8,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
 
 use crate::config::SsMethod;
 use crate::transport::{PacketSink, PacketSource};
 
-use super::crypto::{session_subkey, AesBlock, Cipher, CryptoError};
+use super::crypto::{session_subkey, AesBlock, Cipher, CryptoError, XChaCha};
 #[cfg(test)]
 use super::write_socks_addr;
 use super::{now_secs, read_socks_addr, write_socks_target};
@@ -62,6 +63,88 @@ fn build_client_packet_with(
     out.extend_from_slice(&sep);
     out.extend_from_slice(&body);
     Ok(out)
+}
+
+/// Nonce length of the chacha UDP envelope (SIP022 §3.2.2); XChaCha20-Poly1305 takes 24 bytes.
+const PACKET_NONCE: usize = 24;
+
+/// Build a client→server UDP packet for `2022-blake3-chacha20-poly1305`.
+///
+/// A different frame from the AES one, not the same frame with another cipher: a random 24-byte
+/// nonce goes out in the clear, and **everything after it** — session id and packet id included —
+/// is sealed with XChaCha20-Poly1305 under the PSK. There is no separate header to block-encrypt
+/// and no per-session subkey, which is why this cannot reuse `build_client_packet_with`.
+///
+/// Cross-checked field-by-field against `sing-shadowsocks`'
+/// `clientPacketConn.WritePacket` (v0.2.8, the version the fleet runs): nonce, then session id,
+/// packet id, header type, timestamp, padding length, address, payload.
+fn build_client_packet_chacha(
+    x: &XChaCha,
+    session_id: [u8; 8],
+    packet_id: u64,
+    target: &Address,
+    payload: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let mut nonce = [0u8; PACKET_NONCE];
+    SystemRandom::new()
+        .fill(&mut nonce)
+        .map_err(|_| CryptoError::Rng)?;
+
+    let mut body = Vec::with_capacity(8 + 8 + 1 + 8 + 2 + 19 + payload.len() + TAG);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&packet_id.to_be_bytes());
+    body.push(PKT_TYPE_CLIENT);
+    body.extend_from_slice(&now_secs().to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes()); // no padding for connected single-target flows
+    write_socks_target(target, &mut body);
+    body.extend_from_slice(payload);
+
+    x.seal(&nonce, &mut body)?;
+    let mut out = Vec::with_capacity(PACKET_NONCE + body.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Open a server→client chacha UDP packet, returning `(server_session_id, packet_id, payload)`.
+///
+/// Unlike the AES path there is nothing to authenticate *after* a cheap unauthenticated peek: the
+/// session id only becomes readable once the whole packet has been opened, so a forged datagram is
+/// rejected by the AEAD before any of its fields exist. The caller still advances the replay window
+/// only after this returns.
+fn open_server_packet_chacha(
+    x: &XChaCha,
+    pkt: &[u8],
+    expected_client_sid: [u8; 8],
+) -> Result<([u8; 8], u64, Vec<u8>), CryptoError> {
+    if pkt.len() < PACKET_NONCE + TAG {
+        return Err(CryptoError::Auth);
+    }
+    let nonce: [u8; PACKET_NONCE] = pkt[..PACKET_NONCE]
+        .try_into()
+        .map_err(|_| CryptoError::Auth)?;
+    let mut body = pkt[PACKET_NONCE..].to_vec();
+    let plain_len = x.open(&nonce, &mut body)?.len();
+    body.truncate(plain_len);
+
+    // Session id and packet id lead the plaintext here; the rest is the same header the AES path
+    // parses, so hand the tail to the shared validator rather than duplicating it.
+    let sid: [u8; 8] = body
+        .get(..8)
+        .ok_or(CryptoError::Auth)?
+        .try_into()
+        .map_err(|_| CryptoError::Auth)?;
+    let pid = u64::from_be_bytes(
+        body.get(8..16)
+            .ok_or(CryptoError::Auth)?
+            .try_into()
+            .map_err(|_| CryptoError::Auth)?,
+    );
+    let payload = parse_server_header(
+        body.get(16..).ok_or(CryptoError::Auth)?,
+        expected_client_sid,
+    )?;
+    Ok((sid, pid, payload))
 }
 
 /// Build a client→server UDP packet (AES methods only). Convenience wrapper that builds the
@@ -121,7 +204,16 @@ fn open_server_body(
     let mut body = enc_body.to_vec();
     let plain_len = cipher.open(nonce, &mut body)?.len(); // decrypts in place; trailing 16 bytes = tag
     body.truncate(plain_len);
+    parse_server_header(&body, expected_client_sid)
+}
 
+/// Validate the server main header and return the payload.
+///
+/// Shared by both UDP envelopes because the header itself is identical between them — only the
+/// encryption differs (AES seals it under a session subkey behind a separate header; chacha seals it
+/// under the PSK behind a cleartext nonce). The chacha caller strips the leading session id ‖ packet
+/// id first, since those live inside its ciphertext rather than in a separate header.
+fn parse_server_header(body: &[u8], expected_client_sid: [u8; 8]) -> Result<Vec<u8>, CryptoError> {
     // Server main header: type ‖ timestamp ‖ client_session_id(8) ‖ padding_len(2) ‖ padding ‖ SOCKS addr ‖ payload.
     if body.first() != Some(&PKT_TYPE_SERVER) {
         return Err(CryptoError::Auth);
@@ -211,13 +303,23 @@ pub fn build_server_packet_for_test(
 }
 
 /// Send half of an SS-2022 UDP association (AES methods).
+/// The send-side UDP envelope. Two frames, not two ciphers — see [`XChaCha`].
+enum SinkSeal {
+    /// AES: PSK-keyed block cipher over the separate header, session-subkey AEAD over the body.
+    Aes {
+        block: Box<AesBlock>,
+        cipher: Box<Cipher>,
+    },
+    /// Chacha: cleartext nonce, PSK-keyed XChaCha20-Poly1305 over everything after it.
+    XChaCha(XChaCha),
+}
+
 pub struct ShadowsocksUdpSink {
     socket: Arc<UdpSocket>,
     target: Address,
     session_id: [u8; 8],
     packet_id: u64,
-    block: AesBlock,
-    cipher: Cipher,
+    seal: SinkSeal,
 }
 
 impl ShadowsocksUdpSink {
@@ -228,15 +330,22 @@ impl ShadowsocksUdpSink {
         target: Address,
         session_id: [u8; 8],
     ) -> Result<Self, CryptoError> {
-        let block = AesBlock::new(psk)?;
-        let cipher = Cipher::new(method, &session_subkey(method, psk, &session_id))?;
+        let seal = match method {
+            SsMethod::Chacha20Poly1305 => SinkSeal::XChaCha(XChaCha::new(psk)?),
+            _ => SinkSeal::Aes {
+                block: Box::new(AesBlock::new(psk)?),
+                cipher: Box::new(Cipher::new(
+                    method,
+                    &session_subkey(method, psk, &session_id),
+                )?),
+            },
+        };
         Ok(ShadowsocksUdpSink {
             socket,
             target,
             session_id,
             packet_id: 0,
-            block,
-            cipher,
+            seal,
         })
     }
 }
@@ -244,14 +353,23 @@ impl ShadowsocksUdpSink {
 #[async_trait]
 impl PacketSink for ShadowsocksUdpSink {
     async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
-        let pkt = build_client_packet_with(
-            &self.block,
-            &self.cipher,
-            self.session_id,
-            self.packet_id,
-            &self.target,
-            payload,
-        )
+        let pkt = match &self.seal {
+            SinkSeal::Aes { block, cipher } => build_client_packet_with(
+                block,
+                cipher,
+                self.session_id,
+                self.packet_id,
+                &self.target,
+                payload,
+            ),
+            SinkSeal::XChaCha(x) => build_client_packet_chacha(
+                x,
+                self.session_id,
+                self.packet_id,
+                &self.target,
+                payload,
+            ),
+        }
         .map_err(io::Error::other)?;
         self.packet_id = self.packet_id.wrapping_add(1);
         self.socket.send(&pkt).await.map(|_| ())
@@ -262,19 +380,30 @@ impl PacketSink for ShadowsocksUdpSink {
 /// first sight of the server session ID, then reused for every datagram in that session).
 struct SessionState {
     window: ReplayWindow,
-    cipher: Cipher,
+    /// `None` for the chacha envelope, which opens every packet with the source's own
+    /// PSK-keyed key — there is no per-server-session subkey to cache.
+    cipher: Option<Cipher>,
 }
 
 /// Receive half of an SS-2022 UDP association (AES methods).
 ///
 /// Drops malformed or replayed datagrams and keeps reading so that one bad packet never
 /// surfaces as an error to the netstack.
+/// The receive-side UDP envelope. AES derives a fresh cipher per server session id; chacha opens
+/// every packet with the one PSK-keyed key, so it needs no per-session material at all.
+enum SourceSeal {
+    Aes {
+        method: SsMethod,
+        psk: Vec<u8>,
+        block: AesBlock,
+    },
+    XChaCha(XChaCha),
+}
+
 pub struct ShadowsocksUdpSource {
     socket: Arc<UdpSocket>,
-    method: SsMethod,
-    psk: Vec<u8>,
     client_session_id: [u8; 8],
-    block: AesBlock,
+    seal: SourceSeal,
     sessions: HashMap<[u8; 8], SessionState>,
     scratch: Vec<u8>,
 }
@@ -286,13 +415,18 @@ impl ShadowsocksUdpSource {
         psk: Vec<u8>,
         client_session_id: [u8; 8],
     ) -> Result<Self, CryptoError> {
-        let block = AesBlock::new(&psk)?;
+        let seal = match method {
+            SsMethod::Chacha20Poly1305 => SourceSeal::XChaCha(XChaCha::new(&psk)?),
+            _ => SourceSeal::Aes {
+                block: AesBlock::new(&psk)?,
+                method,
+                psk,
+            },
+        };
         Ok(ShadowsocksUdpSource {
             socket,
-            method,
-            psk,
             client_session_id,
-            block,
+            seal,
             sessions: HashMap::new(),
             scratch: vec![0u8; 64 * 1024], // reused across recvs (one datagram at a time)
         })
@@ -306,11 +440,56 @@ impl PacketSource for ShadowsocksUdpSource {
         // bad datagram never surfaces as an error to the netstack.
         loop {
             let n = self.socket.recv(&mut self.scratch).await?;
+
+            // Chacha first: its AEAD covers the whole datagram, so the session id is unreadable
+            // until the packet has already authenticated. The ordering hazard the AES path below
+            // guards against — acting on an attacker-influenceable `sid` — cannot arise here.
+            if let SourceSeal::XChaCha(x) = &self.seal {
+                let (sid, pid, payload) = match open_server_packet_chacha(
+                    x,
+                    &self.scratch[..n],
+                    self.client_session_id,
+                ) {
+                    Ok(v) => v,
+                    Err(_) => continue, // malformed / forged / bad header -> drop
+                };
+                match self.sessions.get_mut(&sid) {
+                    Some(st) => {
+                        if !st.window.accept(pid) {
+                            continue; // replay / out-of-window -> drop
+                        }
+                    }
+                    // Same capacity rule as the AES path, for the same reason (SIP022 §3.2.4).
+                    None => {
+                        if self.sessions.len() >= MAX_SERVER_SESSIONS {
+                            continue;
+                        }
+                        let mut window = ReplayWindow::new();
+                        window.accept(pid);
+                        self.sessions.insert(
+                            sid,
+                            SessionState {
+                                window,
+                                cipher: None,
+                            },
+                        );
+                    }
+                }
+                let len = payload.len().min(buf.len());
+                buf[..len].copy_from_slice(&payload[..len]);
+                return Ok(len);
+            }
+            // Everything below is the AES envelope. The `continue` is unreachable — the branch above
+            // returns for the only other variant — and is used rather than a panic to keep this
+            // loop's no-panic contract; it costs one extra `recv` in a state that cannot occur.
+            let SourceSeal::Aes { method, psk, block } = &self.seal else {
+                continue;
+            };
             // The separate header is only AES-ECB-decrypted here — keyed but UNAUTHENTICATED, so `sid`
             // is attacker-influenceable (a spoofed datagram on the server's 4-tuple decrypts to some
             // pseudo-random sid). We therefore authenticate the AEAD body BEFORE mutating any session
             // state, so a forged packet can never create/evict a tracked replay window.
-            let (sid, pid, sep) = match decrypt_separate_header(&self.block, &self.scratch[..n]) {
+            let (sid, pid, sep) = match decrypt_separate_header(block, &self.scratch[..n]) {
                 Ok(v) => v,
                 Err(_) => continue, // malformed -> drop
             };
@@ -318,11 +497,14 @@ impl PacketSource for ShadowsocksUdpSource {
 
             // Fast path: an already-tracked server session — open with its cached cipher.
             if let Some(st) = self.sessions.get_mut(&sid) {
-                let payload =
-                    match open_server_body(&st.cipher, &sep, enc_body, self.client_session_id) {
-                        Ok(p) => p,
-                        Err(_) => continue, // failed auth / bad header -> drop, window untouched
-                    };
+                let Some(cached) = st.cipher.as_ref() else {
+                    continue; // an AES session always caches its cipher; nothing to open with
+                };
+                let payload = match open_server_body(cached, &sep, enc_body, self.client_session_id)
+                {
+                    Ok(p) => p,
+                    Err(_) => continue, // failed auth / bad header -> drop, window untouched
+                };
                 if !st.window.accept(pid) {
                     continue; // replay / out-of-window -> drop
                 }
@@ -332,11 +514,10 @@ impl PacketSource for ShadowsocksUdpSource {
             }
 
             // New server session id: derive a cipher and AUTHENTICATE before touching the map.
-            let cipher =
-                match Cipher::new(self.method, &session_subkey(self.method, &self.psk, &sid)) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
+            let cipher = match Cipher::new(*method, &session_subkey(*method, psk, &sid)) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
             let payload = match open_server_body(&cipher, &sep, enc_body, self.client_session_id) {
                 Ok(p) => p,
                 Err(_) => continue, // forged / unauthenticated -> drop, NO map mutation
@@ -350,7 +531,13 @@ impl PacketSource for ShadowsocksUdpSource {
             }
             let mut window = ReplayWindow::new();
             window.accept(pid); // first packet of a fresh window — always fresh
-            self.sessions.insert(sid, SessionState { window, cipher });
+            self.sessions.insert(
+                sid,
+                SessionState {
+                    window,
+                    cipher: Some(cipher),
+                },
+            );
             let len = payload.len().min(buf.len());
             buf[..len].copy_from_slice(&payload[..len]);
             return Ok(len);
@@ -537,6 +724,84 @@ mod tests {
     ///
     /// SIP022 §3.1.3 always allowed this — the TCP path has carried domains since it was written,
     /// while UDP was IP-only, which left the forwarder resolving client-side for proxied UDP flows.
+    /// The chacha envelope is a different frame, so assert its bytes rather than trusting symmetry
+    /// with the AES one: cleartext 24-byte nonce, then a PSK-keyed XChaCha20-Poly1305 seal whose
+    /// plaintext opens with session id ‖ packet id ‖ type ‖ timestamp ‖ padding_len ‖ ATYP.
+    ///
+    /// Decrypted here the way `sing-shadowsocks` does it — one `udpCipher.Open` over everything past
+    /// the nonce, with no separate header and no session subkey — so a frame that merely round-trips
+    /// against our own builder cannot pass.
+    #[test]
+    fn the_chacha_envelope_puts_a_cleartext_nonce_then_seals_everything_else() {
+        let psk = vec![5u8; 32];
+        let x = XChaCha::new(&psk).expect("psk");
+        let session_id = [7u8; 8];
+        let host = "example.com";
+        let pkt = build_client_packet_chacha(
+            &x,
+            session_id,
+            42,
+            &Address::domain(host, 443).expect("domain"),
+            b"hello",
+        )
+        .expect("build");
+
+        // Structural, not a substring scan: the packet is exactly the nonce plus the sealed
+        // plaintext plus the tag, which proves there is no cleartext anywhere but the nonce. A
+        // scan for the hostname would be probabilistic — the nonce is random, so the ciphertext
+        // differs every run.
+        let plain_len = 8 + 8 + 1 + 8 + 2 + (1 + 1 + host.len() + 2) + b"hello".len();
+        assert_eq!(
+            pkt.len(),
+            PACKET_NONCE + plain_len + TAG,
+            "nonce ‖ sealed(plaintext) ‖ tag, with nothing else in the clear"
+        );
+        let nonce: [u8; 24] = pkt[..24].try_into().unwrap();
+
+        let mut body = pkt[PACKET_NONCE..].to_vec();
+        let plain = x
+            .open(&nonce, &mut body)
+            .expect("server-side open")
+            .to_vec();
+
+        assert_eq!(&plain[..8], &session_id, "session id leads the ciphertext");
+        assert_eq!(
+            u64::from_be_bytes(plain[8..16].try_into().unwrap()),
+            42,
+            "packet id follows it"
+        );
+        assert_eq!(plain[16], PKT_TYPE_CLIENT, "then the header type");
+        // session(8) ‖ packet(8) ‖ type(1) ‖ time(8) ‖ padding_len(2) ‖ ATYP
+        let atyp_at = 8 + 8 + 1 + 8 + 2;
+        assert_eq!(plain[atyp_at], 3, "ATYP 3 = domain");
+        assert_eq!(plain[atyp_at + 1] as usize, host.len(), "length byte");
+        assert_eq!(
+            &plain[atyp_at + 2..atyp_at + 2 + host.len()],
+            host.as_bytes(),
+            "the exit receives the name, not an address we resolved"
+        );
+        let payload_at = atyp_at + 2 + host.len() + 2; // + port
+        assert_eq!(&plain[payload_at..], b"hello");
+    }
+
+    /// A tampered byte anywhere past the nonce must fail authentication rather than parse.
+    #[test]
+    fn the_chacha_envelope_rejects_a_tampered_packet() {
+        let x = XChaCha::new(&[5u8; 32]).unwrap();
+        let pkt = build_client_packet_chacha(
+            &x,
+            [7u8; 8],
+            1,
+            &Address::domain("example.com", 443).unwrap(),
+            b"hi",
+        )
+        .unwrap();
+        let nonce: [u8; 24] = pkt[..24].try_into().unwrap();
+        let mut body = pkt[PACKET_NONCE..].to_vec();
+        body[0] ^= 1;
+        assert!(x.open(&nonce, &mut body).is_err());
+    }
+
     /// This asserts the encoded bytes, not just that the call compiles.
     #[test]
     fn a_domain_target_is_encoded_as_atyp3_in_the_datagram() {
