@@ -255,11 +255,29 @@ pub fn config_race_member(
 /// describes the connection pool rather than the transfer speed anyone noticed. Query it as
 /// `p50(throughput_bps) where bytes_total > <floor>`. `bytes_total` is emitted alongside so that
 /// filter is possible without summing two fields at query time.
-pub fn proxy_flow_completed(duration_ms: u64, bytes_up: u64, bytes_down: u64) -> DiagEvent {
+pub fn proxy_flow_completed(
+    duration_ms: u64,
+    bytes_up: u64,
+    bytes_down: u64,
+    connect_ms: u64,
+    ttfb_ms: Option<u64>,
+) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Debug, "tunnel", "proxy.flow_completed");
     ev.fields.insert("duration_ms".into(), duration_ms.into());
     ev.fields.insert("bytes_up".into(), bytes_up.into());
     ev.fields.insert("bytes_down".into(), bytes_down.into());
+    // How long the proxy took to have a usable upstream: dial, plus whatever handshake the transport
+    // runs. This is the half a user feels as "slow to start", and it is invisible in `duration_ms`,
+    // which is timed from *after* the dial.
+    ev.fields.insert("connect_ms".into(), connect_ms.into());
+    // Time to first byte, measured from before the dial — so it includes `connect_ms` and is the
+    // number that answers "how long until anything came back". Absent when the flow never received a
+    // byte: a connection that opened and stayed silent is a different outcome from a fast one, and
+    // recording it as 0 would pull every percentile down. Same `Option`-shaped omission as
+    // `throughput_bps` below.
+    if let Some(ttfb) = ttfb_ms {
+        ev.fields.insert("ttfb_ms".into(), ttfb.into());
+    }
     let bytes_total = bytes_up.saturating_add(bytes_down);
     ev.fields.insert("bytes_total".into(), bytes_total.into());
     // Sub-millisecond flows would divide by zero; they also moved their bytes instantly, so any
@@ -435,7 +453,7 @@ mod tests {
             ),
             (
                 "proxy_flow_completed",
-                proxy_flow_completed(4200, 1551, 6282),
+                proxy_flow_completed(4200, 1551, 6282, 120, Some(180)),
             ),
             (
                 "config_race_member",
@@ -589,14 +607,14 @@ mod tests {
     #[test]
     fn throughput_is_bits_per_second_over_the_flow() {
         // 1 MB down + 0 up over 8s => 8 Mbit / 8s = 1_000_000 bps.
-        let ev = proxy_flow_completed(8_000, 0, 1_000_000);
+        let ev = proxy_flow_completed(8_000, 0, 1_000_000, 90, Some(140));
         assert_eq!(f(&ev, "throughput_bps"), Some(1_000_000));
         assert_eq!(f(&ev, "bytes_total"), Some(1_000_000));
     }
 
     #[test]
     fn bytes_total_is_both_directions() {
-        let ev = proxy_flow_completed(1_000, 1_551, 6_282);
+        let ev = proxy_flow_completed(1_000, 1_551, 6_282, 30, Some(55));
         assert_eq!(f(&ev, "bytes_total"), Some(7_833));
         // 7833 B * 8 bits * 1000ms / 1000ms
         assert_eq!(f(&ev, "throughput_bps"), Some(62_664));
@@ -607,8 +625,8 @@ mod tests {
     /// `bytes_total` separates it from real transfers instead of it dragging the median.
     #[test]
     fn an_idle_keepalive_reports_low_throughput_not_a_slow_transfer() {
-        let idle = proxy_flow_completed(61_723, 0, 5_791);
-        let real = proxy_flow_completed(8_000, 0, 4_611_901);
+        let idle = proxy_flow_completed(61_723, 0, 5_791, 40, Some(70));
+        let real = proxy_flow_completed(8_000, 0, 4_611_901, 40, Some(70));
         let idle_bps = f(&idle, "throughput_bps").expect("idle throughput");
         let real_bps = f(&real, "throughput_bps").expect("real throughput");
         assert!(
@@ -624,7 +642,7 @@ mod tests {
     /// A sub-millisecond flow would divide by zero. Omit rather than invent a number.
     #[test]
     fn a_zero_duration_flow_omits_throughput() {
-        let ev = proxy_flow_completed(0, 100, 200);
+        let ev = proxy_flow_completed(0, 100, 200, 10, None);
         assert_eq!(f(&ev, "throughput_bps"), None);
         assert_eq!(f(&ev, "bytes_total"), Some(300), "bytes still recorded");
     }
@@ -684,6 +702,29 @@ mod tests {
     /// whether any redactor happens to recognize its shape. A ConnectionID in particular is
     /// 8 random bytes in hex, which no redactor can distinguish from an ordinary token — so the
     /// key is the only place it can be caught.
+    /// A flow that never received a byte must omit `ttfb_ms`, not report it as 0.
+    ///
+    /// The distinction is the whole point of the metric: a connection that opened and stayed silent
+    /// is a *failure* shape, and recording it as an instant first byte would pull every percentile
+    /// toward zero — making the tunnel look fastest exactly when it is least useful. `connect_ms` is
+    /// still present, because the dial did complete.
+    #[test]
+    fn a_flow_with_no_first_byte_omits_ttfb_rather_than_reporting_zero() {
+        let silent = proxy_flow_completed(5_000, 100, 0, 42, None);
+        assert_eq!(f(&silent, "connect_ms"), Some(42));
+        assert!(
+            !silent.fields.contains_key("ttfb_ms"),
+            "a flow that received nothing must not claim a time to first byte"
+        );
+
+        let answered = proxy_flow_completed(5_000, 100, 200, 42, Some(0));
+        assert_eq!(
+            f(&answered, "ttfb_ms"),
+            Some(0),
+            "a genuine sub-millisecond first byte is still 0, and must be recorded"
+        );
+    }
+
     #[test]
     fn every_emitted_attribute_key_is_from_a_closed_set() {
         // The resource block (`otlp::build_resource_attrs`) — `getlantern/semconv` names, all
@@ -715,6 +756,13 @@ mod tests {
             "candidate_types",
             "count",
             "duration_ms",
+            // Both durations, so neither can carry a destination, client IP, resolver IP, or
+            // ConnectionID: `connect_ms` is how long the proxy took to have a usable upstream,
+            // `ttfb_ms` how long until the first byte came back. They answer "is it slow to
+            // start" — which `duration_ms` (flow lifetime) cannot, since a long-lived stream
+            // and a slow one are indistinguishable in it.
+            "connect_ms",
+            "ttfb_ms",
             "error",
             "error_kind",
             "interval_ms",

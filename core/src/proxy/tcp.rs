@@ -70,6 +70,12 @@ async fn forward(
     // (the guard decrements on drop).
     let _session = SessionGuard::open(Arc::clone(&metrics));
 
+    // Stamped before any of the flow's work — domain recovery, the routing decision, the dial — so
+    // `connect_ms` and `ttfb_ms` measure what the user actually waits through. Placing it after
+    // routing would silently exclude rule matching and fake-IP recovery, which is precisely the kind
+    // of cost worth being able to see.
+    let flow_start = std::time::Instant::now();
+
     let hooks = hooks.as_deref();
     // Recover the domain behind the (possibly fake) destination IP, then decide the action on it.
     let domain = hooks
@@ -161,19 +167,31 @@ async fn forward(
     // Wrap the upstream half so writes (app→upstream) count as `up` and reads (upstream→app) as
     // `down`. `&mut *stream` derefs the box to the `dyn` stream `copy_bidirectional` accepts.
     let mut upstream = Counting::new(upstream, metrics);
+    // `connect_ms` is everything up to here: routing, the dial, and the transport's own handshake.
+    let connect_ms = flow_start.elapsed().as_millis() as u64;
     // Timed so the flow's *throughput* is recoverable, not just its size. Byte counts alone cannot
     // answer "is the tunnel slow" — the question telemetry kept being asked and could not settle.
     let started = std::time::Instant::now();
     match copy_bidirectional(&mut *stream, &mut upstream).await {
         Ok((to_upstream, to_app)) => {
             let duration_ms = started.elapsed().as_millis() as u64;
-            info!(to_upstream, to_app, duration_ms, "tcp flow completed");
+            // From before the dial, so it covers connect + handshake + the origin's own think time —
+            // what "how long until anything came back" actually means.
+            let ttfb_ms = upstream
+                .first_read_at()
+                .map(|t| t.duration_since(flow_start).as_millis() as u64);
+            info!(
+                to_upstream,
+                to_app, duration_ms, connect_ms, ttfb_ms, "tcp flow completed"
+            );
             // Structured twin of the line above: the diag layer forwards only `message`, so these
             // numbers reach the collector as prose unless they are emitted as real fields.
             crate::diag::emit(crate::diag::events::proxy_flow_completed(
                 duration_ms,
                 to_upstream,
                 to_app,
+                connect_ms,
+                ttfb_ms,
             ));
         }
         Err(e) => warn!(error = %e, "tcp flow error"),
