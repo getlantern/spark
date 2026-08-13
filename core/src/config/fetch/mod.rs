@@ -163,6 +163,10 @@ pub enum FetchOutcome {
     NotModified,
 }
 
+/// Ceiling on a decoded config body. Applies to the **decompressed** size on both branches, so a
+/// gzip bomb is bounded by what the parser would receive rather than by its size on the wire.
+const MAX_BODY: usize = 4 * 1024 * 1024;
+
 /// One config-new fetch: race a direct plain-TLS request against the fronted avenues, returning the
 /// first usable outcome. Direct typically wins on an open network; the fronted paths win where the
 /// direct dial is censored (DNS poisoning / SNI block / RST). Two fronted avenues run when available:
@@ -442,7 +446,13 @@ async fn fetch_once_kindling(
                 crate::config::fetch::request::header_safe(conn.authority(&env.host)).into_owned();
             let resp = flint_kindling::h2_oneshot(conn.stream, &authority, &oneshot).await?;
             let etag = resp.header("etag").map(ToOwned::to_owned);
-            Ok::<_, std::io::Error>((resp.status, etag, resp.body))
+            // flint returns the body verbatim, so the fronted branch decodes here — through the same
+            // helper the 1.1 branch uses, so the decoded-size cap cannot be forgotten on one path.
+            // Read the header before moving the body out of `resp`.
+            let enc = resp.header("content-encoding").map(ToOwned::to_owned);
+            let body =
+                crate::config::fetch::http::decode_body(resp.body, enc.as_deref(), MAX_BODY)?;
+            Ok::<_, std::io::Error>((resp.status, etag, body))
         } else {
             // Same rule on the 1.1 path: the `Host:` header is the authority, so a fronted winner
             // needs the front's inner host here too. Only the header changes — the request line and
@@ -451,7 +461,7 @@ async fn fetch_once_kindling(
             let authority = conn.authority(&env.host).to_owned();
             let bytes = build_request_bytes(&authority, &env.path, req, cond, attribution)
                 .map_err(std::io::Error::other)?;
-            let resp = post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await?;
+            let resp = post_collect(conn.stream, &bytes, MAX_BODY).await?;
             Ok((resp.status, resp.etag, resp.body))
         }
     })
@@ -1870,7 +1880,7 @@ mod tests {
                     KindlingHeaders::default(),
                 )
                 .expect("request bytes");
-                match post_collect(conn.stream, &bytes, 4 * 1024 * 1024).await {
+                match post_collect(conn.stream, &bytes, MAX_BODY).await {
                     Ok(r) => println!(
                         "  http/1.1 -> HTTP {} ({} body bytes)",
                         r.status,

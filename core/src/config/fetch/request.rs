@@ -268,6 +268,12 @@ pub fn build_request_bytes(
         "X-Lantern-Time-Zone: {}\r\n",
         header_safe(&req.time_zone)
     ));
+    // The server compresses when asked and not otherwise: measured 8,758 B identity vs 2,728 B gzip
+    // for the same payload, a 3.2x saving on every fetch — paid on the censored paths this races
+    // over, including the dns-tunnel tier that moves KB/s. Only gzip: the server also offers
+    // deflate, but brotli and zstd are answered uncompressed, and a brotli decoder embeds a ~120 KB
+    // static dictionary against a <3 MB binary budget to save ~270 B per fetch.
+    head.push_str("Accept-Encoding: gzip\r\n");
     head.push_str("Content-Type: application/json\r\n");
     head.push_str("Cache-Control: no-cache\r\n");
     if let Some(etag) = &cond.etag {
@@ -296,6 +302,14 @@ pub fn build_oneshot_request(
 ) -> Result<OneshotRequest, serde_json::Error> {
     let body = serde_json::to_vec(req)?;
     let mut out = OneshotRequest::post(path.to_owned(), body)
+        // The on-the-wire cap the 1.1 path gets from `post_collect`'s read loop. Without it flint
+        // buffers an unbounded *compressed* body before `decode_body` ever sees it, so the
+        // decoded-size check would arrive too late to prevent the allocation. Slack over `MAX_BODY`
+        // for headers and for a body that compresses poorly, mirroring the 1.1 loop's own margin.
+        .with_max_body(super::MAX_BODY + 64 * 1024)
+        // Same negotiation as the 1.1 path above; flint hands back headers + body verbatim and does
+        // no decoding of its own, so the fronted branch decodes through the same `decode_body`.
+        .header("Accept-Encoding", "gzip")
         .header("X-Lantern-App", APP_NAME)
         .header("X-Lantern-App-Version", req.version.clone())
         .header("X-Lantern-Version", req.version.clone())
