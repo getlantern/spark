@@ -70,6 +70,12 @@ async fn forward(
     // (the guard decrements on drop).
     let _session = SessionGuard::open(Arc::clone(&metrics));
 
+    // Stamped before any of the flow's work — domain recovery, the routing decision, the dial — so
+    // `connect_ms` and `ttfb_ms` measure what the user actually waits through. Placing it after
+    // routing would silently exclude rule matching and fake-IP recovery, which is precisely the kind
+    // of cost worth being able to see.
+    let flow_start = std::time::Instant::now();
+
     let hooks = hooks.as_deref();
     // Recover the domain behind the (possibly fake) destination IP, then decide the action on it.
     let domain = hooks
@@ -98,9 +104,6 @@ async fn forward(
     }
     debug!(src = %src, dst = %original_dst, domain = domain.as_deref().unwrap_or("-"), ?decision, "tcp flow: routing");
 
-    // Before the dial, so `connect_ms` and `ttfb_ms` measure what the user waits through rather than
-    // only the copy phase.
-    let flow_start = std::time::Instant::now();
     let upstream = match decision {
         // Reject with RST when the netstack offers it (fail fast — the client sees ECONNRESET in
         // milliseconds, like a real firewall REJECT); merely dropping `stream` leaves the client
