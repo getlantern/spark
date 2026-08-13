@@ -72,12 +72,29 @@ impl Drop for SessionGuard {
 pub struct Counting<S> {
     inner: S,
     metrics: Arc<Metrics>,
+    /// When the first byte arrived from the wrapped half, for time-to-first-byte.
+    ///
+    /// A plain field, not an atomic: the flow owns this wrapper and reads the stamp after the copy
+    /// returns, so nothing observes it concurrently. `poll_read` is the hot path, and the check is
+    /// one `Option` test that stops being taken after the first byte.
+    first_read: Option<std::time::Instant>,
 }
 
 impl<S> Counting<S> {
     /// Wrap `inner`, attributing its writes/reads to `metrics`.
     pub fn new(inner: S, metrics: Arc<Metrics>) -> Self {
-        Self { inner, metrics }
+        Self {
+            inner,
+            metrics,
+            first_read: None,
+        }
+    }
+
+    /// When the first byte was read, or `None` if the flow never received one — a dial that
+    /// connected and then said nothing, which is a distinct outcome from a slow one and must not be
+    /// reported as a latency of zero.
+    pub fn first_read_at(&self) -> Option<std::time::Instant> {
+        self.first_read
     }
 }
 
@@ -93,6 +110,10 @@ impl<S: AsyncRead + Unpin> AsyncRead for Counting<S> {
         if let Poll::Ready(Ok(())) = &r {
             let n = (buf.filled().len() - before) as u64;
             this.metrics.bytes_down.fetch_add(n, Ordering::Relaxed);
+            // A `Ready(Ok)` with zero bytes is EOF or a spurious wakeup, not a first byte.
+            if n > 0 && this.first_read.is_none() {
+                this.first_read = Some(std::time::Instant::now());
+            }
         }
         r
     }
