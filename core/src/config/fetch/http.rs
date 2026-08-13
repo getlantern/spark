@@ -9,8 +9,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 ///
 /// The cap is enforced **during** decompression, not after: a gzip bomb is small on the wire and
 /// unbounded once expanded, so a decode-then-measure approach allocates the bomb before noticing.
-/// `take(max + 1)` lets one byte past the limit through, which is what distinguishes "exactly at the
-/// cap" from "over it" without reading the rest.
+/// `take(max + 1)` reads one byte past the limit — just enough to tell "exactly at the cap" from
+/// "over it" without inflating the rest — and that byte is then rejected here rather than returned,
+/// so this never hands back more than `max`.
 pub(crate) fn inflate_within(body: &[u8], max: usize) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let mut out = Vec::with_capacity(body.len().saturating_mul(4).min(max));
@@ -18,6 +19,9 @@ pub(crate) fn inflate_within(body: &[u8], max: usize) -> io::Result<Vec<u8>> {
         .take(max as u64 + 1)
         .read_to_end(&mut out)
         .map_err(|e| io::Error::other(format!("config-new gzip decode failed: {e}")))?;
+    if out.len() > max {
+        return Err(io::Error::other("config-new body exceeds max_body"));
+    }
     Ok(out)
 }
 
@@ -161,6 +165,24 @@ mod tests {
         assert_eq!(r.status, 200);
         assert_eq!(r.etag.as_deref(), Some("\"abc\""));
         assert_eq!(r.body, payload, "the parser must receive inflated JSON");
+    }
+
+    /// `inflate_within` honours its own contract: never returns more than `max`.
+    ///
+    /// The `+1` read exists only to detect overflow, so it must not leak into the return value —
+    /// a caller trusting the docstring would otherwise get a buffer one byte over its own limit.
+    #[test]
+    fn inflate_within_never_returns_more_than_its_cap() {
+        use std::io::Write;
+        let payload = vec![b'x'; 1000];
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(&payload).unwrap();
+        let gz = enc.finish().unwrap();
+
+        // Exactly at the cap is fine.
+        assert_eq!(inflate_within(&gz, 1000).unwrap().len(), 1000);
+        // One byte over it is an error, not a 1000-byte buffer returned under a 999 limit.
+        assert!(inflate_within(&gz, 999).is_err(), "over the cap must fail");
     }
 
     /// A gzip bomb is refused by the DECODED-size cap, not merely by the on-the-wire read limit.

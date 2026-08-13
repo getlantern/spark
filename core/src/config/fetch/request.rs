@@ -302,6 +302,11 @@ pub fn build_oneshot_request(
 ) -> Result<OneshotRequest, serde_json::Error> {
     let body = serde_json::to_vec(req)?;
     let mut out = OneshotRequest::post(path.to_owned(), body)
+        // The on-the-wire cap the 1.1 path gets from `post_collect`'s read loop. Without it flint
+        // buffers an unbounded *compressed* body before `decode_body` ever sees it, so the
+        // decoded-size check would arrive too late to prevent the allocation. Slack over `MAX_BODY`
+        // for headers and for a body that compresses poorly, mirroring the 1.1 loop's own margin.
+        .with_max_body(super::MAX_BODY + 64 * 1024)
         // Same negotiation as the 1.1 path above; flint hands back headers + body verbatim and does
         // no decoding of its own, so the fronted branch decodes through the same `decode_body`.
         .header("Accept-Encoding", "gzip")
