@@ -268,6 +268,12 @@ pub fn build_request_bytes(
         "X-Lantern-Time-Zone: {}\r\n",
         header_safe(&req.time_zone)
     ));
+    // The server compresses when asked and not otherwise: measured 8,758 B identity vs 2,728 B gzip
+    // for the same payload, a 3.2x saving on every fetch — paid on the censored paths this races
+    // over, including the dns-tunnel tier that moves KB/s. Only gzip: the server also offers
+    // deflate, but brotli and zstd are answered uncompressed, and a brotli decoder embeds a ~120 KB
+    // static dictionary against a <3 MB binary budget to save ~270 B per fetch.
+    head.push_str("Accept-Encoding: gzip\r\n");
     head.push_str("Content-Type: application/json\r\n");
     head.push_str("Cache-Control: no-cache\r\n");
     if let Some(etag) = &cond.etag {

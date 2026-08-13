@@ -188,7 +188,8 @@ multi-server = ["dep:flint-dial"]
 # own network — so a fully-blocked embedded front list self-heals (config-new-fetch-design.md §9).
 # `dep:flint-fronted` pulls the fronting transport + its boring dial path; `dep:flint-kindling` pulls
 # the scanner bootstrap. See docs/config-fetch-cross-platform-design.md.
-config-fetch = ["anytls", "multi-server", "dep:flint-fronted", "dep:flint-kindling", "dep:flint-transport"]
+# `flate2` decodes the gzip the config API returns when asked (3.2x on the measured payload).
+config-fetch = ["anytls", "multi-server", "dep:flint-fronted", "dep:flint-kindling", "dep:flint-transport", "dep:flate2"]
 # Domain-fronted meek polling transport (Shir-o-Khorshid CDN-fronting, no MITM).
 # Pulls flint-fronted (with its boring Chrome dial path) for fronting + the meek
 # polling client + the vantage-point scanner (Akamai local-DNS + CloudFront/Aliyun
