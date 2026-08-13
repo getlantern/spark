@@ -502,13 +502,28 @@ mod tests {
         assert!(stats.emitted.load(Ordering::Relaxed));
     }
 
-    /// An association that never heard back reports no `ttfb_ms` at all, rather than 0.
+    /// A fresh association carries no first-reply time, so `finish` reports `ttfb_ms` as absent.
+    ///
+    /// The sentinel *is* the "no reply" state; `AssocStats::finish` maps it to `None`, and
+    /// `proxy_udp_association_completed` then omits the field rather than writing 0.
     #[test]
-    fn an_association_with_no_reply_has_no_time_to_first_byte() {
+    fn an_association_with_no_reply_leaves_the_first_reply_unset() {
         let stats = AssocStats::new(Instant::now(), 10);
-        assert_eq!(stats.first_reply_ms.load(Ordering::Relaxed), NO_REPLY);
+        assert_eq!(
+            stats.first_reply_ms.load(Ordering::Relaxed),
+            NO_REPLY,
+            "nothing has replied yet, so there is no time to first byte to report"
+        );
+    }
 
-        // The pump's first-reply stamp: only the first one takes effect.
+    /// Only the *first* reply sets the time to first byte.
+    ///
+    /// The pump stamps on every datagram it has not yet stamped for; without the compare-exchange
+    /// the last datagram would win and the field would silently become "time to last byte" — a
+    /// number that looks reasonable and means something else.
+    #[test]
+    fn only_the_first_reply_sets_the_time_to_first_byte() {
+        let stats = AssocStats::new(Instant::now(), 10);
         let _ = stats.first_reply_ms.compare_exchange(
             NO_REPLY,
             42,
