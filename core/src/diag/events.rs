@@ -294,6 +294,42 @@ pub fn proxy_flow_completed(
     ev
 }
 
+/// A UDP association ended: how long it took to open, how long until the first reply, and what it
+/// carried. The UDP twin of [`proxy_flow_completed`].
+///
+/// `reason` distinguishes the endings, which is what makes the numbers usable: a QUIC association is
+/// normally reclaimed by the NAT sweep after going quiet (`idle`), not closed by either side, so
+/// reporting only the closed ones would omit the common case and skew every percentile toward
+/// whatever failed. Values are a fixed set — `closed`, `idle`, `send_failed`, `shutdown`.
+///
+/// `ttfb_ms` is omitted when no reply ever arrived, for the same reason as the TCP path: an
+/// association that opened and heard nothing is a failure shape, and recording it as an instant
+/// first byte would make the tunnel look fastest exactly when it carried nothing.
+pub fn proxy_udp_association_completed(
+    duration_ms: u64,
+    connect_ms: u64,
+    ttfb_ms: Option<u64>,
+    bytes_down: u64,
+    datagrams_down: u64,
+    reason: &str,
+) -> DiagEvent {
+    let mut ev = DiagEvent::new(
+        DiagLevel::Debug,
+        "tunnel",
+        "proxy.udp_association_completed",
+    );
+    ev.fields.insert("duration_ms".into(), duration_ms.into());
+    ev.fields.insert("connect_ms".into(), connect_ms.into());
+    if let Some(ttfb) = ttfb_ms {
+        ev.fields.insert("ttfb_ms".into(), ttfb.into());
+    }
+    ev.fields.insert("bytes_down".into(), bytes_down.into());
+    ev.fields
+        .insert("datagrams_down".into(), datagrams_down.into());
+    ev.insert_str("reason", reason);
+    ev
+}
+
 /// Diagnostic ring overflowed; `count` events were dropped since the last report.
 pub fn diag_buffer_dropped(count: u64) -> DiagEvent {
     let mut ev = DiagEvent::new(DiagLevel::Warn, "app", "diag.buffer_dropped");
@@ -454,6 +490,20 @@ mod tests {
             (
                 "proxy_flow_completed",
                 proxy_flow_completed(4200, 1551, 6282, 120, Some(180)),
+            ),
+            (
+                // `reason` is the only string this constructor takes, so it is the only place a
+                // caller could smuggle something in — feed it a destination-shaped value and let
+                // the hygiene assertions prove it is redacted.
+                "proxy_udp_association_completed",
+                proxy_udp_association_completed(
+                    30_000,
+                    120,
+                    Some(180),
+                    4_096,
+                    12,
+                    "closed https://example.com/x 10.0.0.7",
+                ),
             ),
             (
                 "config_race_member",
@@ -762,6 +812,8 @@ mod tests {
             // start" — which `duration_ms` (flow lifetime) cannot, since a long-lived stream
             // and a slow one are indistinguishable in it.
             "connect_ms",
+            // Datagram count for a UDP association — a count, so it carries no destination.
+            "datagrams_down",
             "ttfb_ms",
             "error",
             "error_kind",

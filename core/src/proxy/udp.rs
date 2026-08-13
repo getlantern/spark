@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -152,6 +153,64 @@ impl<V> NatTable<V> {
 struct Association {
     sink: BoxedPacketSink,
     pump: JoinHandle<()>,
+    stats: Arc<AssocStats>,
+}
+
+/// Timing and volume for one association, shared between its reply pump and whichever code path
+/// ends it.
+///
+/// Atomics rather than plain fields because the two are genuinely concurrent: the pump writes on its
+/// own task while the NAT sweep may reclaim the association from the orchestration loop. `Relaxed`
+/// throughout — these are counters read once at the end, with no ordering relationship to defend.
+struct AssocStats {
+    started: Instant,
+    connect_ms: u64,
+    /// Milliseconds from `started` to the first reply, or `NO_REPLY` if none arrived.
+    first_reply_ms: AtomicU64,
+    bytes_down: AtomicU64,
+    datagrams_down: AtomicU64,
+    /// Ends are racy — a pump can exit while the sweep is reclaiming the same association — so the
+    /// event is claimed exactly once rather than emitted by whoever gets there.
+    emitted: AtomicBool,
+}
+
+/// Sentinel for "no reply yet" in [`AssocStats::first_reply_ms`]; a real elapsed time never reaches it.
+const NO_REPLY: u64 = u64::MAX;
+
+impl AssocStats {
+    fn new(started: Instant, connect_ms: u64) -> Self {
+        AssocStats {
+            started,
+            connect_ms,
+            first_reply_ms: AtomicU64::new(NO_REPLY),
+            bytes_down: AtomicU64::new(0),
+            datagrams_down: AtomicU64::new(0),
+            emitted: AtomicBool::new(false),
+        }
+    }
+
+    /// Emit the completion event, at most once for this association.
+    fn finish(&self, reason: &str) {
+        if self
+            .emitted
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return; // another ending won the race
+        }
+        let ttfb = match self.first_reply_ms.load(Ordering::Relaxed) {
+            NO_REPLY => None,
+            ms => Some(ms),
+        };
+        crate::diag::emit(crate::diag::events::proxy_udp_association_completed(
+            self.started.elapsed().as_millis() as u64,
+            self.connect_ms,
+            ttfb,
+            self.bytes_down.load(Ordering::Relaxed),
+            self.datagrams_down.load(Ordering::Relaxed),
+            reason,
+        ));
+    }
 }
 
 /// Forward UDP datagrams between the netstack and upstreams reached via `transport`.
@@ -180,6 +239,10 @@ pub async fn run_udp(
             }
             _ = sweep.tick() => {
                 for assoc in nat.evict_expired(Instant::now()) {
+                    // The normal ending for QUIC: nothing closes the association, it just goes
+                    // quiet. Emitted before the abort, because aborting the pump means its own
+                    // `finish` never runs.
+                    assoc.stats.finish("idle");
                     assoc.pump.abort();
                 }
             }
@@ -187,6 +250,7 @@ pub async fn run_udp(
     }
     // Abort any pumps still alive so they don't outlive the loop.
     for (_, assoc) in std::mem::take(&mut nat.entries) {
+        assoc.value.stats.finish("shutdown");
         assoc.value.pump.abort();
     }
 }
@@ -207,6 +271,9 @@ async fn handle_inbound(
     if nat.get_mut(&key, now).is_none() {
         // Route the flow (recover the fake-IP domain, decide, dial the right transport). `None` =
         // Rejected or the dial failed (already logged) — drop the datagram, open no association.
+        // Before the dial: for UoT this covers a TCP connect plus the SS-2022 handshake, which is
+        // exactly the cost that native UDP did not have and that is worth being able to see.
+        let started = Instant::now();
         let Some((sink, source)) = open_association(
             transport,
             direct_transport,
@@ -218,13 +285,18 @@ async fn handle_inbound(
         else {
             return;
         };
+        let stats = Arc::new(AssocStats::new(
+            started,
+            started.elapsed().as_millis() as u64,
+        ));
         let pump = spawn_reply_pump(
             source,
             reply_tx.clone(),
             dgram.client_src,
             dgram.original_dst,
+            Arc::clone(&stats),
         );
-        nat.insert(key, Association { sink, pump }, now);
+        nat.insert(key, Association { sink, pump, stats }, now);
     }
 
     // Take the send result out before re-borrowing `nat` to handle a failure.
@@ -235,6 +307,7 @@ async fn handle_inbound(
     if let Err(e) = send_result {
         warn!(error = %e, "udp: send to upstream failed; dropping association");
         if let Some(assoc) = nat.remove(&key) {
+            assoc.stats.finish("send_failed");
             assoc.pump.abort();
         }
     }
@@ -372,11 +445,25 @@ fn spawn_reply_pump(
     reply_tx: mpsc::Sender<UdpDatagram>,
     client_src: SocketAddr,
     original_dst: SocketAddr,
+    stats: Arc<AssocStats>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = vec![0u8; MAX_DATAGRAM];
         // `recv` errors (association closed) end the pump.
         while let Ok(n) = source.recv(&mut buf).await {
+            stats.bytes_down.fetch_add(n as u64, Ordering::Relaxed);
+            stats.datagrams_down.fetch_add(1, Ordering::Relaxed);
+            // First reply only: `compare_exchange` from the sentinel, so a later datagram cannot
+            // overwrite the time to *first* byte.
+            if stats.first_reply_ms.load(Ordering::Relaxed) == NO_REPLY {
+                let ms = stats.started.elapsed().as_millis() as u64;
+                let _ = stats.first_reply_ms.compare_exchange(
+                    NO_REPLY,
+                    ms,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
             let reply = UdpDatagram {
                 client_src,
                 original_dst,
@@ -386,12 +473,75 @@ fn spawn_reply_pump(
                 break; // netstack/proxy gone
             }
         }
+        // Upstream closed or errored. An association reclaimed by the sweep never reaches here (the
+        // pump is aborted), which is why the other endings emit for themselves.
+        stats.finish("closed");
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two endings racing must produce one event, not two.
+    ///
+    /// Real: a pump can exit at the same moment the NAT sweep reclaims the association, and both
+    /// paths call `finish`. Double-counting would inflate every UDP percentile with a duplicate of
+    /// whichever association happened to race.
+    #[test]
+    fn an_association_reports_its_ending_exactly_once() {
+        let stats = AssocStats::new(Instant::now(), 10);
+        assert!(!stats.emitted.load(Ordering::Relaxed));
+        stats.finish("closed");
+        assert!(
+            stats.emitted.load(Ordering::Relaxed),
+            "first ending claims it"
+        );
+        // A second ending is a no-op; the flag stays claimed rather than emitting again.
+        stats.finish("idle");
+        assert!(stats.emitted.load(Ordering::Relaxed));
+    }
+
+    /// A fresh association carries no first-reply time, so `finish` reports `ttfb_ms` as absent.
+    ///
+    /// The sentinel *is* the "no reply" state; `AssocStats::finish` maps it to `None`, and
+    /// `proxy_udp_association_completed` then omits the field rather than writing 0.
+    #[test]
+    fn an_association_with_no_reply_leaves_the_first_reply_unset() {
+        let stats = AssocStats::new(Instant::now(), 10);
+        assert_eq!(
+            stats.first_reply_ms.load(Ordering::Relaxed),
+            NO_REPLY,
+            "nothing has replied yet, so there is no time to first byte to report"
+        );
+    }
+
+    /// Only the *first* reply sets the time to first byte.
+    ///
+    /// The pump stamps on every datagram it has not yet stamped for; without the compare-exchange
+    /// the last datagram would win and the field would silently become "time to last byte" — a
+    /// number that looks reasonable and means something else.
+    #[test]
+    fn only_the_first_reply_sets_the_time_to_first_byte() {
+        let stats = AssocStats::new(Instant::now(), 10);
+        let _ = stats.first_reply_ms.compare_exchange(
+            NO_REPLY,
+            42,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        let _ = stats.first_reply_ms.compare_exchange(
+            NO_REPLY,
+            99,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        assert_eq!(
+            stats.first_reply_ms.load(Ordering::Relaxed),
+            42,
+            "a later datagram must not overwrite the time to *first* byte"
+        );
+    }
 
     fn timeout() -> Duration {
         Duration::from_secs(30)
