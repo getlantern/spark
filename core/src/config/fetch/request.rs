@@ -302,6 +302,9 @@ pub fn build_oneshot_request(
 ) -> Result<OneshotRequest, serde_json::Error> {
     let body = serde_json::to_vec(req)?;
     let mut out = OneshotRequest::post(path.to_owned(), body)
+        // Same negotiation as the 1.1 path above; flint hands back headers + body verbatim and does
+        // no decoding of its own, so the fronted branch decodes through the same `decode_body`.
+        .header("Accept-Encoding", "gzip")
         .header("X-Lantern-App", APP_NAME)
         .header("X-Lantern-App-Version", req.version.clone())
         .header("X-Lantern-Version", req.version.clone())

@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// unbounded once expanded, so a decode-then-measure approach allocates the bomb before noticing.
 /// `take(max + 1)` lets one byte past the limit through, which is what distinguishes "exactly at the
 /// cap" from "over it" without reading the rest.
-fn inflate_within(body: &[u8], max: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn inflate_within(body: &[u8], max: usize) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let mut out = Vec::with_capacity(body.len().saturating_mul(4).min(max));
     flate2::read::GzDecoder::new(body)
@@ -19,6 +19,28 @@ fn inflate_within(body: &[u8], max: usize) -> io::Result<Vec<u8>> {
         .read_to_end(&mut out)
         .map_err(|e| io::Error::other(format!("config-new gzip decode failed: {e}")))?;
     Ok(out)
+}
+
+/// Decode a response body given its `Content-Encoding`, bounding the decoded size.
+///
+/// Shared by both fetch branches: the 1.1 path parses the header itself, while the fronted h2 path
+/// gets headers verbatim from flint (which does no decoding), so both end up here rather than each
+/// growing their own gzip handling — and their own chance to forget the cap.
+pub(crate) fn decode_body(
+    body: Vec<u8>,
+    content_encoding: Option<&str>,
+    max_body: usize,
+) -> io::Result<Vec<u8>> {
+    let body = match content_encoding {
+        Some(e) if e.trim().eq_ignore_ascii_case("gzip") => inflate_within(&body, max_body)?,
+        // Identity, or an encoding we never asked for: left alone so it fails the JSON parse rather
+        // than being silently mistaken for identity.
+        _ => body,
+    };
+    if body.len() > max_body {
+        return Err(io::Error::other("config-new body exceeds max_body"));
+    }
+    Ok(body)
 }
 
 /// A collected HTTP response: status code, the `ETag` header value (if any), and the body bytes.
@@ -85,17 +107,9 @@ where
     // Body is read verbatim — identity transfer encoding only (no chunked decoding). The config API
     // sends a fixed-size JSON body and we request `Connection: close`, so EOF delimits the body.
     let body = raw[sep + 4..].to_vec();
-    let body = if gzipped {
-        inflate_within(&body, max_body)?
-    } else {
-        body
-    };
-    // Checked on the DECODED body: a compressed one is bounded by the read loop above, but the size
-    // that matters is what the parser receives. `inflate_within` also stops at the cap mid-stream, so
-    // this is the second of two checks rather than the only one.
-    if body.len() > max_body {
-        return Err(io::Error::other("config-new body exceeds max_body"));
-    }
+    // Checked on the DECODED body: the read loop above bounds only the compressed bytes, and the size
+    // that matters is what the parser receives.
+    let body = decode_body(body, gzipped.then_some("gzip"), max_body)?;
     Ok(HttpResponse { status, etag, body })
 }
 
