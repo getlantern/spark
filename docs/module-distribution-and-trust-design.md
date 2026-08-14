@@ -233,12 +233,13 @@ That policy is: **emit the artifact on one outbound per engine per body, and omi
 rest.** No schema change is needed for it — `module` is already optional, and an outbound naming only
 `engine` means "already installed."
 
-⚠️ **This policy is not yet safe to use.** Provisioning currently happens inside `wasm_transport`,
-i.e. per pool member in iteration order, so an outbound that omits `module` and is built *before* the
-one that carries it fails its store lookup and is skipped. Until installation becomes a pre-pass over
-all outbounds (first item of Phase 1c), every wasm outbound for an engine must carry the artifact —
-which is precisely the expensive case above. **Do not adopt the emit-once policy server-side before
-that lands.**
+✅ **This policy is safe as of Phase 1c.** Provisioning is a pre-pass over every wasm outbound that
+runs before any pool member is built (`provision_one`, called from `build_members`), so where the
+server chose to put the artifact no longer decides which members work. An earlier draft of this
+section warned the opposite, because provisioning then happened per member in iteration order — an
+outbound that omitted `module` and was built *before* the one carrying it failed its store lookup and
+was skipped. `an_outbound_can_use_a_bundle_a_later_outbound_delivered` pins the fixed behaviour, with
+the carrier listed second.
 
 With the efficiency argument settled, the placement decision rests on upstream shape, where
 per-outbound wins clearly: an upstream contribution is *an outbound type*, and one that also requires
@@ -435,7 +436,8 @@ threshold.
    against a <3 MB stripped binary at that size — but inlining bip324 takes the body to ~14 KB, which
    is the trigger to re-measure. Note the server currently answers `br`/`zstd` **uncompressed**, so
    this is a two-repo change too.
-3. **Where the store lives on each platform.** `<data_dir>/modules/` follows the `<data_dir>/rulesets/`
+3. **Where the store lives on each platform.** `<data_dir>/bundles/` — `engine::store::default_dir`,
+   which already existed (unused) and is now what the runtime fills in; it follows the `<data_dir>/rulesets/`
    precedent and `data_dir` is already threaded to the tunnel (`fd_tunnel.rs:1014`), but the Apple
    app-group container and the Android files dir want confirming against real deployments.
 4. **Whether the mirror fetch reuses `FrontedRuleSetFetcher`.** It already fetches arbitrary URLs over
@@ -471,15 +473,20 @@ threshold.
       `an_unusable_wasm_outbound_is_skipped_rather_than_fatal`,
       `a_config_delivered_bundle_installs_and_becomes_a_transport`, and
       `a_bad_delivered_source_is_refused_and_installs_nothing`.
-- [ ] **Phase 1c — install path, completed.** Three pieces remain:
-      1. **Install as a pre-pass** over every wasm outbound *before* any pool member is built, so
-         emission order cannot decide which members work. This is what unlocks the emit-once policy —
-         see the ⚠️ above.
-      2. **`bundle_dir` defaulting** to `<data_dir>/modules/` at the runtime layer (`fd_tunnel`), the
-         way `protect_interface` is filled in post-adapt. Until then a fetched config yields
-         `bundle_dir: None` and the member is skipped.
-      3. **Mirror fetch** — race the URL set over the fronted machinery `FrontedRuleSetFetcher`
-         already has, with the `sha256` fast-fail. Wire into pool live-reload as well as build.
+- [x] **Phase 1c (1 of 2) — install ordering + store location.** Provisioning moved out of the
+      per-member build into `provision_one`, called from a **pre-pass** over every wasm outbound
+      before any member is built (and once for the single-transport path, where it is fatal rather
+      than logged). `default_bundle_dirs` fills an unset `bundle_dir` from the platform data dir at
+      both bringup and config reload, using the pre-existing `engine::store::default_dir`
+      (`<data_dir>/bundles/`); an explicitly configured store always wins. Covered by
+      `an_outbound_can_use_a_bundle_a_later_outbound_delivered` (the carrier is deliberately listed
+      *second*; verified to fail without the pre-pass) and
+      `default_bundle_dirs_fills_only_what_config_left_unset`.
+      **The ⚠️ emit-once constraint above is now lifted** — the server may send the artifact once per
+      body and omit `module` from the other outbounds for that engine.
+- [ ] **Phase 1c (2 of 2) — mirror fetch.** Race the URL set over the fronted machinery
+      `FrontedRuleSetFetcher` already has, with the `sha256` fast-fail. Wire into pool live-reload as
+      well as build. Until then a `remote` source parses and fails loud as not-yet-fetchable.
 - [ ] **Phase 1d — ship-once.** `modules: {engine: version}` in the `ConfigRequest` body from
       `store.floors()`; lantern-cloud omits bytes for declared modules and `ETag`s the body it actually
       returns.

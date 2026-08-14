@@ -1682,30 +1682,28 @@ API facts: rustls 0.23.41
 
 ## Next chunk (exactly what the next session should do)
 
-**(#114) Phase 1c — make a *fetched* config able to complete module delivery.** Do items 1+2 together;
-neither is useful alone, and together they are what make the Phase 1e e2e test meaningful rather than
-synthetic. See `docs/module-distribution-and-trust-design.md` Part A work breakdown.
+**(#114) Phase 1d — clients declare the modules they already hold.** Phase 1c's first half landed
+(see the decisions-log entry): a fetched config can now complete delivery end to end, and the
+emit-once constraint is **lifted**. What remains is making the bytes cross the wire only once.
 
-1. **`bundle_dir` defaulting — the hard blocker.** `lantern.rs`'s `wasm` arm deliberately emits
-   `bundle_dir: None`, because the adapter takes a `&str` and cannot know the platform's data dir. So
-   **no** fetched config can complete delivery today, whatever lantern-cloud sends. Fill it at the
-   runtime layer from the `data_dir` already threaded to `run_tunnel_data_path` (`fd_tunnel.rs`), the
-   same adapter-produces / runtime-completes split `protect_interface` (`fd_tunnel.rs:925`) and `tun`
-   already use. `<data_dir>/modules/` follows the `<data_dir>/rulesets/` precedent.
-2. **Install as a pre-pass** over every wasm outbound, *before* any pool member is built. Today
-   `install_delivered` runs inside `wasm_transport`, i.e. per member in iteration order, so an outbound
-   that omits `module` and builds before the one carrying it fails its store lookup and is skipped.
-   ⚠️ **Until this lands, every wasm outbound for an engine must carry the artifact — the server must
-   NOT adopt the emit-once policy.** With hex that costs ~9.8 KB per duplicate (see the decisions-log
-   entry), so this is what makes the encoding choice pay off.
-3. Then, separately: **mirror fetch** (async; reuse the fronted racing `FrontedRuleSetFetcher` already
-   has, plus the `sha256` fast-fail). It currently parses and fails loud as not-yet-built, which is
-   deliberate — inline-first was the decision and mirrors are the escape hatch.
+1. Add `modules: {engine: version}` to `ConfigRequest` (`config/fetch/request.rs`), sourced from
+   `BundleStore::floors()`, `skip_serializing_if` empty. It belongs in the POST body, not a header:
+   the body already carries `platform`/`version`/`protocols`, and a header would mean CRLF hygiene
+   plus keeping the HTTP/1.1 and fronted-h2 builders in lockstep for nothing.
+2. Declare the **version, not a hash** — the store already persists exactly this, and `store.rs:10-13`
+   argues the case (the signature authenticates the bytes, so a hash is a second identity for one thing).
+3. Two properties to preserve: the declaration is a **hint, never authorization** (server omits bytes,
+   store turns out not to hold it → skip that member, which `build_members` already does safely), and
+   the server must **`ETag` the body it actually returns**, or a client that just installed a module
+   can `304` onto a config it never fully received.
 
-Also queued: **1d** (the `modules: {engine: version}` request-body declaration from `store.floors()`;
-note the server must `ETag` the body it *actually returns*, or a client that just installed a module
-can `304` onto a config it never fully received) and **1e** (rollout targeting + e2e). This is a
-**two-repo change** — the lantern-cloud (Go) side can start now, the schema is settled.
+Then **1e** (rollout targeting + the e2e deliverable) and, separately, **mirror fetch** — async, reuse
+the fronted racing `FrontedRuleSetFetcher` already has plus the `sha256` fast-fail. A `remote` source
+currently parses and fails loud as not-yet-built, which is deliberate: inline-first was the decision
+and mirrors are the escape hatch.
+
+This is a **two-repo change** — the lantern-cloud (Go) side can start now, the schema is settled and
+merged (#205). Tell whoever picks it up that emit-once is now safe.
 
 ---
 
@@ -2861,6 +2859,27 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   reached only from tests and nothing produced a `.spkb`** — the bundle machinery looked built but had
   no producer, which is why the producer had to come first. Verified: 387 (`wasm-transport`) / 391
   (`module-signer`) / 314 (default) lib tests green, `clippy --all-targets -D warnings` clean.
+
+- 2026-08-14 (#114 Phase 1c, first half — **a fetched config can now complete module delivery**):
+  two changes, both about *where* and *when* rather than what. (1) **`default_bundle_dirs`** fills an
+  unset `bundle_dir` from the platform data dir at bringup **and** on config reload (`fd_tunnel.rs`),
+  using the pre-existing `engine::store::default_dir` → **`<data_dir>/bundles/`**. Note the path:
+  `default_dir` already existed with *zero callers* and says `bundles`, so an earlier plan of
+  `<data_dir>/modules/` would have minted a second convention for one thing — check for an existing
+  helper before inventing a path. An explicitly configured `bundle_dir` always wins. (2) **Provisioning
+  moved out of the per-member build** into `provision_one`, called from a **pre-pass** in
+  `build_members` over every wasm outbound before any member is built, and once (fatally) for the
+  single-transport path. Why it matters: several outbounds routinely share one engine and only one
+  needs to carry the bytes, so with per-member install the outbound that merely *named* the engine
+  failed its store lookup whenever it was built first — pool contents depended on config ordering.
+  **This lifts the emit-once constraint**: the server may now send an artifact once per body and omit
+  `module` from the rest, which is what makes hex's 17% saving real rather than notional (hex does NOT
+  dedup across copies — see the 2026-08-13 entry). Method note worth keeping: both new tests were
+  verified to **fail with the fix disabled** before being trusted, which is how the ordering test was
+  caught testing nothing — it was initially failing on an unrelated missing `callback_url`, and then on
+  an `https://` callback needing the `anytls` feature. A green test whose subject never ran is the
+  failure mode to watch for here. Verified: 817 lib tests, CI-exact `clippy --workspace --all-targets
+  --all-features` clean.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
