@@ -171,6 +171,38 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  # The dynamic-transport exit is a standalone workspace for the same reason sharing is: it depends on
+  # `spark-core` with `bip324`, and as a repo-root member cargo's feature unification would compile
+  # secp256k1 (C) into the *client's* core on a bare build, costing the C-free base build. So the
+  # `test` job above never touches it — gate it here.
+  #
+  # Linux only, deliberately: this is a server we deploy on Linux VPSes, and the BIP324 host functions
+  # pull the C secp256k1 whose Windows toolchain story buys nothing for a binary that will never run
+  # there.
+  wasm-server:
+    name: wasm-server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: wasm-server
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm-server
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      # The integration test dials a real client through the egress over loopback, and reads the
+      # committed `.spkw` fixture — never a build artifact, which is what broke the first attempt.
+      - name: Test
+        run: cargo test --locked
+
   # The Tauri plugin is its own cargo workspace (not in the repo-root `--workspace`), so the `test`
   # job above never builds it. Gate it here. macOS exercises the `service_ipc` unix-socket round-trip
   # test + AppleControl; Windows compiles ServiceControl + the named-pipe branch. Linux is omitted

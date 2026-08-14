@@ -1,0 +1,46 @@
+# Its own cargo workspace, and excluded from the repo-root one — see the root `Cargo.toml`.
+#
+# Not cosmetic: this crate depends on `spark-core` with `features = ["bip324"]`, and cargo unifies
+# features across the members it builds together. As a root member it would therefore compile
+# secp256k1 (C) into the *client's* `spark-core` on a bare `cargo build`, silently costing the C-free
+# base build (docs/GOAL.md) and binary size. Same reason `spark-sharing` is kept out, and the same
+# shape: a server's dependencies must not reach the client. Has its own CI gate for the same reason.
+[workspace]
+resolver = "2"
+
+[package]
+name = "wasm-server"
+version = "0.1.2"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Exit-side server for spark's dynamic WASM transports (ADR 0013 §7): verifies a signed bundle, runs the module as responder, and relays the tunnel. For BIP324 it is the splitting egress that also fronts a real Bitcoin node."
+
+[[bin]]
+name = "spark-wasm-server"
+path = "src/main.rs"
+
+[lib]
+name = "wasm_server"
+path = "src/lib.rs"
+
+[dependencies]
+# `bip324` implies `wasm-transport`, and brings the secp256k1/ellswift host functions the BIP324
+# guest module imports plus `SplittingServer`. A server that could not run bip324 would defeat the
+# point of this binary, so it is not optional here the way it is for the size-budgeted client.
+spark-core = { path = "../core", features = ["bip324"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror = "2"
+# The launch config arrives as JSON, because that is what lantern-cloud's config-push writes.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# `module-signer` only for tests, so the integration test can mint the signed bundle it installs
+# rather than committing a binary fixture that would go stale whenever the guest module changes.
+# Under resolver 2 a dev-dependency's features are unified only for targets that need dev-deps, so
+# `cargo build` of the shipped binary still carries no signing code and no private key.
+spark-core = { path = "../core", features = ["bip324", "module-signer"] }
