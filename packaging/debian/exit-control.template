@@ -1,0 +1,17 @@
+Package: spark-wasm-server
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Lantern <team@getlantern.org>
+Section: net
+Priority: optional
+Depends: libc6
+Conflicts: spark
+Description: Exit-side server for spark's dynamic WASM transports
+ spark-wasm-server terminates the tunnels a spark client opens through a
+ delivered WebAssembly transport module. It verifies the signed bundle against
+ a key compiled into the binary, runs the module as responder, and relays to
+ the address the client announced. For BIP324 it is the splitting egress: a
+ listener indistinguishable from a Bitcoin node, which fronts a real one.
+ .
+ This is a server package. It shares no files with the spark client package and
+ is not useful on a client host.

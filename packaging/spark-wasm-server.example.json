@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Example launch config for the spark dynamic-transport exit. The deployed file is written by",
+    "lantern-cloud's provisioning (or by hand) to /etc/spark-wasm-server/config.json.",
+    "",
+    "It holds a secret — k_srv — so whatever writes it owes it 0600, the way the pipeline already",
+    "treats a TLS private key.",
+    "",
+    "`bundle` is the signed .spkb, hex-encoded: the same artifact, in the same encoding, that a",
+    "client receives over the config channel. It is installed and verified against the key compiled",
+    "into this binary before anything listens, so a bad artifact stops the deploy rather than the",
+    "first connection."
+  ],
+  "mode": "bitcoin",
+  "engine": "bip324",
+  "listen": "0.0.0.0:8333",
+  "bundle_dir": "/var/lib/spark-wasm-server/bundles",
+  "bundle": "<hex-encoded .spkb>",
+  "upstream": "<a real bitcoin node>:8333",
+  "k_srv": "<hex per-server side-door secret>",
+  "magic": "f9beb4d9"
+}

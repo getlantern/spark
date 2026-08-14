@@ -1,0 +1,11 @@
+#!/bin/sh
+# Stop and disable before removal, so a running exit is never left pointing at a deleted binary.
+# `$1` is "remove" or "upgrade"; only act on removal, or an upgrade would take the egress down.
+set -e
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl stop spark-wasm-server || true
+    systemctl disable spark-wasm-server || true
+fi
+
+exit 0

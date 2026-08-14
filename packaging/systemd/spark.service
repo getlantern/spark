@@ -9,7 +9,7 @@ Type=simple
 # spark-service creates the TUN device and edits the routing table, so it needs privilege:
 # run as root, or as a dedicated user granted CAP_NET_ADMIN plus access to /dev/net/tun
 # (see packaging/README.md for the privilege-drop hardening recipe).
-ExecStart=/usr/local/bin/spark-service --socket /run/spark/control.sock --config /etc/spark/config.toml
+ExecStart=/usr/sbin/spark-service --socket /run/spark/control.sock --config /etc/spark/config.toml
 # Root-only control by default. To let a non-root `spark` group drive the daemon, append:
 #   --spark-gid <gid of the spark group>
 Restart=on-failure
