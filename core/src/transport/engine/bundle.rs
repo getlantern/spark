@@ -290,6 +290,36 @@ pub fn build_artifact(
     ))
 }
 
+/// Sign `bundle` into a complete `.spkb` artifact with `keypair` — the offline operation the
+/// `sign-module bundle` tool performs (the one place the private key is used).
+///
+/// `name` must equal `bundle.engine`, since [`BundleVerifier::verify`] refuses a bundle declaring an
+/// engine other than the name it was signed as. That is checked here rather than left to fail at
+/// verification: a mismatch is an authoring mistake, and catching it while the private key is out is
+/// far cheaper than catching it after distribution.
+///
+/// Compiled only under the off-by-default `module-signer` feature, so it never enters a shipped
+/// binary. Mirrors [`crate::transport::wasm::sign_artifact`] for modules.
+#[cfg(feature = "module-signer")]
+pub fn sign_bundle(
+    keypair: &ring::signature::Ed25519KeyPair,
+    name: &str,
+    version: u32,
+    bundle: &Bundle,
+) -> Result<Vec<u8>, BundleError> {
+    if bundle.engine != name {
+        return Err(BundleError::EngineMismatch {
+            declared: bundle.engine.clone(),
+            signed: name.to_owned(),
+        });
+    }
+    let signature = keypair.sign(&signing_payload(name, version, bundle)?);
+    // ring's Ed25519 signature is always 64 bytes; copy into the fixed array `build_artifact` wants.
+    let mut sig = [0u8; SIG_LEN];
+    sig.copy_from_slice(signature.as_ref());
+    build_artifact(name, version, bundle, &sig)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,5 +552,42 @@ mod tests {
             ),
             "SPKW must not pass as SPKB"
         );
+    }
+
+    /// `sign_bundle` produces what `BundleVerifier` accepts — the offline tool and the client check
+    /// are two halves of one contract, so they are tested against each other rather than separately.
+    #[cfg(feature = "module-signer")]
+    #[test]
+    fn sign_bundle_round_trips_through_the_verifier() {
+        let kp = dev_keypair();
+        let b = Bundle::new(ENGINE, vec![genome(ENGINE, 3)], Some(vec![0, 97, 115, 109]));
+        let signed = sign_bundle(&kp, ENGINE, 9, &b).expect("sign");
+
+        let v = verifier(&kp).verify(&signed, 0, 0).expect("verifies");
+        assert_eq!(v.engine, ENGINE);
+        assert_eq!(v.version, 9);
+        assert_eq!(v.max_genome_version(), 3);
+
+        // Byte-identical to assembling it by hand: signing is not a second, divergent encoder.
+        assert_eq!(
+            signed,
+            artifact(&kp, ENGINE, 9, &b),
+            "one encoding, not two"
+        );
+    }
+
+    /// Signing a bundle under a name other than its declared engine is refused *at signing time*.
+    ///
+    /// `BundleVerifier` would reject it anyway (`EngineMismatch`), but only on a client, after the
+    /// artifact had been distributed. Catching it while the private key is out turns a rollout
+    /// incident into an error message.
+    #[cfg(feature = "module-signer")]
+    #[test]
+    fn sign_bundle_refuses_a_name_that_is_not_the_declared_engine() {
+        let b = Bundle::new(ENGINE, vec![genome(ENGINE, 1)], None);
+        assert!(matches!(
+            sign_bundle(&dev_keypair(), "obfs-xor", 1, &b),
+            Err(BundleError::EngineMismatch { .. })
+        ));
     }
 }

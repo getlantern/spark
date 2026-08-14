@@ -31,6 +31,10 @@ pub mod tls;
 
 #[cfg(feature = "wasm-transport")]
 pub mod bundle;
+/// The offline bundle-signing helper — only compiled for the `sign-module` tool, mirroring
+/// [`crate::transport::wasm::sign_artifact`].
+#[cfg(all(feature = "wasm-transport", feature = "module-signer"))]
+pub use bundle::sign_bundle;
 #[cfg(feature = "wasm-transport")]
 pub use bundle::{Bundle, BundleVerifier, VerifiedBundle};
 

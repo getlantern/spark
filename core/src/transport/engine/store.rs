@@ -296,6 +296,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The producer and the consumer agree: what `sign-module bundle` emits is exactly what the
+    /// delivery path installs and loads.
+    ///
+    /// The other tests here hand-assemble artifacts, which proves the *store* works but would keep
+    /// working if `sign_bundle` drifted from it — and the tool is the only way a real artifact is ever
+    /// made. This is the seam that has to hold for a module to reach a client at all.
+    #[cfg(feature = "module-signer")]
+    #[test]
+    fn a_tool_signed_bundle_installs_and_loads() {
+        let dir = temp_dir("tool");
+        let store = BundleStore::new(&dir);
+
+        let b = Bundle::new(ENGINE, vec![genome(ENGINE, 4)], Some(vec![0, 97, 115, 109]))
+            .with_capabilities(vec!["host_rand".to_string()]);
+        let artifact =
+            bundle::sign_bundle(&dev_keypair(), ENGINE, 7, &b).expect("the tool signs a bundle");
+
+        let installed = store
+            .install(&artifact)
+            .expect("install a tool-signed bundle");
+        assert_eq!(installed.engine, ENGINE);
+        assert_eq!(installed.version, 7);
+
+        let loaded = store.load(ENGINE).expect("load by name");
+        assert_eq!(loaded.max_genome_version(), 4);
+        assert_eq!(
+            loaded.capabilities.as_deref(),
+            Some(["host_rand".to_string()].as_slice()),
+            "the capability grant survives the round trip inside the signature"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_missing_bundle_fails_loud() {
         let dir = temp_dir("miss");

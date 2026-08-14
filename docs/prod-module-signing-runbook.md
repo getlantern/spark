@@ -59,10 +59,41 @@ cargo run -q -p spark-core --features module-signer --bin sign-module -- \
 ```
 **Do not distribute an artifact that doesn't verify.**
 
-### D. Distribute over the signed config/fronting channel
-Push the prod-signed `.spkw` + its `TransportConfig` through the same signed-config channel clients already
-consume (lantern-cloud config distribution). Client pins `SPARK_MODULE_PUBKEY_HEX`, verifies, loads — **no
-client release**. *(This step is the unbuilt part — see the gap issue below.)*
+### C2. Bundle it — the form the delivery path installs
+A bare `.spkw` is what the *local* `transport.wasm.module` path consumes. Anything **delivered over
+the config channel** ships as a `.spkb` **bundle** instead: the engine name, its opening plans, the
+module, and the capability grant signed together. That is what gets the store's persisted
+anti-rollback floors (a bare module's floor only survives a restart if a `floor_path` is configured)
+and what carries capability scoping inside the signature, where config cannot widen it. See
+[`module-distribution-and-trust-design.md`](./module-distribution-and-trust-design.md) Part A.
+
+```bash
+cargo run -q -p spark-core --features module-signer --bin sign-module -- \
+  bundle --engine bip324 --version 1 --key-pkcs8 "$tmp/prod-module.pkcs8" \
+  --wasm modules/bip324/target/wasm32-unknown-unknown/release/bip324.wasm \
+  --genome-id bip324-mainnet --genome-version 1 --engine-params 00f9beb4d9 \
+  --out dist/modules/bip324.spkb
+```
+`bundle` self-verifies against its own signing key before it writes anything, so an engine/name
+mismatch or a misaddressed genome fails here rather than after distribution. It does **not** replace
+step C: the self-check cannot catch signing with the *wrong key*, which succeeds locally and fails on
+every client. Run `verify` against the pinned pubkey on the `.spkb` too — it dispatches on the
+artifact's magic, so it is the same invocation:
+```bash
+cargo run -q -p spark-core --features module-signer --bin sign-module -- \
+  verify dist/modules/bip324.spkb --pubkey-hex 1f090afa1b640732f5d1e8536ee49fe7a9bf73581f313101c7543d5ff13a85ce
+# → OK: bundle 'bip324' v1 verifies under the given pubkey — 1 genome(s), 23292 bytes wasm, …
+```
+
+### D. Distribute over the config/fronting channel
+Push the prod-signed `.spkb` + its outbound through the config channel clients already consume
+(lantern-cloud config distribution). Client pins `SPARK_MODULE_PUBKEY_HEX`, verifies, installs, loads
+— **no client release**. *(This step is the unbuilt part — see the gap issue below.)*
+
+Note the channel is **not** signed — `core/src/config/fetch/mod.rs` is explicit that trust there is
+TLS. That is by design: the trust anchor is the artifact's own Ed25519 signature, which is what makes
+it safe to carry over a channel we do not have to trust. Nothing security-relevant may live in the
+config *around* the artifact.
 
 ### E. Custody hygiene
 - The `trap` in step A removes the temp key on exit (best-effort — secure erase isn't guaranteed on all filesystems, so prefer a tmpfs/ramdisk or an ephemeral host for the signing run). Never `git add` a prod `.spkw` next to the dev fixtures.
@@ -73,9 +104,11 @@ client release**. *(This step is the unbuilt part — see the gap issue below.)*
 bip324`. That's the entire CI role. No secret, no signing.
 
 ## Open work (needs design + build)
-1. **Module distribution over the config channel** — where the `.spkw` lives (inline in config vs a fetched
-   URL; `bip324.spkw` is ~23 KB), versioning, per-region/bandit rollout, rollback. This is the real
-   remaining pipeline and the highest-value piece. Design in
-   [`module-distribution-and-trust-design.md`](./module-distribution-and-trust-design.md).
+1. **Module distribution over the config channel** — the wire schema (a `wasm` outbound carrying the
+   bundle inline or by mirror URL), the client-side install into `BundleStore`, per-region/bandit
+   rollout, rollback. This is the real remaining pipeline and the highest-value piece. Decided design
+   in [`module-distribution-and-trust-design.md`](./module-distribution-and-trust-design.md) Part A;
+   it is a **two-repo** change (spark + lantern-cloud).
 
-*(Done: the `build-module.sh` `OUT_DIR` override and the `sign-module verify` helper — steps B and C above.)*
+*(Done: the `build-module.sh` `OUT_DIR` override, the `sign-module verify` helper, and `sign-module
+bundle` — steps B, C, and C2 above.)*
