@@ -1682,28 +1682,27 @@ API facts: rustls 0.23.41
 
 ## Next chunk (exactly what the next session should do)
 
-**(#114) Phase 1d — clients declare the modules they already hold.** Phase 1c's first half landed
-(see the decisions-log entry): a fetched config can now complete delivery end to end, and the
-emit-once constraint is **lifted**. What remains is making the bytes cross the wire only once.
+**(#114) Phase 1e — the e2e deliverable.** The whole client path now exists: 1a (bundle producer),
+1b (wire schema + inline install), 1c-first-half (provisioning pre-pass + `bundle_dir` defaulting),
+1d client half (`modules` declaration). What is left on spark's side is proving it end to end and
+adding rollout controls; the rest is lantern-cloud's.
 
-1. Add `modules: {engine: version}` to `ConfigRequest` (`config/fetch/request.rs`), sourced from
-   `BundleStore::floors()`, `skip_serializing_if` empty. It belongs in the POST body, not a header:
-   the body already carries `platform`/`version`/`protocols`, and a header would mean CRLF hygiene
-   plus keeping the HTTP/1.1 and fronted-h2 builders in lockstep for nothing.
-2. Declare the **version, not a hash** — the store already persists exactly this, and `store.rs:10-13`
-   argues the case (the signature authenticates the bytes, so a hash is a second identity for one thing).
-3. Two properties to preserve: the declaration is a **hint, never authorization** (server omits bytes,
-   store turns out not to hold it → skip that member, which `build_members` already does safely), and
-   the server must **`ETag` the body it actually returns**, or a client that just installed a module
-   can `304` onto a config it never fully received.
+1. **E2E test**: a prod-signed `obfs-xor` bundle delivered via a fixture `config_raw.json`, installed,
+   loaded by a client pinned to the prod pubkey, dialing through. `obfs-xor` (~786 B `.spkb`) is the
+   right first module; bip324 is the size stress case, not the first proof.
+2. **Rollout/rollback targeting** — region / bandit track / staged %, reusing existing config
+   targeting. Three safety properties already hold and should be *kept*, not rebuilt: a bad module
+   degrades one pool member (`build_members` skips), withdrawal takes effect within a poll interval
+   with no reconnect (`pool.reload_from_config`), and downgrade is refused by the persisted floors.
+3. Separately: **mirror fetch** — async, reuse the fronted racing `FrontedRuleSetFetcher` already has
+   plus the `sha256` fast-fail. A `remote` source currently parses and fails loud as not-yet-built,
+   which is deliberate: inline-first was the decision and mirrors are the escape hatch.
 
-Then **1e** (rollout targeting + the e2e deliverable) and, separately, **mirror fetch** — async, reuse
-the fronted racing `FrontedRuleSetFetcher` already has plus the `sha256` fast-fail. A `remote` source
-currently parses and fails loud as not-yet-built, which is deliberate: inline-first was the decision
-and mirrors are the escape hatch.
-
-This is a **two-repo change** — the lantern-cloud (Go) side can start now, the schema is settled and
-merged (#205). Tell whoever picks it up that emit-once is now safe.
+**Blocked on lantern-cloud (Go), which can start now — the schema is settled and merged (#205):**
+emit the `wasm` outbound shape; honour the `modules` declaration by omitting bytes for engines the
+client already holds; and **`ETag` the body actually returned**, or a client that just installed a
+module can `304` onto a config it never fully received. Emit-once is safe as of 1c — tell whoever
+picks it up, since an earlier revision of this file said the opposite.
 
 ---
 
@@ -2880,6 +2879,22 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   an `https://` callback needing the `anytls` feature. A green test whose subject never ran is the
   failure mode to watch for here. Verified: 817 lib tests, CI-exact `clippy --workspace --all-targets
   --all-features` clean.
+
+- 2026-08-14 (#114 Phase 1d client half — **a delivered module's bytes now cross the wire once**):
+  `ConfigRequest` grows `modules: {engine: version}` in the POST body (not a header — the body already
+  carries `platform`/`version`/`protocols`, and a header would mean CR/LF hygiene plus keeping the
+  HTTP/1.1 and fronted-h2 builders in lockstep for nothing; both builders serialize the same struct,
+  so the fronted path got it free). Sourced from a new `BundleStore::installed`. **The non-obvious
+  part:** it is the floors **intersected with the artifacts on disk**, not the floors alone — floors
+  only ever advance, so one outlives its artifact, and a floors-only list would tell the server "don't
+  send bip324, I have it" about an engine the store can no longer load, converting a cheap re-send
+  into a silently skipped pool member. Declares the **version, not a hash**, for the same reason the
+  store keys on name (`store.rs:10-13`): the signature authenticates the bytes, so a hash is a second
+  identity for one thing. Omitted when empty ⇒ a cold client or a build without `wasm-transport` sends
+  a byte-identical request to before. Why this matters at all: the config body changes on every bandit
+  reassignment so the whole-body `ETag` almost never 304s, and hex copies do not dedup under gzip — so
+  without this, inline delivery re-sends the module on essentially every fetch, and hex's 17% win
+  would have been notional. Verified: 819 lib tests, CI-exact clippy clean.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)

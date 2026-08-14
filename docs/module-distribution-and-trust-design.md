@@ -487,9 +487,16 @@ threshold.
 - [ ] **Phase 1c (2 of 2) — mirror fetch.** Race the URL set over the fronted machinery
       `FrontedRuleSetFetcher` already has, with the `sha256` fast-fail. Wire into pool live-reload as
       well as build. Until then a `remote` source parses and fails loud as not-yet-fetchable.
-- [ ] **Phase 1d — ship-once.** `modules: {engine: version}` in the `ConfigRequest` body from
-      `store.floors()`; lantern-cloud omits bytes for declared modules and `ETag`s the body it actually
-      returns.
+- [x] **Phase 1d — ship-once (client half).** `ConfigRequest.modules: {engine: version}`, sourced from
+      `BundleStore::installed` — the floors **intersected with the artifacts on disk**, because a floor
+      outlives its artifact and a floors-only list would claim an engine the store can no longer load.
+      Omitted when empty, so a cold client or a non-`wasm-transport` build sends a byte-identical
+      request. Both request builders serialize the same struct, so the fronted h2 path carries it for
+      free. Covered by `declares_held_modules_in_the_body_and_omits_the_field_when_empty` and
+      `installed_declares_only_engines_still_on_disk`.
+      **Server half outstanding** (lantern-cloud): omit bytes for declared modules, and `ETag` the body
+      *actually returned* — otherwise a client that just installed a module can `304` onto a config it
+      never fully received.
 - [ ] **Phase 1e — rollout/rollback controls** (region / track / staged %) + **E2E test**: a prod-signed
       `obfs-xor` delivered via config, installed, loaded by a client pinned to the prod pubkey, dialing
       end to end.
