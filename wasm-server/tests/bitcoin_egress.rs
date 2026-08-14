@@ -44,17 +44,39 @@ async fn spawn_echo() -> SocketAddr {
     addr
 }
 
+/// Lift the raw guest module out of a signed `.spkw`, whose framing is
+/// `MAGIC "SPKW" | version: u32 BE | name_len: u16 BE | name | wasm_len: u32 BE | wasm | sig(64)`
+/// (see `core/src/transport/wasm/signing.rs`).
+///
+/// The obvious source — `modules/bip324/target/…/bip324.wasm` — is a **local build artifact**:
+/// `modules/*/target` is gitignored and CI never builds the guest modules (they are a different
+/// target and ABI, built on demand by `scripts/build-module.sh`). Reading it passes on a machine that
+/// happens to have built one and fails everywhere else, which is exactly what it did. The committed
+/// `.spkw` fixture is the only form of this module that is actually in the repository.
+fn wasm_from_spkw(artifact: &[u8]) -> Vec<u8> {
+    assert_eq!(&artifact[..4], b"SPKW", "not a signed module artifact");
+    let name_len = u16::from_be_bytes([artifact[8], artifact[9]]) as usize;
+    let wasm_len_at = 10 + name_len;
+    let wasm_len = u32::from_be_bytes([
+        artifact[wasm_len_at],
+        artifact[wasm_len_at + 1],
+        artifact[wasm_len_at + 2],
+        artifact[wasm_len_at + 3],
+    ]) as usize;
+    let start = wasm_len_at + 4;
+    artifact[start..start + wasm_len].to_vec()
+}
+
 /// The committed dev-signed bip324 module, wrapped in a bundle and installed exactly as
 /// `spark-wasm-server install` would, so the test exercises the store rather than a raw `.wasm`.
 fn install_bundle(dir: &std::path::Path) -> TransformModule {
     let artifact =
         std::fs::read("../core/tests/fixtures/wasm/bip324.spkw").expect("committed bip324 fixture");
-    // The fixture is a module (`.spkw`); rewrap it as the bundle the store speaks.
+    // Verify before trusting the framing: the parse below reads length fields out of these bytes.
     let signed = spark_core::transport::wasm::ModuleVerifier::pinned()
         .verify(&artifact, 0)
         .expect("the committed fixture verifies under the pinned dev key");
-    let wasm = std::fs::read("../modules/bip324/target/wasm32-unknown-unknown/release/bip324.wasm")
-        .expect("built bip324 guest module");
+    let wasm = wasm_from_spkw(&artifact);
     assert_eq!(signed.name(), ENGINE);
 
     let genome = Genome::new("plan", ENGINE, Default::default(), Vec::new())
