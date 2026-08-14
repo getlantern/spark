@@ -24,7 +24,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use flint_tls::gambit::{ClientHello, Records};
 
@@ -631,6 +631,106 @@ pub struct WasmConfig {
     /// anti-rollback that survives restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floor_path: Option<PathBuf>,
+    /// Where to obtain the bundle when this engine is **delivered** rather than already installed
+    /// (`docs/module-distribution-and-trust-design.md` Part A).
+    ///
+    /// This is not a fourth way to name a module — it is a *provisioning step* in front of `engine`:
+    /// the artifact is installed into the bundle store, then resolved by name exactly as an
+    /// already-installed one. So `engine` (and `bundle_dir`) are still required, and everything
+    /// downstream of the store is identical whether the bundle arrived over the config channel or was
+    /// put there by some other means. Absent ⇒ the engine must already be installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ModuleSource>,
+}
+
+/// Where a delivered engine's signed bundle comes from. Shaped after sing-box's `rule_set` union
+/// (`inline` / `local` / `remote`) so a spark `wasm` outbound stays plausible to contribute upstream —
+/// see the design note. `format` distinguishes the artifact type for the same reason sing-box's
+/// `rule_set` carries `source`/`binary`.
+///
+/// **None of these arms is a trust boundary.** Whatever the bytes' provenance, they are verified
+/// against the Ed25519 key pinned in this binary before anything is acted on, which is exactly what
+/// makes an arbitrary mirror set safe to race.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ModuleSource {
+    /// The artifact, hex-encoded, carried in the config itself. The first-cut delivery mode: no
+    /// second request to be blocked, at the cost of riding the config fetch that carries it.
+    Inline {
+        /// Lowercase hex of the artifact bytes.
+        ///
+        /// Hex rather than base64, which is the conventional choice for binary-in-JSON and is what an
+        /// earlier draft of this specified. Two reasons, in order of weight:
+        ///
+        /// 1. **It is smaller where it counts.** Hex doubles the artifact uncompressed but uses 16
+        ///    highly regular symbols, so DEFLATE compresses it far better than base64's near-random
+        ///    64-symbol output. Measured on `bip324.spkb` (23,429 B): gzip(hex) = 10,077 B vs
+        ///    gzip(base64) = 12,190 B — hex is **17% smaller on the wire**, which is the only size
+        ///    that is ever paid.
+        /// 2. **It needs no new dependency**, and it is what `init_config` and `genome` in this very
+        ///    struct already use, so config carries binary exactly one way.
+        ///
+        /// The trade is that a hex blob is twice as likely to exceed DEFLATE's 32 KiB window, so
+        /// repeated copies in one body no longer collapse into back-references — see the design note;
+        /// the answer is that the artifact is emitted once per body, not per outbound.
+        content: String,
+        /// Artifact type. Only `spkb` (a signed bundle) is delivered; see [`ModuleFormat`].
+        #[serde(default)]
+        format: ModuleFormat,
+    },
+    /// A path on this machine. The provisioned-out-of-band case, and what a developer uses.
+    Local {
+        path: PathBuf,
+        #[serde(default)]
+        format: ModuleFormat,
+    },
+    /// Mirror URLs to fetch from. A **list**, not one URL: a single URL is a single thing to block,
+    /// whereas a set can be raced the way the config fetch races its avenues. Accepts either a bare
+    /// string or an array, so the single-URL spelling stays wire-compatible with sing-box's `url`.
+    Remote {
+        #[serde(deserialize_with = "de_string_or_vec")]
+        url: Vec<String>,
+        /// Optional hex SHA-256 of the artifact. A **fetch-consistency check**, not the security
+        /// boundary: it fails a corrupted or wrong download fast, before the (authoritative) signature
+        /// check. Absent ⇒ rely on the signature alone, which is sufficient but slower to fail.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+        #[serde(default)]
+        format: ModuleFormat,
+    },
+}
+
+/// The artifact type a [`ModuleSource`] points at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModuleFormat {
+    /// A signed **bundle** (`SPKB`) — engine name, opening plans, module, and capability grant signed
+    /// together. The default, and the only form the delivery path installs: only a bundle gets the
+    /// store's persisted anti-rollback floors and carries capability scoping inside the signature.
+    #[default]
+    Spkb,
+    /// A signed bare **module** (`SPKW`). Accepted in the schema because the local
+    /// `transport.wasm.module` path consumes this form, but it is **not** installable into the bundle
+    /// store — a delivered `spkw` is a configuration error, not a silently degraded install.
+    Spkw,
+}
+
+/// Deserialize a field that is either a bare string or an array of strings into a `Vec<String>`.
+///
+/// Mirrors the leniency `options.route.rules[*].ip_cidr` already gets from `StrOrVec` in the
+/// `config_raw` adapter, and is what lets a mirror list spell the single-URL case the same way
+/// sing-box does.
+fn de_string_or_vec<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 /// The built-in meek endpoint used when `transport.fronted_meek.meek_host` is
@@ -1211,6 +1311,7 @@ mod tests {
                         init_config: Some("deadbeef".into()),
                         genome: None,
                         floor_path: Some(PathBuf::from("/var/lib/spark/floors.toml")),
+                        source: None,
                     }),
                     shaping: ShapingConfig {
                         segment_split: "sni_boundary".into(),

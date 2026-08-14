@@ -1682,6 +1682,33 @@ API facts: rustls 0.23.41
 
 ## Next chunk (exactly what the next session should do)
 
+**(#114) Phase 1c — make a *fetched* config able to complete module delivery.** Do items 1+2 together;
+neither is useful alone, and together they are what make the Phase 1e e2e test meaningful rather than
+synthetic. See `docs/module-distribution-and-trust-design.md` Part A work breakdown.
+
+1. **`bundle_dir` defaulting — the hard blocker.** `lantern.rs`'s `wasm` arm deliberately emits
+   `bundle_dir: None`, because the adapter takes a `&str` and cannot know the platform's data dir. So
+   **no** fetched config can complete delivery today, whatever lantern-cloud sends. Fill it at the
+   runtime layer from the `data_dir` already threaded to `run_tunnel_data_path` (`fd_tunnel.rs`), the
+   same adapter-produces / runtime-completes split `protect_interface` (`fd_tunnel.rs:925`) and `tun`
+   already use. `<data_dir>/modules/` follows the `<data_dir>/rulesets/` precedent.
+2. **Install as a pre-pass** over every wasm outbound, *before* any pool member is built. Today
+   `install_delivered` runs inside `wasm_transport`, i.e. per member in iteration order, so an outbound
+   that omits `module` and builds before the one carrying it fails its store lookup and is skipped.
+   ⚠️ **Until this lands, every wasm outbound for an engine must carry the artifact — the server must
+   NOT adopt the emit-once policy.** With hex that costs ~9.8 KB per duplicate (see the decisions-log
+   entry), so this is what makes the encoding choice pay off.
+3. Then, separately: **mirror fetch** (async; reuse the fronted racing `FrontedRuleSetFetcher` already
+   has, plus the `sha256` fast-fail). It currently parses and fails loud as not-yet-built, which is
+   deliberate — inline-first was the decision and mirrors are the escape hatch.
+
+Also queued: **1d** (the `modules: {engine: version}` request-body declaration from `store.floors()`;
+note the server must `ETag` the body it *actually returns*, or a client that just installed a module
+can `304` onto a config it never fully received) and **1e** (rollout targeting + e2e). This is a
+**two-repo change** — the lantern-cloud (Go) side can start now, the schema is settled.
+
+---
+
 **(P) Network-change push signal for proxyless — optional, and weigh it before building it.**
 
 The expensive half of this is **already done** (2026-08-01): the chosen strategy now carries the
@@ -2801,6 +2828,39 @@ install/restore (fail-open kill-switch + the `FellOpenToDirect` emit), drop-olde
   Apple/Android), `platforms/apple` (the release DMG via `build-dmg.sh` wraps it — Flutter was never in
   the release path), all of Tauri. Verified `cargo check --workspace` clean, `Cargo.lock` has zero Flutter
   entries. macOS product DMG is now unambiguously `packaging/macos/build-tauri-dmg.sh`.
+- 2026-08-13 (#114 module distribution — Part A **decided**, Phases 1a + 1b **built**, uncommitted at
+  time of writing): **prod WASM-module delivery over the config channel.** Design in
+  `docs/module-distribution-and-trust-design.md` Part A (Part B, multi-signer trust, untouched).
+  Decisions: (1) **inline first, spark only**, mirrors in the schema from day one so switching is a
+  config change not a migration; (2) **delivered artifacts are `.spkb` bundles installed through
+  `BundleStore`**, even when inline — only a bundle gets the store's *persisted* anti-rollback floors
+  (a bare `.spkw`'s floor survives a restart only if `floor_path` is set) and carries `capabilities`
+  inside the signature where config cannot widen it; (3) **the module rides the outbound**, shaped as
+  sing-box's `rule_set` union (`inline`/`local`/`remote`), NOT a top-level registry — an upstream
+  contribution is *an outbound type*, and one needing a new top-level section is a much bigger ask;
+  (4) clients **declare what they hold** in the config request body so bytes cross the wire once.
+  Built: `sign-module bundle` (+ `sign_bundle` in `engine/bundle.rs`, `module-signer`-gated,
+  self-verifying before write, refuses name≠declared-engine); `verify` dispatches on artifact magic;
+  a `wasm` arm in `map_outbound` → `ServerSpec::Wasm`; `WasmConfig.source: Option<ModuleSource>` +
+  `install_delivered`. **Facts that cost real measurement and must not be re-derived:**
+  (a) **Hex beats base64 for inline content by 17% after gzip** — `bip324.spkb` 23,429 B raw →
+  gzip(base64) 12,190 B vs **gzip(hex) 10,077 B**. Hex doubles the payload uncompressed but its 16
+  regular symbols compress far better than base64's near-random alphabet; it also needs no new dep
+  (there is NO base64 crate in the tree) and matches `init_config`/`genome`. The obvious choice is the
+  wrong one here. (b) **The encodings behave oppositely on duplication**: the 31 KB base64 blob *just*
+  fits DEFLATE's 32 KiB window so N copies dedup to ~345 B each; the 46.9 KB hex blob does not, so
+  copies cost ~9.8 KB each. base64's dedup was never safe to rely on — bip324 sits ~3% under the
+  window and a larger module loses it *silently*. (c) **The bundle envelope costs +53 B** over the bare
+  module, so bundles are free at wire scale. (d) **The config channel is NOT signed** —
+  `config/fetch/mod.rs:7`, "Trust is TLS — no signature, matching radiance"; issue #114 and the runbook
+  both claimed otherwise and have been corrected. Trust is the artifact's own Ed25519 signature, which
+  is what makes an untrusted mirror set safe to race; nothing security-relevant may live in the config
+  *around* the artifact. (e) **`lantern.rs` had no wasm arm at all** — `from_config_raw_json` starts
+  from `Config::default()`, so `transport.wasm` was always `None` and no wire shape could produce a
+  `WasmConfig`; the gap was a layer deeper than the issue described. (f) **`BundleStore::install` was
+  reached only from tests and nothing produced a `.spkb`** — the bundle machinery looked built but had
+  no producer, which is why the producer had to come first. Verified: 387 (`wasm-transport`) / 391
+  (`module-signer`) / 314 (default) lib tests green, `clippy --all-targets -D warnings` clean.
 
 ## Milestone checklist
 - [x] U0 (Tauri shell + Lantern UI; macOS .app 8.3M / .dmg 2.9M; no openssl; build+clippy+fmt green)
