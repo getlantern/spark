@@ -1,0 +1,34 @@
+[package]
+name = "wasm-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Exit-side server for spark's dynamic WASM transports (ADR 0013 §7): verifies a signed bundle, runs the module as responder, and relays the tunnel. For BIP324 it is the splitting egress that also fronts a real Bitcoin node."
+
+[[bin]]
+name = "spark-wasm-server"
+path = "src/main.rs"
+
+[dependencies]
+# `bip324` implies `wasm-transport`, and brings the secp256k1/ellswift host functions the BIP324
+# guest module imports plus `SplittingServer`. A server that could not run bip324 would defeat the
+# point of this binary, so it is not optional here the way it is for the size-budgeted client.
+spark-core = { path = "../core", features = ["bip324"] }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[lib]
+name = "wasm_server"
+path = "src/lib.rs"
+
+[dev-dependencies]
+bytes = { workspace = true }
+# `module-signer` only for tests, so the integration test can mint the signed bundle it installs
+# rather than committing a binary fixture that would go stale whenever the guest module changes.
+# Under resolver 2 a dev-dependency's features are unified only for targets that need dev-deps, so
+# `cargo build` of the shipped binary still carries no signing code and no private key.
+spark-core = { path = "../core", features = ["bip324", "module-signer"] }

@@ -3128,6 +3128,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-server"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "spark-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "wasmi"
 version = "2.0.0-beta.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
