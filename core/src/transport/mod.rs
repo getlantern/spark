@@ -860,15 +860,33 @@ fn wasm_transport(
                 }
                 wasm_floor::bump(floor_path, signed.name(), signed.version())?;
             }
+            if cfg.source.is_some() {
+                return Err(io::Error::other(
+                    "transport.wasm.source provisions the bundle store, so it goes with engine, not module",
+                ));
+            }
             (signed.name().to_owned(), signed.into_module(), None)
         }
         (None, Some(engine)) => {
             let dir = cfg.bundle_dir.as_ref().ok_or_else(|| {
                 io::Error::other("transport.wasm.engine requires transport.wasm.bundle_dir")
             })?;
+            let store = crate::transport::engine::BundleStore::new(dir);
+            // Provisioning, when the config delivered the artifact rather than assuming it is already
+            // here. This is the whole delivery path: after it, resolution is byte-for-byte the same as
+            // for a bundle that arrived by any other means, so nothing downstream can tell — or
+            // privilege — where a transport came from.
+            //
+            // Installed on every build rather than only when absent, deliberately: `install`
+            // re-verifies against the *current* persisted floors, so a correctly-signed-but-stale
+            // bundle replayed in a fresh config is refused here. Skipping the work when the engine
+            // already exists would skip that check too. This runs once per pool build, not per dial.
+            if let Some(source) = &cfg.source {
+                install_delivered(&store, engine, source)?;
+            }
             // The store re-verifies the artifact and enforces both persisted floors (bundle and
             // genome), so a tampered or replayed file on disk is refused here, not at dial time.
-            let verified = crate::transport::engine::BundleStore::new(dir)
+            let verified = store
                 .load(engine)
                 .map_err(|e| io::Error::other(format!("transport.wasm: {e}")))?;
             let wasm_bytes = verified.wasm.as_deref().ok_or_else(|| {
@@ -931,6 +949,90 @@ fn wasm_transport(
     }
     let t = Arc::new(t);
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Install a config-delivered bundle into `store` before it is resolved by name.
+///
+/// The artifact's own Ed25519 signature — checked inside `install` against the key pinned in this
+/// binary — is the only thing that makes any of these sources trustworthy, so none of them is
+/// privileged over another and none needs a trusted channel. What `install` additionally enforces is
+/// anti-rollback against the persisted floors, which is the property that makes a *stale* signed
+/// bundle as unusable as an unsigned one.
+///
+/// An install failure is returned, never swallowed: the caller is building one pool member, and a
+/// member that cannot be provisioned is skipped with its reason logged rather than silently becoming
+/// a member that dials nothing.
+#[cfg(feature = "wasm-transport")]
+fn install_delivered(
+    store: &crate::transport::engine::BundleStore,
+    engine: &str,
+    source: &crate::config::ModuleSource,
+) -> io::Result<()> {
+    use crate::config::{ModuleFormat, ModuleSource};
+
+    // Only a bundle carries the engine name, genomes, and capability grant the store keys and scopes
+    // on, so a delivered bare module has nowhere to go. Refused rather than quietly treated as a
+    // bundle, which would fail later with a confusing framing error instead of the real reason.
+    let reject_spkw = |format: &ModuleFormat| {
+        match format {
+        ModuleFormat::Spkb => Ok(()),
+        ModuleFormat::Spkw => Err(io::Error::other(format!(
+            "transport.wasm: engine `{engine}` was delivered as a bare `spkw` module; \
+             the delivery path installs `spkb` bundles (see docs/module-distribution-and-trust-design.md)"
+        ))),
+    }
+    };
+
+    let artifact = match source {
+        ModuleSource::Inline { content, format } => {
+            reject_spkw(format)?;
+            decode_hex(content).ok_or_else(|| {
+                io::Error::other(format!(
+                    "transport.wasm: engine `{engine}` inline module is not valid hex"
+                ))
+            })?
+        }
+        ModuleSource::Local { path, format } => {
+            reject_spkw(format)?;
+            std::fs::read(path).map_err(|e| {
+                io::Error::other(format!(
+                    "transport.wasm: reading delivered module {}: {e}",
+                    path.display()
+                ))
+            })?
+        }
+        // Deliberately not built yet. The schema carries mirrors from the start so switching is a
+        // config change rather than a migration, but the fetch itself is async and wants the fronted
+        // racing machinery the rule-set fetcher already has — so it is its own piece of work, and
+        // until then this fails loud instead of pretending.
+        ModuleSource::Remote { url, .. } => {
+            return Err(io::Error::other(format!(
+                "transport.wasm: engine `{engine}` names {} mirror URL(s), but mirror fetch is not built yet; \
+                 deliver the bundle inline for now",
+                url.len()
+            )))
+        }
+    };
+
+    let installed = store
+        .install(&artifact)
+        .map_err(|e| io::Error::other(format!("transport.wasm: installing `{engine}`: {e}")))?;
+    // The store keys on the name the bundle was *signed* as, so a config naming one engine while
+    // delivering another would install under the signed name and then fail an unrelated-looking
+    // "not installed" lookup. Say the real thing instead.
+    if installed.engine != engine {
+        return Err(io::Error::other(format!(
+            "transport.wasm: config names engine `{engine}` but the delivered bundle is signed as `{}`",
+            installed.engine
+        )));
+    }
+    tracing::info!(
+        engine = %installed.engine,
+        version = installed.version,
+        genomes = installed.genomes.len(),
+        "transport.wasm: installed a config-delivered bundle"
+    );
+    Ok(())
 }
 
 /// Without the `wasm-transport` feature, a configured wasm transport is a hard error (mirroring
@@ -1808,7 +1910,7 @@ mod snapshot_json_tests {
 #[cfg(all(test, feature = "wasm-transport"))]
 mod wasm_config_tests {
     use super::*;
-    use crate::config::{Config, TransportConfig, WasmConfig};
+    use crate::config::{Config, ModuleSource, TransportConfig, WasmConfig};
     use ring::rand::SystemRandom;
     use ring::signature::Ed25519KeyPair;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1884,6 +1986,7 @@ mod wasm_config_tests {
             init_config: None,
             genome: None,
             floor_path: None,
+            source: None,
         });
         from_config(&cfg).expect("a stored bundle resolves by name into a transport");
 
@@ -1897,6 +2000,7 @@ mod wasm_config_tests {
             init_config: None,
             genome: None,
             floor_path: None,
+            source: None,
         });
         let err = from_config(&missing)
             .map(|_| ())
@@ -1916,8 +2020,160 @@ mod wasm_config_tests {
             init_config: None,
             genome: None,
             floor_path: None,
+            source: None,
         });
         assert!(from_config(&neither).is_err(), "neither module nor engine");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A signed bundle for `engine` at bundle version `bv`, carrying the XOR fixture module.
+    fn bundle_artifact(engine: &str, bv: u32) -> Vec<u8> {
+        use crate::transport::engine::bundle::{self, Bundle};
+        use crate::transport::engine::Genome;
+
+        let wasm_bytes = wat::parse_str(wasm::testutil::XOR_WAT).expect("assemble fixture");
+        let genome = Genome::new("plan", engine, Default::default(), Vec::new())
+            .encode()
+            .expect("encode genome");
+        let b = Bundle::new(engine, vec![genome], Some(wasm_bytes));
+        let kp = dev_keypair();
+        let sig = kp.sign(&bundle::signing_payload(engine, bv, &b).expect("payload"));
+        let mut s = [0u8; 64];
+        s.copy_from_slice(sig.as_ref());
+        bundle::build_artifact(engine, bv, &b, &s).expect("artifact")
+    }
+
+    fn delivered_cfg(engine: &str, dir: &std::path::Path, source: ModuleSource) -> Config {
+        config_with(WasmConfig {
+            server: "192.0.2.1:443".parse().unwrap(),
+            module: None,
+            engine: Some(engine.to_owned()),
+            bundle_dir: Some(dir.to_path_buf()),
+            min_version: 0,
+            init_config: None,
+            genome: None,
+            floor_path: None,
+            source: Some(source),
+        })
+    }
+
+    /// The delivery path end to end, minus the network: a bundle that exists **only** in the config
+    /// becomes an installed, resolvable transport.
+    ///
+    /// This is the property #114 is about — a transport reaching a client with no app release — and
+    /// the reason `source` provisions the store rather than being a fourth way to name a module:
+    /// after the install, resolution is identical to a bundle that was already there.
+    #[test]
+    fn a_config_delivered_bundle_installs_and_becomes_a_transport() {
+        use crate::transport::engine::BundleStore;
+
+        const ENGINE: &str = "obfs-delivered";
+        let dir = temp_path("delivered");
+        std::fs::create_dir_all(&dir).expect("create store dir");
+
+        let hex: String = bundle_artifact(ENGINE, 1)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert!(
+            !BundleStore::new(&dir).contains(ENGINE),
+            "nothing is installed before the config delivers it"
+        );
+
+        let cfg = delivered_cfg(
+            ENGINE,
+            &dir,
+            ModuleSource::Inline {
+                content: hex,
+                format: crate::config::ModuleFormat::Spkb,
+            },
+        );
+        from_config(&cfg).expect("an inline-delivered bundle installs and resolves");
+        assert!(
+            BundleStore::new(&dir).contains(ENGINE),
+            "the delivered artifact was installed, so a later config need not carry it again"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every way a delivered source can be wrong fails **loud**, and none of them installs anything.
+    /// A pool member that silently became a transport dialing nothing is the failure mode this
+    /// guards: `build_members` skips a member that errors, but only if it actually errors.
+    #[test]
+    fn a_bad_delivered_source_is_refused_and_installs_nothing() {
+        use crate::transport::engine::BundleStore;
+
+        let dir = temp_path("delivered-bad");
+        std::fs::create_dir_all(&dir).expect("create store dir");
+
+        // Not hex.
+        let cfg = delivered_cfg(
+            "e",
+            &dir,
+            ModuleSource::Inline {
+                content: "zzzz".into(),
+                format: crate::config::ModuleFormat::Spkb,
+            },
+        );
+        assert!(from_config(&cfg).is_err(), "invalid hex must fail loud");
+
+        // Well-formed hex, but a bare module where a bundle is required.
+        let hex: String = bundle_artifact("e", 1)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let cfg = delivered_cfg(
+            "e",
+            &dir,
+            ModuleSource::Inline {
+                content: hex.clone(),
+                format: crate::config::ModuleFormat::Spkw,
+            },
+        );
+        assert!(
+            from_config(&cfg).is_err(),
+            "a delivered `spkw` is a configuration error, not a degraded install"
+        );
+
+        // A correctly signed bundle, but config names a different engine than it was signed as.
+        let cfg = delivered_cfg(
+            "not-what-it-was-signed-as",
+            &dir,
+            ModuleSource::Inline {
+                content: hex,
+                format: crate::config::ModuleFormat::Spkb,
+            },
+        );
+        assert!(
+            from_config(&cfg).is_err(),
+            "config must not be able to name an engine the signature doesn't cover"
+        );
+
+        // Mirrors parse (so the schema is settled) but are not fetchable yet — and say so.
+        let cfg = delivered_cfg(
+            "e",
+            &dir,
+            ModuleSource::Remote {
+                url: vec!["https://example.org/e.spkb".into()],
+                sha256: None,
+                format: crate::config::ModuleFormat::Spkb,
+            },
+        );
+        // `.map(|_| ())` because the Ok side is a pair of trait objects, which aren't `Debug`.
+        let err = from_config(&cfg)
+            .map(|_| ())
+            .expect_err("mirror fetch is not built yet");
+        assert!(
+            err.to_string().contains("mirror fetch is not built"),
+            "the error must name the real reason, got: {err}"
+        );
+
+        assert!(
+            !BundleStore::new(&dir).contains("not-what-it-was-signed-as"),
+            "a refused delivery leaves nothing behind under the name config used"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1932,6 +2188,7 @@ mod wasm_config_tests {
             init_config: None,
             genome: None,
             floor_path: None,
+            source: None,
         }
     }
 
@@ -2244,6 +2501,7 @@ mod anytls_gambit_config_tests {
             module: path.clone(),
             min_version: 0,
             floor_path: None,
+            source: None,
         });
         // Builds within a runtime (the transport spawns its idle sweep).
         from_config(&cfg).expect("from_config should attach the dynamic gambit");
@@ -2259,6 +2517,7 @@ mod anytls_gambit_config_tests {
             module: path.clone(),
             min_version: 5,
             floor_path: None,
+            source: None,
         });
         assert!(
             from_config(&cfg).is_err(),

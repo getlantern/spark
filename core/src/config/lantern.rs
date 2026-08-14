@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer};
 
 use super::{
     Config, DnsConfig, DohEndpoint, Endpoint, Hysteria2Config, Hysteria2Tls, Hysteria2TlsMode,
-    InlineIpRule, RouteAction, RuleSetRef, SamizdatConfig, ServerEntry, ServerSpec,
+    InlineIpRule, ModuleSource, RouteAction, RuleSetRef, SamizdatConfig, ServerEntry, ServerSpec,
     ShadowsocksConfig, SmartRoutingConfig, SsMethod,
 };
 
@@ -530,6 +530,38 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
                 .unwrap_or_default(),
             ..Default::default()
         })),
+        // The delivered dynamic transport (`docs/module-distribution-and-trust-design.md` Part A).
+        // This is the arm that makes a wasm transport expressible on the wire at all — until it, a
+        // `WasmConfig` was reachable only from spark's own TOML, so "ship a transport without an app
+        // release" had no path from the config channel to the client.
+        //
+        // `bundle_dir` is deliberately left unset here: the store's location is platform reality the
+        // adapter doesn't know (it takes a `&str`, not a data dir). The runtime fills it in from the
+        // same `data_dir` it already uses for the config cache and `rulesets/` — the same
+        // adapter-produces / runtime-completes split `protect_interface` and `tun` already use.
+        "wasm" => {
+            // A wasm outbound must name its engine: the name is what the artifact was *signed* as, so
+            // it is what binds config to a specific signed identity. Without it there is nothing to
+            // resolve and nothing to check a delivered bundle against.
+            let engine = ob.engine.clone()?;
+            // Requiring a dialable endpoint mirrors every other arm; `WasmConfig.server` is a
+            // `SocketAddr`, so a hostname here is not representable (no bootstrap resolution for it).
+            let server = match endpoint()? {
+                Endpoint::Ip(addr) => addr,
+                Endpoint::Host { .. } => return None,
+            };
+            Some(ServerSpec::Wasm(super::WasmConfig {
+                server,
+                module: None,
+                engine: Some(engine),
+                bundle_dir: None,
+                min_version: ob.min_version,
+                init_config: None,
+                genome: None,
+                floor_path: None,
+                source: ob.module.clone(),
+            }))
+        }
         _ => None, // unbounded, etc. — no spark transport
     }
 }
@@ -896,6 +928,14 @@ struct RawOutbound {
     // bare inner host from it.
     #[serde(default)]
     url: Option<String>,
+    // wasm (delivered dynamic transport). `engine` names the signed bundle; `module` says where to
+    // get it when it isn't installed yet; `min_version` is the anti-rollback floor the config asserts.
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    module: Option<ModuleSource>,
+    #[serde(default)]
+    min_version: u32,
 }
 
 #[derive(Deserialize)]
@@ -1668,5 +1708,87 @@ mod tests {
             .expect("parses")
             .expect("some");
         assert!(o.logs_enabled);
+    }
+
+    /// The gap this arm exists to close: before it, no `config_raw.json` could express a wasm
+    /// transport at all, so a signed module had no route from the config channel to a client.
+    #[test]
+    fn a_wasm_outbound_becomes_a_pool_member_carrying_its_delivered_bundle() {
+        let raw = r#"{"options":{"outbounds":[{
+            "type": "wasm", "tag": "ir-1",
+            "server": "192.0.2.7", "server_port": 8333,
+            "engine": "bip324", "min_version": 3,
+            "module": { "type": "inline", "format": "spkb", "content": "0a0b0c" }
+        }]}}"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        assert_eq!(cfg.transport.servers.len(), 1);
+        let ServerSpec::Wasm(w) = &cfg.transport.servers[0].spec else {
+            panic!("expected a wasm pool member");
+        };
+        assert_eq!(w.server, "192.0.2.7:8333".parse().unwrap());
+        assert_eq!(w.engine.as_deref(), Some("bip324"));
+        assert_eq!(w.min_version, 3, "the config's anti-rollback floor carries");
+        assert_eq!(
+            w.source,
+            Some(ModuleSource::Inline {
+                content: "0a0b0c".into(),
+                format: crate::config::ModuleFormat::Spkb,
+            })
+        );
+        // Platform reality the adapter cannot know; the runtime fills it from its data dir.
+        assert_eq!(w.bundle_dir, None);
+    }
+
+    /// A mirror list accepts sing-box's single-`url` spelling as well as an array, so the one-URL
+    /// form stays wire-identical to upstream while we can still ship a set to race.
+    #[test]
+    fn mirror_urls_accept_both_a_bare_string_and_an_array() {
+        let one = r#"{"options":{"outbounds":[{"type":"wasm","tag":"a","server":"192.0.2.7",
+            "server_port":443,"engine":"e","module":{"type":"remote","url":"https://a/x.spkb"}}]}}"#;
+        let many = r#"{"options":{"outbounds":[{"type":"wasm","tag":"a","server":"192.0.2.7",
+            "server_port":443,"engine":"e","module":{"type":"remote",
+            "url":["https://a/x.spkb","https://b/x.spkb"],"sha256":"ab"}}]}}"#;
+
+        let urls =
+            |raw: &str| match &from_config_raw_json(raw).expect("adapts").transport.servers[0].spec
+            {
+                ServerSpec::Wasm(w) => match w.source.clone().expect("a source") {
+                    ModuleSource::Remote { url, .. } => url,
+                    other => panic!("expected remote, got {other:?}"),
+                },
+                other => panic!("expected wasm, got {other:?}"),
+            };
+        assert_eq!(urls(one), vec!["https://a/x.spkb".to_string()]);
+        assert_eq!(
+            urls(many),
+            vec![
+                "https://a/x.spkb".to_string(),
+                "https://b/x.spkb".to_string()
+            ]
+        );
+    }
+
+    /// A wasm outbound spark can't represent is skipped like any other, not fatal — the property
+    /// that lets a server introduce fields this build predates.
+    #[test]
+    fn an_unusable_wasm_outbound_is_skipped_rather_than_fatal() {
+        // No `engine`: nothing to resolve, and nothing to check a delivered bundle's signed name
+        // against. Paired with a usable outbound so the pool is non-empty and the skip is visible.
+        let raw = r#"{"options":{"outbounds":[
+            {"type":"wasm","tag":"no-engine","server":"192.0.2.7","server_port":443},
+            {"type":"wasm","tag":"hostname","server":"example.org","server_port":443,"engine":"e"},
+            {"type":"shadowsocks","tag":"ok","server":"192.0.2.8","server_port":443,
+             "method":"2022-blake3-aes-256-gcm","password":"p"}
+        ]}}"#;
+        let cfg = from_config_raw_json(raw).expect("adapts");
+        assert_eq!(
+            cfg.transport.servers.len(),
+            1,
+            "both unusable wasm outbounds are skipped, the shadowsocks one survives"
+        );
+        assert!(matches!(
+            cfg.transport.servers[0].spec,
+            ServerSpec::Shadowsocks(_)
+        ));
     }
 }
