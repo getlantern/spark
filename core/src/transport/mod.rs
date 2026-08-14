@@ -1014,18 +1014,29 @@ fn install_delivered(
         }
     };
 
+    // Learn the signed name *before* anything is written. `BundleStore::install` keys on the name
+    // inside the signature, so a config naming one engine while delivering a bundle signed as another
+    // would install — and ratchet the floors for — an engine nobody asked for. Checking after the
+    // install would still return an error here while leaving that behind, and floors only ever
+    // advance, so a corrected config could not undo it: the next legitimate bundle for that engine
+    // below the ratcheted floor would be refused as a rollback.
+    let named = crate::transport::engine::BundleVerifier::pinned()
+        .verify(&artifact, 0, 0)
+        .map_err(|e| {
+            io::Error::other(format!(
+                "transport.wasm: delivered bundle for `{engine}`: {e}"
+            ))
+        })?;
+    if named.engine != engine {
+        return Err(io::Error::other(format!(
+            "transport.wasm: config names engine `{engine}` but the delivered bundle is signed as `{}`",
+            named.engine
+        )));
+    }
+
     let installed = store
         .install(&artifact)
         .map_err(|e| io::Error::other(format!("transport.wasm: installing `{engine}`: {e}")))?;
-    // The store keys on the name the bundle was *signed* as, so a config naming one engine while
-    // delivering another would install under the signed name and then fail an unrelated-looking
-    // "not installed" lookup. Say the real thing instead.
-    if installed.engine != engine {
-        return Err(io::Error::other(format!(
-            "transport.wasm: config names engine `{engine}` but the delivered bundle is signed as `{}`",
-            installed.engine
-        )));
-    }
     tracing::info!(
         engine = %installed.engine,
         version = installed.version,
@@ -2170,9 +2181,22 @@ mod wasm_config_tests {
             "the error must name the real reason, got: {err}"
         );
 
+        let store = BundleStore::new(&dir);
         assert!(
-            !BundleStore::new(&dir).contains("not-what-it-was-signed-as"),
+            !store.contains("not-what-it-was-signed-as"),
             "a refused delivery leaves nothing behind under the name config used"
+        );
+        // The assertion that actually has teeth. `install` keys on the name inside the *signature*,
+        // so a name mismatch would land the artifact under `e` — not under the name config asked
+        // for — and ratchet `e`'s floors, while this function still returned an error. Checking only
+        // the config-supplied name above passes either way and proves nothing.
+        assert!(
+            !store.contains("e"),
+            "a refused delivery must not install under the bundle's SIGNED name either"
+        );
+        assert!(
+            store.floors().expect("floors").is_empty(),
+            "no floor may ratchet for an engine whose delivery was refused"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -2501,7 +2525,6 @@ mod anytls_gambit_config_tests {
             module: path.clone(),
             min_version: 0,
             floor_path: None,
-            source: None,
         });
         // Builds within a runtime (the transport spawns its idle sweep).
         from_config(&cfg).expect("from_config should attach the dynamic gambit");
@@ -2517,7 +2540,6 @@ mod anytls_gambit_config_tests {
             module: path.clone(),
             min_version: 5,
             floor_path: None,
-            source: None,
         });
         assert!(
             from_config(&cfg).is_err(),
