@@ -49,6 +49,16 @@ pub enum Cmd {
     /// resolve it by engine name. Verification happens here, before anything is written, so a bad
     /// artifact is refused at deploy time rather than at the first connection.
     Install(Install),
+    /// Run from a config file — the deployed shape.
+    ///
+    /// The provisioning pipeline delivers a proxy's settings by writing one file and restarting the
+    /// unit, so this is the form that fits it. It also keeps `k_srv` out of the process's argv, where
+    /// any local `ps` would read it.
+    ///
+    /// The config carries the bundle itself, hex-encoded, so the exit obtains its module by exactly
+    /// the mechanism the *client* does. One delivery path, one encoding, and both sides verify the
+    /// same artifact against the same pinned key before running it.
+    Run(Run),
     /// Relay tunnels for a delivered module. The general case.
     Serve(Serve),
     /// BIP324 splitting egress: tunnel for tagged clients, proxy everything else to a real Bitcoin
@@ -60,54 +70,106 @@ pub enum Cmd {
 pub struct Install {
     /// Directory to install into. Created on first install.
     #[arg(long)]
-    bundle_dir: PathBuf,
+    pub bundle_dir: PathBuf,
     /// The signed `.spkb` artifact to install.
-    artifact: PathBuf,
+    pub artifact: PathBuf,
+}
+
+#[derive(Parser)]
+pub struct Run {
+    // `pub` so the integration test can construct a launch without going through clap.
+    /// Path to the JSON launch config.
+    #[arg(long)]
+    pub config: PathBuf,
+}
+
+/// The launch config the provisioning pipeline writes.
+///
+/// JSON because that is what lantern-cloud's config-push produces; the field names mirror the
+/// equivalent flags so an operator can move between the two without a translation table.
+#[derive(Debug, serde::Deserialize)]
+pub struct FileConfig {
+    /// `"bitcoin"` for the splitting egress, `"relay"` for the general case.
+    mode: String,
+    /// Engine to serve — the name the bundle was **signed** as.
+    pub engine: String,
+    pub listen: SocketAddr,
+    /// Where bundles are installed. The pipeline mounts one writable directory into the container,
+    /// so this defaults under it rather than to a path the container cannot write.
+    #[serde(default = "default_bundle_dir")]
+    pub bundle_dir: PathBuf,
+    /// The signed `.spkb`, hex-encoded — the same artifact and the same encoding the client is sent.
+    /// Installed on startup, before anything listens. Absent means "already installed".
+    #[serde(default)]
+    bundle: String,
+    /// `bitcoin` mode only: the real node to proxy non-tunnel connections to.
+    #[serde(default)]
+    upstream: Option<SocketAddr>,
+    /// `bitcoin` mode only: the per-server side-door secret, hex.
+    ///
+    /// **This file holds a secret.** It should be written `0600`, the way the pipeline already treats
+    /// a TLS private key — carrying it here rather than in argv is half the reason this mode exists.
+    #[serde(default)]
+    pub k_srv: String,
+    /// `bitcoin` mode only. Defaults to Bitcoin mainnet.
+    #[serde(default = "default_magic")]
+    pub magic: String,
+    /// `relay` mode only: hex `init` bytes for the module.
+    #[serde(default)]
+    pub init_config: String,
+}
+
+fn default_bundle_dir() -> PathBuf {
+    PathBuf::from("/etc/sing-box/bundles")
+}
+
+fn default_magic() -> String {
+    "f9beb4d9".to_owned()
 }
 
 #[derive(Parser)]
 pub struct Serve {
     /// Directory holding installed bundles, as `BundleStore` lays it out.
     #[arg(long)]
-    bundle_dir: PathBuf,
+    pub bundle_dir: PathBuf,
     /// Engine to serve — the name the bundle was **signed** as.
     #[arg(long)]
-    engine: String,
+    pub engine: String,
     /// Address to listen on.
     #[arg(long, default_value = "0.0.0.0:443")]
-    listen: SocketAddr,
+    pub listen: SocketAddr,
     /// Hex `init` bytes for the module. Empty for a transform-only module.
     #[arg(long, default_value = "")]
-    init_config: String,
+    pub init_config: String,
 }
 
 #[derive(Parser)]
 pub struct ServeBitcoin {
     #[arg(long)]
-    bundle_dir: PathBuf,
+    pub bundle_dir: PathBuf,
     /// Engine to serve. Defaults to the canonical BIP324 engine name.
     #[arg(long, default_value = "bip324")]
-    engine: String,
+    pub engine: String,
     /// Address to listen on. Defaults to the Bitcoin P2P port — a node on a different port is a
     /// weaker cover story than one on 8333.
     #[arg(long, default_value = "0.0.0.0:8333")]
-    listen: SocketAddr,
+    pub listen: SocketAddr,
     /// The real Bitcoin node to proxy non-tunnel connections to.
     ///
     /// Required, and there is no default, because getting it wrong silently destroys the property
     /// this mode exists for: an egress that drops or refuses unrecognized peers is trivially
     /// distinguishable from a Bitcoin node, which is exactly what a prober checks for.
     #[arg(long)]
-    upstream: SocketAddr,
+    pub upstream: SocketAddr,
     /// Per-server side-door secret (`k_srv`), hex. Clients derive their opening tag from the same
     /// value, so this is what pairs a client to this egress — treat it as a secret and give it to
     /// clients through the signed config, never in the clear.
     #[arg(long)]
-    k_srv: String,
+    pub k_srv: String,
     /// Network magic, hex (4 bytes). Defaults to Bitcoin **mainnet** — the cover is only cover if it
     /// looks like the network real peers are on.
     #[arg(long, default_value = "f9beb4d9")]
-    magic: String,
+    pub magic: String,
 }
 
 /// Why the exit failed to start or to serve a connection.
@@ -214,6 +276,71 @@ pub fn install(args: Install) -> Result<()> {
         "installed a verified bundle"
     );
     Ok(())
+}
+
+/// Run from a config file: install the bundle it carries, then serve.
+///
+/// Installing before listening is deliberate — a bundle that will not verify should stop the process
+/// at startup, where the deploy notices, rather than at the first client connection.
+pub async fn run(args: Run) -> Result<()> {
+    let raw = std::fs::read_to_string(&args.config).map_err(ServerError::io(format!(
+        "reading {}",
+        args.config.display()
+    )))?;
+    let cfg: FileConfig = serde_json::from_str(&raw)
+        .map_err(|e| ServerError::bad("--config", format!("{}: {e}", args.config.display())))?;
+
+    if !cfg.bundle.is_empty() {
+        let artifact = decode_hex("bundle", &cfg.bundle)?;
+        let verified = BundleStore::new(&cfg.bundle_dir)
+            .install(&artifact)
+            .map_err(|source| ServerError::Bundle {
+                engine: cfg.engine.clone(),
+                source,
+            })?;
+        // The store keys on the name inside the *signature*, so a config naming one engine while
+        // carrying another would install under the signed name and then fail an unrelated-looking
+        // "not installed" lookup. Say the real thing.
+        if verified.engine != cfg.engine {
+            return Err(ServerError::bad(
+                "--config",
+                format!(
+                    "names engine `{}` but the bundle is signed as `{}`",
+                    cfg.engine, verified.engine
+                ),
+            ));
+        }
+        info!(engine = %verified.engine, version = verified.version, "installed the config's bundle");
+    }
+
+    match cfg.mode.as_str() {
+        "bitcoin" => {
+            serve_bitcoin(ServeBitcoin {
+                bundle_dir: cfg.bundle_dir,
+                engine: cfg.engine,
+                listen: cfg.listen,
+                upstream: cfg.upstream.ok_or_else(|| {
+                    ServerError::bad("--config", "mode `bitcoin` requires `upstream`")
+                })?,
+                k_srv: cfg.k_srv,
+                magic: cfg.magic,
+            })
+            .await
+        }
+        "relay" => {
+            serve(Serve {
+                bundle_dir: cfg.bundle_dir,
+                engine: cfg.engine,
+                listen: cfg.listen,
+                init_config: cfg.init_config,
+            })
+            .await
+        }
+        other => Err(ServerError::bad(
+            "--config",
+            format!("unknown mode `{other}` — expected `bitcoin` or `relay`"),
+        )),
+    }
 }
 
 /// Load and **verify** the engine's bundle, returning its compiled module.

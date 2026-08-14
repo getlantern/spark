@@ -170,3 +170,117 @@ async fn a_tagged_client_tunnels_and_an_untagged_peer_reaches_bitcoin() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The deployed shape: the provisioning pipeline writes one JSON file and restarts the unit, and the
+/// bundle rides *in that file*, hex-encoded — the same artifact and encoding the client is sent.
+///
+/// The success path already has coverage above (`serve_bitcoin` is what `run` dispatches to, and it
+/// blocks forever once it starts listening), so these pin the checks that happen *before* anything
+/// listens. That ordering is the point: a bad bundle or a bad config should stop the process at
+/// deploy time, where someone is watching, not at the first client connection.
+mod run_from_config {
+    use super::*;
+
+    fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("launch.json");
+        std::fs::write(&path, body).expect("write config");
+        path
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A signed bundle, minted here so the test does not depend on a build artifact.
+    fn bundle_hex() -> String {
+        let artifact = std::fs::read("../core/tests/fixtures/wasm/bip324.spkw")
+            .expect("committed bip324 fixture");
+        let wasm = super::wasm_from_spkw(&artifact);
+        let genome = Genome::new("plan", ENGINE, Default::default(), Vec::new())
+            .encode()
+            .expect("encode genome");
+        let bundle = spark_core::transport::engine::Bundle::new(ENGINE, vec![genome], Some(wasm));
+        hex(&spark_core::transport::engine::sign_bundle(
+            &spark_core::transport::wasm::dev_keypair(),
+            ENGINE,
+            1,
+            &bundle,
+        )
+        .expect("sign"))
+    }
+
+    #[tokio::test]
+    async fn the_bundle_in_the_config_is_installed_before_anything_listens() {
+        let dir = std::env::temp_dir().join(format!("wasm-server-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let store = dir.join("bundles");
+
+        // Deliberately an unknown mode: `run` installs, *then* dispatches, so this returns instead of
+        // blocking on a listener while still proving the install happened.
+        let cfg = write_config(
+            &dir,
+            &format!(
+                r#"{{"mode":"nonsense","engine":"{ENGINE}","listen":"127.0.0.1:0",
+                     "bundle_dir":{store:?},"bundle":"{}"}}"#,
+                bundle_hex()
+            ),
+        );
+        let err = wasm_server::run(wasm_server::Run { config: cfg })
+            .await
+            .expect_err("an unknown mode must be refused");
+        assert!(err.to_string().contains("unknown mode"), "got: {err}");
+        assert!(
+            BundleStore::new(&store).contains(ENGINE),
+            "the config's bundle was installed before the mode was even looked at"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The store keys on the name inside the *signature*. A config naming a different engine would
+    /// otherwise install under the signed name and then fail an unrelated-looking "not installed".
+    #[tokio::test]
+    async fn a_config_naming_the_wrong_engine_is_refused() {
+        let dir = std::env::temp_dir().join(format!("wasm-server-cfg-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cfg = write_config(
+            &dir,
+            &format!(
+                r#"{{"mode":"bitcoin","engine":"not-what-it-is","listen":"127.0.0.1:0",
+                     "bundle_dir":{:?},"bundle":"{}","upstream":"127.0.0.1:1","k_srv":"aa"}}"#,
+                dir.join("bundles"),
+                bundle_hex()
+            ),
+        );
+        let err = wasm_server::run(wasm_server::Run { config: cfg })
+            .await
+            .expect_err("an engine/signature mismatch must be refused");
+        assert!(
+            err.to_string().contains("signed as `bip324`"),
+            "the error must name the real reason, got: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `bitcoin` mode without an upstream would be an egress that refuses every non-tunnel peer —
+    /// trivially distinguishable from a Bitcoin node, which is the one thing this mode must not be.
+    #[tokio::test]
+    async fn bitcoin_mode_requires_an_upstream() {
+        let dir = std::env::temp_dir().join(format!("wasm-server-cfg-up-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cfg = write_config(
+            &dir,
+            r#"{"mode":"bitcoin","engine":"bip324","listen":"127.0.0.1:0","k_srv":"aa"}"#,
+        );
+        let err = wasm_server::run(wasm_server::Run { config: cfg })
+            .await
+            .expect_err("bitcoin mode without an upstream must be refused");
+        assert!(
+            err.to_string().contains("requires `upstream`"),
+            "got: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

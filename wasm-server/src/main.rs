@@ -4,7 +4,7 @@
 //! reachable from tests rather than only from a running process.
 
 use clap::Parser;
-use wasm_server::{install, serve, serve_bitcoin, Cli, Cmd, ServerError};
+use wasm_server::{install, run, serve, serve_bitcoin, Cli, Cmd, ServerError};
 
 fn main() -> Result<(), ServerError> {
     tracing_subscriber::fmt()
@@ -26,6 +26,7 @@ fn main() -> Result<(), ServerError> {
         .block_on(async {
             match cli.cmd {
                 Cmd::Install(a) => install(a),
+                Cmd::Run(a) => run(a).await,
                 Cmd::Serve(a) => serve(a).await,
                 Cmd::ServeBitcoin(a) => serve_bitcoin(a).await,
             }

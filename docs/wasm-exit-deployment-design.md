@@ -1,6 +1,6 @@
 # Deploying a spark exit server — design
 
-Status: **draft, needs a decision on §3 and §4** · Tracks: [#114](https://github.com/getlantern/spark/issues/114) ·
+Status: **§2C, §3 and §4 decided; §5 step 1 built (#207)** · Tracks: [#114](https://github.com/getlantern/spark/issues/114) ·
 Builds on: [`module-distribution-and-trust-design.md`](./module-distribution-and-trust-design.md)
 
 ## The problem
@@ -58,7 +58,7 @@ the worst possible moment.
 track. Cleanest, and dns-tunnel inherits it. But it edits provisioning code that *every existing track
 flows through*, to benefit a track that does not exist yet.
 
-**C. Recommended: `run --config` in spark, plus an entrypoint placeholder in cloud-init.**
+**C. Decided: `run --config` in spark, plus an entrypoint placeholder in cloud-init.**
 
 Two small changes that meet in the middle:
 
@@ -74,11 +74,11 @@ The unit name and config path stay `sing-box` / `/etc/sing-box/config.json`. The
 spark exit but they are *only names*, and leaving them alone keeps the diff to provisioning code near
 zero. Renaming them is a follow-up that touches nothing functional.
 
-## 3. Getting the bundle onto the exit — DECISION NEEDED
+## 3. Getting the bundle onto the exit — DECIDED: inline, hex-encoded
 
 The exit needs its `.spkb`, and `ssh.go` only knows how to write `config.json` + TLS materials.
 
-**Recommended: carry it in the config, hex-encoded** — the same way the *client* receives it. Then
+**Decided (afisk, 2026-08-14): carry it in the config, hex-encoded** — the same way the *client* receives it. Then
 `run --config` installs it through `BundleStore` on startup, and the existing config-push path needs no
 change at all. It also makes the symmetry exact: client and exit obtain the identical artifact by the
 identical mechanism, and both verify it against the same pinned key before use.
@@ -89,7 +89,7 @@ delivery path to keep in sync with the first.
 Size is not a concern here: `bip324.spkb` is ~46 KB hex, against a config file with no meaningful
 ceiling on a host we own.
 
-## 4. The Bitcoin node — DECISION NEEDED
+## 4. The Bitcoin node — DECIDED: a public node first
 
 `serve-bitcoin --upstream` must point at something that behaves like a real Bitcoin node, or the cover
 story is gone. `spark-wasm-server` refuses to start without it for exactly this reason.
@@ -107,12 +107,21 @@ cover traffic on one third party who did not agree to it.
 **iii. A shared bitcoind for the fleet.** Halfway: one node we run, several egresses proxying to it.
 Same identity-collision issue as (ii), among our own hosts.
 
-Suggested path: **(ii) for the first deploy** to prove the pipeline end to end, then **(i)** before any
-exit carries real users. The switch is one flag.
+**Decided (afisk, 2026-08-14): (ii) — a public node — for the first deploy**, then (i) before an exit
+carries real users. The switch is one config field.
+
+Two things this defers rather than solves, and they should not be forgotten when the switch happens:
+our address presents *that node's* identity to every peer that reaches it, and all of our cover
+traffic lands on a third party who did not agree to carry it. Both are acceptable while the point is
+to prove the pipeline; neither is acceptable at scale.
 
 ## 5. Sequencing
 
-1. `run --config` in `spark-wasm-server`, installing the inline bundle on startup (spark, small).
+1. ~~`run --config` in `spark-wasm-server`, installing the inline bundle on startup~~ — **done**
+   (#207). The config is JSON, carries the bundle as hex, and installs it *before* anything listens,
+   so a bad artifact stops the deploy rather than the first connection. `k_srv` rides the file rather
+   than argv, where any local `ps` would read it — the file therefore holds a secret and wants `0600`,
+   the way the pipeline already treats a TLS private key.
 2. Container image + its build (spark or a deploy repo — **where is an open question**; there is no
    existing image build for a spark binary).
 3. `ENTRYPOINT_PLACEHOLDER` in cloud-init, defaulting to today's value (lantern-cloud, ~5 lines).
@@ -124,12 +133,11 @@ exit carries real users. The switch is one flag.
 
 ## Open questions
 
-1. **§3 and §4** above.
-2. **Where does the image build live?** No spark binary has one. A `Dockerfile` in spark plus a CI job
+1. **Where does the image build live?** No spark binary has one. A `Dockerfile` in spark plus a CI job
    is the obvious answer, but it is the first of its kind and wants a registry decision.
-3. **Does the exit need the same `SPARK_MODULE_PUBKEY_HEX` pinning ceremony as the client?** It does
+2. **Does the exit need the same `SPARK_MODULE_PUBKEY_HEX` pinning ceremony as the client?** It does
    today — a release build refuses to compile without it, which is deliberate — so the image build
    needs the pubkey as a build arg, the same way `release.yml` passes it.
-4. **How does `k_srv` reach both sides?** The exit gets it from its config; the client must get the
+3. **How does `k_srv` reach both sides?** The exit gets it from its config; the client must get the
    matching value through the signed config channel. That is a genome/`init_config` question this note
    does not answer.
