@@ -1,6 +1,6 @@
 # Deploying a spark exit server — design
 
-Status: **§2C, §3 and §4 decided; §5 step 1 built (#207)** · Tracks: [#114](https://github.com/getlantern/spark/issues/114) ·
+Status: **§3 and §4 decided; §5 step 1 built (#207); §1–§2 corrected — the live pipeline uses no container** · Tracks: [#114](https://github.com/getlantern/spark/issues/114) ·
 Builds on: [`module-distribution-and-trust-design.md`](./module-distribution-and-trust-design.md)
 
 ## The problem
@@ -15,64 +15,54 @@ lantern-cloud — no track, no image, nothing. It has been finished and undeploy
 So whatever we build here is the pattern dns-tunnel needs too, and it is worth designing as
 "deploy a spark server" rather than as a bip324 special case.
 
-## 1. What the pipeline hardcodes today
+## 1. How a VPS is actually provisioned
 
-Verified against `lantern-cloud/cmd/api/vps/`. A VPS is provisioned in two phases:
+**Corrected 2026-08-14 (afisk): there is no container.** An earlier revision of this note analysed
+`vps/cloudinit.go`, which installs Docker and runs lantern-box in a container. That path still exists
+and is still called from `cmd/vps-test`, but the production service does not use it:
+`cmd/api/main.go:972` constructs the provisioning worker with `UsePacker: true`, and every packer
+branch in `vps_provision_worker.go` routes to `PushConfigPacker`. The Docker path is dead code in the
+live service, and designing against it produced the wrong answer.
 
-**cloud-init** (`cloudinit.go`) installs Docker, pulls `cfg.DockerImage`, and writes a systemd unit:
+What actually happens (`vps/cloudinit_packer.go` + `vps/ssh.go`):
 
-```
-[Unit] Description=sing-box proxy service
-ExecStart=/usr/bin/docker run --rm --name sing-box \
-    --net=host -v /etc/sing-box:/etc/sing-box \
-    --entrypoint /usr/local/bin/lantern-box \
-    IMAGE_PLACEHOLDER \
-    run --config /etc/sing-box/config.json
-```
+1. Boot a **Packer image** carrying the base OS — no application version baked in.
+2. **cloud-init installs a `.deb`**: it curls
+   `github.com/getlantern/lantern-box/releases/download/v<tag>/lantern-box_<tag>_linux_<arch>.deb`
+   and `apt-get install`s it. The comment there is the load-bearing detail — *"the packer image does
+   not bake in a specific lantern-box version — cloud-init installs the tag the orchestrator picked
+   for this route"* — so the version is per-route orchestrator state, not image state.
+3. The `.deb` drops the binary and a **systemd unit, left disabled**.
+4. **`PushConfigPacker`** SSHes in, writes config + TLS material under `/etc/lantern-box/`, opens the
+   listen port, and runs `systemctl enable --now lantern-box`.
 
-**config push** (`ssh.go`) writes `/etc/sing-box/config.json` (plus optional `tls.crt`/`tls.key`),
-re-pulls the image, and `systemctl enable --now sing-box`.
+## 2. What a spark exit needs — much less than a container
 
-Four things are baked in, and a spark server matches none of them:
+The pieces are already generic on both sides, which is why this is small:
 
-| baked in | value | spark exit needs |
-|---|---|---|
-| systemd unit name | `sing-box` | anything |
-| container entrypoint | `/usr/local/bin/lantern-box` | `/usr/local/bin/spark-wasm-server` |
-| config path | `/etc/sing-box/config.json` | somewhere for a config + a `.spkb` |
-| CLI shape | `run --config <path>` | `serve-bitcoin --k-srv … --upstream …` |
+| piece | state |
+|---|---|
+| `renderDebCloudInitStep` | **already package-generic** — takes `pkg`, `url`, `detail`, `note` |
+| `LanternBoxDebURL` | lantern-box-specific; needs a sibling for spark |
+| spark `.deb` build | **already exists** — `packaging/debian/build-deb.sh`, run by `release.yml` on tags |
+| systemd unit in a spark `.deb` | **already exists** — the package ships `packaging/systemd/spark.service` |
+| per-route version selection | already the track's release tag |
 
-Two things are already generic and worth keeping: the image ref comes from the track
-(`Track.DockerImageRef`, and `IsSingboxTrack()` is only a *name* check, so a non-sing-box image is
-representable rather than excluded), and `--net=host` plus the iptables rule on `cfg.ListenPort` mean
-the listener is reachable without any port-mapping work.
+So deploying an exit is: **publish `spark-wasm-server` in a `.deb`, add a URL helper and an install
+step, ship a systemd unit, and let the existing config push write the file and start it.** No
+registry, no image build, no entrypoint indirection — all of which the previous revision of this note
+proposed against the wrong pipeline.
 
-## 2. Making a spark server fit — three options
+Two things still need deciding, and they are smaller than they were:
 
-**A. Impersonate lantern-box.** Ship the image with `spark-wasm-server` at
-`/usr/local/bin/lantern-box` and teach it `run --config <path>`. Zero lantern-cloud changes; deployable
-today. It also puts a binary at a path that lies about what it is, which will cost somebody an hour at
-the worst possible moment.
-
-**B. Parameterize the whole pipeline** — unit name, entrypoint, config path, argv — driven off the
-track. Cleanest, and dns-tunnel inherits it. But it edits provisioning code that *every existing track
-flows through*, to benefit a track that does not exist yet.
-
-**C. Decided: `run --config` in spark, plus an entrypoint placeholder in cloud-init.**
-
-Two small changes that meet in the middle:
-
-- **spark side** — `spark-wasm-server run --config <path>`, reading the same arguments from a JSON
-  file. Worth having regardless: the pipeline's whole config-delivery mechanism is "write a file, restart
-  the unit," and a `k_srv` secret does not belong in a systemd `ExecStart` line where `ps` can read it.
-- **lantern-cloud side** — the entrypoint becomes a placeholder exactly like the image already is
-  (`sed -i 's|IMAGE_PLACEHOLDER|…|'` is the established pattern, one line away from
-  `ENTRYPOINT_PLACEHOLDER`), defaulting to `/usr/local/bin/lantern-box` so every existing track is
-  byte-identical.
-
-The unit name and config path stay `sing-box` / `/etc/sing-box/config.json`. They are inaccurate for a
-spark exit but they are *only names*, and leaving them alone keeps the diff to provisioning code near
-zero. Renaming them is a follow-up that touches nothing functional.
+- **One `.deb` or two.** The existing package installs `spark` + `spark-service` for a *client* host.
+  An exit wants neither, and shipping a client's systemd unit onto a server would be actively
+  confusing. A separate `spark-wasm-server` package is probably right, reusing the same build script
+  shape.
+- **The unit and config paths.** `PushConfigPacker` writes to `/etc/lantern-box/` and starts a unit
+  named `lantern-box`. Both are just names, but a spark exit reusing them would be a lie in the
+  filesystem; parameterizing them is a handful of lines now that the Docker entrypoint question is
+  moot.
 
 ## 3. Getting the bundle onto the exit — DECIDED: inline, hex-encoded
 
@@ -122,22 +112,27 @@ to prove the pipeline; neither is acceptable at scale.
    so a bad artifact stops the deploy rather than the first connection. `k_srv` rides the file rather
    than argv, where any local `ps` would read it — the file therefore holds a secret and wants `0600`,
    the way the pipeline already treats a TLS private key.
-2. Container image + its build (spark or a deploy repo — **where is an open question**; there is no
-   existing image build for a spark binary).
-3. `ENTRYPOINT_PLACEHOLDER` in cloud-init, defaulting to today's value (lantern-cloud, ~5 lines).
-4. A `wasm` arm in `pcfg` emitting the outbound spark already parses, plus a track pointing at the new
-   image (lantern-cloud).
-5. `bitcoind` per §4.
-6. Then, and only then, the #114 e2e is meaningful: a signed module delivered by config to a client
-   that dials an exit actually running it.
+2. **A `spark-wasm-server` `.deb`** — a sibling of `packaging/debian/build-deb.sh` with its own systemd
+   unit, published by `release.yml` alongside the existing artifacts.
+3. **A `SparkExitDebURL` helper + an install step** in the packer cloud-init (lantern-cloud). The
+   step renderer is already package-generic, so this is a URL and a call.
+4. **Parameterize the config path and unit name** in `PushConfigPacker`, or accept `lantern-box` as a
+   misnomer on an exit host. Small either way, and no longer entangled with a container entrypoint.
+5. A `wasm` arm in `pcfg` emitting the outbound spark already parses, plus a track carrying the
+   engine, the release tag, and the launch config.
+6. `bitcoind` per §4 — a public node first.
+7. Then the #114 e2e is meaningful: a signed module delivered by config to a client that dials an exit
+   actually running it.
 
 ## Open questions
 
-1. **Where does the image build live?** No spark binary has one. A `Dockerfile` in spark plus a CI job
-   is the obvious answer, but it is the first of its kind and wants a registry decision.
+1. **One `.deb` or two?** See §2 — an exit wants neither `spark` nor `spark-service`, and shipping a
+   client's systemd unit onto a server invites confusion.
 2. **Does the exit need the same `SPARK_MODULE_PUBKEY_HEX` pinning ceremony as the client?** It does
-   today — a release build refuses to compile without it, which is deliberate — so the image build
-   needs the pubkey as a build arg, the same way `release.yml` passes it.
+   today — a release build refuses to compile without it, deliberately — so the `.deb` build needs the
+   pubkey as a build-time variable, exactly as `release.yml` already passes it for the client.
 3. **How does `k_srv` reach both sides?** The exit gets it from its config; the client must get the
-   matching value through the signed config channel. That is a genome/`init_config` question this note
-   does not answer.
+   matching value through the config channel. That is a genome/`init_config` question this note does
+   not answer, and it is the last seam where client and exit can each be correct and still not speak.
+
+*(Resolved: "where does the container image build live" — there is no container. See §1.)*
