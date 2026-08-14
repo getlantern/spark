@@ -144,6 +144,28 @@ impl BundleStore {
             .unwrap_or(false)
     }
 
+    /// The engines this store can actually serve, as `engine → bundle version`.
+    ///
+    /// This is what a client tells a server it already holds, so that the server can omit bytes it
+    /// would otherwise re-send on every config fetch.
+    ///
+    /// Derived from the floors but **intersected with the artifacts on disk**, because the two can
+    /// disagree in the direction that matters: floors only ever advance, so one survives its artifact
+    /// being removed, and a floors-only list would claim an engine the store cannot load. The
+    /// declaration is only a hint — a member whose bundle turns out to be missing is skipped, not
+    /// fatal — but it should not be a hint we already know to be wrong.
+    ///
+    /// A missing or unreadable store is an empty map, not an error: having nothing to declare is the
+    /// normal cold-start state, and it must not be able to fail a config fetch.
+    pub fn installed(&self) -> BTreeMap<String, u32> {
+        self.floors()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(engine, _)| self.contains(engine))
+            .map(|(engine, floor)| (engine, floor.bundle))
+            .collect()
+    }
+
     /// The persisted floors, keyed by engine name.
     pub fn floors(&self) -> io::Result<BTreeMap<String, Floor>> {
         match std::fs::read_to_string(self.dir.join(FLOORS_FILE)) {
@@ -325,6 +347,46 @@ mod tests {
             loaded.capabilities.as_deref(),
             Some(["host_rand".to_string()].as_slice()),
             "the capability grant survives the round trip inside the signature"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What a client declares to the server must be what it can actually serve.
+    ///
+    /// Floors and artifacts can disagree in the direction that matters: floors only ever advance, so
+    /// one outlives its artifact. A floors-only declaration would tell the server "don't send me
+    /// bip324, I have it" about an engine the store can no longer load — turning a cheap re-send into
+    /// a silently skipped pool member.
+    #[test]
+    fn installed_declares_only_engines_still_on_disk() {
+        let dir = temp_dir("installed");
+        let store = BundleStore::new(&dir);
+        assert!(
+            store.installed().is_empty(),
+            "a cold store declares nothing"
+        );
+
+        store
+            .install(&artifact(&dev_keypair(), ENGINE, 3, 1))
+            .expect("install");
+        assert_eq!(
+            store.installed(),
+            [(ENGINE.to_string(), 3u32)]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+            "an installed engine is declared at its bundle version"
+        );
+
+        // Remove the artifact but leave the floors — the state a floors-only view would misreport.
+        std::fs::remove_file(dir.join(format!("{ENGINE}.{BUNDLE_EXT}"))).expect("remove artifact");
+        assert!(
+            !store.floors().expect("floors").is_empty(),
+            "the floor survives the artifact, which is the whole hazard"
+        );
+        assert!(
+            store.installed().is_empty(),
+            "an engine whose artifact is gone must not be declared"
         );
 
         std::fs::remove_dir_all(&dir).ok();

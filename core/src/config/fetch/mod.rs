@@ -172,6 +172,27 @@ const MAX_BODY: usize = 4 * 1024 * 1024;
 /// direct dial is censored (DNS poisoning / SNI block / RST). Two fronted avenues run when available:
 /// the embedded `fronted.yaml.gz` one-shot (a known-good accelerator) and the vantage-point scanner
 /// (`bootstrap`), which discovers live edges from the user's own network and so self-heals when the
+/// The transport-module bundles this client already holds (`engine → version`), for the request's
+/// `modules` declaration. Empty without the `wasm-transport` feature, and empty on a cold client —
+/// in both cases the field is omitted and the request is byte-identical to what it was before.
+///
+/// Reads the same store the runtime installs into ([`crate::transport::engine::store::default_dir`]),
+/// so the two cannot disagree about where bundles live.
+fn installed_modules(dir: &Path) -> std::collections::BTreeMap<String, u32> {
+    #[cfg(feature = "wasm-transport")]
+    {
+        crate::transport::engine::BundleStore::new(crate::transport::engine::store::default_dir(
+            dir,
+        ))
+        .installed()
+    }
+    #[cfg(not(feature = "wasm-transport"))]
+    {
+        let _ = dir;
+        std::collections::BTreeMap::new()
+    }
+}
+
 /// embedded front list is fully blocked.
 async fn fetch_once(
     env: &FetchEnv,
@@ -179,10 +200,12 @@ async fn fetch_once(
     creds: &user::Creds,
     cond: &Conditional,
     kindling: &flint_kindling::Kindling,
+    dir: &Path,
 ) -> std::io::Result<FetchOutcome> {
     let mut req = ConfigRequest::new(device_id.to_string());
     req.user_id = creds.user_id.clone();
     req.pro_token = creds.pro_token.clone();
+    req.modules = installed_modules(dir);
     with_outcome(
         "kindling",
         Box::pin(fetch_once_kindling(
@@ -702,7 +725,7 @@ pub async fn load_or_fetch(dir: &Path, env: &FetchEnv) -> std::io::Result<(Confi
     // Race the connection-level avenues (direct + proxyless) against both fronted avenues (embedded
     // list + vantage-point scanner) for censored cold-start resilience.
     let kindling = config_kindling(env, seed_from_device_id(&did));
-    match fetch_once(env, &did, &creds, &Conditional::default(), &kindling).await {
+    match fetch_once(env, &did, &creds, &Conditional::default(), &kindling, dir).await {
         Ok(FetchOutcome::New { raw, etag }) => {
             let cfg = Config::from_config_str(&raw).map_err(std::io::Error::other)?;
             let meta = CacheMeta {
@@ -791,7 +814,7 @@ where
     let kindling = config_kindling(env, seed_from_device_id(&did));
     let mut fail = 0u32;
     while !should_stop() {
-        match fetch_once(env, &did, &creds, &cond, &kindling).await {
+        match fetch_once(env, &did, &creds, &cond, &kindling, dir).await {
             Ok(FetchOutcome::New { raw, etag }) => match Config::from_config_str(&raw) {
                 Ok(cfg) => {
                     fail = 0;
