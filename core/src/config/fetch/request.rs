@@ -29,6 +29,15 @@ pub struct ConfigRequest {
     pub version: String,
     pub locale: String,
     pub protocols: Vec<String>,
+    /// Optional client behaviours the server can gate on (`common.Capability*` in lantern-cloud's
+    /// shared types) — capability negotiation instead of version sniffing.
+    ///
+    /// Spark advertises only what it actually honours. `non_selectable_outbounds`, for instance, is
+    /// deliberately absent: nothing here consumes `NonSelectableOutbounds`, and claiming it would
+    /// invite the server to send infrastructure outbounds this client would then surface as
+    /// selectable proxies.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
     /// Transport-module bundles this client already holds, as `engine → bundle version`, so the
     /// server can omit bytes it would otherwise re-send.
     ///
@@ -74,6 +83,27 @@ pub(crate) const APP_NAME: &str = "lantern";
 /// to clients reporting `>= 9.2.0`, so advertising `"meek"` below this version would never get one.
 pub(crate) const LANTERN_VERSION: &str = "9.2.0";
 
+/// The server-side token for "this client can install and run a signed transport-module bundle
+/// delivered in its config" (`common.CapabilityTransportModules`). The string is the wire contract —
+/// it must match the Go constant exactly, so it lives in one named place here rather than inline.
+#[cfg(feature = "wasm-transport")]
+const CAPABILITY_TRANSPORT_MODULES: &str = "transport_modules";
+
+/// What this build can actually do, for [`ConfigRequest::capabilities`].
+///
+/// Advertising module support cannot be inferred from `modules`: that field is omitted when empty, so
+/// a client that supports delivery but holds nothing yet is byte-identical on the wire to one that
+/// cannot use modules at all. Without this token the server has to guess, and both guesses are bad —
+/// never bootstrap a client's first module, or send every client a module-bearing outbound it will
+/// silently skip, with the module's bytes (the expensive part) attached.
+fn capabilities() -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut caps = Vec::new();
+    #[cfg(feature = "wasm-transport")]
+    caps.push(CAPABILITY_TRANSPORT_MODULES.to_string());
+    caps
+}
+
 /// This build's platform string in the Lantern convention (`darwin`/`linux`/…). Shared by the
 /// config-new request and the `/user-create` pre-step.
 pub(crate) fn platform() -> &'static str {
@@ -105,6 +135,7 @@ impl ConfigRequest {
                 // *outbound* the server also assigns is harmlessly skipped by lantern.rs.
                 "unbounded".to_string(),
             ],
+            capabilities: capabilities(),
             // Filled in by the fetch, which knows the data dir the store lives under.
             modules: std::collections::BTreeMap::new(),
             time_zone: local_timezone(),
@@ -607,6 +638,49 @@ mod tests {
         assert!(body.contains("\"device_id\":\"dev-123\""));
     }
 
+    /// A build that can run delivered modules says so; one that cannot stays silent.
+    ///
+    /// This is the distinction `modules` cannot make on its own. That field is omitted when empty, so
+    /// a client that supports delivery but holds nothing yet looks exactly like a client that cannot
+    /// use modules at all — and the server needs to tell them apart to know whether to send the first
+    /// one. Both halves are asserted here, because a capability nobody omits carries no information.
+    #[test]
+    fn the_transport_module_capability_tracks_the_build() {
+        let req = ConfigRequest::new("d".into());
+        let body = String::from_utf8(
+            build_request_bytes(
+                "h",
+                "/p",
+                &req,
+                &Conditional::default(),
+                KindlingHeaders::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .split_once("\r\n\r\n")
+        .unwrap()
+        .1
+        .to_string();
+
+        if cfg!(feature = "wasm-transport") {
+            assert!(
+                body.contains(r#""capabilities":["transport_modules"]"#),
+                "a build that can run delivered modules must advertise it: {body}"
+            );
+        } else {
+            assert!(
+                !body.contains("capabilities"),
+                "a build that cannot run modules must send no capabilities at all: {body}"
+            );
+        }
+
+        // Never advertised, in either build: nothing here consumes `NonSelectableOutbounds`, and
+        // claiming it would invite the server to send outbounds this client would surface as
+        // selectable proxies.
+        assert!(!body.contains("non_selectable_outbounds"));
+    }
+
     /// The `modules` declaration rides the JSON body and disappears when there is nothing to declare.
     ///
     /// Both halves matter. Present, it is what stops an inline module riding every config fetch —
@@ -630,10 +704,19 @@ mod tests {
             s.split_once("\r\n\r\n").unwrap().1.to_string()
         };
 
+        // Decode and look for the *key*, rather than searching the serialized text. A substring
+        // search passes or fails for the wrong reason as soon as any other field's value contains
+        // the word — which is not hypothetical: `"capabilities":["transport_modules"]` broke exactly
+        // this assertion the moment that field was added.
+        let key_absent = |body: &str, key: &str| {
+            let v: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+            v.get(key).is_none()
+        };
+
         let empty = ConfigRequest::new("d".into());
         let body = body_of(&empty);
         assert!(
-            !body.contains("modules"),
+            key_absent(&body, "modules"),
             "nothing held ⇒ the field is absent, not `\"modules\":{{}}`: {body}"
         );
 
