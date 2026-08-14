@@ -1,6 +1,9 @@
 # Rust build output
 /target
 /spark-sharing/target
+# `wasm-server` is its own workspace (see Cargo.toml), so it has its own build dir that the
+# root-anchored `/target` above does not cover.
+/wasm-server/target
 **/*.rs.bk
 
 # Release packaging output (DMGs, tarballs, etc. — built by packaging/ scripts + CI)

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "dns-tunnel-core", "dns-tunnel-server", "bip324-core", "wasm-server"]
+members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/apple", "spark-backend", "spark-ffi", "dns-tunnel-core", "dns-tunnel-server", "bip324-core"]
 # Kept out of the workspace on purpose:
 #  - vendor/netstack-smoltcp: depended on by `path`, but its examples/tests/dev-deps
 #    (tun2, structopt, socket2-ext, …) should not be built as part of our workspace.
@@ -14,7 +14,13 @@ members = ["core", "cli", "ipc", "service", "platforms/android", "platforms/appl
 #    wasm32-unknown-unknown cdylibs — a different target + ABI + profile than the host
 #    workspace; built + signed on demand by scripts/build-module.sh, never by `cargo build`.
 #    (bip324 path-depends on the `bip324-core` workspace member but is itself excluded.)
-exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing", "modules/obfs-xor", "modules/bip324"]
+#  - wasm-server: the dynamic-transport exit (ADR 0013 §7). Same reason as spark-sharing, and
+#    sharper: it depends on `spark-core` with `features = ["bip324"]`, and Cargo unifies features
+#    across the members it builds together — so as a member it would compile secp256k1 (C) into the
+#    *client's* `spark-core` on a bare `cargo build`, silently costing the C-free base build
+#    (docs/GOAL.md) and binary size. Excluding it keeps the server's features out of the client
+#    entirely. Has its own CI gate, like spark-sharing.
+exclude = ["vendor/netstack-smoltcp", "netstack-spike", "circ-tool", "gui-tauri/src-tauri", "spark-sharing", "modules/obfs-xor", "modules/bip324", "wasm-server"]
 
 [workspace.package]
 version = "0.1.2"
