@@ -456,6 +456,27 @@ fn build_members(
     let wire = wire_plan_from_config(&config.transport.shaping);
     let mut members = Vec::with_capacity(config.transport.servers.len());
     let mut skipped: Vec<String> = Vec::new();
+
+    // Provision every config-delivered bundle before building *any* member.
+    //
+    // Installing inside the member build would make an artifact's availability depend on iteration
+    // order: several outbounds routinely share one engine, and only one of them needs to carry the
+    // bytes, so an outbound that names the engine without carrying it fails its store lookup whenever
+    // it happens to be built first. Where a server chose to put the artifact must not decide which
+    // transports work. Doing it here also means the server can send the bytes once per body instead
+    // of once per outbound, which is what makes the hex encoding's saving real rather than notional.
+    //
+    // A failure is logged, not propagated: the member that needed it then fails its own build and is
+    // skipped below with a reason, exactly like any other un-buildable member.
+    #[cfg(feature = "wasm-transport")]
+    for entry in &config.transport.servers {
+        if let crate::config::ServerSpec::Wasm(w) = &entry.spec {
+            if let Err(e) = provision_one(w) {
+                tracing::warn!(error = %e, "transport.wasm: provisioning a delivered bundle failed");
+            }
+        }
+    }
+
     for entry in &config.transport.servers {
         // Skip (don't propagate) a member we can't build, mirroring the config_raw adapter skipping
         // outbounds it can't represent. The reason is logged and aggregated into the empty-pool error.
@@ -628,6 +649,11 @@ pub fn from_config_with_control(
     }
     // The dynamic wasm transport is next in precedence (above the plain `server` tunnel).
     if let Some(wasm) = &config.transport.wasm {
+        // Provisioning is fatal here, unlike in a pool: this is the only transport configured, so a
+        // bundle that cannot be installed leaves nothing to fall back to, and the precise reason is
+        // what the operator needs to see.
+        #[cfg(feature = "wasm-transport")]
+        provision_one(wasm)?;
         let (tcp, udp) = wasm_transport(wasm, protector)?;
         return Ok((tcp, udp, None));
     }
@@ -871,22 +897,15 @@ fn wasm_transport(
             let dir = cfg.bundle_dir.as_ref().ok_or_else(|| {
                 io::Error::other("transport.wasm.engine requires transport.wasm.bundle_dir")
             })?;
-            let store = crate::transport::engine::BundleStore::new(dir);
-            // Provisioning, when the config delivered the artifact rather than assuming it is already
-            // here. This is the whole delivery path: after it, resolution is byte-for-byte the same as
-            // for a bundle that arrived by any other means, so nothing downstream can tell — or
-            // privilege — where a transport came from.
+            // Anything the config *delivered* was already installed by `provision_one`, ahead of this
+            // and ahead of every other pool member, so that where a server put the artifact cannot
+            // decide which members work. By here the distinction is gone: a bundle that arrived over
+            // the config channel and one that was already on disk resolve identically, which is what
+            // keeps the delivery path from being a privileged second way to load code.
             //
-            // Installed on every build rather than only when absent, deliberately: `install`
-            // re-verifies against the *current* persisted floors, so a correctly-signed-but-stale
-            // bundle replayed in a fresh config is refused here. Skipping the work when the engine
-            // already exists would skip that check too. This runs once per pool build, not per dial.
-            if let Some(source) = &cfg.source {
-                install_delivered(&store, engine, source)?;
-            }
             // The store re-verifies the artifact and enforces both persisted floors (bundle and
             // genome), so a tampered or replayed file on disk is refused here, not at dial time.
-            let verified = store
+            let verified = crate::transport::engine::BundleStore::new(dir)
                 .load(engine)
                 .map_err(|e| io::Error::other(format!("transport.wasm: {e}")))?;
             let wasm_bytes = verified.wasm.as_deref().ok_or_else(|| {
@@ -949,6 +968,65 @@ fn wasm_transport(
     }
     let t = Arc::new(t);
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
+}
+
+/// Point every wasm transport that didn't name a bundle store at the one under `data_dir`.
+///
+/// The `config_raw.json` adapter cannot do this: it takes a `&str` and has no idea where this
+/// platform keeps its writable state (an app-group container on Apple, the app files dir on Android).
+/// So it emits `bundle_dir: None` and the runtime completes it here — the same
+/// adapter-produces / runtime-completes split `protect_interface` and `tun` already use.
+///
+/// An explicitly configured `bundle_dir` always wins, so spark's own TOML keeps full control.
+///
+/// Without this, a fetched config can carry a perfectly good bundle and still install nothing: the
+/// engine has nowhere to live, so provisioning fails and every wasm member is skipped.
+#[cfg(feature = "wasm-transport")]
+pub fn default_bundle_dirs(config: &mut Config, data_dir: &std::path::Path) {
+    let dir = crate::transport::engine::store::default_dir(data_dir);
+    let fill = |w: &mut WasmConfig| {
+        if w.bundle_dir.is_none() {
+            w.bundle_dir = Some(dir.clone());
+        }
+    };
+    if let Some(w) = config.transport.wasm.as_mut() {
+        fill(w);
+    }
+    for entry in config.transport.servers.iter_mut() {
+        if let crate::config::ServerSpec::Wasm(w) = &mut entry.spec {
+            fill(w);
+        }
+    }
+}
+
+/// Install the bundle one wasm transport had delivered to it, if it had one.
+///
+/// The single place the (`engine`, `bundle_dir`, `source`) triple is turned into an install, so the
+/// pool path and the single-transport path cannot drift on what "provisioned" means — they differ
+/// only in what they do with the error.
+///
+/// A `source` without an `engine` or a `bundle_dir` is not silently skipped: `source` provisions the
+/// store that `engine` resolves against, so either missing means a config that cannot do what it
+/// says. `bundle_dir` in particular is filled in by the runtime for a fetched config
+/// ([`crate::fd_tunnel`]), so its absence here means that step did not run.
+#[cfg(feature = "wasm-transport")]
+fn provision_one(cfg: &WasmConfig) -> io::Result<()> {
+    let Some(source) = &cfg.source else {
+        return Ok(());
+    };
+    let engine = cfg.engine.as_deref().ok_or_else(|| {
+        io::Error::other("transport.wasm.source provisions a bundle store, which requires engine")
+    })?;
+    let dir = cfg.bundle_dir.as_ref().ok_or_else(|| {
+        io::Error::other(format!(
+            "transport.wasm: engine `{engine}` was delivered a bundle but has no bundle_dir to install it into"
+        ))
+    })?;
+    install_delivered(
+        &crate::transport::engine::BundleStore::new(dir),
+        engine,
+        source,
+    )
 }
 
 /// Ceiling on a bundle artifact read from a path or (later) a mirror.
@@ -2206,6 +2284,143 @@ mod wasm_config_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Where the server put the artifact must not decide which members work.
+    ///
+    /// Several outbounds routinely share one engine and only one needs to carry the bytes — that is
+    /// the whole point of emitting the artifact once per body rather than once per outbound. If
+    /// provisioning happened inside the member build, the outbound that merely *names* the engine
+    /// would fail its store lookup whenever it was built first, so the pool's contents would depend
+    /// on config ordering. Here the carrier is deliberately listed **second**.
+    #[cfg(feature = "multi-server")]
+    #[test]
+    fn an_outbound_can_use_a_bundle_a_later_outbound_delivered() {
+        use crate::config::{ServerEntry, ServerSpec};
+        use crate::transport::engine::BundleStore;
+
+        const ENGINE: &str = "obfs-shared";
+        let dir = temp_path("shared-engine");
+        std::fs::create_dir_all(&dir).expect("create store dir");
+
+        let hex: String = bundle_artifact(ENGINE, 1)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let member = |source: Option<ModuleSource>| ServerEntry {
+            spec: ServerSpec::Wasm(WasmConfig {
+                server: "192.0.2.1:443".parse().unwrap(),
+                module: None,
+                engine: Some(ENGINE.to_owned()),
+                bundle_dir: Some(dir.clone()),
+                min_version: 0,
+                init_config: None,
+                genome: None,
+                floor_path: None,
+                source,
+            }),
+            // A pool member needs a health-check URL to be buildable at all, and an `http://` one so this
+            // test does not additionally require the `anytls` TLS backend; without it both members
+            // are skipped for an unrelated reason and the ordering property under test is masked.
+            callback_url: Some("http://example.invalid/health".into()),
+            name: None,
+            country: None,
+            country_code: None,
+            city: None,
+            latitude: None,
+            longitude: None,
+        };
+
+        let cfg = Config {
+            transport: TransportConfig {
+                // First names the engine and carries nothing; second carries the bytes.
+                servers: vec![
+                    member(None),
+                    member(Some(ModuleSource::Inline {
+                        content: hex,
+                        format: crate::config::ModuleFormat::Spkb,
+                    })),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(
+            !BundleStore::new(&dir).contains(ENGINE),
+            "nothing installed yet"
+        );
+        let (members, skipped) = build_members(&cfg, None);
+        assert!(
+            skipped.is_empty(),
+            "no member should be skipped — the artifact is installed before any of them build: {skipped:?}"
+        );
+        assert_eq!(members.len(), 2, "both members resolve the shared engine");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The runtime, not the adapter, decides where bundles live — a fetched config cannot know.
+    #[test]
+    fn default_bundle_dirs_fills_only_what_config_left_unset() {
+        use crate::config::{ServerEntry, ServerSpec};
+
+        let explicit = std::path::PathBuf::from("/explicitly/configured");
+        let mut cfg = Config {
+            transport: TransportConfig {
+                wasm: Some(WasmConfig {
+                    server: "192.0.2.1:443".parse().unwrap(),
+                    module: None,
+                    engine: Some("e".into()),
+                    bundle_dir: None,
+                    min_version: 0,
+                    init_config: None,
+                    genome: None,
+                    floor_path: None,
+                    source: None,
+                }),
+                servers: vec![ServerEntry {
+                    spec: ServerSpec::Wasm(WasmConfig {
+                        server: "192.0.2.2:443".parse().unwrap(),
+                        module: None,
+                        engine: Some("e".into()),
+                        bundle_dir: Some(explicit.clone()),
+                        min_version: 0,
+                        init_config: None,
+                        genome: None,
+                        floor_path: None,
+                        source: None,
+                    }),
+                    callback_url: None,
+                    name: None,
+                    country: None,
+                    country_code: None,
+                    city: None,
+                    latitude: None,
+                    longitude: None,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        super::default_bundle_dirs(&mut cfg, std::path::Path::new("/data"));
+
+        assert_eq!(
+            cfg.transport.wasm.unwrap().bundle_dir,
+            Some(crate::transport::engine::store::default_dir(
+                std::path::Path::new("/data")
+            )),
+            "an unset store is filled from the platform data dir"
+        );
+        let ServerSpec::Wasm(w) = &cfg.transport.servers[0].spec else {
+            panic!("expected a wasm member");
+        };
+        assert_eq!(
+            w.bundle_dir,
+            Some(explicit),
+            "an explicitly configured store is never overridden"
+        );
     }
 
     /// Every way a delivered source can be wrong fails **loud**, and none of them installs anything.

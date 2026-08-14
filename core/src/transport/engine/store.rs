@@ -144,6 +144,37 @@ impl BundleStore {
             .unwrap_or(false)
     }
 
+    /// The engines this store can actually serve, as `engine → bundle version`.
+    ///
+    /// This is what a client tells a server it already holds, so that the server can omit bytes it
+    /// would otherwise re-send on every config fetch.
+    ///
+    /// An engine is declared only if [`load`](Self::load) **succeeds**, and at the version that load
+    /// authenticated — not merely because a file exists, and not at the floor.
+    ///
+    /// The weaker test is tempting and wrong. Floors only ever advance, so one survives its artifact
+    /// being deleted; and an artifact can be present but stale against its own floor, or tampered
+    /// with, in which case it exists and still cannot be served. Declaring any of those tells the
+    /// server "don't send me this, I have it" about an engine that will then fail to load — and since
+    /// the client is what asked the bytes to be withheld, the situation stops being self-correcting.
+    /// Re-sending is cheap; a pool member silently skipped on every fetch is not.
+    ///
+    /// So the cost is deliberate: this verifies each candidate (signature + both floors) once per
+    /// config fetch — poll-interval work over a handful of engines, not per-dial.
+    ///
+    /// A missing or unreadable store is an empty map, not an error: having nothing to declare is the
+    /// normal cold-start state, and it must not be able to fail a config fetch.
+    pub fn installed(&self) -> BTreeMap<String, u32> {
+        self.floors()
+            .unwrap_or_default()
+            .into_keys()
+            .filter_map(|engine| {
+                let version = self.load(&engine).ok()?.version;
+                Some((engine, version))
+            })
+            .collect()
+    }
+
     /// The persisted floors, keyed by engine name.
     pub fn floors(&self) -> io::Result<BTreeMap<String, Floor>> {
         match std::fs::read_to_string(self.dir.join(FLOORS_FILE)) {
@@ -325,6 +356,62 @@ mod tests {
             loaded.capabilities.as_deref(),
             Some(["host_rand".to_string()].as_slice()),
             "the capability grant survives the round trip inside the signature"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What a client declares to the server must be what it can actually serve.
+    ///
+    /// Floors and artifacts can disagree in the direction that matters: floors only ever advance, so
+    /// one outlives its artifact. A floors-only declaration would tell the server "don't send me
+    /// bip324, I have it" about an engine the store can no longer load — turning a cheap re-send into
+    /// a silently skipped pool member.
+    #[test]
+    fn installed_declares_only_engines_still_on_disk() {
+        let dir = temp_dir("installed");
+        let store = BundleStore::new(&dir);
+        assert!(
+            store.installed().is_empty(),
+            "a cold store declares nothing"
+        );
+
+        store
+            .install(&artifact(&dev_keypair(), ENGINE, 3, 1))
+            .expect("install");
+        assert_eq!(
+            store.installed(),
+            [(ENGINE.to_string(), 3u32)]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+            "an installed engine is declared at its bundle version"
+        );
+
+        // A present-but-unusable artifact is the case a file-exists check would get wrong: it is
+        // still there, so `contains` is true, but it cannot be loaded — and declaring it would ask
+        // the server to withhold the very bytes that would repair it.
+        let path = dir.join(format!("{ENGINE}.{BUNDLE_EXT}"));
+        let mut tampered = std::fs::read(&path).expect("read artifact");
+        let idx = tampered.len() - 64 - 8; // inside the signed payload
+        tampered[idx] ^= 0xff;
+        std::fs::write(&path, &tampered).expect("write tampered artifact");
+        assert!(store.contains(ENGINE), "the file is still there");
+        assert!(
+            store.installed().is_empty(),
+            "an artifact that cannot be loaded must not be declared, or the re-send that would \
+             repair it never comes"
+        );
+
+        // Removed entirely, floor left behind — floors outlive artifacts, so this must not be
+        // reported either.
+        std::fs::remove_file(&path).expect("remove artifact");
+        assert!(
+            !store.floors().expect("floors").is_empty(),
+            "the floor survives the artifact, which is the whole hazard"
+        );
+        assert!(
+            store.installed().is_empty(),
+            "an engine whose artifact is gone must not be declared"
         );
 
         std::fs::remove_dir_all(&dir).ok();

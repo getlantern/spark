@@ -29,6 +29,23 @@ pub struct ConfigRequest {
     pub version: String,
     pub locale: String,
     pub protocols: Vec<String>,
+    /// Transport-module bundles this client already holds, as `engine → bundle version`, so the
+    /// server can omit bytes it would otherwise re-send.
+    ///
+    /// Without this, an inline module rides *every* config fetch that offers it — and the config body
+    /// changes on every bandit reassignment, so the existing whole-body `ETag` almost never spares it.
+    /// Declaring what we hold turns a per-fetch cost into a one-time one.
+    ///
+    /// The **version**, not a hash: the bundle store already persists exactly this, and the signature
+    /// is what authenticates the bytes, so a hash would be a second identity for one thing (see
+    /// `engine/store.rs`, which keys on name for the same reason).
+    ///
+    /// This is a **hint, never authorization**. If the server takes it at its word and the store turns
+    /// out not to hold the engine, that pool member is skipped like any other un-buildable one — a
+    /// client that lies only degrades itself. Omitted when empty, so a build without `wasm-transport`
+    /// (or a client holding nothing) sends exactly what it sent before.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub modules: std::collections::BTreeMap<String, u32>,
     #[serde(skip)]
     pub time_zone: String,
 }
@@ -88,6 +105,8 @@ impl ConfigRequest {
                 // *outbound* the server also assigns is harmlessly skipped by lantern.rs.
                 "unbounded".to_string(),
             ],
+            // Filled in by the fetch, which knows the data dir the store lives under.
+            modules: std::collections::BTreeMap::new(),
             time_zone: local_timezone(),
         }
     }
@@ -586,6 +605,61 @@ mod tests {
         let (head, body) = s.split_once("\r\n\r\n").unwrap();
         assert!(head.contains(&format!("Content-Length: {}", body.len())));
         assert!(body.contains("\"device_id\":\"dev-123\""));
+    }
+
+    /// The `modules` declaration rides the JSON body and disappears when there is nothing to declare.
+    ///
+    /// Both halves matter. Present, it is what stops an inline module riding every config fetch —
+    /// the body changes on each bandit reassignment, so the whole-body `ETag` almost never spares it.
+    /// Absent, the request must be exactly what it was before this field existed, so a cold client or
+    /// a build without `wasm-transport` cannot be told apart from an older one.
+    #[test]
+    fn declares_held_modules_in_the_body_and_omits_the_field_when_empty() {
+        let body_of = |req: &ConfigRequest| {
+            let s = String::from_utf8(
+                build_request_bytes(
+                    "h",
+                    "/p",
+                    req,
+                    &Conditional::default(),
+                    KindlingHeaders::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            s.split_once("\r\n\r\n").unwrap().1.to_string()
+        };
+
+        let empty = ConfigRequest::new("d".into());
+        let body = body_of(&empty);
+        assert!(
+            !body.contains("modules"),
+            "nothing held ⇒ the field is absent, not `\"modules\":{{}}`: {body}"
+        );
+
+        let mut held = ConfigRequest::new("d".into());
+        held.modules = [("bip324".to_string(), 3u32), ("obfs-xor".to_string(), 1u32)]
+            .into_iter()
+            .collect();
+        let body = body_of(&held);
+        assert!(
+            body.contains(r#""modules":{"bip324":3,"obfs-xor":1}"#),
+            "held bundles are declared as engine → version, sorted: {body}"
+        );
+        // Content-Length must cover the grown body, or the server reads a truncated request.
+        let s = String::from_utf8(
+            build_request_bytes(
+                "h",
+                "/p",
+                &held,
+                &Conditional::default(),
+                KindlingHeaders::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let (head, body) = s.split_once("\r\n\r\n").unwrap();
+        assert!(head.contains(&format!("Content-Length: {}", body.len())));
     }
 
     #[test]

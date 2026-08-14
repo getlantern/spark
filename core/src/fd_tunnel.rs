@@ -945,6 +945,12 @@ pub fn run_fd_lantern_api(
                 ),
             }
         }
+        // A fetched config names an engine but cannot name a bundle store — the adapter has no idea
+        // where this platform keeps writable state — so point any wasm transport at the one under our
+        // own data dir. Without it a delivered bundle has nowhere to install and every wasm member is
+        // skipped, which is the difference between the delivery path working and looking broken.
+        #[cfg(feature = "wasm-transport")]
+        crate::transport::default_bundle_dirs(&mut config, &data_dir);
         info!(
             servers = config.transport.servers.len(),
             "lantern-api: boot config ready, bringing tunnel up"
@@ -957,6 +963,10 @@ pub fn run_fd_lantern_api(
         // A fetched config carries no `protect_interface`; reuse the one discovered at bringup so a
         // rebuilt pool pins its sockets identically (UDP/QUIC tunnel bypass, above).
         let reload_iface = config.transport.protect_interface.clone();
+        // The reload closure outlives `data_dir`'s other uses, so it needs its own handle to complete
+        // a refreshed config the same way bringup completes the boot one.
+        #[cfg(feature = "wasm-transport")]
+        let reload_bundle_dir = data_dir.clone();
         // Same identity as the connect fetch — a refresh that re-derived it would reintroduce exactly
         // the second account this is removing.
         let loop_identity = identity.clone();
@@ -967,6 +977,11 @@ pub fn run_fd_lantern_api(
             };
             let on_config = move |mut cfg: Config| {
                 cfg.transport.protect_interface = reload_iface.clone();
+                // Same completion as at bringup: a refreshed config is just as adapter-produced, so a
+                // module delivered by a *later* config must be installable too — that is what makes
+                // this the path a new transport arrives on without a reconnect.
+                #[cfg(feature = "wasm-transport")]
+                crate::transport::default_bundle_dirs(&mut cfg, &reload_bundle_dir);
                 // No live pool (direct/tunnel/single-transport) → the refresh still warmed the
                 // on-disk cache for the next connect, as before.
                 if let Some(pool) = current_pool() {
