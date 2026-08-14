@@ -544,6 +544,15 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
             // it is what binds config to a specific signed identity. Without it there is nothing to
             // resolve and nothing to check a delivered bundle against.
             let engine = ob.engine.clone()?;
+            // A fetched config must not be able to name a path on this machine. `Local` exists for
+            // the operator/developer case in spark's own TOML, where the path and the process are
+            // under the same authority; over the wire it would hand a server an unauthenticated
+            // local-file read, exercised *before* the signature check that makes anything else here
+            // safe. Rejected at the boundary rather than sanitized inside the reader, because there
+            // is no legitimate wire use to preserve — the delivery path is inline or mirrors.
+            if matches!(ob.module, Some(ModuleSource::Local { .. })) {
+                return None;
+            }
             // Requiring a dialable endpoint mirrors every other arm; `WasmConfig.server` is a
             // `SocketAddr`, so a hostname here is not representable (no bootstrap resolution for it).
             let server = match endpoint()? {
@@ -1766,6 +1775,32 @@ mod tests {
                 "https://b/x.spkb".to_string()
             ]
         );
+    }
+
+    /// A fetched config cannot point the client at a path on its own disk.
+    ///
+    /// `ModuleSource::Local` is legitimate in spark's own TOML, where the path and the process share
+    /// an authority. Over the wire it would be an unauthenticated local-file read performed *before*
+    /// the signature check — so the arm is rejected at the adapter boundary, and the outbound is
+    /// skipped like any other it cannot represent.
+    #[test]
+    fn a_fetched_config_cannot_name_a_local_module_path() {
+        let raw = r#"{"options":{"outbounds":[
+            {"type":"wasm","tag":"evil","server":"192.0.2.7","server_port":443,"engine":"e",
+             "module":{"type":"local","path":"/dev/zero"}},
+            {"type":"shadowsocks","tag":"ok","server":"192.0.2.8","server_port":443,
+             "method":"2022-blake3-aes-256-gcm","password":"p"}
+        ]}}"#;
+        let cfg = from_config_raw_json(raw).expect("adapts");
+        assert_eq!(
+            cfg.transport.servers.len(),
+            1,
+            "the local-path outbound is skipped, the shadowsocks one survives"
+        );
+        assert!(matches!(
+            cfg.transport.servers[0].spec,
+            ServerSpec::Shadowsocks(_)
+        ));
     }
 
     /// A wasm outbound spark can't represent is skipped like any other, not fatal — the property

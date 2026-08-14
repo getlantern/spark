@@ -951,6 +951,56 @@ fn wasm_transport(
     Ok((t.clone() as Arc<dyn Transport>, t as Arc<dyn UdpTransport>))
 }
 
+/// Ceiling on a bundle artifact read from a path or (later) a mirror.
+///
+/// Matched to the config fetch's own `MAX_BODY`, deliberately: an *inline* bundle is already bounded
+/// by that limit because it rides the config body, so bounding the out-of-band sources at the same
+/// number stops a path or a mirror from being a way around it. Generous against real artifacts —
+/// `bip324.spkb` is ~23 KB — because the point is to bound the damage, not to predict module size.
+#[cfg(feature = "wasm-transport")]
+const MAX_BUNDLE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Read a bundle artifact from `path`, refusing anything that is not a regular file or that exceeds
+/// [`MAX_BUNDLE_BYTES`].
+///
+/// `std::fs::read` on a character device never reaches EOF — `/dev/zero` allocates until the process
+/// dies — and this read happens *before* the signature check, so it cannot lean on the artifact being
+/// authentic. The cap is enforced during the read rather than only from the metadata: metadata and
+/// read are not atomic, and a device reports a length of zero regardless.
+#[cfg(feature = "wasm-transport")]
+fn read_bounded(path: &std::path::Path, engine: &str) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let meta = std::fs::metadata(path).map_err(|e| {
+        io::Error::other(format!(
+            "transport.wasm: reading delivered module {}: {e}",
+            path.display()
+        ))
+    })?;
+    if !meta.is_file() {
+        return Err(io::Error::other(format!(
+            "transport.wasm: engine `{engine}` names {}, which is not a regular file",
+            path.display()
+        )));
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(MAX_BUNDLE_BYTES + 1).read_to_end(&mut buf))
+        .map_err(|e| {
+            io::Error::other(format!(
+                "transport.wasm: reading delivered module {}: {e}",
+                path.display()
+            ))
+        })?;
+    if buf.len() as u64 > MAX_BUNDLE_BYTES {
+        return Err(io::Error::other(format!(
+            "transport.wasm: engine `{engine}` names {}, which exceeds the {MAX_BUNDLE_BYTES}-byte bundle limit",
+            path.display()
+        )));
+    }
+    Ok(buf)
+}
+
 /// Install a config-delivered bundle into `store` before it is resolved by name.
 ///
 /// The artifact's own Ed25519 signature — checked inside `install` against the key pinned in this
@@ -994,12 +1044,7 @@ fn install_delivered(
         }
         ModuleSource::Local { path, format } => {
             reject_spkw(format)?;
-            std::fs::read(path).map_err(|e| {
-                io::Error::other(format!(
-                    "transport.wasm: reading delivered module {}: {e}",
-                    path.display()
-                ))
-            })?
+            read_bounded(path, engine)?
         }
         // Deliberately not built yet. The schema carries mirrors from the start so switching is a
         // config change rather than a migration, but the fetch itself is async and wants the fronted
@@ -2215,6 +2260,28 @@ mod wasm_config_tests {
             from_config(&cfg).is_err(),
             "config must not be able to name an engine the signature doesn't cover"
         );
+
+        // A non-regular file must be refused before it is read. `/dev/zero` never reaches EOF, so
+        // `std::fs::read` would allocate until the process died — and this happens before the
+        // signature check, so it cannot rely on the artifact being authentic.
+        #[cfg(unix)]
+        {
+            let cfg = delivered_cfg(
+                "e",
+                &dir,
+                ModuleSource::Local {
+                    path: std::path::PathBuf::from("/dev/zero"),
+                    format: crate::config::ModuleFormat::Spkb,
+                },
+            );
+            let err = from_config(&cfg)
+                .map(|_| ())
+                .expect_err("a character device must be refused, not read");
+            assert!(
+                err.to_string().contains("not a regular file"),
+                "the error must name the real reason, got: {err}"
+            );
+        }
 
         // Mirrors parse (so the schema is settled) but are not fetchable yet — and say so.
         let cfg = delivered_cfg(
