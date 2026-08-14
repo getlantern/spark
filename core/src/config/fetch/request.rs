@@ -663,14 +663,26 @@ mod tests {
         .1
         .to_string();
 
+        let json: serde_json::Value = serde_json::from_str(&body).expect("the body is JSON");
+        let advertised: Vec<&str> = json
+            .get("capabilities")
+            .map(|c| {
+                c.as_array()
+                    .expect("capabilities is an array")
+                    .iter()
+                    .map(|v| v.as_str().expect("each capability is a string"))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         if cfg!(feature = "wasm-transport") {
             assert!(
-                body.contains(r#""capabilities":["transport_modules"]"#),
+                advertised.contains(&"transport_modules"),
                 "a build that can run delivered modules must advertise it: {body}"
             );
         } else {
             assert!(
-                !body.contains("capabilities"),
+                json.get("capabilities").is_none(),
                 "a build that cannot run modules must send no capabilities at all: {body}"
             );
         }
@@ -678,7 +690,7 @@ mod tests {
         // Never advertised, in either build: nothing here consumes `NonSelectableOutbounds`, and
         // claiming it would invite the server to send outbounds this client would surface as
         // selectable proxies.
-        assert!(!body.contains("non_selectable_outbounds"));
+        assert!(!advertised.contains(&"non_selectable_outbounds"));
     }
 
     /// The `modules` declaration rides the JSON body and disappears when there is nothing to declare.
