@@ -565,7 +565,7 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
                 engine: Some(engine),
                 bundle_dir: None,
                 min_version: ob.min_version,
-                init_config: None,
+                init_config: ob.init_config.clone(),
                 genome: None,
                 floor_path: None,
                 source: ob.module.clone(),
@@ -945,6 +945,14 @@ struct RawOutbound {
     module: Option<ModuleSource>,
     #[serde(default)]
     min_version: u32,
+    /// Hex bytes handed to the module's `init` export, verbatim.
+    ///
+    /// Opaque here on purpose. These are engine-specific — for bip324 they carry the initiator
+    /// role, the network magic and the per-server side-door key, which is what pairs a client to one
+    /// egress — and ADR 0013's whole point is that the core never parses `engine_params`. Assembling
+    /// them belongs to whoever configured the track; forwarding them belongs here.
+    #[serde(default)]
+    init_config: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1746,6 +1754,31 @@ mod tests {
         );
         // Platform reality the adapter cannot know; the runtime fills it from its data dir.
         assert_eq!(w.bundle_dir, None);
+    }
+
+    /// The bytes that pair a client to one specific exit reach the module verbatim.
+    ///
+    /// For bip324 `init_config` carries the per-server side-door key. A client that does not get it
+    /// cannot compute its opening tag, so the egress classifies it as an ordinary Bitcoin peer and
+    /// proxies it to the real node — the transport fails completely, and looks like a working
+    /// Bitcoin server while doing so. Nothing errors, which is why this is worth pinning.
+    #[test]
+    fn a_wasm_outbound_forwards_the_modules_init_config() {
+        let raw = r#"{"options":{"outbounds":[{
+            "type": "wasm", "tag": "ir-1",
+            "server": "192.0.2.7", "server_port": 8333,
+            "engine": "bip324",
+            "init_config": "00f9beb4d900050badc0ffee"
+        }]}}"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        let ServerSpec::Wasm(w) = &cfg.transport.servers[0].spec else {
+            panic!("expected a wasm pool member");
+        };
+        assert_eq!(
+            w.init_config.as_deref(),
+            Some("00f9beb4d900050badc0ffee"),
+            "the init bytes must reach the module unchanged — the core never parses them"
+        );
     }
 
     /// A mirror list accepts sing-box's single-`url` spelling as well as an array, so the one-URL
