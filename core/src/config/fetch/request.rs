@@ -97,10 +97,10 @@ const CAPABILITY_TRANSPORT_MODULES: &str = "transport_modules";
 /// never bootstrap a client's first module, or send every client a module-bearing outbound it will
 /// silently skip, with the module's bytes (the expensive part) attached.
 fn capabilities() -> Vec<String> {
-    #[allow(unused_mut)]
-    let mut caps = Vec::new();
     #[cfg(feature = "wasm-transport")]
-    caps.push(CAPABILITY_TRANSPORT_MODULES.to_string());
+    let caps = vec![CAPABILITY_TRANSPORT_MODULES.to_string()];
+    #[cfg(not(feature = "wasm-transport"))]
+    let caps: Vec<String> = Vec::new();
     caps
 }
 
