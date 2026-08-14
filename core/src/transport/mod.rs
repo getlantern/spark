@@ -1359,15 +1359,34 @@ fn proxyless_transport(
     ))
 }
 
+/// One ASCII hex digit → its value; `None` for anything else.
+///
+/// Decoding runs over **bytes**, never `&str` slices. Both decoders below take config-supplied
+/// strings, and `&s[i..i + 2]` panics — not errors — when the split lands inside a multi-byte UTF-8
+/// character (`"aéb"` is 4 bytes, so it clears an even-length check and then cuts through `é`).
+/// With `panic = "abort"` in the release profile that is not a recoverable error but a hard abort of
+/// the tunnel process, reachable from a malformed config field. Over bytes, a continuation byte is
+/// simply not a hex digit, so it returns `None` like any other junk.
+#[cfg(any(feature = "samizdat", feature = "wasm-transport"))]
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Decode an even-length hex string into exactly `N` bytes (`None` on wrong length or non-hex).
 #[cfg(feature = "samizdat")]
 fn decode_hex_n<const N: usize>(s: &str) -> Option<[u8; N]> {
-    if s.len() != 2 * N {
+    let bytes = s.as_bytes();
+    if bytes.len() != 2 * N {
         return None;
     }
     let mut out = [0u8; N];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    for (byte, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        *byte = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Some(out)
 }
@@ -1375,13 +1394,48 @@ fn decode_hex_n<const N: usize>(s: &str) -> Option<[u8; N]> {
 /// Decode an even-length hex string into bytes (no `hex` crate dependency).
 #[cfg(feature = "wasm-transport")]
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    let bytes = s.as_bytes();
+    if bytes.len() % 2 != 0 {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    bytes
+        .chunks_exact(2)
+        .map(|pair| Some((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
         .collect()
+}
+
+#[cfg(any(feature = "samizdat", feature = "wasm-transport"))]
+#[cfg(test)]
+mod hex_decoder_tests {
+    /// Non-ASCII hex input must return `None`, not panic.
+    ///
+    /// Every caller of these decoders is a config-supplied string — samizdat's `server_pubkey` and
+    /// `short_id`, and wasm's `init_config`, `genome`, and inline module `content` — all of which
+    /// arrive from a fetched `config_raw.json`. The old `&s[i..i + 2]` form panicked when the split
+    /// landed mid-codepoint, and `panic = "abort"` makes that a tunnel-process abort rather than an
+    /// error a caller could handle. `"aéb"` is the minimal reproducer: 4 bytes, so it clears the
+    /// even-length check, and the first split cuts through `é`.
+    #[cfg(feature = "wasm-transport")]
+    #[test]
+    fn decode_hex_refuses_multibyte_utf8_without_panicking() {
+        assert_eq!(super::decode_hex("aéb"), None);
+        assert_eq!(super::decode_hex("éé"), None);
+        assert_eq!(super::decode_hex("zz"), None, "still rejects plain non-hex");
+        assert_eq!(super::decode_hex("0a0B"), Some(vec![0x0a, 0x0b]));
+        assert_eq!(super::decode_hex("abc"), None, "odd length");
+        assert_eq!(super::decode_hex(""), Some(Vec::new()));
+    }
+
+    /// Same bug, same fix, on the fixed-width decoder — this one is reached by samizdat's
+    /// `server_pubkey`/`short_id`, so it is on a path that ships today.
+    #[cfg(feature = "samizdat")]
+    #[test]
+    fn decode_hex_n_refuses_multibyte_utf8_without_panicking() {
+        assert_eq!(super::decode_hex_n::<2>("aéb"), None);
+        assert_eq!(super::decode_hex_n::<2>("zzzz"), None);
+        assert_eq!(super::decode_hex_n::<2>("0a0B"), Some([0x0a, 0x0b]));
+        assert_eq!(super::decode_hex_n::<2>("0a0b0c"), None, "wrong length");
+    }
 }
 
 /// A persisted per-module version floor (a TOML `name = version` map) for anti-rollback across
