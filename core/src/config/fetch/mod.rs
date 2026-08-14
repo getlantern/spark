@@ -167,11 +167,6 @@ pub enum FetchOutcome {
 /// gzip bomb is bounded by what the parser would receive rather than by its size on the wire.
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
-/// One config-new fetch: race a direct plain-TLS request against the fronted avenues, returning the
-/// first usable outcome. Direct typically wins on an open network; the fronted paths win where the
-/// direct dial is censored (DNS poisoning / SNI block / RST). Two fronted avenues run when available:
-/// the embedded `fronted.yaml.gz` one-shot (a known-good accelerator) and the vantage-point scanner
-/// (`bootstrap`), which discovers live edges from the user's own network and so self-heals when the
 /// The transport-module bundles this client already holds (`engine → version`), for the request's
 /// `modules` declaration. Empty without the `wasm-transport` feature, and empty on a cold client —
 /// in both cases the field is omitted and the request is byte-identical to what it was before.
@@ -193,6 +188,11 @@ fn installed_modules(dir: &Path) -> std::collections::BTreeMap<String, u32> {
     }
 }
 
+/// One config-new fetch: race a direct plain-TLS request against the fronted avenues, returning the
+/// first usable outcome. Direct typically wins on an open network; the fronted paths win where the
+/// direct dial is censored (DNS poisoning / SNI block / RST). Two fronted avenues run when available:
+/// the embedded `fronted.yaml.gz` one-shot (a known-good accelerator) and the vantage-point scanner
+/// (`bootstrap`), which discovers live edges from the user's own network and so self-heals when the
 /// embedded front list is fully blocked.
 async fn fetch_once(
     env: &FetchEnv,
