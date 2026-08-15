@@ -42,8 +42,11 @@ lint: ## Clippy over the workspace + the excluded crates, denying warnings (CI's
 	cd wasm-server && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings
 
 .PHONY: test
-test: ## Full test suite (workspace + the excluded wasm-server crate)
-	cargo test --workspace --all-features
+test: ## Full test suite, exactly as CI runs it (nextest + doctests + the excluded wasm-server crate)
+	# nextest, matching CI: it enforces the per-test timeout in .config/nextest.toml, so a hung
+	# test fails fast instead of stalling the job. It does NOT run doctests, hence the second line.
+	cargo nextest run --workspace --all-features
+	cargo test --workspace --all-features --doc
 	cd wasm-server && cargo test --locked
 
 .PHONY: check
@@ -83,16 +86,24 @@ size: ## Release-build and fail if any binary exceeds its stripped size budget
 #
 # iOS (make ios-testflight) uses a different set, also already exported:
 #   ASC_KEY_ID + ASC_ISSUER_ID + ASC_KEY_PATH   App Store Connect API key
-.PHONY: macos
-macos: ## Build the signed + NOTARIZED macOS DMG -> dist/Spark.dmg (needs NOTARY_PROFILE or AC_USERNAME+AC_PASSWORD)
-	@if [ -z "$$NOTARY_PROFILE" ] && [ -z "$$AC_USERNAME" ]; then \
-		echo "ERROR: no notarization credentials."; \
+# Both AC_ vars, not just the username: build-tauri-dmg.sh requires `AC_USERNAME && AC_PASSWORD`,
+# so checking only one lets a half-set environment through to fail later and less clearly.
+# Reports presence only, never values: AC_USERNAME is an Apple ID and this text can end up in a CI
+# log. (`$${VAR:-UNSET}` would print the value when set, which is the opposite of what is wanted.)
+define require-notary-creds
+	@if [ -z "$$NOTARY_PROFILE" ] && { [ -z "$$AC_USERNAME" ] || [ -z "$$AC_PASSWORD" ]; }; then \
+		echo "ERROR: no notarization credentials (need NOTARY_PROFILE, or AC_USERNAME *and* AC_PASSWORD)."; \
+		echo "  AC_USERNAME: $$([ -n "$$AC_USERNAME" ] && echo set || echo UNSET)   AC_PASSWORD: $$([ -n "$$AC_PASSWORD" ] && echo set || echo UNSET)"; \
 		echo "  An un-notarized system extension is refused at activation, so the app would launch"; \
-		echo "  and the tunnel would silently never come up. Set NOTARY_PROFILE (see the comment"; \
-		echo "  above this target in the Makefile) or AC_USERNAME + AC_PASSWORD."; \
+		echo "  and the tunnel would silently never come up."; \
 		echo "  For UI-only iteration where the tunnel is not exercised: make macos-fast"; \
 		exit 1; \
 	fi
+endef
+
+.PHONY: macos
+macos: ## Build the signed + NOTARIZED macOS DMG -> dist/Spark.dmg (needs NOTARY_PROFILE or AC_USERNAME+AC_PASSWORD)
+	$(require-notary-creds)
 	bash packaging/macos/build-tauri-dmg.sh
 
 .PHONY: macos-fast
@@ -102,6 +113,7 @@ macos-fast: ## Signed but NOT notarized DMG — UI iteration only, the system ex
 
 .PHONY: macos-intel
 macos-intel: ## Same as `macos`, for x86_64 -> dist/Spark-x86_64.dmg
+	$(require-notary-creds)
 	MAC_ARCH=x86_64 bash packaging/macos/build-tauri-dmg.sh
 
 .PHONY: gui-dev
