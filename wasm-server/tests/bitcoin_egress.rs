@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use spark_core::transport::engine::{BundleStore, Genome, ModuleEngine};
-use spark_core::transport::wasm::{SplittingServer, TransformModule, WasmServer};
+use spark_core::transport::wasm::{SplittingServer, TransformModule, UpstreamPool, WasmServer};
 use spark_core::transport::Transport;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -131,14 +131,18 @@ async fn a_tagged_client_tunnels_and_an_untagged_peer_reaches_bitcoin() {
 
     // The egress, wired as `serve_bitcoin` wires it.
     let wasm = WasmServer::new(module.clone()).with_config(responder_init());
-    let splitter = Arc::new(SplittingServer::new(wasm, K_SRV.to_vec(), bitcoind));
+    let splitter = Arc::new(SplittingServer::new(
+        wasm,
+        K_SRV.to_vec(),
+        UpstreamPool::single(bitcoind),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind egress");
     let egress = listener.local_addr().expect("egress addr");
     tokio::spawn(async move {
-        while let Ok((conn, _)) = listener.accept().await {
+        while let Ok((conn, peer)) = listener.accept().await {
             let splitter = Arc::clone(&splitter);
             tokio::spawn(async move {
-                let _ = splitter.handle(conn).await;
+                let _ = splitter.handle(conn, peer.ip()).await;
             });
         }
     });
@@ -276,9 +280,226 @@ mod run_from_config {
         let err = wasm_server::run(wasm_server::Run { config: cfg })
             .await
             .expect_err("bitcoin mode without an upstream must be refused");
+        // Match the structure, not the prose: the property under test is "the config is rejected,
+        // naming upstream", and pinning the exact sentence makes an unrelated reword look like a
+        // regression — which is how this assertion broke when the field became a list.
         assert!(
-            err.to_string().contains("requires `upstream`"),
+            matches!(
+                &err,
+                wasm_server::ServerError::BadArgument { flag, reason }
+                    if *flag == "--config" && reason.contains("upstream")
+            ),
             "got: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A pool spelled as an array is accepted, and a bare string still is too.
+    ///
+    /// The single-address spelling is what an operator writes by hand and what every config written
+    /// before the field became a list already contains, so dropping it would break those configs on
+    /// upgrade with a parse error rather than a behaviour change.
+    #[tokio::test]
+    async fn upstream_accepts_both_one_address_and_a_list() {
+        for (label, upstream) in [
+            ("bare string", r#""127.0.0.1:8333""#),
+            ("one-element array", r#"["127.0.0.1:8333"]"#),
+            ("pool", r#"["127.0.0.1:8333","127.0.0.1:8334"]"#),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "wasm-server-cfg-pool-{}-{}",
+                std::process::id(),
+                label.replace(' ', "-")
+            ));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let cfg = write_config(
+                &dir,
+                &format!(
+                    r#"{{"mode":"bitcoin","engine":"bip324","listen":"127.0.0.1:0","k_srv":"aa","upstream":{upstream}}}"#
+                ),
+            );
+            let err = wasm_server::run(wasm_server::Run { config: cfg })
+                .await
+                .expect_err("no bundle is installed, so startup still fails — but not on parsing");
+            assert!(
+                !matches!(
+                    &err,
+                    wasm_server::ServerError::BadArgument { reason, .. }
+                        if reason.contains("upstream")
+                ),
+                "{label} must parse as an upstream pool, got: {err}"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+}
+
+/// The exit's logging asymmetry, asserted against the real `tracing` stream.
+///
+/// An untagged peer — a potential active prober — is recorded **with its address**, because it is
+/// either a real Bitcoin peer or somebody probing us, and the second is what an operator needs to
+/// see. A client that presented a valid side-door tag is one of *our users*, and an exit host is
+/// precisely the machine an adversary would seize to learn who they are, so it is never written down.
+///
+/// Both halves matter: without the first there is no probe signal at all; without the second every
+/// exit becomes a record of our own users.
+///
+/// This lives here rather than beside `SplittingServer` in `core` for a mundane but load-bearing
+/// reason: `tracing` caches callsite interest process-wide, another `core` unit test installs a
+/// *global* subscriber, and the two race — the test passed alone and failed in the full suite. An
+/// integration test gets its own process, so the scoped subscriber is the only one there is.
+mod logging_hygiene {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    type CapturedEvent = BTreeMap<String, String>;
+
+    /// Collects every `tracing` event's structured fields.
+    ///
+    /// Fields rather than formatted text: an assertion on rendered output would pass or fail on field
+    /// ordering and escaping, neither of which is the property under test.
+    fn capture_layer(
+        sink: Arc<Mutex<Vec<CapturedEvent>>>,
+    ) -> impl tracing_subscriber::Layer<tracing_subscriber::registry::Registry> {
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::Context;
+        use tracing_subscriber::Layer;
+
+        #[derive(Default)]
+        struct Fields(CapturedEvent);
+        impl Visit for Fields {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name().to_owned(), format!("{value:?}"));
+            }
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.0.insert(field.name().to_owned(), value.to_owned());
+            }
+        }
+
+        struct Capture(Arc<Mutex<Vec<CapturedEvent>>>);
+        impl Layer<tracing_subscriber::registry::Registry> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: Context<'_, tracing_subscriber::registry::Registry>,
+            ) {
+                let mut fields = Fields::default();
+                event.record(&mut fields);
+                self.0.lock().expect("capture lock").push(fields.0);
+            }
+        }
+        Capture(sink)
+    }
+
+    #[tokio::test]
+    async fn an_untagged_peer_is_logged_by_address_and_a_tunnel_client_is_not() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let events: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry::Registry::default()
+            .with(capture_layer(Arc::clone(&events)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let dir = std::env::temp_dir().join(format!("wasm-server-hygiene-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let module = install_bundle(&dir);
+
+        let echo = spawn_echo().await;
+        let bitcoind = spawn_echo().await;
+        let wasm = WasmServer::new(module.clone()).with_config(responder_init());
+        let splitter = Arc::new(SplittingServer::new(
+            wasm,
+            K_SRV.to_vec(),
+            UpstreamPool::single(bitcoind),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind egress");
+        let egress = listener.local_addr().expect("egress addr");
+        tokio::spawn(async move {
+            while let Ok((conn, peer)) = listener.accept().await {
+                let splitter = Arc::clone(&splitter);
+                tokio::spawn(async move {
+                    let _ = splitter.handle(conn, peer.ip()).await;
+                });
+            }
+        });
+
+        // A tunnel client, which authenticates.
+        let engine = Arc::new(ModuleEngine::new(ENGINE.to_string(), module));
+        let transport = spark_core::transport::wasm::WasmTransport::with_engine(egress, engine)
+            .with_config(initiator_init());
+        let mut tunneled = transport.dial(echo).await.expect("tunnel dial");
+        tunneled.write_all(b"user traffic").await.expect("write");
+        let mut got = [0u8; 12];
+        tunneled.read_exact(&mut got).await.expect("read");
+        drop(tunneled);
+
+        // An untagged peer, which does not. 96 bytes of non-tag opening.
+        let mut peer = TcpStream::connect(egress).await.expect("peer connect");
+        let opening: Vec<u8> = (0..96u32).map(|i| i as u8).collect();
+        peer.write_all(&opening).await.expect("peer write");
+        let mut echoed = vec![0u8; opening.len()];
+        peer.read_exact(&mut echoed).await.expect("peer read");
+        drop(peer);
+
+        // The probe record rides a `Drop` on a spawned task, so wait for it rather than sleeping a
+        // guessed interval — a fixed delay is a flake that only shows up on a busy machine.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let seen = events
+                .lock()
+                .expect("capture lock")
+                .iter()
+                .any(|e| e.get("message").map(String::as_str) == Some("untagged peer"));
+            if seen {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no untagged record appeared within the deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let captured = events.lock().expect("capture lock").clone();
+        let untagged: Vec<&CapturedEvent> = captured
+            .iter()
+            .filter(|e| e.get("message").map(String::as_str) == Some("untagged peer"))
+            .collect();
+        assert_eq!(untagged.len(), 1, "expected one probe record: {captured:?}");
+        let record = untagged[0];
+        assert!(
+            record.contains_key("peer"),
+            "the probe record must carry the peer's address: {record:?}"
+        );
+        // The fields that separate a prober from a real peer. Without them an operator sees only
+        // *that* somebody connected, which every legitimate Bitcoin peer also does.
+        for field in [
+            "opening",
+            "duration_ms",
+            "bytes_to_upstream",
+            "bytes_from_upstream",
+        ] {
+            assert!(
+                record.contains_key(field),
+                "probe triage needs `{field}`: {record:?}"
+            );
+        }
+
+        // The other half: no event anywhere may carry an address for the client that authenticated.
+        // `untagged peer` is the only event permitted a `peer` field at all.
+        let leaked: Vec<&CapturedEvent> = captured
+            .iter()
+            .filter(|e| {
+                e.contains_key("peer")
+                    && e.get("message").map(String::as_str) != Some("untagged peer")
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a tunnel client is one of our users and must never be written down; leaked: {leaked:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
