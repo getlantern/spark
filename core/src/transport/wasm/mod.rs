@@ -119,7 +119,11 @@ mod signing;
 #[cfg(feature = "bip324")]
 mod splitter;
 mod stream;
+#[cfg(feature = "bip324")]
+mod telemetry;
 mod transport;
+#[cfg(feature = "bip324")]
+mod upstream;
 pub use signing::{build_artifact, signing_payload, ModuleError, ModuleVerifier, SignedModule};
 /// The offline artifact-signing helper — only compiled for the `sign-module` tool.
 #[cfg(feature = "module-signer")]
@@ -127,7 +131,11 @@ pub use signing::{generate_keypair_pkcs8, public_key_hex, sign_artifact};
 #[cfg(feature = "bip324")]
 pub use splitter::SplittingServer;
 pub use stream::TransformStream;
+#[cfg(feature = "bip324")]
+pub use telemetry::{EgressSnapshot, EgressTelemetry, Opening, Outcome};
 pub use transport::{WasmServer, WasmTransport};
+#[cfg(feature = "bip324")]
+pub use upstream::{PoolError, UpstreamPool};
 
 /// PKCS#8 of the **development** module-signing keypair — the private half of
 /// `signing::DEV_MODULE_PUBKEY` (the dev fallback `ModuleVerifier::pinned()` trusts when no production

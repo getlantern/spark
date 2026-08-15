@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use spark_core::transport::engine::BundleStore;
-use spark_core::transport::wasm::{SplittingServer, TransformModule, WasmServer};
+use spark_core::transport::wasm::{SplittingServer, TransformModule, UpstreamPool, WasmServer};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
@@ -107,9 +107,15 @@ pub struct FileConfig {
     /// Installed on startup, before anything listens. Absent means "already installed".
     #[serde(default)]
     bundle: String,
-    /// `bitcoin` mode only: the real node to proxy non-tunnel connections to.
-    #[serde(default)]
-    upstream: Option<SocketAddr>,
+    /// `bitcoin` mode only: the real Bitcoin nodes to proxy non-tunnel connections to.
+    ///
+    /// A list rather than one address: `bitcoind` scores misbehaviour per peer, and every peer we
+    /// forward is *us* from the upstream's point of view, so one bad sender we proxy can get this
+    /// egress banned from its only cover. Accepts a bare string as well as an array, matching how
+    /// the client's own schema treats `url` — an operator with one node should not have to know it
+    /// is a degenerate pool.
+    #[serde(default, deserialize_with = "de_addr_or_vec")]
+    upstream: Vec<SocketAddr>,
     /// `bitcoin` mode only: the per-server side-door secret, hex.
     ///
     /// **This file holds a secret.** It should be written `0600`, the way the pipeline already treats
@@ -122,6 +128,42 @@ pub struct FileConfig {
     /// `relay` mode only: hex `init` bytes for the module.
     #[serde(default)]
     pub init_config: String,
+}
+
+/// Deserialize `upstream` from either a bare address or an array of them.
+///
+/// Mirrors `de_string_or_vec` in the client's config schema, and for the same reason: the single-node
+/// spelling is the one an operator writes by hand, and it should not have to be an array of one.
+fn de_addr_or_vec<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Vec<SocketAddr>, D::Error> {
+    use serde::Deserialize as _;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(SocketAddr),
+        Many(Vec<SocketAddr>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(a) => vec![a],
+        OneOrMany::Many(v) => v,
+    })
+}
+
+/// How often the egress logs its running totals.
+const SUMMARY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Aborts a background task when the owner goes away.
+///
+/// CLAUDE.md forbids a detached `tokio::spawn` whose handle nobody can cancel; the summary loop is
+/// infinite, so it needs an owner that ends it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn default_bundle_dir() -> PathBuf {
@@ -159,13 +201,16 @@ pub struct ServeBitcoin {
     /// weaker cover story than one on 8333.
     #[arg(long, default_value = "0.0.0.0:8333")]
     pub listen: SocketAddr,
-    /// The real Bitcoin node to proxy non-tunnel connections to.
+    /// A real Bitcoin node to proxy non-tunnel connections to. Repeat for a pool.
     ///
     /// Required, and there is no default, because getting it wrong silently destroys the property
     /// this mode exists for: an egress that drops or refuses unrecognized peers is trivially
     /// distinguishable from a Bitcoin node, which is exactly what a prober checks for.
-    #[arg(long)]
-    pub upstream: SocketAddr,
+    ///
+    /// With several, each peer is mapped to one of them by its own address and always transits that
+    /// same node — see [`UpstreamPool`]. A ban then costs 1/N of the cover rather than all of it.
+    #[arg(long, required = true)]
+    pub upstream: Vec<SocketAddr>,
     /// Per-server side-door secret (`k_srv`), hex. Clients derive their opening tag from the same
     /// value, so this is what pairs a client to this egress — treat it as a secret and give it to
     /// clients through the signed config, never in the clear.
@@ -324,9 +369,15 @@ pub async fn run(args: Run) -> Result<()> {
                 bundle_dir: cfg.bundle_dir,
                 engine: cfg.engine,
                 listen: cfg.listen,
-                upstream: cfg.upstream.ok_or_else(|| {
-                    ServerError::bad("--config", "mode `bitcoin` requires `upstream`")
-                })?,
+                upstream: {
+                    if cfg.upstream.is_empty() {
+                        return Err(ServerError::bad(
+                            "--config",
+                            "mode `bitcoin` requires at least one `upstream`",
+                        ));
+                    }
+                    cfg.upstream
+                },
                 k_srv: cfg.k_srv,
                 magic: cfg.magic,
             })
@@ -477,17 +528,41 @@ pub async fn serve_bitcoin(args: ServeBitcoin) -> Result<()> {
     init.extend_from_slice(&0u16.to_be_bytes());
 
     let wasm = WasmServer::new(module).with_config(init);
-    let splitter = Arc::new(SplittingServer::new(wasm, k_srv, args.upstream));
+    let upstream = UpstreamPool::new(args.upstream.iter().copied())
+        .map_err(|e| ServerError::bad("--upstream", e.to_string()))?;
+    let pool_size = upstream.len();
+    let splitter = Arc::new(SplittingServer::new(wasm, k_srv, upstream));
 
     let listener = TcpListener::bind(args.listen)
         .await
         .map_err(ServerError::io(format!("binding {}", args.listen)))?;
     info!(
         listen = %args.listen,
-        upstream = %args.upstream,
+        upstreams = pool_size,
         engine = %args.engine,
         "serving BIP324 splitting egress"
     );
+    // At `info`, with the addresses. These are our own cover infrastructure, not user destinations —
+    // docs/GOAL.md's log-hygiene rule protects where *users* go, and an operator cannot tell a
+    // degraded exit from a healthy one without knowing which nodes it is actually using.
+    for addr in args.upstream.iter() {
+        info!(upstream = %addr, "upstream in pool");
+    }
+
+    // A periodic roll-up so the shape of the traffic is visible without aggregating per-connection
+    // lines: how much of what we serve is tunnel versus cover, and whether untagged peers are being
+    // served at all. Held in a JoinHandle rather than detached (CLAUDE.md) and aborted with the loop.
+    let telemetry = splitter.telemetry();
+    let summary = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SUMMARY_INTERVAL);
+        // The first tick fires immediately; skip it so startup does not emit an all-zero line.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            telemetry.log_summary();
+        }
+    });
+    let _summary = AbortOnDrop(summary);
     loop {
         let (conn, peer) = listener
             .accept()
@@ -497,7 +572,7 @@ pub async fn serve_bitcoin(args: ServeBitcoin) -> Result<()> {
         tokio::spawn(async move {
             // `handle` covers both branches — tunnel and proxy-to-bitcoind — so a failure here says
             // nothing about which one the peer was, and must not be treated as a tunnel error.
-            if let Err(e) = splitter.handle(conn).await {
+            if let Err(e) = splitter.handle(conn, peer.ip()).await {
                 debug!(%peer, "connection failed");
                 warn!(error = %e, "connection failed");
             }
