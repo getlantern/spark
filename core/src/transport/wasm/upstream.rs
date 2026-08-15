@@ -41,6 +41,11 @@ const DEFAULT_COOLDOWN: Duration = Duration::from_secs(60);
 /// A pool of real Bitcoin nodes, one of which is chosen per peer.
 pub struct UpstreamPool {
     nodes: Vec<Upstream>,
+    /// Dials attempted, for the test that pins "at most one attempt per node per call". A failed
+    /// connect leaves nothing observable from outside — the port is dead by construction — so the
+    /// count has to come from here.
+    #[cfg(test)]
+    attempts: AtomicU64,
     cooldown: Duration,
     /// Baseline for the `down_until` stamps. An `Instant` is not atomic, so health is kept as millis
     /// elapsed since this, which fits an `AtomicU64` and avoids a lock on the accept path.
@@ -87,6 +92,8 @@ impl UpstreamPool {
             nodes,
             cooldown: DEFAULT_COOLDOWN,
             epoch: Instant::now(),
+            #[cfg(test)]
+            attempts: AtomicU64::new(0),
         })
     }
 
@@ -99,6 +106,8 @@ impl UpstreamPool {
             }],
             cooldown: DEFAULT_COOLDOWN,
             epoch: Instant::now(),
+            #[cfg(test)]
+            attempts: AtomicU64::new(0),
         }
     }
 
@@ -142,28 +151,34 @@ impl UpstreamPool {
                 .reverse()
         });
 
+        // Partition ONCE, against a single `now`, so each node is attempted at most once per call.
+        // Ordering the two groups rather than filtering twice is what guarantees that: a node that
+        // fails in the healthy group is marked down, and re-testing the mark afterwards would put it
+        // straight back in the queue — every connection would then dial each dead node twice during
+        // an outage, which is exactly the cost the cooldown exists to avoid.
         let now = self.now_millis();
+        let (healthy, cooling): (Vec<&&Upstream>, Vec<&&Upstream>) = ranked
+            .iter()
+            .partition(|n| n.down_until.load(Ordering::Relaxed) <= now);
+
         let mut last_err = None;
-        // Healthy nodes first, then the cooling-down ones: a pool where everything is marked down
-        // should still try, since the mark is a heuristic and the alternative is a guaranteed failure.
-        for pass in [Pass::Healthy, Pass::CoolingDown] {
-            for node in &ranked {
-                if pass.skips(node.down_until.load(Ordering::Relaxed), now) {
-                    continue;
+        // Cooling-down nodes are still tried, after the healthy ones: the mark is a heuristic, and
+        // the alternative when every node carries one is a guaranteed failure.
+        for node in healthy.into_iter().chain(cooling) {
+            #[cfg(test)]
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            match TcpStream::connect(node.addr).await {
+                Ok(stream) => {
+                    node.down_until.store(0, Ordering::Relaxed);
+                    return Ok(stream);
                 }
-                match TcpStream::connect(node.addr).await {
-                    Ok(stream) => {
-                        node.down_until.store(0, Ordering::Relaxed);
-                        return Ok(stream);
-                    }
-                    Err(e) => {
-                        node.down_until.store(
-                            self.now_millis()
-                                .saturating_add(self.cooldown.as_millis() as u64),
-                            Ordering::Relaxed,
-                        );
-                        last_err = Some(e);
-                    }
+                Err(e) => {
+                    node.down_until.store(
+                        self.now_millis()
+                            .saturating_add(self.cooldown.as_millis() as u64),
+                        Ordering::Relaxed,
+                    );
+                    last_err = Some(e);
                 }
             }
         }
@@ -174,25 +189,6 @@ impl UpstreamPool {
 
     fn now_millis(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
-    }
-}
-
-/// Which nodes a failover pass considers.
-#[derive(Clone, Copy)]
-enum Pass {
-    Healthy,
-    CoolingDown,
-}
-
-impl Pass {
-    /// Whether this pass skips a node whose cooldown expires at `down_until`.
-    fn skips(self, down_until: u64, now: u64) -> bool {
-        match self {
-            Pass::Healthy => down_until > now,
-            // The second pass is the last resort, so it skips nothing — including the nodes the first
-            // pass already tried and failed, whose marks are now fresh.
-            Pass::CoolingDown => false,
-        }
     }
 }
 
@@ -376,6 +372,26 @@ mod tests {
                 .expect("peer addr");
             assert_eq!(got, live, "only the live node can accept");
         }
+    }
+
+    /// Each node is dialed at most once per call.
+    ///
+    /// The scenario that matters is *all nodes healthy and all dead*: a node fails, is marked down,
+    /// and a naive re-test of that mark puts it straight back in the queue — so every connection
+    /// dials every dead node twice, which is the exact cost the cooldown exists to avoid. (A node
+    /// that was already cooling down before the call does not exercise this.)
+    #[tokio::test]
+    async fn a_failed_node_is_not_retried_within_the_same_call() {
+        let pool = UpstreamPool::new([refused().await, refused().await]).expect("pool");
+        assert!(
+            pool.connect_for(peer(3)).await.is_err(),
+            "both nodes are dead, so the call must fail"
+        );
+        assert_eq!(
+            pool.attempts.load(Ordering::Relaxed),
+            2,
+            "two nodes must cost two dials, not four — a node that just failed must not be retried"
+        );
     }
 
     /// With everything down there is nothing to fail over to, and the caller must see the error rather
