@@ -4953,6 +4953,7 @@ dependencies = [
  "async-trait",
  "boring2",
  "bytes",
+ "flate2",
  "flint-dial",
  "flint-fronted",
  "flint-kindling",

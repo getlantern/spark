@@ -39,10 +39,47 @@ details in `docs/PLAN.md` §4 (M0). Bringing up real TUN devices and the privile
 
 ## Building and running
 
+**`make` lists every build target.** Each one wraps a script under `packaging/` or `scripts/`;
+the Makefile exists so those don't have to be found by reading the release workflow.
+
 ```bash
-cargo build --release          # binary at target/release/spark
+make            # list targets
+make check      # fmt + clippy + the full test suite — run before pushing
+make release    # release build; binary at target/release/spark
+make macos      # the macOS product DMG (see the warning below)
+```
+
+### Building the macOS app
+
+Use **`make macos`**, not `npm run tauri build`.
+
+`npm run tauri build` produces only the Tauri UI shell: no `org.getlantern.spark.tunnel`
+system extension and an ad-hoc signature. It launches and looks correct, and it cannot tunnel —
+which is why it is worth stating rather than leaving to be rediscovered.
+
+`make macos` builds the UI, builds and embeds the system extension, signs with a Developer ID
+identity **derived from the installed provisioning profiles** (nothing to name or configure), then
+notarizes and staples.
+
+Notarization is not optional: macOS refuses to activate an un-notarized system extension, so a
+build without it launches fine and the tunnel silently never comes up.
+
+Credentials come from the environment — `AC_USERNAME` (Apple ID) and `AC_PASSWORD` (an
+app-specific password). On a machine that already exports them, `make macos` needs nothing else;
+check with `env | grep '^AC_'` before assuming they are absent. Otherwise, either export those two
+or store a notarytool profile once:
+
+```bash
+xcrun notarytool store-credentials spark \
+  --apple-id <apple-id> --team-id ACZRKC3LQ9 --password <app-specific-password>
+
+NOTARY_PROFILE=spark make macos      # -> dist/Spark.dmg
+```
+
+`make macos-fast` skips notarization for UI-only iteration. The tunnel will not work in that build.
+
+```bash
 cargo test -p spark-core       # unit tests (packet parser + checksums)
-cargo clippy --workspace --all-targets -- -D warnings
 cargo run --example netstack_smoke -p spark-core   # prints NETSTACK OK (M0 gate)
 ```
 
