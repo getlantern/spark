@@ -1,0 +1,12 @@
+#!/bin/sh
+# Reload systemd so it sees the new unit, but do NOT auto-start. An exit cannot run without a config
+# that names its engine, its upstream and its side-door secret, and that file is written by the
+# provisioning pipeline (or by hand) after this package lands.
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    echo "spark-wasm-server installed. Write /etc/spark-wasm-server/config.json, then: systemctl enable --now spark-wasm-server"
+fi
+
+exit 0

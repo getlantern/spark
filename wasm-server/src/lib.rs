@@ -94,8 +94,13 @@ pub struct FileConfig {
     /// Engine to serve — the name the bundle was **signed** as.
     pub engine: String,
     pub listen: SocketAddr,
-    /// Where bundles are installed. The pipeline mounts one writable directory into the container,
-    /// so this defaults under it rather than to a path the container cannot write.
+    /// Where bundles are installed. Defaults to `bundles/` **under** the unit's `StateDirectory` —
+    /// `StateDirectory=spark-wasm-server` creates `/var/lib/spark-wasm-server`, and the store gets
+    /// its own subdirectory there so its artifacts and `floors.toml` do not sit loose in the state
+    /// root alongside whatever else this service ever needs to keep.
+    ///
+    /// That root is the only path this service can write at all: it runs under `DynamicUser` with
+    /// `ProtectSystem=strict`, so anywhere else is read-only by construction.
     #[serde(default = "default_bundle_dir")]
     pub bundle_dir: PathBuf,
     /// The signed `.spkb`, hex-encoded — the same artifact and the same encoding the client is sent.
@@ -120,7 +125,7 @@ pub struct FileConfig {
 }
 
 fn default_bundle_dir() -> PathBuf {
-    PathBuf::from("/etc/sing-box/bundles")
+    PathBuf::from("/var/lib/spark-wasm-server/bundles")
 }
 
 fn default_magic() -> String {

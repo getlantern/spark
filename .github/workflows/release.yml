@@ -166,6 +166,33 @@ jobs:
         run: |
           packaging/debian/build-deb.sh "$VERSION" amd64 "target/$TARGET/release" dist
 
+      # The dynamic-transport exit. Built and packaged only on Linux, because that is the only place
+      # it runs — lantern-cloud provisions Linux VPSes, and cloud-init installs this .deb by URL for
+      # the release tag the orchestrator picked for a route (docs/wasm-exit-deployment-design.md).
+      #
+      # A separate cargo invocation because `wasm-server` is deliberately NOT a workspace member: it
+      # depends on spark-core with `bip324`, and cargo unifies features across members, so building
+      # it alongside the client would compile secp256k1 (C) into the client and cost the C-free base
+      # build. Same reason it has its own CI job.
+      - name: Build + package the exit .deb (Linux)
+        if: matrix.os == 'linux' && github.ref_type == 'tag'
+        working-directory: wasm-server
+        env:
+          TARGET: ${{ matrix.target }}
+          SPARK_MODULE_PUBKEY_HEX: ${{ vars.SPARK_MODULE_PUBKEY_HEX }}
+        run: |
+          # A release build with wasm-transport refuses to compile without a pinned module-signing
+          # pubkey — deliberately, since falling back to the published dev key would be fail-open.
+          # An exit with no pinned key is not a degraded exit, it is a broken one, so fail the job
+          # rather than ship it.
+          test -n "$SPARK_MODULE_PUBKEY_HEX" || {
+            echo "SPARK_MODULE_PUBKEY_HEX is unset; refusing to build an exit that trusts the dev key" >&2
+            exit 1
+          }
+          cargo build --release --target "$TARGET" --locked
+          cd ..
+          packaging/debian/build-exit-deb.sh "$VERSION" amd64 "wasm-server/target/$TARGET/release" dist
+
       - name: Package zip (Windows)
         if: matrix.os == 'windows'
         shell: pwsh

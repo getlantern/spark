@@ -53,6 +53,15 @@ step, ship a systemd unit, and let the existing config push write the file and s
 registry, no image build, no entrypoint indirection — all of which the previous revision of this note
 proposed against the wrong pipeline.
 
+⚠️ **cloud-init has a hard size cap, and it is already tight.** Linode limits `user_data` to 16,384
+bytes, and lantern-cloud's scripts outgrew it — as of `f187c3c4f` (2026-08-14) they are shipped as
+`base64(gzip(script))`, which the commit puts at "roughly a quarter", with a hard error if even the
+compressed form exceeds the cap. The `.deb` install step is a URL and a few lines of shell, so it
+fits comfortably. **The module bundle must never go here.** A hex-encoded `bip324.spkb` is ~46 KB and
+would threaten the cap on its own; it rides the config that `PushConfigPacker` writes over SSH, which
+has no such limit. That is an independent argument for §3's decision, arrived at from the other
+direction.
+
 Two things still need deciding, and they are smaller than they were:
 
 - **One `.deb` or two.** The existing package installs `spark` + `spark-service` for a *client* host.
