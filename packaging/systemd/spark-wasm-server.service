@@ -9,7 +9,17 @@ Type=simple
 # `run --config` rather than flags: the provisioning pipeline delivers settings by writing one file
 # and restarting the unit, and the config carries `k_srv` — a secret that has no business in an
 # ExecStart line, where any local `ps` would read it.
-ExecStart=/usr/sbin/spark-wasm-server run --config /etc/spark-wasm-server/config.json
+# %d is the unit's private credentials directory. systemd reads the file below as ROOT and stages a
+# copy there, owned by the service user and mode 0400 — which is what makes DynamicUser workable at
+# all here: the provisioning pipeline writes /etc/spark-wasm-server/config.json as root 0600 inside a
+# 0700 directory (it carries `k_srv`), and a transient unprivileged user cannot traverse to it, let
+# alone read it. The service could not read its own config, so it never bound its port and the
+# reachability gate failed the route — first observed in prod on 2026-08-17.
+#
+# The alternative fixes are worse: dropping DynamicUser gives the wasm host root, and loosening the
+# file to 0644 publishes the side-door secret to every local account.
+ExecStart=/usr/sbin/spark-wasm-server run --config %d/config
+LoadCredential=config:/etc/spark-wasm-server/config.json
 Restart=on-failure
 RestartSec=2
 
@@ -30,9 +40,11 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 # Hardening. None of these are load-bearing for the transport; they bound the blast radius of a
 # module that escapes the wasmi sandbox, which is the threat this binary uniquely carries.
 #
-# UNVERIFIED ON A REAL HOST: this block was written on macOS and never started under systemd. If the
-# unit fails to start, suspect these before anything in the binary — `SystemCallFilter` and
-# `MemoryDenyWriteExecute` are the usual culprits, and relaxing them costs nothing functional.
+# PARTIALLY VERIFIED: first started under systemd on a real host 2026-08-17. What failed there was
+# not this block but the config being unreadable under DynamicUser (see LoadCredential above). These
+# directives themselves are still unproven against a *working* start, so if the unit fails after the
+# credential fix, suspect `SystemCallFilter` and `MemoryDenyWriteExecute` first — relaxing either
+# costs nothing functional.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
