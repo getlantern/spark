@@ -29,6 +29,7 @@ fn snapshot(dir: &Path) -> Option<Vec<u8>> {
 /// NE's live snapshot when connected). An app fetch layered on top produces a *second, independent*
 /// assignment for the same account — the two disagree about which servers exist, and the UI ends up
 /// offering a location the tunnel has no member for.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn app_owns_fetching() -> bool {
     let (_, raw) = crate::desktop::ne_spike::load_first_status(std::time::Duration::from_secs(2));
     app_owns_fetching_in(crate::desktop::ne_spike::ui_state(raw))
@@ -38,8 +39,20 @@ pub(crate) fn app_owns_fetching() -> bool {
 ///
 /// "connecting" is deliberately the tunnel's: control transfers at the connect *attempt*, not at
 /// success, so a fetch cannot race a bringup and mint a second assignment mid-handover.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn app_owns_fetching_in(state: &str) -> bool {
     matches!(state, "disconnected" | "failed")
+}
+
+/// On Windows and Linux the app always owns fetching, because nothing else fetches.
+///
+/// There is no second fetcher to divide ownership with: the privileged service is started with a
+/// bare `Connect` carrying no config, and `ServiceControl::servers()` returns an empty list — the
+/// UI's list comes solely from the app's own cache. The divergence this rule prevents on Apple
+/// cannot arise here, and suspending the app's fetch while connected would only freeze the list.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+pub(crate) fn app_owns_fetching() -> bool {
+    true
 }
 
 /// Run one kindling config fetch into the app's cache `dir`. Returns `Ok(true)` if the cached
@@ -71,6 +84,7 @@ mod tests {
     /// layered on top mints a second, independent assignment for the same account, and the two
     /// disagree about which servers exist. That is what made the UI offer a location the tunnel had
     /// no member for.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
     fn only_a_down_tunnel_leaves_fetching_to_the_app() {
         use super::app_owns_fetching_in;
