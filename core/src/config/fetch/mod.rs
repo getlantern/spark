@@ -15,7 +15,7 @@ pub(crate) mod http;
 pub(crate) mod request;
 /// Re-exported so a controlling app can declare it for the tunnel it starts — the capability
 /// describes the installation, not the process fetching. See [`FetchEnv::with_capabilities`].
-pub use request::CAPABILITY_TRANSPORT_MODULES;
+pub use request::{tunnel_runs_delivered_modules, CAPABILITY_TRANSPORT_MODULES};
 mod user;
 
 use std::path::Path;

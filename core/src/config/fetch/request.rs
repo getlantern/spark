@@ -116,6 +116,40 @@ fn capabilities() -> Vec<String> {
     caps
 }
 
+/// Whether the **tunnel** shipped by this build can run delivered transport modules.
+///
+/// The app cannot answer this from its own `cfg!(feature = "wasm-transport")`: on Apple it links
+/// spark-core without the wasm host and could never run a module itself, yet every tunnel runs in
+/// the network extension, which does have it. What it *can* read is the input both builds are
+/// driven by. Every platform enables the module host on exactly one condition — the release
+/// workflow and `platforms/apple/build-xcframework.sh` both do:
+///
+/// ```sh
+/// features=prod
+/// if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then features="$features,bip324"; fi
+/// ```
+///
+/// so a build with a production module-signing key pinned has `bip324` (hence `wasm-transport`) in
+/// its tunnel, and one without it does not — on Windows and Linux exactly as much as on Apple.
+/// Reading the same variable makes the app's answer follow the tunnel's by construction instead of
+/// by a platform guess that would be wrong in both directions: `prod` alone omits `wasm-transport`
+/// even on Apple, and a keyed desktop build has it.
+///
+/// `option_env!` is sound here because `build.rs` re-emits this variable as `rustc-env` (see the
+/// `PINNED` loop there) — without that, a cached crate would keep a stale expansion.
+pub fn tunnel_runs_delivered_modules() -> bool {
+    pinned_key_enables_modules(option_env!("SPARK_MODULE_PUBKEY_HEX"))
+}
+
+/// The rule alone, so both branches are testable — the real one is fixed at compile time.
+///
+/// Empty counts as absent, matching the `[ -n "$SPARK_MODULE_PUBKEY_HEX" ]` the build scripts use.
+/// This is the case that actually occurs: an unset GitHub Actions `vars.*` expands to the empty
+/// string, so the variable arrives *set and empty* rather than missing.
+fn pinned_key_enables_modules(key: Option<&str>) -> bool {
+    matches!(key, Some(k) if !k.is_empty())
+}
+
 /// This build's platform string in the Lantern convention (`darwin`/`linux`/…). Shared by the
 /// config-new request and the `/user-create` pre-step.
 pub(crate) fn platform() -> &'static str {
@@ -433,6 +467,23 @@ mod capability_declaration_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The app advertises module support on behalf of the tunnel, so this rule decides whether a
+    /// module-bearing outbound may be sent to this installation at all. Both directions are wrong in
+    /// their own way: claiming it without the host makes the tunnel skip the outbound it was given,
+    /// and withholding it when the host is present hides the route from the app while the tunnel
+    /// sees it — the divergence that made the UI offer a server it could not use.
+    #[test]
+    fn module_support_follows_the_pinned_signing_key() {
+        use super::pinned_key_enables_modules;
+
+        assert!(pinned_key_enables_modules(Some("a3f19c")));
+
+        assert!(!pinned_key_enables_modules(None));
+        // Set-but-empty is the case that actually happens: an unset GitHub Actions `vars.*` expands
+        // to "", so the variable arrives present and empty. Treating that as "pinned" would
+        // advertise the host on precisely the builds that lack it — every untagged CI build.
+        assert!(!pinned_key_enables_modules(Some("")));
+    }
 
     /// Both headers ride the HTTP/1.1 request when the fetch came through the race.
     #[test]

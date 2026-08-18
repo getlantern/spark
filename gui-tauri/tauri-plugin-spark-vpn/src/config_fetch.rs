@@ -43,9 +43,21 @@ pub(crate) async fn fetch_into_cache(dir: &Path) -> std::io::Result<bool> {
     // this binary's features made the app ask a different question than the NE, so the server
     // withheld delivered-module outbounds from the app and the two disagreed about which servers
     // exist — the UI offered one the tunnel had no member for, and traffic silently took another.
-    let env = spark_core::config::fetch::FetchEnv::from_env().with_capabilities(vec![
-        spark_core::config::fetch::CAPABILITY_TRANSPORT_MODULES.to_string(),
-    ]);
+    //
+    // Conditional, not unconditional: the module host is only in the tunnel when a production
+    // module-signing key was pinned at build time, and that is true on Windows and Linux exactly as
+    // it is on Apple (`tunnel_runs_delivered_modules` documents the shared build rule). Claiming it
+    // on a build without one would be the same divergence pointing the other way — the server would
+    // send a module-bearing outbound to a tunnel that must skip it. When it is absent we declare
+    // nothing and fall back to the default set derived from this build.
+    let env = spark_core::config::fetch::FetchEnv::from_env();
+    let env = if spark_core::config::fetch::tunnel_runs_delivered_modules() {
+        env.with_capabilities(vec![
+            spark_core::config::fetch::CAPABILITY_TRANSPORT_MODULES.to_string(),
+        ])
+    } else {
+        env
+    };
     let _ = spark_core::config::fetch::load_or_fetch(dir, &env).await?;
     let after = snapshot(dir);
     Ok(config_changed(&before, &after))
