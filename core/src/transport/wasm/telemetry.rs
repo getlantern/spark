@@ -157,11 +157,15 @@ impl EgressTelemetry {
             tunnel_sessions: self.tunnel_sessions.load(Ordering::Relaxed),
             untagged_total: self.untagged_total.load(Ordering::Relaxed),
             untagged_silent: self.untagged_silent.load(Ordering::Relaxed),
+            // Recover a poisoned guard rather than reporting 0. The set is only ever
+            // read and inserted into, so its contents stay meaningful after a panic
+            // elsewhere — and reporting 0 distinct sources would understate a scan at
+            // exactly the moment the number matters.
             untagged_silent_sources: self
                 .silent_sources
                 .lock()
-                .map(|set| set.len() as u64)
-                .unwrap_or(0),
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len() as u64,
             untagged_short: self.untagged_short.load(Ordering::Relaxed),
             untagged_relayed: self.untagged_relayed.load(Ordering::Relaxed),
             upstream_unreachable: self.upstream_unreachable.load(Ordering::Relaxed),
@@ -217,16 +221,17 @@ impl EgressTelemetry {
     /// Past the cap every silent drop reports, which keeps the failure direction noisy
     /// rather than silent.
     fn note_silent_source(&self, peer: IpAddr) -> bool {
-        match self.silent_sources.lock() {
-            Ok(mut set) => {
-                if set.len() >= MAX_TRACKED_SILENT_SOURCES {
-                    return true;
-                }
-                set.insert(peer)
-            }
-            // A poisoned lock must not silence telemetry.
-            Err(_) => true,
+        // Recovering a poisoned guard keeps both dedup and the distinct-source count
+        // working; the alternative (reporting everything) is safe but throws away the
+        // signal this function exists to produce.
+        let mut set = self
+            .silent_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if set.len() >= MAX_TRACKED_SILENT_SOURCES {
+            return true;
         }
+        set.insert(peer)
     }
 
     /// Log the running totals. Called periodically by the exit so an operator sees the shape of the
