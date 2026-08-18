@@ -26,7 +26,54 @@ pub(crate) async fn disconnect<R: Runtime>(app: AppHandle<R>) -> crate::Result<(
     app.state::<Ctl>().disconnect()?;
     #[cfg(desktop)]
     crate::tray::refresh(&app);
+    // Fetching comes back to the app now that the tunnel is down. Refresh so the list the user sees
+    // while disconnected is the app's own current one, rather than whatever the NE last published
+    // before it stopped — the two are independent assignments and the NE's is now stale by
+    // definition. Detached: a failure leaves the cached list intact, exactly as at startup.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    resume_app_fetching(&app);
     Ok(())
+}
+
+/// Re-take config fetching after the tunnel goes down.
+///
+/// Spawned rather than awaited because `disconnect()` only *requests* the stop: the status can
+/// still read `connected` for a moment after it returns, and a fetch issued in that window would
+/// see the tunnel as the owner and skip — leaving the list frozen at the NE's last one. The poll
+/// waits out that window instead of guessing a delay. It does not wait for teardown to finish:
+/// `disconnecting` already reads as `disconnected` (`ui_state`), and fetching alongside a tunnel
+/// that is on its way down is harmless — it will not refresh again.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn resume_app_fetching<R: Runtime>(app: &AppHandle<R>) {
+    use tauri::Emitter;
+
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Bounded: if the tunnel is somehow still up after 5s, skip rather than fetch under it.
+        // The next app start or disconnect refreshes, so the cost of skipping is a stale list, not
+        // a wrong one.
+        for _ in 0..10 {
+            if crate::config_fetch::app_owns_fetching() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if !crate::config_fetch::app_owns_fetching() {
+            return;
+        }
+        let Ok(base) = handle.path().app_config_dir() else {
+            return;
+        };
+        let dir = crate::desktop::app_config_cache_dir(&base);
+        let _ = std::fs::create_dir_all(&dir);
+        match crate::config_fetch::fetch_into_cache(&dir).await {
+            Ok(true) => {
+                let _ = handle.emit("spark://servers", ());
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("[spark-vpn] post-disconnect config fetch failed: {e}"),
+        }
+    });
 }
 
 #[tauri::command]

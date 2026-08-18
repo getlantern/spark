@@ -7,7 +7,7 @@ use crate::models::{ServerInfo, Status};
 //    the NETunnelProviderManager path is shared, macOS additionally does system-extension activation) ─
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-mod ne_spike {
+pub(crate) mod ne_spike {
     use objc2_network_extension::NETunnelProviderManager;
 
     /// Raw NEVPNStatus of a fresh manager's connection (Invalid=0, Disconnected=1,

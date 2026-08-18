@@ -22,6 +22,26 @@ fn snapshot(dir: &Path) -> Option<Vec<u8>> {
     std::fs::read(dir.join("config_raw.json")).ok()
 }
 
+/// Whether the app owns config fetching right now.
+///
+/// Exactly one process may fetch at a time. While the tunnel is up the network extension owns it:
+/// it self-fetches on its own schedule, and its pool is what the UI shows (`servers()` reads the
+/// NE's live snapshot when connected). An app fetch layered on top produces a *second, independent*
+/// assignment for the same account — the two disagree about which servers exist, and the UI ends up
+/// offering a location the tunnel has no member for.
+pub(crate) fn app_owns_fetching() -> bool {
+    let (_, raw) = crate::desktop::ne_spike::load_first_status(std::time::Duration::from_secs(2));
+    app_owns_fetching_in(crate::desktop::ne_spike::ui_state(raw))
+}
+
+/// The rule itself, split from reading the live status so it can be tested.
+///
+/// "connecting" is deliberately the tunnel's: control transfers at the connect *attempt*, not at
+/// success, so a fetch cannot race a bringup and mint a second assignment mid-handover.
+pub(crate) fn app_owns_fetching_in(state: &str) -> bool {
+    matches!(state, "disconnected" | "failed")
+}
+
 /// Run one kindling config fetch into the app's cache `dir`. Returns `Ok(true)` if the cached
 /// config changed (caller emits `spark://servers`), `Ok(false)` on 304/unchanged, and `Err` if the
 /// fetch failed (caller keeps the cached list — never clobbers). `load_or_fetch` writes the cache
@@ -46,6 +66,28 @@ pub(crate) async fn fetch_into_cache(dir: &Path) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::config_changed;
+
+    /// Exactly one process fetches at a time. While the tunnel is up the NE owns it — an app fetch
+    /// layered on top mints a second, independent assignment for the same account, and the two
+    /// disagree about which servers exist. That is what made the UI offer a location the tunnel had
+    /// no member for.
+    #[test]
+    fn only_a_down_tunnel_leaves_fetching_to_the_app() {
+        use super::app_owns_fetching_in;
+
+        assert!(app_owns_fetching_in("disconnected"));
+        // A failed session is not serving traffic and will not refresh, so the app takes over
+        // rather than leaving the list frozen at whatever the NE last published.
+        assert!(app_owns_fetching_in("failed"));
+
+        assert!(!app_owns_fetching_in("connected"));
+        // Control transfers at the connect ATTEMPT, not at success: a fetch racing a bringup would
+        // be exactly the concurrent second assignment this rule exists to prevent.
+        assert!(!app_owns_fetching_in("connecting"));
+        // Anything unrecognized belongs to the tunnel — the safe direction is to not fetch, since a
+        // missed refresh is recoverable and a divergent assignment is what breaks selection.
+        assert!(!app_owns_fetching_in("something-new"));
+    }
 
     #[test]
     fn detects_change_and_no_change() {
