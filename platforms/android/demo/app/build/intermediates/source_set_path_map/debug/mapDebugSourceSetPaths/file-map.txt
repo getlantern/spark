@@ -1,0 +1,7 @@
+org.getlantern.spark.app-pngs-0 /Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/build/generated/res/pngs/debug
+org.getlantern.spark.app-resValues-1 /Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/build/generated/res/resValues/debug
+org.getlantern.spark.app-packageDebugResources-2 /Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/build/intermediates/incremental/debug/packageDebugResources/merged.dir
+org.getlantern.spark.app-packageDebugResources-3 /Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/build/intermediates/incremental/debug/packageDebugResources/stripped.dir
+org.getlantern.spark.app-debug-4 /Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/build/intermediates/merged_res/debug/mergeDebugResources
+org.getlantern.spark.app-debug-5 /Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/debug/res
+org.getlantern.spark.app-main-6 /Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/res

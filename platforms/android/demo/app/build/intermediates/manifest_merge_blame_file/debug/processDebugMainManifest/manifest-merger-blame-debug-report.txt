@@ -1,0 +1,59 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="org.getlantern.spark"
+4    android:versionCode="1"
+5    android:versionName="0.1.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="24"
+9        android:targetSdkVersion="35" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:4:5-67
+11-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:4:22-64
+12
+13    <application
+13-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:6:5-28:19
+14        android:allowBackup="false"
+14-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:7:9-36
+15        android:debuggable="true"
+16        android:extractNativeLibs="false"
+17        android:label="Spark" >
+17-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:8:9-30
+18        <activity
+18-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:10:9-17:20
+19            android:name="org.getlantern.spark.MainActivity"
+19-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:11:13-41
+20            android:exported="true" >
+20-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:12:13-36
+21            <intent-filter>
+21-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:13:13-16:29
+22                <action android:name="android.intent.action.MAIN" />
+22-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:14:17-69
+22-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:14:25-66
+23
+24                <category android:name="android.intent.category.LAUNCHER" />
+24-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:15:17-77
+24-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:15:27-74
+25            </intent-filter>
+26        </activity>
+27
+28        <!-- The VpnService must require BIND_VPN_SERVICE and advertise the VpnService action. -->
+29        <service
+29-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:20:9-27:19
+30            android:name="org.getlantern.spark.SparkVpnService"
+30-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:21:13-44
+31            android:exported="false"
+31-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:22:13-37
+32            android:permission="android.permission.BIND_VPN_SERVICE" >
+32-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:23:13-69
+33            <intent-filter>
+33-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:24:13-26:29
+34                <action android:name="android.net.VpnService" />
+34-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:25:17-65
+34-->/Users/afisk/go/src/github.com/getlantern/spark/platforms/android/demo/app/src/main/AndroidManifest.xml:25:25-62
+35            </intent-filter>
+36        </service>
+37    </application>
+38
+39</manifest>

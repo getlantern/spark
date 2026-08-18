@@ -52,6 +52,16 @@ pub trait TunnelEngine: Send {
     /// A snapshot of the data-path counters (ADR 0004 slice 2). Cheap atomic reads; cumulative over
     /// the engine's lifetime, with `sessions_active` reflecting currently-open flows.
     fn metrics(&self) -> MetricsSnapshot;
+    /// Apply a new config to the *running* tunnel — new servers get probed and surfaced without a
+    /// reconnect, and the best prior working proxy is retained.
+    ///
+    /// This is how a config the app fetched reaches a live session: the app is the only fetcher (a
+    /// second one would mint an independent assignment for the same account), so without this the
+    /// session would be stuck on whatever it started with until the user reconnected.
+    ///
+    /// `Err` when there is nothing to reload — no tunnel running, or a config with no server pool
+    /// (a direct/single-transport path has no pool to swap).
+    fn apply_config(&self, config: &Config) -> Result<(), EngineError>;
 }
 
 /// The production engine: opens the TUN, starts `spark-core`'s netstack + forwarders, and
@@ -68,6 +78,9 @@ pub trait TunnelEngine: Send {
 #[derive(Default)]
 pub struct CoreEngine {
     tun: Option<Arc<Tun>>,
+    /// The running pool's control handle, kept so a config pushed by the app can be applied live.
+    /// `None` when the tunnel is down, or up on a path with no pool to swap.
+    pool: Option<Arc<dyn transport::PoolControl>>,
     supervisor: Option<JoinHandle<()>>,
     /// Present only while connected with `[routing] manage` on — owns the installed routes.
     routes: Option<RouteManager>,
@@ -108,8 +121,11 @@ impl TunnelEngine for CoreEngine {
         let tunneled = config.transport.server.is_some();
         info!(device = %device, addr = %config.tun.addr, tunneled, "tunnel up");
 
-        let (tcp_transport, udp_transport) = transport::from_config(&config)
+        // `_with_control` rather than `from_config`: the returned handle is what lets a config the
+        // app fetched be applied to this session without a reconnect (see `apply_config`).
+        let (tcp_transport, udp_transport, control) = transport::from_config_with_control(&config)
             .map_err(|e| EngineError(format!("building transport: {e}")))?;
+        self.pool = control;
 
         let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)
             .map_err(|e| EngineError(format!("starting the netstack: {e}")))?;
@@ -186,6 +202,8 @@ impl TunnelEngine for CoreEngine {
         if self.tun.take().is_some() {
             info!("tunnel down");
         }
+        // Nothing left to reload into once the data path is gone.
+        self.pool = None;
         // Then settle the routing end-state. The ops clear stale covers first, so they're
         // correct regardless of whether the device teardown already removed them.
         if let Some(mut routes) = self.routes.take() {
@@ -200,6 +218,21 @@ impl TunnelEngine for CoreEngine {
 
     fn metrics(&self) -> MetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    fn apply_config(&self, config: &Config) -> Result<(), EngineError> {
+        let Some(pool) = &self.pool else {
+            return Err(EngineError(
+                "no running server pool to apply a config to".to_owned(),
+            ));
+        };
+        pool.reload_from_config(config)
+            .map_err(|e| EngineError(format!("reloading the server pool: {e}")))?;
+        info!(
+            servers = config.transport.servers.len(),
+            "config: live-reloaded the server pool"
+        );
+        Ok(())
     }
 }
 
@@ -260,6 +293,15 @@ pub(crate) mod test_support {
         }
         fn metrics(&self) -> MetricsSnapshot {
             MetricsSnapshot::default()
+        }
+        fn apply_config(&self, config: &Config) -> Result<(), EngineError> {
+            // Records the pushed config the same way `start` does, so a test can assert what the
+            // running tunnel was handed. Refuses while down, like the real engine.
+            if !self.running.load(Ordering::SeqCst) {
+                return Err(EngineError("not running".to_owned()));
+            }
+            *self.last_config.lock().unwrap() = Some(config.clone());
+            Ok(())
         }
     }
 }
