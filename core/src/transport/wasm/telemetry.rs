@@ -30,13 +30,15 @@
 //! Bitcoin node always speaks first, so a silent connection is a port-scan or a liveness probe rather
 //! than a peer. Before this module those were dropped with no record whatsoever.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
-use tracing::info;
+use tracing::{debug, info};
 
 /// How an untagged peer opened the conversation, which is the cheapest probe signal available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,8 +95,22 @@ impl fmt::Display for Outcome {
 ///
 /// Counters are `Relaxed` atomics: they are advisory operational figures, never used to synchronize
 /// anything, and the cost has to stay negligible on the accept path.
+/// How many distinct silent sources to remember.
+///
+/// Bounded because the set is fed by unauthenticated peers: without a cap, a scan from
+/// a large address range is a memory-growth primitive against the exit. Past the cap we
+/// stop tracking new sources and log every silent drop, which is the safe direction —
+/// noisier, never quieter.
+const MAX_TRACKED_SILENT_SOURCES: usize = 4096;
+
 #[derive(Debug, Default)]
 pub struct EgressTelemetry {
+    /// Sources already reported silent, so a repeat offender costs one line, not one
+    /// per connection. See [`EgressTelemetry::on_untagged`].
+    ///
+    /// A `Mutex` rather than an actor: the critical section is a hash lookup and never
+    /// spans an `.await` (CLAUDE.md permits exactly this shape).
+    silent_sources: Mutex<HashSet<IpAddr>>,
     tunnel_sessions: AtomicU64,
     untagged_total: AtomicU64,
     untagged_silent: AtomicU64,
@@ -106,14 +122,25 @@ pub struct EgressTelemetry {
 }
 
 /// An immutable read of [`EgressTelemetry`].
+///
+/// `non_exhaustive` because this type exists to accumulate fields: every counter worth
+/// surfacing lands here, so without it each addition is a source-breaking change for
+/// anything constructing it by literal or matching it exhaustively. Nothing outside
+/// this crate does either today — the attribute is there so that stays true for free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct EgressSnapshot {
     /// Tunnel clients served since start. A count only — never an address.
     pub tunnel_sessions: u64,
     /// Untagged (non-tunnel) connections seen since start.
     pub untagged_total: u64,
-    /// Untagged connections that sent nothing: the strongest single probe signal.
+    /// Untagged connections that sent nothing.
     pub untagged_silent: u64,
+    /// DISTINCT sources among those, which is the number that actually means something:
+    /// many silent connections from one address is a health checker, the same count
+    /// spread across many addresses is a scan. Saturates at
+    /// `MAX_TRACKED_SILENT_SOURCES`.
+    pub untagged_silent_sources: u64,
     /// Untagged connections that spoke but sent less than a full opening.
     pub untagged_short: u64,
     /// Untagged connections successfully relayed to a real node — the cover story working.
@@ -136,6 +163,15 @@ impl EgressTelemetry {
             tunnel_sessions: self.tunnel_sessions.load(Ordering::Relaxed),
             untagged_total: self.untagged_total.load(Ordering::Relaxed),
             untagged_silent: self.untagged_silent.load(Ordering::Relaxed),
+            // Recover a poisoned guard rather than reporting 0. The set is only ever
+            // read and inserted into, so its contents stay meaningful after a panic
+            // elsewhere — and reporting 0 distinct sources would understate a scan at
+            // exactly the moment the number matters.
+            untagged_silent_sources: self
+                .silent_sources
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len() as u64,
             untagged_short: self.untagged_short.load(Ordering::Relaxed),
             untagged_relayed: self.untagged_relayed.load(Ordering::Relaxed),
             upstream_unreachable: self.upstream_unreachable.load(Ordering::Relaxed),
@@ -156,9 +192,11 @@ impl EgressTelemetry {
     /// Begin recording an untagged connection. The summary is emitted when the returned guard drops.
     pub fn on_untagged(self: &Arc<Self>, peer: IpAddr, opening: Opening) -> UntaggedSession {
         self.untagged_total.fetch_add(1, Ordering::Relaxed);
+        let mut first_silent_from_source = true;
         match opening {
             Opening::Silent => {
                 self.untagged_silent.fetch_add(1, Ordering::Relaxed);
+                first_silent_from_source = self.note_silent_source(peer);
             }
             Opening::Short { .. } => {
                 self.untagged_short.fetch_add(1, Ordering::Relaxed);
@@ -170,11 +208,36 @@ impl EgressTelemetry {
             peer,
             opening,
             started: Instant::now(),
+            reportable: first_silent_from_source,
             upstream: None,
             outcome: Outcome::Dropped,
             bytes_to_upstream: 0,
             bytes_from_upstream: 0,
         }
+    }
+
+    /// Record a silent source, reporting whether this is the first time we have seen it.
+    ///
+    /// Repeats are the norm, not the exception: our own reachability sweep dials every
+    /// published route and closes without sending a byte, which is indistinguishable
+    /// from a port scan and, on a quiet exit, is ~all of the silent traffic. Logging a
+    /// line per connection buries a real scan under known monitoring — first observed
+    /// in prod, where one address produced 77 of 89 untagged records.
+    ///
+    /// Past the cap every silent drop reports, which keeps the failure direction noisy
+    /// rather than silent.
+    fn note_silent_source(&self, peer: IpAddr) -> bool {
+        // Recovering a poisoned guard keeps both dedup and the distinct-source count
+        // working; the alternative (reporting everything) is safe but throws away the
+        // signal this function exists to produce.
+        let mut set = self
+            .silent_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if set.len() >= MAX_TRACKED_SILENT_SOURCES {
+            return true;
+        }
+        set.insert(peer)
     }
 
     /// Log the running totals. Called periodically by the exit so an operator sees the shape of the
@@ -185,6 +248,7 @@ impl EgressTelemetry {
             tunnel_sessions = s.tunnel_sessions,
             untagged_total = s.untagged_total,
             untagged_silent = s.untagged_silent,
+            untagged_silent_sources = s.untagged_silent_sources,
             untagged_short = s.untagged_short,
             untagged_relayed = s.untagged_relayed,
             upstream_unreachable = s.upstream_unreachable,
@@ -204,6 +268,9 @@ pub struct UntaggedSession {
     peer: IpAddr,
     opening: Opening,
     started: Instant,
+    /// Whether this record earns an `info` line. False only for a repeat silent source
+    /// — the counters still move, so nothing is lost from the roll-up.
+    reportable: bool,
     upstream: Option<SocketAddr>,
     outcome: Outcome,
     bytes_to_upstream: u64,
@@ -249,29 +316,48 @@ impl Drop for UntaggedSession {
             .bytes_from_upstream
             .fetch_add(self.bytes_from_upstream, Ordering::Relaxed);
 
-        // `info`, not `debug`: this is the record the operator is asking for. It is emitted only for
-        // peers that failed authentication, so it cannot leak a tunnel user's address — see the module
-        // docs for why that asymmetry is deliberate.
+        // `info`, not `debug`: this is the record the operator is asking for. It is
+        // emitted only for peers that failed authentication, so it cannot leak a tunnel
+        // user's address — see the module docs for why that asymmetry is deliberate.
         //
-        // `opening`, `duration_ms` and the byte counts together are what separate a prober from a
-        // peer. A prober shows up as a short, low-byte session (often `silent`), and repeatedly from
-        // one address; a real peer stays connected and moves data. Neither fact is visible from the
-        // connection alone, which is why none of these fields is optional.
-        info!(
-            peer = %self.peer,
-            opening = %self.opening,
-            opening_bytes = match self.opening {
-                Opening::Silent => 0,
-                Opening::Short { bytes } => bytes,
-                Opening::Untagged => super::splitter::PEEK_LEN,
-            },
-            upstream = ?self.upstream,
-            outcome = %self.outcome,
-            duration_ms,
-            bytes_to_upstream = self.bytes_to_upstream,
-            bytes_from_upstream = self.bytes_from_upstream,
-            "untagged peer"
-        );
+        // `opening`, `duration_ms` and the byte counts together are what separate a
+        // prober from a peer. A prober shows up as a short, low-byte session (often
+        // `silent`), and repeatedly from one address; a real peer stays connected and
+        // moves data. Neither fact is visible from the connection alone, which is why
+        // none of these fields is optional.
+        //
+        // A repeat silent source drops to `debug`: it is almost always our own
+        // reachability sweep, which dials and closes without sending, and one line per
+        // sweep per route buries a real scan. The first sighting still logs at `info`,
+        // and `untagged_silent_sources` in the roll-up is what distinguishes one noisy
+        // address from many.
+        let opening_bytes = match self.opening {
+            Opening::Silent => 0,
+            Opening::Short { bytes } => bytes,
+            Opening::Untagged => super::splitter::PEEK_LEN,
+        };
+        if self.reportable {
+            info!(
+                peer = %self.peer,
+                opening = %self.opening,
+                opening_bytes,
+                upstream = ?self.upstream,
+                outcome = %self.outcome,
+                duration_ms,
+                bytes_to_upstream = self.bytes_to_upstream,
+                bytes_from_upstream = self.bytes_from_upstream,
+                "untagged peer"
+            );
+        } else {
+            debug!(
+                peer = %self.peer,
+                opening = %self.opening,
+                opening_bytes,
+                outcome = %self.outcome,
+                duration_ms,
+                "untagged peer (repeat silent source)"
+            );
+        }
     }
 }
 
@@ -340,6 +426,101 @@ mod tests {
         let s = t.snapshot();
         assert_eq!(s.upstream_unreachable, 1);
         assert_eq!(s.untagged_relayed, 0, "a failed relay is not cover");
+    }
+
+    /// One noisy source must not drown a real scan.
+    ///
+    /// Our own reachability sweep dials every published route and closes without
+    /// sending, which is byte-for-byte a port scan. In prod one such address produced
+    /// 77 of 89 untagged records, so per-connection reporting made the sharpest probe
+    /// signal useless. Repeats stop being reportable; the counters still move.
+    #[test]
+    fn a_repeat_silent_source_is_reported_once() {
+        let t = Arc::new(EgressTelemetry::new());
+        let noisy = peer();
+
+        let first = t.on_untagged(noisy, Opening::Silent);
+        assert!(
+            first.reportable,
+            "the first sighting of a source must be reported"
+        );
+        drop(first);
+
+        for _ in 0..20 {
+            let again = t.on_untagged(noisy, Opening::Silent);
+            assert!(
+                !again.reportable,
+                "a repeat from the same source must not be reported"
+            );
+            drop(again);
+        }
+
+        let s = t.snapshot();
+        assert_eq!(s.untagged_silent, 21, "every connection still counts");
+        assert_eq!(s.untagged_silent_sources, 1, "...but they are one source");
+    }
+
+    /// The distinction the metric exists to draw: same volume, different shape.
+    #[test]
+    fn distinct_sources_separate_a_scan_from_a_health_check() {
+        let health = Arc::new(EgressTelemetry::new());
+        for _ in 0..30 {
+            drop(health.on_untagged(peer(), Opening::Silent));
+        }
+
+        let scan = Arc::new(EgressTelemetry::new());
+        for n in 0..30u8 {
+            drop(scan.on_untagged(IpAddr::V4(Ipv4Addr::new(198, 51, 100, n)), Opening::Silent));
+        }
+
+        assert_eq!(
+            health.snapshot().untagged_silent,
+            scan.snapshot().untagged_silent
+        );
+        assert_eq!(health.snapshot().untagged_silent_sources, 1);
+        assert_eq!(scan.snapshot().untagged_silent_sources, 30);
+    }
+
+    /// Only silent drops dedup. A peer that actually spoke is always reported — those
+    /// carry the duration and byte counts that make a record worth having.
+    #[test]
+    fn non_silent_openings_are_always_reported() {
+        let t = Arc::new(EgressTelemetry::new());
+        for _ in 0..5 {
+            assert!(t.on_untagged(peer(), Opening::Untagged).reportable);
+            assert!(
+                t.on_untagged(peer(), Opening::Short { bytes: 12 })
+                    .reportable
+            );
+        }
+        assert_eq!(
+            t.snapshot().untagged_silent_sources,
+            0,
+            "no silent sources tracked"
+        );
+    }
+
+    /// The set is fed by unauthenticated peers, so it must not grow without bound —
+    /// otherwise a scan from a large range is a memory-growth primitive. Past the cap
+    /// everything reports, which is the noisy (safe) direction.
+    #[test]
+    fn tracked_silent_sources_are_bounded() {
+        let t = Arc::new(EgressTelemetry::new());
+        for n in 0..(MAX_TRACKED_SILENT_SOURCES + 500) {
+            let ip = IpAddr::V4(Ipv4Addr::from((n as u32).to_be_bytes()));
+            drop(t.on_untagged(ip, Opening::Silent));
+        }
+        let s = t.snapshot();
+        assert!(
+            s.untagged_silent_sources <= MAX_TRACKED_SILENT_SOURCES as u64,
+            "tracked sources must saturate at the cap, got {}",
+            s.untagged_silent_sources
+        );
+        assert_eq!(
+            s.untagged_silent,
+            (MAX_TRACKED_SILENT_SOURCES + 500) as u64,
+            "the raw count keeps rising even after tracking saturates"
+        );
     }
 
     /// A probe that makes the relay task die must still leave a record — that is the whole reason the
