@@ -337,7 +337,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 completionHandler("{\"ok\":false}".data(using: .utf8))
                 return
             }
-            let rc = spark_apply_config(raw)
+            // `withCString`, like every sibling here: it makes the pointer's lifetime explicit for
+            // the duration of the call rather than relying on Swift's implicit String bridging, and
+            // avoids an implicit temporary for a body that runs to tens of kilobytes.
+            let rc = raw.withCString { spark_apply_config($0) }
             log.notice("handleAppMessage: config \(raw.count, privacy: .public)B rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
         case "splitTunnel":

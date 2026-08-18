@@ -25,6 +25,32 @@ pub(crate) fn tunnel_state<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
         .map(|s| s.state)
 }
 
+/// [`tunnel_state`] off the async runtime.
+///
+/// Every `TunnelControl` method is synchronous and slow: `AppleControl::status` waits on a
+/// `recv_timeout` for the NE to answer, and `ServiceControl` does a blocking IPC round trip. Awaiting
+/// those directly inside a spawned task parks a Tokio worker thread for seconds, so they run on the
+/// blocking pool instead.
+pub(crate) async fn tunnel_state_async<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let handle = app.clone();
+    tokio::task::spawn_blocking(move || tunnel_state(&handle))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Hand `raw` to the running tunnel, off the async runtime (see [`tunnel_state_async`] — the push is
+/// the slowest of these calls, waiting up to 5s for the extension to acknowledge).
+async fn push_config_async<R: Runtime>(app: &AppHandle<R>, raw: String) -> Result<(), String> {
+    let handle = app.clone();
+    tokio::task::spawn_blocking(move || match handle.try_state::<Ctl>() {
+        Some(ctl) => ctl.push_config(&raw).map_err(|e| e.to_string()),
+        None => Err("no tunnel control registered".to_owned()),
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("push task failed: {e}")))
+}
+
 #[tauri::command]
 pub(crate) async fn connect<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
     app.state::<Ctl>().connect()?;
@@ -56,18 +82,28 @@ fn hand_config_to_new_session<R: Runtime>(app: &AppHandle<R>) {
         let Some(raw) = crate::config_fetch::cached_config(&dir) else {
             return; // nothing cached yet — the tunnel's own boot fetch is the fallback
         };
-        // Wait for a session that can accept it. Bounded: a bring-up that has not reached
-        // `connected` in ~15s has bigger problems than a stale pool, and the next fetch pushes again.
-        for _ in 0..30 {
-            if let Some(ctl) = handle.try_state::<Ctl>() {
-                if matches!(ctl.status(), Ok(s) if s.state == "connected") {
-                    if let Err(e) = ctl.push_config(&raw) {
-                        eprintln!("[spark-vpn] handing config to the new session failed: {e}");
-                    }
-                    return;
+        // Wait for a session that can accept it, bounding the WHOLE wait rather than counting
+        // iterations: each status read can itself block for seconds, so a loop of N sleeps is not an
+        // N-sleep wait. A bring-up that has not reached `connected` inside this has bigger problems
+        // than a stale pool, and the tunnel's own fetch is the fallback.
+        let deadline = std::time::Duration::from_secs(20);
+        let handed = tokio::time::timeout(deadline, async {
+            loop {
+                if crate::commands::tunnel_state_async(&handle)
+                    .await
+                    .as_deref()
+                    == Some("connected")
+                {
+                    return push_config_async(&handle, raw.clone()).await;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        })
+        .await;
+        // A timeout is not worth reporting — the tunnel simply never came up, which it already
+        // logs. Only a push that was attempted and failed says something new.
+        if let Ok(Err(e)) = handed {
+            eprintln!("[spark-vpn] handing config to the new session failed: {e}");
         }
     });
 }
@@ -97,7 +133,7 @@ fn refresh_after_disconnect<R: Runtime>(app: &AppHandle<R>) {
         };
         let dir = crate::desktop::app_config_cache_dir(&base);
         let _ = std::fs::create_dir_all(&dir);
-        if !crate::config_fetch::app_owns_fetching(&handle) {
+        if !crate::config_fetch::app_owns_fetching(&handle).await {
             return; // still tearing down; the next launch or disconnect refreshes
         }
         match crate::config_fetch::fetch_into_cache(&dir).await {

@@ -217,7 +217,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     // over a running tunnel) the tunnel owns fetching: it is refreshing on its own,
                     // and it is carrying this process's traffic — a fetch from here would be
                     // geolocated to the exit and mint a second, wrongly-placed assignment.
-                    if !crate::config_fetch::app_owns_fetching(&handle) {
+                    if !crate::config_fetch::app_owns_fetching(&handle).await {
                         return;
                     }
                     match crate::config_fetch::fetch_into_cache(&dir).await {

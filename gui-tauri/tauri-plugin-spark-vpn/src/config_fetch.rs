@@ -93,11 +93,13 @@ const TUNNEL_SELF_FETCHES: bool = cfg!(any(target_os = "macos", target_os = "ios
 /// So the app fetches only while the tunnel is down. While it is up, the tunnel refreshes and the UI
 /// reads its live pool through `servers()`. Where the tunnel does not self-fetch, the app keeps
 /// fetching regardless — standing down would freeze the list and nothing else would refresh it.
-pub(crate) fn app_owns_fetching<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+pub(crate) async fn app_owns_fetching<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     if !TUNNEL_SELF_FETCHES {
         return true;
     }
-    match crate::commands::tunnel_state(app) {
+    // Off the async runtime: reading the tunnel's status blocks for seconds (see
+    // `commands::tunnel_state_async`), and every caller here is inside a spawned task.
+    match crate::commands::tunnel_state_async(app).await {
         Some(state) => app_owns_fetching_in(&state),
         // No readable tunnel status: nothing is up to be fetching or to route us through, so the app
         // owns it. This is the ordinary first-run case (no tunnel configured yet); treating it as the

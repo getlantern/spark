@@ -602,11 +602,10 @@ impl Transform {
                 memory
                     .write(&mut store, ptr as usize, config)
                     .map_err(|e| WasmError::Memory(e.to_string()))?;
-                init.call(&mut store, (ptr, config.len() as i32))
-                    .map_err(|source| WasmError::Call {
-                        func: EXPORT_INIT,
-                        source,
-                    })?;
+                if let Err(source) = init.call(&mut store, (ptr, config.len() as i32)) {
+                    let fault = store.data_mut().fault.take();
+                    return Err(call_error(fault, EXPORT_INIT, source));
+                }
                 if let Some(msg) = store.data_mut().fault.take() {
                     return Err(WasmError::HostFault(msg));
                 }
@@ -773,9 +772,13 @@ impl Transform {
             .write(&mut self.store, ptr as usize, input)
             .map_err(|e| WasmError::Memory(e.to_string()))?;
 
-        let packed = func
-            .call(&mut self.store, (ptr, len))
-            .map_err(|source| classify_call(name, source))? as u64;
+        let packed = match func.call(&mut self.store, (ptr, len)) {
+            Ok(v) => v as u64,
+            Err(source) => {
+                let fault = self.store.data_mut().fault.take();
+                return Err(call_error(fault, name, source));
+            }
+        };
         self.take_fault()?;
 
         let out_ptr = (packed >> 32) as usize;
@@ -825,6 +828,21 @@ fn set_fuel(store: &mut Store<HostState>, fuel: u64) -> Result<(), WasmError> {
 
 /// Map a failed guest call to an error, distinguishing fuel exhaustion (a runaway module) from other
 /// traps — wasmi reports an out-of-fuel trap whose message mentions fuel.
+/// The most informative error available for a guest call that failed.
+///
+/// A trapping guest is usually the **symptom**, not the cause. Every host import here is infallible
+/// at the wasmi boundary by design: on failure it records why in [`HostState::fault`], returns a
+/// sentinel, and the guest — finding a sentinel it cannot proceed from — unwinds into `unreachable`.
+/// Reporting the trap alone therefore throws away the only description of what actually went wrong,
+/// which is how a CSPRNG failure or a bad length reaches the logs as the uninformative
+/// "wasm `unreachable` instruction executed". Prefer the recorded fault whenever there is one.
+fn call_error(fault: Option<String>, func: &'static str, source: wasmi::Error) -> WasmError {
+    match fault {
+        Some(msg) => WasmError::HostFault(msg),
+        None => classify_call(func, source),
+    }
+}
+
 fn classify_call(func: &'static str, source: wasmi::Error) -> WasmError {
     if source.to_string().contains("fuel") {
         WasmError::Fuel(format!(
@@ -2687,6 +2705,45 @@ mod tests {
         for _ in 0..5000 {
             assert_eq!(t.transform_out(&input).expect("transform_out").len(), 64);
         }
+    }
+
+    /// A trapping guest is the symptom; the host fault is the cause. Every host import is
+    /// infallible at the wasmi boundary — on failure it records why and returns a sentinel, and the
+    /// guest then unwinds into `unreachable`. Reporting only the trap is what made a real bip324
+    /// failure read as "wasm `unreachable` instruction executed", with no way to tell a CSPRNG
+    /// failure from a bad length without rebuilding the host.
+    #[test]
+    fn a_trap_reports_the_host_fault_that_caused_it() {
+        // `init` asks `host_rand` to fill a wildly out-of-bounds region. The host refuses, records
+        // the reason, and returns; the guest then traps exactly as a real module would.
+        const WAT: &str = r#"
+(module
+  (import "env" "host_rand" (func $rand (param i32 i32)))
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "init") (param $ptr i32) (param $len i32)
+    (call $rand (i32.const 0x7fff0000) (i32.const 0x10000))
+    (unreachable))
+  (func (export "transform_out") (param i32) (param i32) (result i64) (i64.const 0))
+  (func (export "transform_in") (param i32) (param i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        // `Transform` is not `Debug`, so match rather than `expect_err`.
+        let err = match module.instantiate_with_config(&[0x01]) {
+            Err(e) => e,
+            Ok(_) => panic!("the guest was expected to trap"),
+        };
+
+        assert!(
+            matches!(err, WasmError::HostFault(_)),
+            "expected the recorded host fault, got the bare trap: {err}"
+        );
+        // And the message must name the cause, not just that something failed.
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("unreachable"),
+            "the trap masked the cause: {rendered}"
+        );
     }
 
     #[test]
