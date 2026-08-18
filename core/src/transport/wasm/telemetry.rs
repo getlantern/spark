@@ -122,7 +122,13 @@ pub struct EgressTelemetry {
 }
 
 /// An immutable read of [`EgressTelemetry`].
+///
+/// `non_exhaustive` because this type exists to accumulate fields: every counter worth
+/// surfacing lands here, so without it each addition is a source-breaking change for
+/// anything constructing it by literal or matching it exhaustively. Nothing outside
+/// this crate does either today — the attribute is there so that stays true for free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct EgressSnapshot {
     /// Tunnel clients served since start. A count only — never an address.
     pub tunnel_sessions: u64,
