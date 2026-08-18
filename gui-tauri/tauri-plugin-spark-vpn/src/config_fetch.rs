@@ -68,39 +68,87 @@ pub(crate) fn cached_config(dir: &Path) -> Option<String> {
     snapshot(dir).and_then(|b| String::from_utf8(b).ok())
 }
 
-/// Fetch into the app's cache, then hand the result to the running tunnel.
+/// Whether this platform's tunnel refreshes config on its own while it is up.
 ///
-/// The app is the **only** process that fetches. `/config-new` *assigns*, so a tunnel that fetched
-/// for itself would hold a second, independent assignment for the same account: the two disagree
-/// about which servers exist, and the UI ends up offering a location the tunnel has no member for.
-/// Forwarding the app's own bytes keeps one assignment, applied live with no reconnect.
+/// On Apple the tunnel runs in the network extension in `lantern-api` mode and re-fetches on its own
+/// schedule. On Windows and Linux the privileged service is *handed* a config — `Connect` carries
+/// none and the service starts the active profile or its launch config — so it never fetches, and
+/// the app must keep fetching for it.
+const TUNNEL_SELF_FETCHES: bool = cfg!(any(target_os = "macos", target_os = "ios"));
+
+/// Whether the app owns config fetching right now.
 ///
-/// Pushed on **every** successful fetch, not only a changed one. The push is also what tells the
-/// tunnel an app is driving (it retires the daemon's own refresh loop), so waiting for the first
-/// change would leave both fetching until then; and a reload with an unchanged config is cheap and
-/// keeps the working proxy. Best-effort: a tunnel that is down has nothing to apply to and will read
-/// this same config from the cache when it starts, so a failed push never fails the fetch.
-pub(crate) async fn fetch_and_push<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    dir: &Path,
-) -> std::io::Result<bool> {
-    let changed = fetch_into_cache(dir).await?;
-    if let Some(raw) = snapshot(dir) {
-        if let Ok(raw) = String::from_utf8(raw) {
-            use tauri::Manager;
-            if let Some(ctl) = app.try_state::<crate::commands::Ctl>() {
-                if let Err(e) = ctl.push_config(&raw) {
-                    eprintln!("[spark-vpn] config push failed (cached for next connect): {e}");
-                }
-            }
-        }
+/// Two things force this, and they point the same way:
+///
+/// 1. **One fetcher.** `/config-new` *assigns*, so two fetchers hold two independent assignments for
+///    one account and disagree about which servers exist — the UI then offers a location the tunnel
+///    has no member for.
+/// 2. **The fetch must bypass the tunnel.** While the tunnel is up it carries the app's traffic too;
+///    the app's sockets are not pinned to the physical interface and (on iOS) cannot be. A fetch
+///    routed through the tunnel is geolocated to the *exit*, so the server assigns servers for the
+///    exit's country rather than the user's — and a broken pool could never fetch its replacement.
+///    The tunnel's own sockets *are* pinned (`transport.protect_interface`), so while it is up it is
+///    the only party that can fetch correctly.
+///
+/// So the app fetches only while the tunnel is down. While it is up, the tunnel refreshes and the UI
+/// reads its live pool through `servers()`. Where the tunnel does not self-fetch, the app keeps
+/// fetching regardless — standing down would freeze the list and nothing else would refresh it.
+pub(crate) fn app_owns_fetching<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    if !TUNNEL_SELF_FETCHES {
+        return true;
     }
-    Ok(changed)
+    match crate::commands::tunnel_state(app) {
+        Some(state) => app_owns_fetching_in(&state),
+        // No readable tunnel status: nothing is up to be fetching or to route us through, so the app
+        // owns it. This is the ordinary first-run case (no tunnel configured yet); treating it as the
+        // tunnel's would leave a fresh install never fetching at all.
+        None => true,
+    }
+}
+
+/// The rule itself, split from reading the live status so it can be tested.
+///
+/// "connecting" is deliberately the tunnel's: control transfers at the connect *attempt*, not at
+/// success, so a fetch cannot race a bringup — and by the time it landed the tunnel might already be
+/// carrying it.
+pub(crate) fn app_owns_fetching_in(state: &str) -> bool {
+    if !TUNNEL_SELF_FETCHES {
+        return true;
+    }
+    matches!(state, "disconnected" | "failed")
 }
 
 #[cfg(test)]
 mod tests {
     use super::config_changed;
+
+    /// Exactly one process fetches at a time, and while the tunnel is up it must be the tunnel: it
+    /// carries the app's traffic, so an app fetch would be geolocated to the exit and assign servers
+    /// for the wrong country — and on iOS the app cannot bypass it at all. Where the tunnel does not
+    /// fetch for itself, the app must keep going or nothing refreshes the list.
+    #[test]
+    fn the_fetcher_is_whoever_can_reach_the_api_directly() {
+        use super::{app_owns_fetching_in, TUNNEL_SELF_FETCHES};
+
+        // True everywhere: a tunnel that is down neither fetches nor routes us.
+        assert!(app_owns_fetching_in("disconnected"));
+        assert!(app_owns_fetching_in("failed"));
+
+        if TUNNEL_SELF_FETCHES {
+            assert!(!app_owns_fetching_in("connected"));
+            // Control transfers at the connect ATTEMPT: a fetch racing a bringup could land after
+            // the tunnel is already carrying it, which is the case this rule exists to prevent.
+            assert!(!app_owns_fetching_in("connecting"));
+            assert!(!app_owns_fetching_in("something-new"));
+        } else {
+            for state in ["connected", "connecting", "disconnecting", "something-new"] {
+                assert!(
+                    app_owns_fetching_in(state),
+                    "{state}: nothing else fetches here, so the app must not stand down"
+                );
+            }
+        }
+    }
 
     #[test]
     fn detects_change_and_no_change() {

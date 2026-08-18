@@ -13,6 +13,18 @@ pub(crate) struct SelectedServer(pub Mutex<Option<usize>>);
 
 pub(crate) type Ctl = Box<dyn TunnelControl>;
 
+/// The tunnel's state string, or `None` if it cannot be read.
+///
+/// `TunnelControl::status` reports the same vocabulary on every platform (`AppleControl` maps
+/// `NEVPNStatus`, `ServiceControl` maps `TunnelState` over IPC), which is what lets the
+/// fetch-ownership rule be one rule rather than a per-platform one. `None` means no reachable
+/// tunnel — not running, not yet configured, or a status read that timed out.
+pub(crate) fn tunnel_state<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    app.try_state::<Ctl>()
+        .and_then(|ctl| ctl.status().ok())
+        .map(|s| s.state)
+}
+
 #[tauri::command]
 pub(crate) async fn connect<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
     app.state::<Ctl>().connect()?;
@@ -69,12 +81,12 @@ pub(crate) async fn disconnect<R: Runtime>(app: AppHandle<R>) -> crate::Result<(
     Ok(())
 }
 
-/// Refresh the config after the tunnel goes down.
+/// Refresh the config once the tunnel is down and fetching comes back to the app.
 ///
-/// The app fetches on its own schedule regardless of tunnel state, but a disconnect is a natural
-/// moment to re-pull: the list the user browses while disconnected should be current, and the next
-/// connect starts from whatever this leaves in the cache. Detached so `disconnect()` returns at
-/// once, and best-effort — a failure leaves the cached list intact, exactly as at startup.
+/// This is the first fetch since the tunnel took over that can reach the API *directly* rather than
+/// through the exit, so it is also the one that re-anchors the assignment to the user's own location.
+/// Detached so `disconnect()` returns at once, and best-effort — a failure leaves the cached list
+/// intact, exactly as at startup.
 fn refresh_after_disconnect<R: Runtime>(app: &AppHandle<R>) {
     use tauri::Emitter;
 
@@ -85,7 +97,10 @@ fn refresh_after_disconnect<R: Runtime>(app: &AppHandle<R>) {
         };
         let dir = crate::desktop::app_config_cache_dir(&base);
         let _ = std::fs::create_dir_all(&dir);
-        match crate::config_fetch::fetch_and_push(&handle, &dir).await {
+        if !crate::config_fetch::app_owns_fetching(&handle) {
+            return; // still tearing down; the next launch or disconnect refreshes
+        }
+        match crate::config_fetch::fetch_into_cache(&dir).await {
             Ok(true) => {
                 let _ = handle.emit("spark://servers", ());
             }

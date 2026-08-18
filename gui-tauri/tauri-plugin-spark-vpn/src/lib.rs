@@ -213,11 +213,14 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     };
                     let dir = crate::desktop::app_config_cache_dir(&base);
                     let _ = std::fs::create_dir_all(&dir);
-                    // Runs whatever the tunnel is doing: the app is the only fetcher, and the
-                    // result is pushed to the tunnel if one is up (see `fetch_and_push`), so a
-                    // relaunch over a running tunnel refreshes that session rather than opening a
-                    // second, competing assignment for the same account.
-                    match crate::config_fetch::fetch_and_push(&handle, &dir).await {
+                    // Only while the tunnel is down. If it is already up (the app was relaunched
+                    // over a running tunnel) the tunnel owns fetching: it is refreshing on its own,
+                    // and it is carrying this process's traffic — a fetch from here would be
+                    // geolocated to the exit and mint a second, wrongly-placed assignment.
+                    if !crate::config_fetch::app_owns_fetching(&handle) {
+                        return;
+                    }
+                    match crate::config_fetch::fetch_into_cache(&dir).await {
                         Ok(true) => {
                             let _ = handle.emit("spark://servers", ());
                         }

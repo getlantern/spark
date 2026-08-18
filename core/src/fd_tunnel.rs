@@ -137,27 +137,30 @@ fn make_config_applier(config: &Config, data_dir: Option<&std::path::Path>) -> C
     })
 }
 
-/// Set once the app pushes a config, retiring the daemon's own refresh loop.
+/// Drop every per-session global, so nothing from a finished tunnel leaks into the next one.
 ///
-/// Both fetching is the whole bug: `/config-new` *assigns*, so a daemon that keeps refreshing while
-/// the app also fetches holds a second, independent assignment for the same account, and the two
-/// disagree about which servers exist. The daemon still performs its **boot** fetch — it has to, for
-/// a tunnel started with no app running (on-demand) — but the first pushed config is proof that an
-/// app is driving, and from then on the daemon defers to it rather than racing it.
-///
-/// Reset on teardown, so the next session starts able to refresh for itself again.
-static APP_DRIVES_CONFIG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Whether the app has taken over config fetching for this session.
-pub fn app_drives_config() -> bool {
-    APP_DRIVES_CONFIG.load(std::sync::atomic::Ordering::Relaxed)
+/// Both entry points tear down their own way (`run_with_handle` and `run_fd_lantern_api`), and the
+/// resets were duplicated across them — so the lantern-api path, which is the one the Apple NE and
+/// the Android `:vpn` process actually use, silently kept both. That left `apply_config_str`
+/// reporting success with no tunnel running, and `APP_DRIVES_CONFIG` latched on for the life of the
+/// process: the NE outlives a session, so the *next* connect's refresh loop would stop immediately
+/// and an on-demand tunnel started with no app driving it would never refresh at all.
+fn clear_session_state() {
+    set_pool(None);
+    set_config_applier(None);
+    #[cfg(feature = "smart-routing")]
+    set_active_router(None);
 }
 
 /// Apply a config the **app** fetched to the running tunnel, with no reconnect.
 ///
-/// `raw` is a config-new response body — the same bytes the daemon's own fetch caches, so the app
-/// can forward what it already has rather than the tunnel fetching a second, independent assignment
-/// for the same account. Returns `false` if no tunnel is up to receive it or `raw` does not adapt.
+/// `raw` is a config-new response body — the same bytes the daemon's own fetch caches. The app hands
+/// over what it already has at **connect**, so a session starts on a known-good pool (and any module
+/// bundle it carries) without waiting for the daemon's first fetch. The daemon still owns refresh
+/// once it is up: its sockets are pinned to the physical interface, and the app's are not, so only
+/// the daemon's fetch is guaranteed to bypass the tunnel it would otherwise be routed through.
+///
+/// Returns `false` if no tunnel is up to receive it or `raw` does not adapt.
 ///
 /// Called across the platform boundary (Apple C-ABI / desktop control IPC), so it must not panic.
 pub fn apply_config_str(raw: &str) -> bool {
@@ -167,9 +170,6 @@ pub fn apply_config_str(raw: &str) -> bool {
     };
     match Config::from_config_str(raw) {
         Ok(cfg) => {
-            // An app is fetching for us; stop racing it. Set before applying so a refresh that is
-            // already in flight cannot re-apply its own assignment after this one lands.
-            APP_DRIVES_CONFIG.store(true, std::sync::atomic::Ordering::Relaxed);
             apply(cfg);
             true
         }
@@ -644,12 +644,7 @@ fn run_with_handle(
         &waiter,
     ));
     deregister(&stop);
-    // Drop the pool control handle for this (now torn-down) tunnel so the FFI reports no active pool.
-    set_pool(None);
-    set_config_applier(None);
-    APP_DRIVES_CONFIG.store(false, std::sync::atomic::Ordering::Relaxed);
-    #[cfg(feature = "smart-routing")]
-    set_active_router(None);
+    clear_session_state();
     set_ready(Readiness::Down);
     result
 }
@@ -1089,9 +1084,7 @@ pub fn run_fd_lantern_api(
                 }
             };
             tokio::select! {
-                // Ends when the app pushes a config: from then on the app is the only fetcher,
-                // and a refresh here would mint the second assignment this exists to avoid.
-                _ = fetch::run_loop(&loop_dir, &env, on_config, app_drives_config) => {}
+                _ = fetch::run_loop(&loop_dir, &env, on_config, || false) => {}
                 _ = loop_stop.notified() => {}
             }
         });
@@ -1122,9 +1115,7 @@ pub fn run_fd_lantern_api(
         run_tunnel_data_path(fd, mtu, config, Some(data_dir.as_path()), split_tunnel, routing_mode, &waiter).await
     });
     deregister(&stop);
-    set_pool(None);
-    #[cfg(feature = "smart-routing")]
-    set_active_router(None);
+    clear_session_state();
     set_ready(Readiness::Down);
     // Controlled exit of the tunnel loop (Ok or Err — either way the teardown path
     // ran and any error was already logged/captured above): disarm the unclean-exit
@@ -1212,6 +1203,23 @@ mod tests {
     /// refused when there is no tunnel to receive it, and when accepted it goes through the SAME
     /// applier the background refresh uses — that shared path is what keeps a pushed config from
     /// being applied differently than a refreshed one.
+    /// Teardown must drop every per-session global. The NE process outlives a session, so a stale
+    /// applier left here makes `apply_config_str` report success with no tunnel running, and the app
+    /// then believes the live pool changed. Both entry points route through `clear_session_state` so
+    /// they cannot drift apart again — the lantern-api path, the one the Apple NE and Android `:vpn`
+    /// process actually use, was missing these resets exactly because they were duplicated.
+    #[test]
+    fn teardown_leaves_nothing_for_the_next_session() {
+        set_config_applier(Some(Arc::new(|_cfg| {})));
+
+        clear_session_state();
+
+        assert!(
+            current_config_applier().is_none(),
+            "a torn-down tunnel must not still accept a pushed config"
+        );
+    }
+
     // Needs one adaptable outbound type to build a config from, so it is gated on having one.
     #[cfg(feature = "samizdat")]
     #[test]
@@ -1237,22 +1245,11 @@ mod tests {
             SEEN.fetch_add(1, Ordering::SeqCst);
         })));
 
-        assert!(
-            !app_drives_config(),
-            "the daemon refreshes for itself until an app actually pushes"
-        );
-
         assert!(apply_config_str(RAW), "a valid push must be accepted");
         assert_eq!(
             SEEN.load(Ordering::SeqCst),
             1,
             "the push must reach the registered applier exactly once"
-        );
-        // The flag is what retires the daemon's own refresh loop. Without it both keep fetching, and
-        // two assignments for one account is the whole bug.
-        assert!(
-            app_drives_config(),
-            "a pushed config must hand config fetching to the app"
         );
 
         // Garbage must not reach the applier at all — a tunnel keeps its working pool rather than
@@ -1265,8 +1262,6 @@ mod tests {
         );
 
         set_config_applier(None);
-        // Process-wide statics: leave them as found so an unrelated test cannot observe this one.
-        APP_DRIVES_CONFIG.store(false, Ordering::Relaxed);
     }
     use super::*;
 
