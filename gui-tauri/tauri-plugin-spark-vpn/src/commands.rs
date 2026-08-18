@@ -11,26 +11,53 @@ use crate::models::{ServerInfo, Status};
 #[derive(Default)]
 pub(crate) struct SelectedServer(pub Mutex<Option<usize>>);
 
-type Ctl = Box<dyn TunnelControl>;
-
-/// The tunnel's state string, or `None` if it cannot be read.
-///
-/// `TunnelControl::status` reports the same vocabulary on every platform (`AppleControl` maps
-/// `NEVPNStatus`, `ServiceControl` maps `TunnelState` over IPC), which is what lets the
-/// fetch-ownership rule be one rule rather than a per-platform one. `None` means no reachable
-/// tunnel — not running, not yet configured, or a status read that timed out.
-pub(crate) fn tunnel_state<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
-    app.try_state::<Ctl>()
-        .and_then(|ctl| ctl.status().ok())
-        .map(|s| s.state)
-}
+pub(crate) type Ctl = Box<dyn TunnelControl>;
 
 #[tauri::command]
 pub(crate) async fn connect<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
     app.state::<Ctl>().connect()?;
     #[cfg(desktop)]
     crate::tray::refresh(&app);
+    hand_config_to_new_session(&app);
     Ok(())
+}
+
+/// Push the app's cached config to a session that is coming up.
+///
+/// A tunnel started with no config of its own fetches one to boot from, which is a second,
+/// independent assignment for the same account — the exact divergence the app-side fetch exists to
+/// avoid. It cannot simply be removed: a tunnel started without the app (on-demand) has nothing else
+/// to boot from. So the app hands over its own config as soon as the session can take it, which both
+/// converges this session onto the app's assignment and retires the daemon's refresh loop
+/// (`app_drives_config`), leaving the app the only fetcher from here on.
+///
+/// Spawned, because `connect()` returns as soon as the bring-up is *requested* — there is no session
+/// to push to yet. Best-effort throughout: the tunnel is already running on a working config, so a
+/// failed push costs a refresh, not a connection.
+fn hand_config_to_new_session<R: Runtime>(app: &AppHandle<R>) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(base) = handle.path().app_config_dir() else {
+            return;
+        };
+        let dir = crate::desktop::app_config_cache_dir(&base);
+        let Some(raw) = crate::config_fetch::cached_config(&dir) else {
+            return; // nothing cached yet — the tunnel's own boot fetch is the fallback
+        };
+        // Wait for a session that can accept it. Bounded: a bring-up that has not reached
+        // `connected` in ~15s has bigger problems than a stale pool, and the next fetch pushes again.
+        for _ in 0..30 {
+            if let Some(ctl) = handle.try_state::<Ctl>() {
+                if matches!(ctl.status(), Ok(s) if s.state == "connected") {
+                    if let Err(e) = ctl.push_config(&raw) {
+                        eprintln!("[spark-vpn] handing config to the new session failed: {e}");
+                    }
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
 }
 
 #[tauri::command]
@@ -38,45 +65,27 @@ pub(crate) async fn disconnect<R: Runtime>(app: AppHandle<R>) -> crate::Result<(
     app.state::<Ctl>().disconnect()?;
     #[cfg(desktop)]
     crate::tray::refresh(&app);
-    // Fetching comes back to the app now that the tunnel is down. Refresh so the list the user sees
-    // while disconnected is the app's own current one, rather than whatever the tunnel last
-    // published before it stopped — the two are independent assignments and the tunnel's is now
-    // stale by definition. Detached: a failure leaves the cached list intact, exactly as at startup.
-    resume_app_fetching(&app);
+    refresh_after_disconnect(&app);
     Ok(())
 }
 
-/// Re-take config fetching after the tunnel goes down.
+/// Refresh the config after the tunnel goes down.
 ///
-/// Spawned rather than awaited because `disconnect()` only *requests* the stop: the status can
-/// still read `connected` for a moment after it returns, and a fetch issued in that window would
-/// see the tunnel as the owner and skip — leaving the list frozen at the NE's last one. The poll
-/// waits out that window instead of guessing a delay. It does not wait for teardown to finish:
-/// `disconnecting` already reads as `disconnected` (`ui_state`), and fetching alongside a tunnel
-/// that is on its way down is harmless — it will not refresh again.
-fn resume_app_fetching<R: Runtime>(app: &AppHandle<R>) {
+/// The app fetches on its own schedule regardless of tunnel state, but a disconnect is a natural
+/// moment to re-pull: the list the user browses while disconnected should be current, and the next
+/// connect starts from whatever this leaves in the cache. Detached so `disconnect()` returns at
+/// once, and best-effort — a failure leaves the cached list intact, exactly as at startup.
+fn refresh_after_disconnect<R: Runtime>(app: &AppHandle<R>) {
     use tauri::Emitter;
 
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        // Bounded: if the tunnel is somehow still up after 5s, skip rather than fetch under it.
-        // The next app start or disconnect refreshes, so the cost of skipping is a stale list, not
-        // a wrong one.
-        for _ in 0..10 {
-            if crate::config_fetch::app_owns_fetching(&handle) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-        if !crate::config_fetch::app_owns_fetching(&handle) {
-            return;
-        }
         let Ok(base) = handle.path().app_config_dir() else {
             return;
         };
         let dir = crate::desktop::app_config_cache_dir(&base);
         let _ = std::fs::create_dir_all(&dir);
-        match crate::config_fetch::fetch_into_cache(&dir).await {
+        match crate::config_fetch::fetch_and_push(&handle, &dir).await {
             Ok(true) => {
                 let _ = handle.emit("spark://servers", ());
             }

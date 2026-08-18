@@ -11,9 +11,9 @@ pub type ProtocolVersion = u32;
 
 /// The version this build speaks. v2 (ADR 0004) adds the read-only backend-contract requests
 /// [`RequestPayload::GetCapabilities`]/[`RequestPayload::GetDetails`] and their responses; v3 adds
-/// [`RequestPayload::SetTelemetry`]. All additive (appended enum variants), so older peers still
-/// decode the frames of their own version.
-pub const PROTOCOL_VERSION: ProtocolVersion = 3;
+/// [`RequestPayload::SetTelemetry`]; v4 adds [`RequestPayload::ApplyConfig`]. All additive
+/// (appended enum variants), so older peers still decode the frames of their own version.
+pub const PROTOCOL_VERSION: ProtocolVersion = 4;
 
 /// The oldest version this build can still interoperate with.
 pub const MIN_SUPPORTED_VERSION: ProtocolVersion = 1;
@@ -93,6 +93,18 @@ pub enum RequestPayload {
     /// [`TelemetryConfig`]. Write-only: nothing here is ever readable back over the control plane.
     /// → `Ack`.
     SetTelemetry(TelemetryConfig),
+    /// (v4) Apply a config the **app** fetched to the running tunnel, live — no reconnect. → `Ack`.
+    ///
+    /// The app is the only process that fetches: `/config-new` *assigns*, so a tunnel that fetched
+    /// for itself would hold a second, independent assignment for the same account, and the two
+    /// disagree about which servers exist. Forwarding the app's own bytes keeps one assignment.
+    ///
+    /// Appended last, and the enum is only ever extended at the end, so an older peer's encodings
+    /// keep their discriminants (postcard indexes variants by position).
+    ApplyConfig {
+        /// A config-new response body — the same bytes the app caches as `config_raw.json`.
+        raw: String,
+    },
 }
 
 /// A service→client response. `req_id` echoes the request it answers.

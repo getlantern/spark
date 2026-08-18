@@ -327,6 +327,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let rc = spark_select_server(index)
             log.notice("handleAppMessage: select index=\(index) rc=\(rc)")
             completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
+        case "config":
+            // The app is the only process that fetches; it forwards what it got so this tunnel does
+            // not fetch a second, independent assignment for the same account. Empty/missing body →
+            // reject rather than hand the core an empty string to fail on.
+            let raw = (obj["raw"] as? String) ?? ""
+            guard !raw.isEmpty else {
+                log.error("handleAppMessage: config with no body")
+                completionHandler("{\"ok\":false}".data(using: .utf8))
+                return
+            }
+            let rc = spark_apply_config(raw)
+            log.notice("handleAppMessage: config \(raw.count, privacy: .public)B rc=\(rc)")
+            completionHandler("{\"ok\":\(rc == 0)}".data(using: .utf8))
         case "splitTunnel":
             // The app sends {"cmd":"splitTunnel","list":"<json>"} where <json> is the
             // {enabled,domains,ips} JSON string. Missing list → "{}" (disabled / empty policy).

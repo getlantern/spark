@@ -99,6 +99,16 @@ void spark_string_free(char *s);
  * -1 if no server pool is active. */
 int32_t spark_select_server(int32_t index);
 
+/* ---- Config push ----
+ * Apply a config the APP fetched to the running tunnel, live (no reconnect). `raw` is a
+ * NUL-terminated config-new response body — the same bytes the app caches as config_raw.json.
+ * This is how the app hands over what it already has instead of the tunnel fetching a second,
+ * independent assignment for the same account; two assignments disagree about which servers
+ * exist, and the UI then offers a location the tunnel cannot use. Returns 0 if applied; -1 if
+ * `raw` is NULL, not valid UTF-8, does not adapt, or no tunnel is running to receive it. A
+ * rejected push leaves the current pool untouched. */
+int32_t spark_apply_config(const char *raw);
+
 /* ---- Split-tunnel bypass list ----
  * Update the running tunnel's split-tunnel bypass list live. `json` is a NUL-terminated
  * `{enabled,domains,ips}` payload. Returns 0 if applied; -1 if `json` is NULL, not valid UTF-8,

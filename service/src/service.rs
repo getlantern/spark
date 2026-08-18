@@ -198,6 +198,13 @@ pub async fn run_service<E: TunnelEngine>(
                             message: "request requires protocol version 3".into(),
                         }
                     }
+                    // v4-only, same discipline as v3 above.
+                    RequestPayload::ApplyConfig { .. } if negotiated < Some(4) => {
+                        ResponsePayload::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: "request requires protocol version 4".into(),
+                        }
+                    }
                     RequestPayload::GetCapabilities => {
                         ResponsePayload::Capabilities(info.capabilities.clone())
                     }
@@ -261,6 +268,23 @@ pub async fn run_service<E: TunnelEngine>(
                     // (#165). Nothing is stored beyond the uploader's own channel and nothing is
                     // ever read back out: the ingestion key must not reach an IPC peer, so there
                     // is deliberately no `GetTelemetry`, and `Details` carries none of it.
+                    RequestPayload::ApplyConfig { raw } => {
+                        // The app fetched this; apply it to the RUNNING tunnel so a refresh reaches
+                        // the session that is up, not just the next one. Nothing is stored here: the
+                        // app owns the config, and a `Connect` still uses the active profile or the
+                        // launch config as before.
+                        if spark_core::fd_tunnel::apply_config_str(&raw) {
+                            ResponsePayload::Ack
+                        } else {
+                            // No tunnel up to receive it, or it did not adapt. Answer honestly so
+                            // the app can log it rather than believe the running pool changed.
+                            ResponsePayload::Error {
+                                code: ErrorCode::InvalidRequest,
+                                message: "config not applied (no running tunnel, or it did not adapt)"
+                                    .into(),
+                            }
+                        }
+                    }
                     RequestPayload::SetTelemetry(cfg) => {
                         match crate::diag_wire::set_telemetry(&cfg) {
                             Ok(()) => ResponsePayload::Ack,
