@@ -1310,7 +1310,10 @@ async fn prober_loop(
                 "probe reports healthy but recent dials failed — trusting flow outcomes and ranking these last"
             );
         }
-        tracing::debug!(
+        // INFO: the healthy/pool ratio is how you tell "the member is missing from the pool" from
+        // "it is in the pool and failing" — the two look identical in the UI (no latency shown) and
+        // have completely different causes. One line per probe interval.
+        tracing::info!(
             healthy = probe_healthy,
             failing = failing.len(),
             pool = members.len(),
