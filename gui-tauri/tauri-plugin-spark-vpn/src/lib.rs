@@ -213,11 +213,12 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     };
                     let dir = crate::desktop::app_config_cache_dir(&base);
                     let _ = std::fs::create_dir_all(&dir);
-                    // Only while the tunnel is down. If it is already up (the app was relaunched
-                    // over a running tunnel), the NE owns fetching and its pool is what `servers()`
-                    // shows — an app fetch here would mint a second, independent assignment for the
-                    // same account and the two would disagree about which servers exist.
-                    if !crate::config_fetch::app_owns_fetching() {
+                    // Only while the tunnel is down, where the tunnel fetches for itself. If it is
+                    // already up (the app was relaunched over a running tunnel), it owns fetching
+                    // and its pool is what `servers()` shows — an app fetch here would mint a
+                    // second, independent assignment and the two would disagree about which servers
+                    // exist. Where the tunnel does not fetch, this is always true.
+                    if !crate::config_fetch::app_owns_fetching(&handle) {
                         return;
                     }
                     match crate::config_fetch::fetch_into_cache(&dir).await {

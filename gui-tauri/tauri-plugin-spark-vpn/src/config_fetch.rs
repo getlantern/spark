@@ -22,37 +22,54 @@ fn snapshot(dir: &Path) -> Option<Vec<u8>> {
     std::fs::read(dir.join("config_raw.json")).ok()
 }
 
+/// Whether this platform's tunnel refreshes config on its own while it is up.
+///
+/// The one real platform difference, named once instead of forked across the rule. On Apple the
+/// tunnel runs in the network extension in `lantern-api` mode and re-fetches on its own schedule.
+/// On Windows and Linux the privileged service is *handed* a config — `Connect` carries none and
+/// the service starts the active profile or its launch config (`service.rs`) — so it never fetches.
+///
+/// When this is false the app is the only fetcher and must keep fetching while connected; standing
+/// down would freeze the list for the whole session and prevent nothing. Flip it here when the
+/// desktop service gains its own refresh, and the rule below follows.
+const TUNNEL_SELF_FETCHES: bool = cfg!(any(target_os = "macos", target_os = "ios"));
+
 /// Whether the app owns config fetching right now.
 ///
-/// Exactly one process may fetch at a time. While the tunnel is up the network extension owns it:
-/// it self-fetches on its own schedule, and its pool is what the UI shows (`servers()` reads the
-/// NE's live snapshot when connected). An app fetch layered on top produces a *second, independent*
-/// assignment for the same account — the two disagree about which servers exist, and the UI ends up
-/// offering a location the tunnel has no member for.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-pub(crate) fn app_owns_fetching() -> bool {
-    let (_, raw) = crate::desktop::ne_spike::load_first_status(std::time::Duration::from_secs(2));
-    app_owns_fetching_in(crate::desktop::ne_spike::ui_state(raw))
+/// Exactly one process may fetch at a time. Where the tunnel fetches for itself, it owns fetching
+/// while it is up: its pool is what the UI shows (`servers()` reads the tunnel's live snapshot when
+/// connected). An app fetch layered on top produces a *second, independent* assignment for the same
+/// account — the two disagree about which servers exist, and the UI ends up offering a location the
+/// tunnel has no member for.
+///
+/// The state is read through [`TunnelControl::status`], which reports the same vocabulary on every
+/// platform (`AppleControl` maps `NEVPNStatus`, `ServiceControl` maps `TunnelState`), so this is one
+/// rule everywhere rather than a per-platform one.
+pub(crate) fn app_owns_fetching<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    // Skip the status round trip where it cannot change the answer — on desktop that is an IPC
+    // connect to a service which, at app start, is often not running at all.
+    if !TUNNEL_SELF_FETCHES {
+        return true;
+    }
+    match crate::commands::tunnel_state(app) {
+        Some(state) => app_owns_fetching_in(&state),
+        // No readable tunnel status: nothing is up to be fetching, so the app owns it. This is the
+        // ordinary first-run case (no tunnel configured yet), and on Apple it is also what a status
+        // read that times out reports — treating it as the tunnel's would leave a fresh install
+        // never fetching at all.
+        None => true,
+    }
 }
 
 /// The rule itself, split from reading the live status so it can be tested.
 ///
 /// "connecting" is deliberately the tunnel's: control transfers at the connect *attempt*, not at
 /// success, so a fetch cannot race a bringup and mint a second assignment mid-handover.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn app_owns_fetching_in(state: &str) -> bool {
+    if !TUNNEL_SELF_FETCHES {
+        return true;
+    }
     matches!(state, "disconnected" | "failed")
-}
-
-/// On Windows and Linux the app always owns fetching, because nothing else fetches.
-///
-/// There is no second fetcher to divide ownership with: the privileged service is started with a
-/// bare `Connect` carrying no config, and `ServiceControl::servers()` returns an empty list — the
-/// UI's list comes solely from the app's own cache. The divergence this rule prevents on Apple
-/// cannot arise here, and suspending the app's fetch while connected would only freeze the list.
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
-pub(crate) fn app_owns_fetching() -> bool {
-    true
 }
 
 /// Run one kindling config fetch into the app's cache `dir`. Returns `Ok(true)` if the cached
@@ -80,27 +97,40 @@ pub(crate) async fn fetch_into_cache(dir: &Path) -> std::io::Result<bool> {
 mod tests {
     use super::config_changed;
 
-    /// Exactly one process fetches at a time. While the tunnel is up the NE owns it — an app fetch
+    /// Exactly one process fetches at a time. Where the tunnel fetches for itself, an app fetch
     /// layered on top mints a second, independent assignment for the same account, and the two
     /// disagree about which servers exist. That is what made the UI offer a location the tunnel had
     /// no member for.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    ///
+    /// Where the tunnel does NOT fetch (Windows/Linux today), the app is the only fetcher and must
+    /// keep going while connected — standing down would freeze the list for the whole session.
     #[test]
     fn only_a_down_tunnel_leaves_fetching_to_the_app() {
-        use super::app_owns_fetching_in;
+        use super::{app_owns_fetching_in, TUNNEL_SELF_FETCHES};
 
+        // True on every platform: a tunnel that is down never owns fetching.
         assert!(app_owns_fetching_in("disconnected"));
         // A failed session is not serving traffic and will not refresh, so the app takes over
-        // rather than leaving the list frozen at whatever the NE last published.
+        // rather than leaving the list frozen at whatever the tunnel last published.
         assert!(app_owns_fetching_in("failed"));
 
-        assert!(!app_owns_fetching_in("connected"));
-        // Control transfers at the connect ATTEMPT, not at success: a fetch racing a bringup would
-        // be exactly the concurrent second assignment this rule exists to prevent.
-        assert!(!app_owns_fetching_in("connecting"));
-        // Anything unrecognized belongs to the tunnel — the safe direction is to not fetch, since a
-        // missed refresh is recoverable and a divergent assignment is what breaks selection.
-        assert!(!app_owns_fetching_in("something-new"));
+        if TUNNEL_SELF_FETCHES {
+            assert!(!app_owns_fetching_in("connected"));
+            // Control transfers at the connect ATTEMPT, not at success: a fetch racing a bringup
+            // would be exactly the concurrent second assignment this rule exists to prevent.
+            assert!(!app_owns_fetching_in("connecting"));
+            // Anything unrecognized belongs to the tunnel — the safe direction is to not fetch,
+            // since a missed refresh is recoverable and a divergent assignment breaks selection.
+            assert!(!app_owns_fetching_in("something-new"));
+        } else {
+            // Nothing else fetches here, so no state may take ownership away from the app.
+            for state in ["connected", "connecting", "disconnecting", "something-new"] {
+                assert!(
+                    app_owns_fetching_in(state),
+                    "{state} must not stop the only fetcher"
+                );
+            }
+        }
     }
 
     #[test]

@@ -13,6 +13,18 @@ pub(crate) struct SelectedServer(pub Mutex<Option<usize>>);
 
 type Ctl = Box<dyn TunnelControl>;
 
+/// The tunnel's state string, or `None` if it cannot be read.
+///
+/// `TunnelControl::status` reports the same vocabulary on every platform (`AppleControl` maps
+/// `NEVPNStatus`, `ServiceControl` maps `TunnelState` over IPC), which is what lets the
+/// fetch-ownership rule be one rule rather than a per-platform one. `None` means no reachable
+/// tunnel — not running, not yet configured, or a status read that timed out.
+pub(crate) fn tunnel_state<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    app.try_state::<Ctl>()
+        .and_then(|ctl| ctl.status().ok())
+        .map(|s| s.state)
+}
+
 #[tauri::command]
 pub(crate) async fn connect<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
     app.state::<Ctl>().connect()?;
@@ -27,10 +39,9 @@ pub(crate) async fn disconnect<R: Runtime>(app: AppHandle<R>) -> crate::Result<(
     #[cfg(desktop)]
     crate::tray::refresh(&app);
     // Fetching comes back to the app now that the tunnel is down. Refresh so the list the user sees
-    // while disconnected is the app's own current one, rather than whatever the NE last published
-    // before it stopped — the two are independent assignments and the NE's is now stale by
-    // definition. Detached: a failure leaves the cached list intact, exactly as at startup.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    // while disconnected is the app's own current one, rather than whatever the tunnel last
+    // published before it stopped — the two are independent assignments and the tunnel's is now
+    // stale by definition. Detached: a failure leaves the cached list intact, exactly as at startup.
     resume_app_fetching(&app);
     Ok(())
 }
@@ -43,7 +54,6 @@ pub(crate) async fn disconnect<R: Runtime>(app: AppHandle<R>) -> crate::Result<(
 /// waits out that window instead of guessing a delay. It does not wait for teardown to finish:
 /// `disconnecting` already reads as `disconnected` (`ui_state`), and fetching alongside a tunnel
 /// that is on its way down is harmless — it will not refresh again.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn resume_app_fetching<R: Runtime>(app: &AppHandle<R>) {
     use tauri::Emitter;
 
@@ -53,12 +63,12 @@ fn resume_app_fetching<R: Runtime>(app: &AppHandle<R>) {
         // The next app start or disconnect refreshes, so the cost of skipping is a stale list, not
         // a wrong one.
         for _ in 0..10 {
-            if crate::config_fetch::app_owns_fetching() {
+            if crate::config_fetch::app_owns_fetching(&handle) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        if !crate::config_fetch::app_owns_fetching() {
+        if !crate::config_fetch::app_owns_fetching(&handle) {
             return;
         }
         let Ok(base) = handle.path().app_config_dir() else {
