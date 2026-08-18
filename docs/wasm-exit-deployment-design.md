@@ -206,6 +206,14 @@ actionable.
 The sharpest signal is a peer that connects and says **nothing** (`opening=silent`) — a real node
 always speaks first. Those were previously dropped with no record at all.
 
+⚠️ **Our own monitoring is the loudest silent source.** `VPSReachabilityProbeWorker` dials every
+published route and closes without sending a byte, which is byte-for-byte a port scan. On the first
+prod exit it produced **77 of 89** untagged records. So a repeat silent source logs once at `info`
+and thereafter at `debug`, and the roll-up carries `untagged_silent_sources` — the distinct-source
+count is the number that means something: many connections from one address is a health check, the
+same count spread across many addresses is a scan. The tracked set is bounded, because it is fed by
+unauthenticated peers.
+
 ⚠️ **`untagged` is not a synonym for `prober`.** The bucket also holds every real Bitcoin peer, and —
 importantly — *our own clients when they are misconfigured*: a wrong `k_srv`, a stale bundle, or a
 magic mismatch all classify as untagged. So a spike in untagged records after a config push is far more
