@@ -86,10 +86,22 @@ pub(crate) const LANTERN_VERSION: &str = "9.2.0";
 /// The server-side token for "this client can install and run a signed transport-module bundle
 /// delivered in its config" (`common.CapabilityTransportModules`). The string is the wire contract —
 /// it must match the Go constant exactly, so it lives in one named place here rather than inline.
-#[cfg(feature = "wasm-transport")]
-const CAPABILITY_TRANSPORT_MODULES: &str = "transport_modules";
+/// The client can install and run a signed transport module delivered in its config.
+///
+/// NOT gated on `wasm-transport`. The token is a wire constant, and a build that cannot run modules
+/// itself may still need to name it: on Apple the app links spark-core without the wasm host but
+/// starts a network extension that has it, and the app has to declare the tunnel's capability.
+/// Gating the string on the feature made it unnameable from exactly the build that needs it.
+///
+/// Public because the capability describes the **installation**, not the process that happens to be
+/// fetching. On Apple the app and the network extension are separate processes with different
+/// feature sets — only the NE links the wasm host — yet every tunnel runs in the NE, so the app's
+/// fetch has to advertise what the NE can do or the server withholds the outbound from it and the
+/// two disagree about which servers exist.
+pub const CAPABILITY_TRANSPORT_MODULES: &str = "transport_modules";
 
-/// What this build can actually do, for [`ConfigRequest::capabilities`].
+/// What this build can actually do, for [`ConfigRequest::capabilities`], when the caller does not
+/// declare a set itself (see [`super::FetchEnv::with_capabilities`]).
 ///
 /// Advertising module support cannot be inferred from `modules`: that field is omitted when empty, so
 /// a client that supports delivery but holds nothing yet is byte-identical on the wire to one that
@@ -390,6 +402,33 @@ pub fn build_oneshot_request(
         out = out.header("If-Modified-Since", header_safe(lm).into_owned());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod capability_declaration_tests {
+    use super::*;
+
+    /// Pins that a build without the wasm host advertises nothing of its own — the configuration
+    /// the Apple app ships, and the reason a declaration is needed at all.
+    ///
+    /// Gated because CI also builds `--all-features`, where the token IS present and the assertion
+    /// is simply false. The parent module's override test is written to hold in both.
+    #[cfg(not(feature = "wasm-transport"))]
+    #[test]
+    fn this_build_has_no_capabilities_of_its_own() {
+        assert!(
+            capabilities().is_empty(),
+            "expected a build without `wasm-transport`; if this fails the declaration tests are \
+             asserting nothing, because the build would advertise the token anyway"
+        );
+    }
+
+    /// The token is the wire contract with `common.CapabilityTransportModules`; a rename on either
+    /// side silently stops the server offering delivered modules, with no error anywhere.
+    #[test]
+    fn the_capability_token_matches_the_wire_contract() {
+        assert_eq!(CAPABILITY_TRANSPORT_MODULES, "transport_modules");
+    }
 }
 
 #[cfg(test)]

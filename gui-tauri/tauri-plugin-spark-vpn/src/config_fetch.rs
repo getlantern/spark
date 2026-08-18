@@ -37,7 +37,15 @@ fn snapshot(dir: &Path) -> Option<Vec<u8>> {
 /// would need a cross-process lock for no correctness gain.
 pub(crate) async fn fetch_into_cache(dir: &Path) -> std::io::Result<bool> {
     let before = snapshot(dir);
-    let env = spark_core::config::fetch::FetchEnv::from_env();
+    // Advertise the TUNNEL's capabilities, not this process's. The app links spark-core without the
+    // wasm host and could never run a delivered module itself — but it never tunnels either: on
+    // Apple every tunnel runs in the network extension, which does have it. Deriving the set from
+    // this binary's features made the app ask a different question than the NE, so the server
+    // withheld delivered-module outbounds from the app and the two disagreed about which servers
+    // exist — the UI offered one the tunnel had no member for, and traffic silently took another.
+    let env = spark_core::config::fetch::FetchEnv::from_env().with_capabilities(vec![
+        spark_core::config::fetch::CAPABILITY_TRANSPORT_MODULES.to_string(),
+    ]);
     let _ = spark_core::config::fetch::load_or_fetch(dir, &env).await?;
     let after = snapshot(dir);
     Ok(config_changed(&before, &after))
