@@ -39,10 +39,14 @@ cd "$(dirname "$0")/.."
 # volunteer by definition. Half of that graph (srtp/media/interceptor/rtp/rtcp) is media plumbing a
 # DataChannel never touches, so a trimmed fork upstream is the only real lever if this needs to shrink.
 #
-# The Linux figure is PROJECTED, not measured: 12.73 x 1.30 (the ratio above) = ~16.6 MiB. 19 MiB
-# leaves ~13% on that projection, in line with the ~11% this budget has always targeted. The CI `size`
-# job on ubuntu-latest is what confirms it — if the real Linux ELF lands materially under ~16.6 MiB,
-# tighten this back down rather than leaving slack a regression could hide in.
+# Both platforms are now MEASURED by the CI `size` job, and the 1.30 ratio above held:
+#
+#   x86_64 Linux   spark-service  17,193,392 B  16.40 MiB   (86% of 19 MiB)
+#   macOS arm64    spark-service  13,312,608 B  12.70 MiB   (66%)
+#
+# 19 MiB therefore leaves ~14% on the fattest binary, in line with the ~11% this budget has always
+# targeted, so there is no slack worth reclaiming. Note `spark` (the CLI) is deliberately NOT carrying
+# `unbounded` — see cli/Cargo.toml — which is why it sits at 10.4 MiB on Linux rather than ~15.
 FEATURES=${FEATURES:-prod}
 BUDGET=${BUDGET:-$((19 * 1024 * 1024))}   # 19 MiB; measured 12.73 MiB macOS arm64, ~16.6 MiB projected Linux
 BINS=(spark spark-service)
