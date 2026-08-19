@@ -4,7 +4,7 @@
   import { MockBackend, type SparkBackend, type SparkStatus, type ServerInfo } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { selectedIndex, syncFromSnapshot, reapplyIfDropped } from "$lib/selection";
-  import { flagEmoji, serverLabel } from "$lib/format";
+  import { flagEmoji, serverLabel, protocolLabel } from "$lib/format";
   import { unboundedVisible } from "$lib/unbounded";
   import BottomTabs from "$lib/BottomTabs.svelte";
   import { vpnState } from "$lib/vpn_state.svelte";
@@ -221,8 +221,21 @@
           {#if $selectedIndex === null}<span class="locbolt" aria-label={$_("auto")}>⚡</span>{/if}
           <span class="chev">{@render chevron()}</span>
         </div>
-        {#if current?.latencyMs != null}
-          <div class="locsub">{current.latencyMs} ms</div>
+        <!-- Protocol beside the latency, because which transport is carrying you is the thing
+             this row cannot otherwise tell you — two servers in the same city differ only by it.
+             Rendered whenever either half is known: a member with no latency yet still has a
+             protocol, and showing it beats an empty row that reads as "nothing here".
+             Gated on the LABEL, not the raw field — a whitespace-only protocol is truthy but
+             renders as nothing, which would leave an empty span and a dangling separator. -->
+        {#if current}
+          {@const proto = protocolLabel(current.protocol)}
+          {#if proto || current.latencyMs != null}
+            <div class="locsub">
+              {#if proto}<span class="proto">{proto}</span>{/if}
+              {#if proto && current.latencyMs != null}<span class="sep">·</span>{/if}
+              {#if current.latencyMs != null}<span>{current.latencyMs} ms</span>{/if}
+            </div>
+          {/if}
         {/if}
       </button>
       <div class="divider"></div>
@@ -368,6 +381,10 @@
   .value.ok { color: var(--success); }
   .locbolt { color: var(--bolt); font-size: 16px; }
   .locsub { padding-inline-start: 32px; font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
+  /* The protocol is the identifying half of this line, so it carries the weight; the separator
+     recedes so the two read as one phrase rather than two competing labels. */
+  .locsub .proto { font-weight: 500; }
+  .locsub .sep { margin-inline: 4px; opacity: 0.55; }
   .chev { color: var(--text-tertiary); display: inline-flex; }
   :global([dir="rtl"]) .chev { transform: scaleX(-1); }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--indicator-off); }

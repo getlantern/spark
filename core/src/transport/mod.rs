@@ -389,7 +389,28 @@ fn build_member(
     };
     Ok(Member::new(transport, udp, callback, meta)
         .with_label(spec_label(&entry.spec))
-        .with_protocol(spec_kind(&entry.spec).to_string()))
+        .with_protocol(spec_protocol_label(&entry.spec)))
+}
+
+/// The protocol label to show a user for a pool member.
+///
+/// Usually the wire kind, but a delivered module is the exception: its kind is `"wasm"`, which names
+/// the *mechanism* that carries it rather than the protocol it speaks. Every server-introduced
+/// transport would read the same, so a user choosing between them would be told nothing — and the
+/// one currently shipping is BIP324, which is meaningfully "the one that looks like Bitcoin". The
+/// engine name is what the module was signed as, so it is both accurate and stable.
+///
+/// Falls back to the kind when there is no engine — a locally provisioned artifact names a file, not
+/// an engine, and "wasm" is then the most specific true thing to say.
+#[cfg(feature = "multi-server")]
+pub fn spec_protocol_label(spec: &crate::config::ServerSpec) -> String {
+    match spec {
+        crate::config::ServerSpec::Wasm(c) => c
+            .engine
+            .clone()
+            .unwrap_or_else(|| spec_kind(spec).to_string()),
+        _ => spec_kind(spec).to_string(),
+    }
 }
 
 /// The bare protocol kind for a spec, e.g. `"hysteria2"` — surfaced to the UI as a per-member
@@ -2141,6 +2162,51 @@ mod wasm_config_tests {
     /// Step 5, and the point of all five: a transport built from an engine **name**, with no module
     /// path in the config at all. This is the shape a server-delivered transport takes — install a
     /// signed bundle, then refer to its engine.
+    /// A delivered module's kind is "wasm", which names the mechanism that carries it, not the
+    /// protocol it speaks — so every server-introduced transport would present identically and a
+    /// user choosing between them would learn nothing. The engine is the protocol, so that is the
+    /// label.
+    ///
+    /// Both label paths must agree: the pre-connect list (parsed from `config_raw.json` before a
+    /// pool exists) and the live pool both go through this function. When they disagreed, the UI
+    /// offered a server whose subtitle did not match the one carrying traffic.
+    #[cfg(feature = "multi-server")]
+    #[test]
+    fn a_delivered_module_is_labelled_by_its_engine() {
+        use crate::config::{ServerSpec, WasmConfig};
+
+        let delivered = ServerSpec::Wasm(WasmConfig {
+            server: "192.0.2.1:8333".parse().unwrap(),
+            module: None,
+            engine: Some("bip324".to_owned()),
+            bundle_dir: None,
+            min_version: 0,
+            init_config: None,
+            genome: None,
+            floor_path: None,
+            source: None,
+        });
+        assert_eq!(spec_protocol_label(&delivered), "bip324");
+        // The wire kind is unchanged — it names the outbound type the server sent, which is still
+        // `wasm`, and other code matches on it.
+        assert_eq!(spec_kind(&delivered), "wasm");
+
+        // A locally provisioned artifact names a file, not an engine; "wasm" is then the most
+        // specific true thing to say rather than a blank or a guess.
+        let local = ServerSpec::Wasm(WasmConfig {
+            server: "192.0.2.1:8333".parse().unwrap(),
+            module: Some("/tmp/x.spkw".into()),
+            engine: None,
+            bundle_dir: None,
+            min_version: 0,
+            init_config: None,
+            genome: None,
+            floor_path: None,
+            source: None,
+        });
+        assert_eq!(spec_protocol_label(&local), "wasm");
+    }
+
     #[test]
     fn from_config_builds_a_transport_from_a_stored_bundle_by_name() {
         use crate::transport::engine::bundle::{self, Bundle};
