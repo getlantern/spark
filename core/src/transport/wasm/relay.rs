@@ -7,7 +7,7 @@
 //! not the other.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -44,6 +44,17 @@ pub fn is_udp_associate(target: &Address) -> bool {
 /// **Log hygiene** (docs/GOAL.md): the announced destination never reaches a default-level log. An
 /// exit sees the destination of every user's every flow, so a destination in a `warn!` would make
 /// the exit's own log the most sensitive artifact in the deployment.
+///
+/// ```no_run
+/// # use spark_core::transport::wasm::{relay_to_target, WasmServer};
+/// # async fn example(server: &WasmServer, conn: tokio::net::TcpStream) -> std::io::Result<()> {
+/// // `accept` deobfuscates the connection and reads the tunnel header. Whatever it returns is
+/// // handed straight over: the target decides TCP or UDP, and `leftover` is the bytes that shared
+/// // the header's read — relaying them is not optional, it is the connection's first payload.
+/// let (target, leftover, wrapped) = server.accept(conn).await?;
+/// relay_to_target(target, leftover, wrapped).await
+/// # }
+/// ```
 pub async fn relay_to_target<S>(target: Address, leftover: BytesMut, wrapped: S) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -123,15 +134,15 @@ where
                     break;
                 }
                 buf.advance(2);
-                if sock.send(&buf[..len]).await.is_err() {
-                    return;
-                }
+                sock.send(&buf[..len]).await?;
                 buf.advance(len);
             }
-            match read.read(&mut chunk).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            let n = read.read(&mut chunk).await?;
+            // A closed client stream is how an association ends, not a failure.
+            if n == 0 {
+                return Ok(());
             }
+            buf.extend_from_slice(&chunk[..n]);
         }
     };
 
@@ -139,48 +150,67 @@ where
     let down = async {
         let mut datagram = vec![0u8; UDP_DATAGRAM_MAX];
         loop {
-            let n = match sock.recv(&mut datagram).await {
-                Ok(n) => n,
-                Err(_) => return,
-            };
+            let n = sock.recv(&mut datagram).await?;
             let mut frame = BytesMut::with_capacity(2 + n);
             frame.extend_from_slice(&(n as u16).to_be_bytes());
             frame.extend_from_slice(&datagram[..n]);
-            if write.write_all(&frame).await.is_err() {
-                return;
-            }
+            write.write_all(&frame).await?;
         }
     };
 
     // Either direction ending ends the association: a closed client stream means nothing more will
-    // be sent or wanted, and a dead socket means there is nothing left to relay.
+    // be sent or wanted, and a dead socket means there is nothing left to relay. The surviving
+    // direction's error is returned rather than dropped — the caller logs it, and a relay that
+    // failed is not a relay that finished.
     tokio::pin!(up, down);
     tokio::select! {
-        _ = &mut up => {}
-        _ = &mut down => {}
+        r = &mut up => r,
+        r = &mut down => r,
     }
-    Ok(())
 }
 
 /// Bind a socket for one association and connect it to `target`.
 ///
-/// The bind family follows the target's, so a v6 destination is not dialed from a v4 socket. A
+/// The bind family follows each candidate's, so a v6 destination is not dialed from a v4 socket. A
 /// domain is resolved here, as the TCP path resolves it — the exit is the side with a resolver that
 /// sees the real network.
+///
+/// **Every** resolved address is tried, not just the first. `lookup_host` can return a v6 address
+/// first on a host with no v6 route, and taking only `.next()` would fail the association outright
+/// on a target that is perfectly reachable over v4 — the same address-family fallback every
+/// ordinary client performs.
 async fn connect_udp(target: &Address) -> io::Result<UdpSocket> {
-    let peer: SocketAddr = match target {
-        Address::Ip(sa) => *sa,
+    let candidates: Vec<SocketAddr> = match target {
+        Address::Ip(sa) => vec![*sa],
         Address::Domain { host, port } => tokio::net::lookup_host((host.as_str(), *port))
             .await
             .inspect_err(|_| tracing::debug!(?target, "resolving the announced UDP target failed"))?
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no addresses"))?,
+            .collect(),
     };
-    let bind: SocketAddr = if peer.is_ipv6() {
-        "[::]:0".parse().expect("v6 wildcard")
-    } else {
-        "0.0.0.0:0".parse().expect("v4 wildcard")
-    };
+    let mut last: Option<io::Error> = None;
+    for peer in candidates {
+        match bind_and_connect(peer).await {
+            Ok(sock) => return Ok(sock),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "target resolved to no addresses")
+    }))
+}
+
+/// Bind a wildcard socket of `peer`'s family and connect it, so sends need no address.
+async fn bind_and_connect(peer: SocketAddr) -> io::Result<UdpSocket> {
+    // Constructed rather than parsed: a wildcard address cannot fail to build, and an `expect` on
+    // a parse in a per-association path is a panic waiting for the one input that surprises it.
+    let bind = SocketAddr::new(
+        if peer.is_ipv6() {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        },
+        0,
+    );
     let sock = UdpSocket::bind(bind).await?;
     sock.connect(peer).await?;
     Ok(sock)
