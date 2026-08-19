@@ -2805,8 +2805,13 @@ mod tests {
             Ok(_) => panic!("the guest was expected to trap"),
         };
 
+        // `init` failures are wrapped with what the guest was handed, so the cause is one level in.
+        let cause = match &err {
+            WasmError::InitRejected { cause, .. } => cause.as_ref(),
+            other => other,
+        };
         assert!(
-            matches!(err, WasmError::HostFault(_)),
+            matches!(cause, WasmError::HostFault(_)),
             "expected the recorded host fault, got the bare trap: {err}"
         );
         // And the message must name the cause, not just that something failed.
