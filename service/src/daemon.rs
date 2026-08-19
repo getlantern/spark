@@ -111,6 +111,14 @@ pub async fn serve_daemon(args: Args, shutdown: impl Future<Output = ()>) -> any
         _ => {}
     }
 
+    // Register the Unbounded consumer before anything builds a transport. Core skips an `unbounded`
+    // pool member when no builder is installed, and a member skipped at build time is not revisited,
+    // so this has to happen ahead of the first bringup. Done here rather than in `main` because
+    // `install` captures the current Tokio handle: a config-driven restart of the consumer runs on a
+    // synchronous pool-rebuild path with no ambient runtime of its own.
+    #[cfg(feature = "unbounded")]
+    spark_sharing::install();
+
     // The event loop owns the engine + tunnel state; connections talk to it over `cmd_tx`.
     let fail_closed = config.kill_switch.fail_closed;
     // Capabilities + the launch/base config + the profile-store path for the v2 requests.

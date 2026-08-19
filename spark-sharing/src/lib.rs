@@ -4,6 +4,10 @@ mod aggregate;
 mod consumer;
 mod freddie;
 mod geo;
+// The `spark-core` edge: an `UnboundedConsumer` impl + `install`. Feature-gated so a volunteer-only
+// build (the Tauri plugin) never compiles it.
+#[cfg(feature = "spark-transport")]
+mod install;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +28,8 @@ pub use consumer::{
 };
 pub use freddie::{FreddieBuildError, FreddieSignaler};
 pub use geo::{Geo, GeoResolver};
+#[cfg(feature = "spark-transport")]
+pub use install::{install, SparkUnboundedConsumer};
 pub use lantern_unbounded::supervisor::{
     PoolEvent, SupervisorEvent, SupervisorPoolSummary, SupervisorSummary,
 };

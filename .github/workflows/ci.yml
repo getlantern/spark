@@ -93,7 +93,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Size budget (< 4 MiB stripped per binary)
+      - name: Size budget (stripped, per binary; limit in scripts/size-budget.sh)
         run: ./scripts/size-budget.sh
 
   # Nothing in CI compiled the mobile slices at all, so a change that broke iOS or Android surfaced

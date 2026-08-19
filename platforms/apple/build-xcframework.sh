@@ -70,6 +70,17 @@ for t in "${TARGETS[@]}"; do
       features="$features,bip324"
       echo "  (bip324 enabled — pinning SPARK_MODULE_PUBKEY_HEX)" >&2
     fi
+    # The Unbounded consumer is the one place these slices deliberately diverge, the same way
+    # `system-stack` is absent above: macOS gets it, iOS does not. webrtc-rs has never been
+    # cross-built for aarch64-apple-ios here and no CI job would catch a break, and the iOS NE runs on
+    # roughly a tenth of desktop's memory budget with the netstack already in it. Revisit with a real
+    # iOS cross-build, not by deleting this case.
+    case "$t" in
+        *-apple-darwin)
+            features="$features,unbounded"
+            echo "  (unbounded consumer enabled — macOS slice only)" >&2
+            ;;
+    esac
     cargo build --release -p spark-apple --target "$t" --features "$features" >&2
 done
 

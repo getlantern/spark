@@ -45,6 +45,15 @@ smart-routing = ["spark-core/smart-routing"]
 # owns the tun fd on Linux/macOS, so both belong here as much as in the CLI.
 system-stack = ["spark-core/system-stack"]
 fronted-meek = ["spark-core/fronted-meek"]
+# Unbounded consumer (the censored side of the WebRTC peer-proxy): registers `spark-sharing`'s
+# consumer into spark-core's transport seam so a config-delivered `unbounded` outbound is dialable.
+# Needs core's `multi-server`, because that is the only shape the spec ever arrives in.
+#
+# This is the one feature that reaches OUTSIDE the root workspace (`spark-sharing` is its own
+# workspace). That is deliberate and unavoidable: the consumer is a data-path transport, so it must
+# live in the process that owns the tunnel, and `core` cannot depend on `spark-sharing` without a
+# cycle. The cost is the webrtc-rs graph (14 crates) entering this binary.
+unbounded = ["dep:spark-sharing", "spark-core/multi-server"]
 
 # Everything a production desktop build ships — the single source of truth for "what a real binary
 # can do", so the release workflow cannot drift from the transports the Apple and Android slices
@@ -62,6 +71,10 @@ prod = [
     # cannot drift from what the phones ship.
     "spark-core/prod",
     "spark-core/system-stack",
+    # The Unbounded consumer. Desktop only by construction: the mobile slices go through
+    # `platforms/{apple,android}`, which do not carry this dep — webrtc-rs has never been built for
+    # an iOS or Android target here, and the iOS NE's memory budget is a fraction of desktop's.
+    "unbounded",
     # THIS crate's `config-fetch`, not just core's. `spark-core/prod` already turns core's on, so
     # this adds no code to core — what it adds is the `cfg(feature = "config-fetch")` that THIS
     # crate's source reads, which a `spark-core/…` entry does not set. `diag_wire`'s uploader is
@@ -73,6 +86,9 @@ prod = [
 [dependencies]
 spark-ipc = { path = "../ipc", features = ["stream"] }
 spark-core = { path = "../core" }
+# The Unbounded consumer implementation (behind the `unbounded` feature). A `path` dep across a
+# workspace boundary — `spark-sharing` has its own workspace and lockfile; see the feature comment.
+spark-sharing = { path = "../spark-sharing", features = ["spark-transport"], optional = true }
 tokio.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true

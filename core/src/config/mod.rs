@@ -935,6 +935,37 @@ pub struct DnsTunnelConfig {
     pub use_system_resolvers: Option<bool>,
 }
 
+/// Unbounded consumer configuration — the censored side of the WebRTC peer-proxy, relaying through a
+/// volunteer to Lantern's egress.
+///
+/// **This spec is not built by `core`.** The implementation lives in `spark-sharing` and is installed
+/// at startup via [`crate::transport::external::set_unbounded_consumer`]; a build with nothing
+/// installed skips the member with a reason. See that module for why the dependency is inverted.
+///
+/// Unlike every other spec, the parameters do not come from the outbound that carries them. A
+/// `type: "unbounded"` outbound has no dialable address at all — its `server`/`server_port` are
+/// empty/zero and its `egress_addr` is the *volunteer's* field, since the volunteer dials the egress
+/// and the consumer never does. What the consumer needs is the signaling endpoint, which the config
+/// delivers once in the top-level `unbounded` block. So the outbound's presence is the *assignment*
+/// and the block carries the *parameters*.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnboundedConsumerConfig {
+    /// Freddie signaling endpoint (`unbounded.discovery_srv`), an `https://…` URL. Required: with no
+    /// signaling there is no way to find a volunteer, so an empty value is not a usable member.
+    pub signaling_url: String,
+    /// ICE STUN URLs for candidate gathering. Empty is valid and is what the live config yields
+    /// today — it carries no STUN servers, and ICE still gathers host and server-reflexive
+    /// candidates without an explicit one. Kept on the surface so adding them later is config-only.
+    #[serde(default)]
+    pub stun_urls: Vec<String>,
+    /// How many peer paths to advertise concurrently (`unbounded.ctable_size`). Zero means "let the
+    /// consumer runtime pick its floor" rather than "no paths" — a zero from the wire must not
+    /// produce a member that can never carry a flow.
+    #[serde(default)]
+    pub concurrent_paths: usize,
+}
+
 /// The AEAD cipher for the DNS-tunnel transport (ADR 0011).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub enum DnsTunnelCipher {
@@ -1063,6 +1094,8 @@ pub enum ServerSpec {
     /// DNS-tunnel (ADR 0011).
     #[serde(rename = "dns-tunnel")]
     DnsTunnel(DnsTunnelConfig),
+    /// Unbounded WebRTC peer-proxy consumer. Built by an installed external builder, not by `core`.
+    Unbounded(UnboundedConsumerConfig),
 }
 
 /// One server in the pool: a transport spec plus an optional per-entry callback override (falls back
@@ -1218,6 +1251,10 @@ impl Config {
             ServerSpec::Wasm(_) => None, // wasm.server is a SocketAddr, never a hostname
             ServerSpec::FrontedMeek(_) => None, // self-bootstrapping; no server host to resolve
             ServerSpec::DnsTunnel(c) => c.authoritative.as_ref(), // resolvers are IP literals
+            // No `Endpoint` to resolve: the consumer never dials a server address (the peer is
+            // negotiated through signaling), and its one hostname — the signaling URL — is resolved
+            // by the consumer implementation itself, not by core's bootstrap phase.
+            ServerSpec::Unbounded(_) => None,
         });
         singles
             .into_iter()

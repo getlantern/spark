@@ -228,6 +228,9 @@ pub mod discovery;
 /// `dns-tunnel-core` nor its `lz4_flex`.
 #[cfg(feature = "dns-tunnel")]
 pub mod dns_tunnel;
+/// Registration seam for a transport `core` cannot build itself (the Unbounded consumer). Carries no
+/// dependency of its own — the implementation is installed by the binary that owns the tunnel.
+pub mod external;
 /// Domain-fronted meek polling transport (Shir-o-Khorshid CDN-fronting, no MITM).
 /// Behind the `fronted-meek` feature so the base build pulls neither flint-fronted
 /// nor its boring dial path. See docs/fronted-meek-design.md.
@@ -341,6 +344,23 @@ pub(crate) fn build_one(
         ServerSpec::DnsTunnel(cfg) => dns_tunnel_transport(cfg, protector.cloned()),
         ServerSpec::FrontedMeek(cfg) => fronted_meek_transport(cfg),
         ServerSpec::Wasm(cfg) => wasm_transport(cfg, protector.cloned()),
+        // Built by an installed external builder, never by `core` (see `external`'s module docs for
+        // the cycle this breaks). No builder installed is a *skip*, not a failure: this build simply
+        // cannot speak Unbounded, and the rest of the assigned pool is unaffected. The message names
+        // the seam rather than the protocol, because that is the thing an operator can act on.
+        ServerSpec::Unbounded(cfg) => {
+            if cfg.signaling_url.is_empty() {
+                return Err(io::Error::other(
+                    "unbounded: no signaling endpoint (the config's `unbounded.discovery_srv` is absent or empty)",
+                ));
+            }
+            match external::unbounded_consumer() {
+                Some(builder) => builder.build(cfg),
+                None => Err(io::Error::other(
+                    "unbounded: no consumer builder installed in this binary",
+                )),
+            }
+        }
         ServerSpec::Tunnel(cfg) => {
             let server = cfg.server.socket_addr()?;
             let mut client = tcp_tunnel::client::TunnelClient::new(server);
@@ -431,6 +451,7 @@ pub fn spec_kind(spec: &crate::config::ServerSpec) -> &'static str {
         ServerSpec::Wasm(_) => "wasm",
         ServerSpec::Tunnel(_) => "tunnel",
         ServerSpec::DnsTunnel(_) => "dns-tunnel",
+        ServerSpec::Unbounded(_) => "unbounded",
     }
 }
 
@@ -458,6 +479,12 @@ fn spec_label(spec: &crate::config::ServerSpec) -> String {
         // Log hygiene: never surface the tunnel zone/resolvers — just the resolver count.
         ServerSpec::DnsTunnel(c) => {
             format!("dns-tunnel ({} configured resolvers)", c.resolvers.len())
+        }
+        // There is no server address to name: the peer is chosen by signaling, per session, and is
+        // not known at build time. The path count is the only stable thing that distinguishes one
+        // configured consumer from another.
+        ServerSpec::Unbounded(c) => {
+            format!("unbounded ({} peer paths)", c.concurrent_paths)
         }
     }
 }
@@ -2814,6 +2841,157 @@ mod pool_config_tests {
         };
         from_config(&cfg).expect(
             "pool should build from the buildable member after skipping the un-buildable one",
+        );
+    }
+
+    /// Serializes the tests that install into the process-wide external-transport slot, so one
+    /// test's builder cannot be observed by another asserting the empty case.
+    static EXTERNAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn unbounded_entry() -> ServerEntry {
+        ServerEntry {
+            spec: ServerSpec::Unbounded(crate::config::UnboundedConsumerConfig {
+                signaling_url: "https://freddie.example/v1/signal".into(),
+                stun_urls: Vec::new(),
+                concurrent_paths: 5,
+            }),
+            callback_url: None,
+            name: Some("ub".into()),
+            country: None,
+            country_code: None,
+            city: None,
+            latitude: None,
+            longitude: None,
+        }
+    }
+
+    fn pool_of(entries: Vec<ServerEntry>) -> Config {
+        Config {
+            transport: TransportConfig {
+                servers: entries,
+                callback_url: Some("http://127.0.0.1:80/ok".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A build that never installed a consumer builder must *skip* the member, not fail the pool —
+    /// the config server assigns `unbounded` outbounds to any client advertising the capability, so
+    /// treating it as fatal would brick the tunnel for every build without the implementation linked.
+    #[tokio::test]
+    async fn unbounded_member_is_skipped_when_no_builder_is_installed() {
+        let _guard = EXTERNAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        external::set_unbounded_consumer(None);
+
+        let (members, skipped) = build_members(&pool_of(vec![unbounded_entry()]), None);
+        assert!(members.is_empty(), "nothing can build the consumer here");
+        assert_eq!(skipped.len(), 1);
+        assert!(
+            skipped[0].contains("no consumer builder installed"),
+            "the skip reason must name the missing seam, not the protocol: {}",
+            skipped[0]
+        );
+    }
+
+    /// The whole point of the seam: with a builder installed, the member builds like any other.
+    #[tokio::test]
+    async fn unbounded_member_builds_through_an_installed_builder() {
+        let _guard = EXTERNAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        /// Stands in for `spark-sharing`'s consumer: records the config it was handed and returns a
+        /// transport pair. `DirectTransport` is a stand-in for the real one — this asserts the
+        /// dispatch and the config hand-off, which is all `core` is responsible for.
+        struct Fake {
+            seen: std::sync::Mutex<Vec<crate::config::UnboundedConsumerConfig>>,
+        }
+        impl external::UnboundedConsumer for Fake {
+            fn build(
+                &self,
+                config: &crate::config::UnboundedConsumerConfig,
+            ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(config.clone());
+                let d = Arc::new(DirectTransport::new(None));
+                Ok((d.clone() as Arc<dyn Transport>, d as Arc<dyn UdpTransport>))
+            }
+        }
+
+        let fake = Arc::new(Fake {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        external::set_unbounded_consumer(Some(fake.clone()));
+
+        let (members, skipped) = build_members(&pool_of(vec![unbounded_entry()]), None);
+        external::set_unbounded_consumer(None);
+
+        assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
+        assert_eq!(members.len(), 1);
+        // The builder receives the parameters the config carried, not defaults.
+        let seen = fake.seen.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(seen.len(), 1, "built exactly once per pool build");
+        assert_eq!(seen[0].signaling_url, "https://freddie.example/v1/signal");
+        assert_eq!(seen[0].concurrent_paths, 5);
+    }
+
+    /// An unbuildable consumer must not take the rest of the assigned pool down with it. This is the
+    /// realistic shape: the server assigns unbounded *alongside* ordinary outbounds.
+    #[tokio::test]
+    async fn a_pool_with_an_unbuildable_unbounded_member_still_builds() {
+        let _guard = EXTERNAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        external::set_unbounded_consumer(None);
+
+        let tunnel = ServerEntry {
+            spec: ServerSpec::Tunnel(TunnelConfig {
+                server: "1.2.3.4:443".parse().unwrap(),
+                sni: None,
+            }),
+            callback_url: None,
+            name: Some("t".into()),
+            country: None,
+            country_code: None,
+            city: None,
+            latitude: None,
+            longitude: None,
+        };
+        let cfg = pool_of(vec![unbounded_entry(), tunnel]);
+        from_config(&cfg)
+            .expect("the pool must build from the tunnel member after skipping the consumer");
+    }
+
+    /// A signaling-less spec cannot be dialed, so it is rejected at build time rather than handed to
+    /// a builder that would have to fail on every dial. Guards the case where a future config path
+    /// constructs the spec directly instead of going through the adapter's gate.
+    #[tokio::test]
+    async fn unbounded_member_without_signaling_is_rejected_before_the_builder() {
+        let _guard = EXTERNAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        struct Boom;
+        impl external::UnboundedConsumer for Boom {
+            fn build(
+                &self,
+                _config: &crate::config::UnboundedConsumerConfig,
+            ) -> io::Result<(Arc<dyn Transport>, Arc<dyn UdpTransport>)> {
+                panic!("the builder must not be reached for a spec with no signaling endpoint");
+            }
+        }
+        external::set_unbounded_consumer(Some(Arc::new(Boom)));
+
+        let mut entry = unbounded_entry();
+        if let ServerSpec::Unbounded(u) = &mut entry.spec {
+            u.signaling_url = String::new();
+        }
+        let (members, skipped) = build_members(&pool_of(vec![entry]), None);
+        external::set_unbounded_consumer(None);
+
+        assert!(members.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(
+            skipped[0].contains("no signaling endpoint"),
+            "skip reason was: {}",
+            skipped[0]
         );
     }
 

@@ -22,13 +22,33 @@ cd "$(dirname "$0")/.."
 # The cost is honest: this pulls BoringSSL and a QUIC stack, so the job is slower than it was.
 # A gate that measures the wrong binary is worse than a slow one.
 #
-# Budget headroom is sized for the *Linux* ELF, which is the fattest thing we build. Both numbers
-# below are measured, not projected: spark-service is 8.24 MiB on macOS arm64 and 10.75 MiB on
-# x86_64 Linux — a 30% inflation from opt-level = 3, larger than the ~20% this script's older
-# history implied. (A 10 MiB budget would have failed outright, which is how the real ratio was
-# found.) 12 MiB leaves ~11% on the fattest measured binary.
+# Budget headroom is sized for the *Linux* ELF, which is the fattest thing we build. The macOS/Linux
+# ratio is measured: spark-service was 8.24 MiB on macOS arm64 and 10.75 MiB on x86_64 Linux — a 30%
+# inflation from opt-level = 3, larger than the ~20% this script's older history implied. (A 10 MiB
+# budget would have failed outright, which is how the real ratio was found.)
+#
+# Raised 12 -> 19 MiB for the Unbounded consumer, which `prod` now carries. This is the largest single
+# feature cost in the tree and the number is measured on macOS arm64, same machine and profile, by
+# building `prod` with and without it:
+#
+#   prod minus unbounded   9,156,000 B   8.73 MiB
+#   prod                  13,345,680 B  12.73 MiB   (+4.00 MiB, +46%)
+#
+# The cost is webrtc-rs: 14 crates (webrtc + ice/dtls/sctp/srtp/turn/stun/mdns/rtp/rtcp/media/
+# interceptor/data/util), and it is unavoidable rather than sloppy — the consumer speaks WebRTC to a
+# volunteer by definition. Half of that graph (srtp/media/interceptor/rtp/rtcp) is media plumbing a
+# DataChannel never touches, so a trimmed fork upstream is the only real lever if this needs to shrink.
+#
+# Both platforms are now MEASURED by the CI `size` job, and the 1.30 ratio above held:
+#
+#   x86_64 Linux   spark-service  17,193,392 B  16.40 MiB   (86% of 19 MiB)
+#   macOS arm64    spark-service  13,312,608 B  12.70 MiB   (66%)
+#
+# 19 MiB therefore leaves ~14% on the fattest binary, in line with the ~11% this budget has always
+# targeted, so there is no slack worth reclaiming. Note `spark` (the CLI) is deliberately NOT carrying
+# `unbounded` — see cli/Cargo.toml — which is why it sits at 10.4 MiB on Linux rather than ~15.
 FEATURES=${FEATURES:-prod}
-BUDGET=${BUDGET:-$((12 * 1024 * 1024))}   # 12 MiB; measured 10.75 MiB spark-service on x86_64 Linux
+BUDGET=${BUDGET:-$((19 * 1024 * 1024))}   # 19 MiB; measured 12.73 MiB macOS arm64, ~16.6 MiB projected Linux
 BINS=(spark spark-service)
 
 echo "building release binaries (features: $FEATURES)..." >&2

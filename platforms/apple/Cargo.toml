@@ -57,10 +57,21 @@ bip324 = ["spark-core/bip324"]
 # `system-stack` is deliberately absent: one feature list covers the iOS slices, which cannot hand
 # over a tun fd in the shape it needs, and enabling it there would advertise a capability the
 # platform cannot provide (`caps.system_stack`).
+# Unbounded consumer (the censored side of the WebRTC peer-proxy). NOT in `prod`, because `prod` is one
+# list shared by all three Apple slices and this is deliberately **macOS only** — the same reasoning as
+# `system-stack`'s absence above. build-xcframework.sh appends it for the darwin slice alone:
+#   - webrtc-rs has never been cross-built for aarch64-apple-ios here, and nothing in CI would catch it;
+#   - the iOS NE runs on roughly a tenth of desktop's memory budget, and the consumer adds a QUIC
+#     endpoint plus a WebRTC stack to a process that already holds the netstack.
+unbounded = ["dep:spark-sharing", "spark-core/multi-server"]
+
 prod = ["spark-core/prod"]
 
 [dependencies]
 spark-core = { path = "../../core" }
+# The Unbounded consumer implementation (behind the `unbounded` feature, darwin slice only). A `path`
+# dep across a workspace boundary — `spark-sharing` has its own workspace and lockfile.
+spark-sharing = { path = "../../spark-sharing", features = ["spark-transport"], optional = true }
 # This crate emits a few `tracing` events of its own (notably the refusal to start without a supplied
 # identity); the NE's log bridge forwards them to os_log alongside core's.
 tracing.workspace = true

@@ -202,6 +202,11 @@ async fn run_tunnel(args: RunArgs) -> anyhow::Result<()> {
             }
         }
     }
+    // Ahead of the transport build, for the same reason the service does it there: core skips an
+    // `unbounded` pool member when no builder is installed, and does not revisit it.
+    #[cfg(feature = "unbounded")]
+    spark_sharing::install();
+
     let (tcp_transport, udp_transport) =
         transport::from_config(&config).context("building the transport")?;
 
