@@ -20,23 +20,21 @@ export function serverLabel(s: ServerInfo): string {
   return s.name || "Server";
 }
 
-/// Canonical display name for a transport protocol kind (e.g. "hysteria2" → "Hysteria2",
-/// "anytls" → "AnyTLS"). Unknown kinds pass through unchanged; null/empty → "".
+/// The transport's name, exactly as the config delivered it.
+///
+/// Deliberately not a lookup table. Transports are introduced by the *server* — a signed module
+/// arrives over the config channel and a client that has never heard of it can run it — so a
+/// client-side map of display names would mean every new transport needed a client release just to
+/// be named, which is the property the delivery channel exists to remove. A map would also fail
+/// unevenly: known transports would look finished and each new one would look unfinished, for no
+/// reason a user could perceive.
+///
+/// So the name the config gives is the name shown. Whoever names a transport server-side chooses
+/// how it reads, and can change it without shipping anything.
+///
+/// Trimmed only — whitespace is not a name — and empty/null yields "" so callers can test it.
 export function protocolLabel(protocol?: string | null): string {
-  if (!protocol) return "";
-  const known: Record<string, string> = {
-    anytls: "AnyTLS",
-    samizdat: "Samizdat",
-    shadowsocks: "Shadowsocks",
-    hysteria2: "Hysteria2",
-    // A delivered module reports the engine it was signed as, so this maps the engines rather than
-    // the mechanism. "WASM" stays only as the fallback for a locally provisioned artifact, which
-    // has a file rather than an engine to name.
-    bip324: "BIP324",
-    wasm: "WASM",
-    tunnel: "Tunnel",
-  };
-  return known[protocol.toLowerCase()] ?? protocol;
+  return protocol?.trim() ?? "";
 }
 
 /// Latency band for the pill color. `null`/unhealthy → "slow" (worst, so it never looks fast).
