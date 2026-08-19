@@ -1174,11 +1174,33 @@ mod tests {
 
     /// Same reason as the meek transport's equivalent: `Unsupported` is what stops `select.rs` from
     /// demoting this member for TCP because it cannot carry UDP. See `unsupported_udp`.
-    #[test]
-    fn the_udp_refusal_is_unsupported_not_a_generic_error() {
-        assert_eq!(
-            super::unsupported_udp().kind(),
-            std::io::ErrorKind::Unsupported
+    ///
+    /// Exercised through **both trait methods** rather than the helper, because `select.rs` has a
+    /// separate dial path for each and an inline `Error::other` in either one would reintroduce the
+    /// bug while a helper-only assertion stayed green. Neither method touches the network, so no
+    /// server is needed.
+    #[tokio::test]
+    async fn the_udp_refusal_is_unsupported_not_a_generic_error() {
+        let (_privkey, server_pub) = keypair();
+        let transport = DnsTunnelTransport::new(
+            "t.example.com".to_string(),
+            server_pub,
+            vec!["127.0.0.1:53".to_string()],
+            PoolConfig::default(),
+            cfg(),
+            None,
         );
+        // The Ok variant holds trait objects that aren't Debug, so match rather than expect_err.
+        match transport.dial_udp("1.2.3.4:53".parse().unwrap()).await {
+            Ok(_) => panic!("dns-tunnel must refuse UDP"),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::Unsupported, "{e}"),
+        }
+        match transport
+            .dial_udp_addr(Address::domain("example.com", 53).unwrap())
+            .await
+        {
+            Ok(_) => panic!("dns-tunnel must refuse UDP for a domain target too"),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::Unsupported, "{e}"),
+        }
     }
 }
