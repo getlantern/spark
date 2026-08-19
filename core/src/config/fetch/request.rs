@@ -86,10 +86,22 @@ pub(crate) const LANTERN_VERSION: &str = "9.2.0";
 /// The server-side token for "this client can install and run a signed transport-module bundle
 /// delivered in its config" (`common.CapabilityTransportModules`). The string is the wire contract —
 /// it must match the Go constant exactly, so it lives in one named place here rather than inline.
-#[cfg(feature = "wasm-transport")]
-const CAPABILITY_TRANSPORT_MODULES: &str = "transport_modules";
+/// The client can install and run a signed transport module delivered in its config.
+///
+/// NOT gated on `wasm-transport`. The token is a wire constant, and a build that cannot run modules
+/// itself may still need to name it: on Apple the app links spark-core without the wasm host but
+/// starts a network extension that has it, and the app has to declare the tunnel's capability.
+/// Gating the string on the feature made it unnameable from exactly the build that needs it.
+///
+/// Public because the capability describes the **installation**, not the process that happens to be
+/// fetching. On Apple the app and the network extension are separate processes with different
+/// feature sets — only the NE links the wasm host — yet every tunnel runs in the NE, so the app's
+/// fetch has to advertise what the NE can do or the server withholds the outbound from it and the
+/// two disagree about which servers exist.
+pub const CAPABILITY_TRANSPORT_MODULES: &str = "transport_modules";
 
-/// What this build can actually do, for [`ConfigRequest::capabilities`].
+/// What this build can actually do, for [`ConfigRequest::capabilities`], when the caller does not
+/// declare a set itself (see [`super::FetchEnv::with_capabilities`]).
 ///
 /// Advertising module support cannot be inferred from `modules`: that field is omitted when empty, so
 /// a client that supports delivery but holds nothing yet is byte-identical on the wire to one that
@@ -102,6 +114,40 @@ fn capabilities() -> Vec<String> {
     #[cfg(not(feature = "wasm-transport"))]
     let caps: Vec<String> = Vec::new();
     caps
+}
+
+/// Whether the **tunnel** shipped by this build can run delivered transport modules.
+///
+/// The app cannot answer this from its own `cfg!(feature = "wasm-transport")`: on Apple it links
+/// spark-core without the wasm host and could never run a module itself, yet every tunnel runs in
+/// the network extension, which does have it. What it *can* read is the input both builds are
+/// driven by. Every platform enables the module host on exactly one condition — the release
+/// workflow and `platforms/apple/build-xcframework.sh` both do:
+///
+/// ```sh
+/// features=prod
+/// if [ -n "$SPARK_MODULE_PUBKEY_HEX" ]; then features="$features,bip324"; fi
+/// ```
+///
+/// so a build with a production module-signing key pinned has `bip324` (hence `wasm-transport`) in
+/// its tunnel, and one without it does not — on Windows and Linux exactly as much as on Apple.
+/// Reading the same variable makes the app's answer follow the tunnel's by construction instead of
+/// by a platform guess that would be wrong in both directions: `prod` alone omits `wasm-transport`
+/// even on Apple, and a keyed desktop build has it.
+///
+/// `option_env!` is sound here because `build.rs` re-emits this variable as `rustc-env` (see the
+/// `PINNED` loop there) — without that, a cached crate would keep a stale expansion.
+pub fn tunnel_runs_delivered_modules() -> bool {
+    pinned_key_enables_modules(option_env!("SPARK_MODULE_PUBKEY_HEX"))
+}
+
+/// The rule alone, so both branches are testable — the real one is fixed at compile time.
+///
+/// Empty counts as absent, matching the `[ -n "$SPARK_MODULE_PUBKEY_HEX" ]` the build scripts use.
+/// This is the case that actually occurs: an unset GitHub Actions `vars.*` expands to the empty
+/// string, so the variable arrives *set and empty* rather than missing.
+fn pinned_key_enables_modules(key: Option<&str>) -> bool {
+    matches!(key, Some(k) if !k.is_empty())
 }
 
 /// This build's platform string in the Lantern convention (`darwin`/`linux`/…). Shared by the
@@ -393,7 +439,51 @@ pub fn build_oneshot_request(
 }
 
 #[cfg(test)]
+mod capability_declaration_tests {
+    use super::*;
+
+    /// Pins that a build without the wasm host advertises nothing of its own — the configuration
+    /// the Apple app ships, and the reason a declaration is needed at all.
+    ///
+    /// Gated because CI also builds `--all-features`, where the token IS present and the assertion
+    /// is simply false. The parent module's override test is written to hold in both.
+    #[cfg(not(feature = "wasm-transport"))]
+    #[test]
+    fn this_build_has_no_capabilities_of_its_own() {
+        assert!(
+            capabilities().is_empty(),
+            "expected a build without `wasm-transport`; if this fails the declaration tests are \
+             asserting nothing, because the build would advertise the token anyway"
+        );
+    }
+
+    /// The token is the wire contract with `common.CapabilityTransportModules`; a rename on either
+    /// side silently stops the server offering delivered modules, with no error anywhere.
+    #[test]
+    fn the_capability_token_matches_the_wire_contract() {
+        assert_eq!(CAPABILITY_TRANSPORT_MODULES, "transport_modules");
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    /// The app advertises module support on behalf of the tunnel, so this rule decides whether a
+    /// module-bearing outbound may be sent to this installation at all. Both directions are wrong in
+    /// their own way: claiming it without the host makes the tunnel skip the outbound it was given,
+    /// and withholding it when the host is present hides the route from the app while the tunnel
+    /// sees it — the divergence that made the UI offer a server it could not use.
+    #[test]
+    fn module_support_follows_the_pinned_signing_key() {
+        use super::pinned_key_enables_modules;
+
+        assert!(pinned_key_enables_modules(Some("a3f19c")));
+
+        assert!(!pinned_key_enables_modules(None));
+        // Set-but-empty is the case that actually happens: an unset GitHub Actions `vars.*` expands
+        // to "", so the variable arrives present and empty. Treating that as "pinned" would
+        // advertise the host on precisely the builds that lack it — every untagged CI build.
+        assert!(!pinned_key_enables_modules(Some("")));
+    }
 
     /// Both headers ride the HTTP/1.1 request when the fetch came through the race.
     #[test]

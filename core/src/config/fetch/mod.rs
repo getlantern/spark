@@ -13,6 +13,9 @@ pub(crate) mod cache;
 // hand-rolled HTTP/1.1 POST + header hygiene for its OTLP uploads.
 pub(crate) mod http;
 pub(crate) mod request;
+/// Re-exported so a controlling app can declare it for the tunnel it starts — the capability
+/// describes the installation, not the process fetching. See [`FetchEnv::with_capabilities`].
+pub use request::{tunnel_runs_delivered_modules, CAPABILITY_TRANSPORT_MODULES};
 mod user;
 
 use std::path::Path;
@@ -76,6 +79,14 @@ pub struct FetchEnv {
     /// Identity handed down by the controlling app. When set it is used verbatim, and NOTHING about
     /// identity is read from or written to the data dir — see [`Identity`].
     pub identity: Option<Identity>,
+    /// Capabilities of the **installation**, when the caller knows better than this build's own
+    /// features. `None` uses the build's set.
+    ///
+    /// Exists for Apple, where the app and the network extension are separate binaries: only the NE
+    /// links the wasm host, but every tunnel runs in the NE, so the app must advertise what the NE
+    /// can do. Otherwise the server withholds delivered-module outbounds from the app's fetch and the
+    /// two processes disagree about which servers exist.
+    pub capabilities: Option<Vec<String>>,
 }
 
 /// A device + account identity supplied by the controlling app instead of minted here.
@@ -114,7 +125,29 @@ impl Identity {
     }
 }
 
+/// Apply an installation-level capability declaration over this build's own features.
+///
+/// A named function rather than two inline lines so the decision is testable: dropping it silently
+/// reverts the app to advertising nothing, the server withholds delivered-module outbounds from it,
+/// and the app's server list disagrees with the tunnel's — a failure that surfaces only as a
+/// selectable server the tunnel has no member for.
+fn apply_declared_capabilities(req: &mut ConfigRequest, env: &FetchEnv) {
+    if let Some(caps) = &env.capabilities {
+        req.capabilities = caps.clone();
+    }
+}
+
 impl FetchEnv {
+    /// Declare the installation's capabilities, overriding this build's own features.
+    ///
+    /// The Apple app uses this: it links spark-core without the wasm host, but the tunnel it starts
+    /// is the network extension, which has it. Advertising the NE's capability is what keeps the
+    /// app's server list and the tunnel's from disagreeing.
+    pub fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.capabilities = Some(capabilities);
+        self
+    }
+
     pub fn prod() -> Self {
         FetchEnv {
             host: "df.iantem.io".into(),
@@ -123,6 +156,7 @@ impl FetchEnv {
             pro_host: "api.getiantem.org".into(),
             pro_path: "/user-create".into(),
             identity: None,
+            capabilities: None,
         }
     }
     pub fn staging() -> Self {
@@ -133,6 +167,7 @@ impl FetchEnv {
             pro_host: "api.staging.iantem.io".into(),
             pro_path: "/pro-server/user-create".into(),
             identity: None,
+            capabilities: None,
         }
     }
     /// Use `id` for every fetch instead of the data dir's `device_id` + `/user-create` creds.
@@ -206,6 +241,7 @@ async fn fetch_once(
     req.user_id = creds.user_id.clone();
     req.pro_token = creds.pro_token.clone();
     req.modules = installed_modules(dir);
+    apply_declared_capabilities(&mut req, env);
     with_outcome(
         "kindling",
         Box::pin(fetch_once_kindling(
@@ -867,6 +903,53 @@ async fn sleep_or_stop<Stop: Fn() -> bool>(d: Duration, should_stop: &Stop) {
 }
 
 #[cfg(test)]
+mod declared_capability_tests {
+    use super::*;
+
+    /// The Apple case: the app links spark-core WITHOUT the wasm host, so its own capability set is
+    /// empty — but every tunnel runs in the network extension, which has it. Declaring the tunnel's
+    /// capability is what keeps the app's server list and the tunnel's from disagreeing about which
+    /// servers exist.
+    #[test]
+    fn a_declaration_overrides_this_builds_own_capabilities() {
+        // A sentinel no build produces on its own, so this holds whether or not this build has the
+        // wasm host — CI exercises both configurations.
+        let declared = vec!["declared-by-the-installation".to_string()];
+        let env = FetchEnv::prod().with_capabilities(declared.clone());
+        let mut req = ConfigRequest::new("dev".into());
+
+        apply_declared_capabilities(&mut req, &env);
+        assert_eq!(
+            req.capabilities, declared,
+            "the caller's declaration must reach the request and REPLACE the build's own set, or \
+             the server withholds the delivered-module outbound from the app"
+        );
+    }
+
+    /// An explicit EMPTY declaration is honored, and is distinct from no declaration. The server
+    /// reads absence as "cannot", so a caller that means "this installation has nothing" must be
+    /// able to say so without silently falling back to the build's own set.
+    #[test]
+    fn an_explicit_empty_declaration_is_honored() {
+        let env = FetchEnv::prod().with_capabilities(Vec::new());
+        let mut req = ConfigRequest::new("dev".into());
+        apply_declared_capabilities(&mut req, &env);
+        assert!(req.capabilities.is_empty());
+    }
+
+    /// No declaration leaves the build's own set alone — a single-process client (the CLI, the Linux
+    /// service) is still described correctly by its own features and must not be overridden.
+    #[test]
+    fn no_declaration_leaves_the_builds_own_set() {
+        let env = FetchEnv::prod();
+        let mut req = ConfigRequest::new("dev".into());
+        let own = req.capabilities.clone();
+        apply_declared_capabilities(&mut req, &env);
+        assert_eq!(req.capabilities, own);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -961,6 +1044,7 @@ mod tests {
             pro_host: "pro.invalid".into(),
             pro_path: "/user-create".into(),
             identity: None,
+            capabilities: None,
         };
         let (cfg, _meta) = load_or_fetch(&dir, &env).await.unwrap();
         assert_eq!(
@@ -2093,6 +2177,7 @@ mod tests {
             pro_host: "pro.invalid".into(),
             pro_path: "/user-create".into(),
             identity: None,
+            capabilities: None,
         }
         .with_identity(Identity {
             device_id: "supplied-device".into(),
