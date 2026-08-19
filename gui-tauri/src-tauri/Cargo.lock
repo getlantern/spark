@@ -4948,7 +4948,7 @@ dependencies = [
 
 [[package]]
 name = "spark-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "boring2",
@@ -4984,7 +4984,7 @@ dependencies = [
 
 [[package]]
 name = "spark-ipc"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "postcard",
  "serde",
