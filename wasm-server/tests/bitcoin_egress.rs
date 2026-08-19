@@ -120,6 +120,87 @@ fn initiator_init() -> Vec<u8> {
     v
 }
 
+/// A UDP echo server standing in for a QUIC destination.
+async fn spawn_udp_echo() -> SocketAddr {
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind udp echo");
+    let addr = sock.local_addr().expect("udp echo addr");
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            if sock.send_to(&buf[..n], from).await.is_err() {
+                return;
+            }
+        }
+    });
+    addr
+}
+
+/// Chrome prefers HTTP/3 where the edge offers it, so a tunnel that relays TCP and drops UDP does
+/// not fail cleanly — it stalls, per site, while QUIC attempts collapse and Chrome backs down. The
+/// exit spoke only TCP until now: it read the announced target and dialed it, with no case for the
+/// UDP-associate sentinel, so every association broke (`send to upstream failed … Broken pipe`).
+///
+/// This drives the real client's `dial_udp` against the real exit — the two halves are separately
+/// plausible and the interesting failures are between them: the sentinel dispatch, the *second*
+/// address (connect-mode), and the `[u16 BE len][payload]` framing in both directions.
+#[tokio::test]
+async fn a_client_relays_datagrams_through_the_egress() {
+    use spark_core::transport::UdpTransport;
+
+    let dir = std::env::temp_dir().join(format!("spark-wasm-server-udp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let module = install_bundle(&dir);
+
+    let udp_echo = spawn_udp_echo().await;
+    let bitcoind = spawn_echo().await;
+
+    let wasm = WasmServer::new(module.clone()).with_config(responder_init());
+    let splitter = Arc::new(SplittingServer::new(
+        wasm,
+        K_SRV.to_vec(),
+        UpstreamPool::single(bitcoind),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind egress");
+    let egress = listener.local_addr().expect("egress addr");
+    tokio::spawn(async move {
+        while let Ok((conn, peer)) = listener.accept().await {
+            let splitter = Arc::clone(&splitter);
+            tokio::spawn(async move {
+                let _ = splitter.handle(conn, peer.ip()).await;
+            });
+        }
+    });
+
+    let engine = Arc::new(ModuleEngine::new(ENGINE.to_string(), module));
+    let transport = spark_core::transport::wasm::WasmTransport::with_engine(egress, engine)
+        .with_config(initiator_init());
+    let (mut sink, mut source) = transport
+        .dial_udp(udp_echo)
+        .await
+        .expect("open a UDP association through the egress");
+
+    // Several datagrams, so the test covers the steady state and not just the opening frame that
+    // rides along with the header.
+    for i in 0u8..4 {
+        let payload = vec![i; 64 + i as usize];
+        sink.send(&payload).await.expect("send a datagram");
+        let mut out = vec![0u8; 2048];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), source.recv(&mut out))
+            .await
+            .expect("a reply arrives (no deadlock, no dropped association)")
+            .expect("recv");
+        assert_eq!(
+            &out[..n],
+            &payload[..],
+            "datagram {i} must round-trip through the egress intact"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[tokio::test]
 async fn a_tagged_client_tunnels_and_an_untagged_peer_reaches_bitcoin() {
     let dir = std::env::temp_dir().join(format!("spark-wasm-server-e2e-{}", std::process::id()));

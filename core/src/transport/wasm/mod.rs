@@ -115,6 +115,7 @@ use secp256k1::ellswift::{ElligatorSwift, ElligatorSwiftSharedSecret, Party};
 use secp256k1::SecretKey;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+mod relay;
 mod signing;
 #[cfg(feature = "bip324")]
 mod splitter;
@@ -124,6 +125,7 @@ mod telemetry;
 mod transport;
 #[cfg(feature = "bip324")]
 mod upstream;
+pub use relay::{is_udp_associate, relay_to_target};
 pub use signing::{build_artifact, signing_payload, ModuleError, ModuleVerifier, SignedModule};
 /// The offline artifact-signing helper — only compiled for the `sign-module` tool.
 #[cfg(feature = "module-signer")]

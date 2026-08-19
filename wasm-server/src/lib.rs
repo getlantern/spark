@@ -29,8 +29,9 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use spark_core::transport::engine::BundleStore;
-use spark_core::transport::wasm::{SplittingServer, TransformModule, UpstreamPool, WasmServer};
-use tokio::io::AsyncWriteExt;
+use spark_core::transport::wasm::{
+    relay_to_target, SplittingServer, TransformModule, UpstreamPool, WasmServer,
+};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
@@ -471,33 +472,17 @@ pub async fn serve(args: Serve) -> Result<()> {
 /// log the most sensitive artifact in the deployment. The error names what failed; the destination is
 /// available at `debug` when someone is actually debugging.
 async fn relay_one(server: &WasmServer, conn: TcpStream) -> Result<()> {
-    let (target, leftover, mut wrapped) = server
+    let (target, leftover, wrapped) = server
         .accept(conn)
         .await
         .map_err(ServerError::io("reading the tunnel header"))?;
-    let mut upstream = match &target {
-        spark_core::transport::tcp_tunnel::header::Address::Ip(sa) => TcpStream::connect(*sa).await,
-        spark_core::transport::tcp_tunnel::header::Address::Domain { host, port } => {
-            TcpStream::connect((host.as_str(), *port)).await
-        }
-    }
-    .map_err(|e| {
-        debug!(?target, "dialing the announced target failed");
-        ServerError::io("dialing the announced target")(e)
-    })?;
 
-    // Bytes that arrived in the same read as the header have already left the client; dropping them
-    // would silently truncate the very first request on every connection.
-    if !leftover.is_empty() {
-        upstream
-            .write_all(&leftover)
-            .await
-            .map_err(ServerError::io("forwarding the buffered opening bytes"))?;
-    }
-    tokio::io::copy_bidirectional(&mut wrapped, &mut upstream)
+    // Shared with the splitting egress: a UDP association is dispatched on the sentinel there too,
+    // and one implementation is what keeps a protocol addition from reaching one exit and not the
+    // other. (It did not, once: the splitter kept dialing TCP for UDP associations.)
+    relay_to_target(target, leftover, wrapped)
         .await
-        .map_err(ServerError::io("relaying"))?;
-    Ok(())
+        .map_err(ServerError::io("relaying"))
 }
 
 pub async fn serve_bitcoin(args: ServeBitcoin) -> Result<()> {
