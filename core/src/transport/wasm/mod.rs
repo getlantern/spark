@@ -125,12 +125,12 @@ mod telemetry;
 mod transport;
 #[cfg(feature = "bip324")]
 mod upstream;
-#[cfg(feature = "bip324")]
 pub use relay::{is_udp_associate, relay_to_target};
 pub use signing::{build_artifact, signing_payload, ModuleError, ModuleVerifier, SignedModule};
 /// The offline artifact-signing helper — only compiled for the `sign-module` tool.
 #[cfg(feature = "module-signer")]
 pub use signing::{generate_keypair_pkcs8, public_key_hex, sign_artifact};
+#[cfg(feature = "bip324")]
 pub use splitter::SplittingServer;
 pub use stream::TransformStream;
 #[cfg(feature = "bip324")]

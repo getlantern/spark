@@ -16,9 +16,15 @@ use tokio::net::{TcpStream, UdpSocket};
 use crate::transport::tcp_tunnel::header::{Address, HeaderError};
 use crate::transport::tcp_tunnel::udp::udp_associate_sentinel;
 
-/// Read buffer for one relayed datagram. 64 KiB is the largest a UDP payload can be, so nothing
-/// legitimate is truncated. Allocated per *association*, and only for associations that relay.
-const UDP_DATAGRAM_MAX: usize = 64 * 1024;
+/// Read buffer for one relayed datagram, sized to what the wire can express.
+///
+/// The frame's length field is a `u16`, so `u16::MAX` is the ceiling — not 64 KiB. Reading one byte
+/// more than the field can hold would make `n as u16` wrap and describe a 0-byte datagram, framing
+/// a payload the peer would never reassemble. A UDP payload cannot exceed this anyway (65535 less
+/// the 8-byte header), so nothing legitimate is truncated.
+///
+/// Allocated per *association*, and only for associations that relay.
+const UDP_DATAGRAM_MAX: usize = u16::MAX as usize;
 
 /// Whether an announced target is the UDP-associate sentinel rather than a real destination.
 ///
@@ -178,4 +184,46 @@ async fn connect_udp(target: &Address) -> io::Result<UdpSocket> {
     let sock = UdpSocket::bind(bind).await?;
     sock.connect(peer).await?;
     Ok(sock)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The read buffer and the wire's length field have to agree. They are two constants in
+    /// different places — `UDP_DATAGRAM_MAX` here, the `u16` in the frame header — and nothing makes
+    /// them agree except this. A buffer larger than the field can express does not fail loudly: the
+    /// `n as u16` truncates, so a maximal datagram is framed with a wrong (possibly zero) length and
+    /// the peer reassembles garbage or stalls.
+    #[test]
+    fn the_read_buffer_cannot_outgrow_the_length_field() {
+        assert!(
+            UDP_DATAGRAM_MAX <= u16::MAX as usize,
+            "a datagram of {UDP_DATAGRAM_MAX} bytes cannot be described by the frame's u16 length"
+        );
+        // And the cast at the framing site is lossless for every length the buffer can produce.
+        assert_eq!(UDP_DATAGRAM_MAX as u16 as usize, UDP_DATAGRAM_MAX);
+    }
+
+    /// The sentinel is how a UDP association is told apart from a TCP target, and it is compared
+    /// against a value defined in `tcp_tunnel::udp` — the same one the client encodes. A literal
+    /// here would be a second definition free to drift, and the drift would not be a compile error:
+    /// associations would simply be dialed as TCP again, which is the bug this fixes.
+    #[test]
+    fn the_sentinel_is_recognized_and_nothing_else_is() {
+        assert!(is_udp_associate(&udp_associate_sentinel()));
+
+        assert!(!is_udp_associate(&Address::Ip(
+            "1.2.3.4:443".parse().unwrap()
+        )));
+        assert!(!is_udp_associate(&Address::Domain {
+            host: "example.com".to_owned(),
+            port: 443,
+        }));
+        // Same host, different port: the sentinel is the whole address, not the name.
+        assert!(!is_udp_associate(&Address::Domain {
+            host: crate::transport::tcp_tunnel::udp::UDP_ASSOCIATE_SENTINEL.to_owned(),
+            port: 443,
+        }));
+    }
 }
