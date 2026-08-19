@@ -210,6 +210,53 @@ impl Transport for ConsumerTransport {
     }
 }
 
+/// The refusal both `UdpTransport` methods return.
+///
+/// `ErrorKind::Unsupported`, deliberately, NOT `Error::other`: spark's selecting pool reads
+/// `Unsupported` as a statement about what a member *can carry* and moves to the next one, while any
+/// other error is read as ill health and **demotes** the member. Since a capability never comes back,
+/// that demotion is permanent, and the ranking it feeds is shared with TCP — so getting this wrong
+/// would rank a perfectly healthy consumer last for the TCP it serves fine. This exact conflation was
+/// already observed in the field with the shadowsocks members (see `select.rs`'s `dial_udp`).
+#[cfg(feature = "spark-transport")]
+fn unsupported_udp() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unbounded: UDP is not supported (the egress relays SOCKS5 CONNECT only)",
+    )
+}
+
+/// Unbounded carries **no UDP**. The egress relays each peer session to a SOCKS5 upstream and the
+/// consumer only ever issues `CONNECT` (`consumer_socks5.rs` writes CMD `0x01`; there is no UDP
+/// ASSOCIATE), so there is no datagram path to offer. Spelled out on both methods rather than
+/// delegated: `dial_udp_addr` has no default, and a transport must state what it can carry.
+///
+/// A pool member that refuses UDP is not a broken member — the selecting transport falls back for
+/// UDP flows exactly as it does for a TCP dial failure.
+#[cfg(feature = "spark-transport")]
+#[async_trait]
+impl spark_core::transport::UdpTransport for ConsumerTransport {
+    async fn dial_udp_addr(
+        &self,
+        _target: Address,
+    ) -> std::io::Result<(
+        spark_core::transport::BoxedPacketSink,
+        spark_core::transport::BoxedPacketSource,
+    )> {
+        Err(unsupported_udp())
+    }
+
+    async fn dial_udp(
+        &self,
+        _target: SocketAddr,
+    ) -> std::io::Result<(
+        spark_core::transport::BoxedPacketSink,
+        spark_core::transport::BoxedPacketSource,
+    )> {
+        Err(unsupported_udp())
+    }
+}
+
 #[cfg(feature = "spark-transport")]
 impl ConsumerTransport {
     async fn dial_target(&self, target: Socks5Target) -> std::io::Result<BoxedStream> {
@@ -419,5 +466,20 @@ mod tests {
         assert_eq!(summary.sessions.len(), 2);
         assert_eq!(summary.attempts(), 2);
         assert_eq!(summary.failed_attempts(), 0);
+    }
+
+    /// The refusal's *kind* is load-bearing, not cosmetic: spark's selecting pool demotes a member
+    /// that returns anything but `Unsupported` from a UDP dial, permanently and for TCP too. A
+    /// refactor that reached for the more idiomatic-looking `Error::other` would silently rank a
+    /// healthy consumer last, with nothing failing to show it.
+    #[cfg(feature = "spark-transport")]
+    #[test]
+    fn the_udp_refusal_is_unsupported_not_a_generic_error() {
+        let e = super::unsupported_udp();
+        assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::Unsupported,
+            "the pool reads any other kind as ill health and demotes the member"
+        );
     }
 }

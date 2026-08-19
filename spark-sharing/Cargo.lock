@@ -2425,6 +2425,7 @@ dependencies = [
  "lantern-unbounded",
  "quinn",
  "rcgen",
+ "ring",
  "rustls",
  "serde_json",
  "spark-core",

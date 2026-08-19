@@ -244,6 +244,10 @@ pub async fn resolve_endpoints(config: &mut Config, resolver: &dyn NameResolver)
                     entries.push((auth, None)); // resolvers are IP literals; no SNI
                 }
             }
+            // No `Endpoint` and no SNI: the consumer never dials a server address (its peer is
+            // negotiated through signaling), and the signaling URL is resolved by the consumer
+            // implementation, not by this bootstrap phase.
+            crate::config::ServerSpec::Unbounded(_) => {}
         }
     }
     for (ep, sni) in entries {

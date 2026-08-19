@@ -3508,3 +3508,113 @@ figure again beat its own single-stream. **Method note worth keeping:** the pump
 (`redirect ready` → `rx packet` → `tcp rewrite decision` → `wrote rewritten packet` → `listener
 accepted`) is what turned "it forwards nothing" into a one-stage diagnosis in a single run; silent
 success at every stage is what made it unattributable for a day.
+
+**2026-08-19 — Unbounded consumer WIRED END-TO-END and shipped in `prod`.**
+The censored side of the WebRTC peer-proxy has existed in `spark-sharing/src/consumer.rs` since July
+(`start_consumer`, the QUIC broker over `VirtualUdpSocket`, and a `ConsumerTransport` that impls
+`spark_core::transport::Transport` behind the `spark-transport` feature) but **nothing ever enabled that
+feature or constructed one**, and `config/lantern.rs` deliberately *dropped* `type: "unbounded"`
+outbounds. This session wired everything up to — but not including — the dependency edge.
+
+Landed, no new dependencies (root `Cargo.lock` byte-identical):
+- **`core/src/transport/external.rs`** (new) — the inversion seam. `trait UnboundedConsumer` +
+  `set_unbounded_consumer(Option<Arc<dyn …>>)` over a process-wide `OnceLock<Mutex<Option<…>>>` slot,
+  the same shape `fd_tunnel` already uses for `POOL`/`ConfigApplier`. Poison-tolerant, no `unwrap`.
+  The reader is `multi-server`-gated (an `unbounded` spec only ever arrives as a pool member);
+  the setter is ungated so a caller compiles either way.
+- **`ServerSpec::Unbounded(UnboundedConsumerConfig)`** — `signaling_url` + `stun_urls` +
+  `concurrent_paths`. Arms added in `build_one` (dispatch to the installed builder), `spec_kind`
+  (`"unbounded"`), `spec_label` (path count — there is no server address to name), and the two
+  bootstrap-resolution scans (`config/mod.rs`, `bootstrap/mod.rs`) as `None`/`{}`.
+- **`config/lantern.rs`** — `map_outbound` now takes the top-level `unbounded` block, because a
+  `type: "unbounded"` outbound has **no dialable parameters of its own**: `server`/`server_port` are
+  empty/zero and its `egress_addr` is the *volunteer's* field (the volunteer dials the egress; the
+  consumer never does). The outbound's presence is the assignment, the block carries the parameters.
+  Mapped only when `features.unbounded` is on AND `discovery_srv` is non-empty; otherwise it falls into
+  the existing skipped-by-kind tally.
+
+**Verified facts worth not re-deriving.** `FreddieSignaler` impls both `Signaler` and
+`ConsumerSignaler` (freddie.rs:332,344) — so the consumer needs it, which is why moving the consumer
+*into* core would have meant moving/duplicating 1,221 tested lines of hand-rolled HTTP/1.1 + rustls.
+That is what settled the design toward inversion rather than relocation. `lantern-unbounded`'s
+`peer_proxy.rs:341-350` is the whole volunteer job (DataChannel → `EgressTunnel::connect` →
+`relay(peer, egress)`); `relay` is a 20-line `select!` over two `DatagramTransport`s. Neither
+`unbounded-rs` nor flint has any port-mapping (UPnP/NAT-PMP/PCP) — one grep over every `.rs` and
+`Cargo.toml` under `getlantern/` returns nothing, so Lantern's *other* unbounded mode (map a port,
+become a direct proxy distributed by lantern-cloud) is greenfield in Rust. Its Go reference is
+`radiance/portforward` (522 lines, goupnp) + `radiance/peer` (1,143 lines, samizdat inbound +
+`/v1/peer/register`).
+
+Coverage proved by sabotage, not by passing: replacing the registry lookup with an error failed
+**exactly** `unbounded_member_builds_through_an_installed_builder` and nothing else; neutering the
+`features.unbounded` gate failed five tests, three of them pre-existing. Gates: 728 core tests +
+whole-workspace tests green, `cargo clippy --workspace --all-targets` clean at default *and* `prod`,
+`cargo fmt` applied.
+
+**The dependency edge, closed (decided in-session: ship it in `prod`).**
+- **`spark-sharing/src/install.rs`** (new, behind `spark-transport`) — `SparkUnboundedConsumer` impls
+  core's `UnboundedConsumer`; `install()` registers it. The impl lives here, not in `service`/`cli`,
+  because this crate already has the `spark-core` edge — so both binaries share one implementation
+  instead of duplicating it. It **caches by config**: core rebuilds the whole pool on every live config
+  push, so restarting per rebuild would abandon working peer paths and re-advertise to signaling on the
+  refresh cadence. It **captures a `tokio::runtime::Handle` at install** rather than reading
+  `Handle::try_current()` at build time, because the config-driven rebuild path is synchronous — without
+  it a refresh would panic inside `tokio::spawn` with "no reactor running". Session ids are 16 random
+  bytes via `ring` (declared direct; already in the tree via rustls, so +1 lock line).
+- **`spark-service`** — `unbounded` feature (optional `spark-sharing` path dep across the workspace
+  boundary) + `spark_sharing::install()` in `serve_daemon`, ahead of the event loop: a member skipped at
+  build time is not revisited, so registration must precede the first bringup. **In `prod`.**
+- **`spark-cli`** — same wiring, `unbounded` available but deliberately **not** in `prod` (it is the
+  hand-run harness; the webrtc graph would inflate the size-gated `spark` binary for no shipped
+  benefit). Recorded in that file's existing "Deliberately NOT here" list.
+- **`ConsumerTransport` now impls `UdpTransport`** — refusing, because unbounded carries no UDP
+  (`consumer_socks5.rs` writes SOCKS5 CMD `0x01`; there is no UDP ASSOCIATE). **The error *kind* is
+  load-bearing:** `ErrorKind::Unsupported`, NOT `Error::other`. `select.rs`'s `dial_udp` reads
+  `Unsupported` as a capability statement and tries the next member, but treats any other kind as ill
+  health and **demotes** — permanently, and the ranking is shared with TCP. That exact conflation was
+  already observed in the field with the shadowsocks members. Locked down by a test asserting the kind.
+
+**The same bug, found in passing and FIXED in two shipped transports.** `fronted_meek.rs` **and**
+`dns_tunnel/mod.rs` both returned `io::Error::other` from both `UdpTransport` methods, so a meek or
+dns-tunnel pool member was demoted — permanently, on the TCP-shared ranking — by every UDP flow that
+reached it. Both are pure capability refusals (their own messages say "UDP is not supported" /
+"is unsupported in this build"), so both now return `ErrorKind::Unsupported` via a documented
+`unsupported_udp()` helper. This was a *live* defect in `prod`, not a latent one: both features are in
+the `prod` set, and dns-tunnel is the shutdown-escalation tier — the member you least want mis-ranked.
+
+**Why the existing test missed it, which is the transferable part.** `fronted_meek` already had a test
+named `udp_is_unsupported`. It asserted `e.to_string().contains("UDP")` — the *message*, never the
+kind — so it passed for as long as the bug existed while appearing to cover exactly this. It is now
+strengthened to assert `ErrorKind::Unsupported` through the real trait methods (both of them —
+`select.rs` has a separate dial path for each), and both fixes were sabotage-verified: flipping the
+kind back to `Other` fails both tests.
+
+**Size: `prod` grew +4.00 MiB and the budget went 12 → 19 MiB.** Measured on macOS arm64, same machine
+and profile, by building `prod` with and without the feature: 9,156,000 B (8.73 MiB) → 13,345,680 B
+(12.73 MiB), +46%. It is the largest single feature cost in the tree, and it is inherent rather than
+sloppy — a WebRTC consumer needs webrtc-rs (14 crates). Roughly half that graph
+(srtp/media/interceptor/rtp/rtcp) is media plumbing a DataChannel never touches, so **a trimmed
+upstream fork is the only real lever** if this ever has to shrink. The root `Cargo.lock` gained 137
+crates; no existing crate changed version (the 34 removed lines are dep-list disambiguations as second
+majors of `syn`/`socket2`/`memoffset`/`webpki-roots`/`r-efi` entered — `syn` now compiles twice, so
+expect slower cold builds).
+
+**Deliberately desktop-only.** The mobile slices go through `platforms/{apple,android}`, which do not
+carry the dep. That is a real gap, not an oversight — censored users are disproportionately on phones,
+so the consumer arguably belongs there most — but webrtc-rs has never been built for an iOS or Android
+target here, and the iOS NE runs on roughly a tenth of desktop's memory budget with a second sing-box
+already in it (the same reason radiance's `peer_share.go` excludes iOS). Doing it needs its own chunk
+with a real cross-build.
+
+**NEXT CHUNK / open.**
+1. **CI confirmation.** The Linux size figure is PROJECTED (12.73 × 1.30 ≈ 16.6 MiB); the ubuntu-latest
+   `size` job is what settles it. If the real ELF lands well under that, tighten 19 MiB back down
+   rather than leaving slack a regression can hide in. Also unverified locally: **webrtc-rs on the
+   Windows MSVC target**, which `ci.yml`'s cross-check job now builds under `--features prod`.
+2. **Live e2e.** Never exercised against a real volunteer + a gated config — the consumer's dial path,
+   the `install.rs` reuse-across-config-push behavior, and the `ConsumerHandle`-retention contract are
+   all still only unit-tested. `spark run --features unbounded` is the harness.
+3. **No STUN servers on the wire.** `stun_urls` is always empty; ICE gathers host/srflx only. Fine for
+   many NATs, not all. Adding them is config-only on both sides now.
+4. The consumer is latency-probed and ranked like any other pool member, which gives the desired
+   "last resort" behavior with no special-casing — but it has never been observed doing so.

@@ -291,8 +291,11 @@ pub fn from_config_raw_json(s: &str) -> Result<Config, ConfigRawError> {
     // Borrowed keys: `raw` outlives the summary below, and the kinds are its own strings — cloning
     // them would allocate on every parse, and the config is re-parsed on the poll loop.
     let mut skipped: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    // Hoisted: every `unbounded` outbound draws its parameters from this one block, and the loop must
+    // not rebuild (and reallocate) it per outbound on a path that re-parses on the poll loop.
+    let unbounded = raw.unbounded_config();
     for ob in &raw.options.outbounds {
-        let Some(spec) = map_outbound(ob) else {
+        let Some(spec) = map_outbound(ob, &unbounded) else {
             // The `tag` deliberately does NOT go in the summary. It is per-server and high
             // cardinality — the useful question is "which kinds is this build missing, and how
             // many", which the count answers. Tags stay available at DEBUG for a specific hunt.
@@ -464,7 +467,11 @@ fn host_from_url(url: &str) -> Option<String> {
 
 /// Map one raw sing-box outbound into a spark [`ServerSpec`], or `None` if spark can't represent it
 /// (unsupported `type`, a missing required field, or a non-SS-2022 Shadowsocks method).
-fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
+///
+/// `unbounded` carries the top-level `unbounded` block, because a `type: "unbounded"` outbound has no
+/// dialable parameters of its own — see [`UnboundedConsumerConfig`] for why the assignment and the
+/// parameters arrive in different places.
+fn map_outbound(ob: &RawOutbound, unbounded: &UnboundedConfig) -> Option<ServerSpec> {
     // Build the endpoint from the separate host + port directly. Formatting `"{server}:{port}"` and
     // re-parsing would mangle an IPv6 literal (`"2001:db8::1"` + 443 → an unbracketed, unparseable
     // string) and silently drop the outbound.
@@ -571,7 +578,24 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
                 source: ob.module.clone(),
             }))
         }
-        _ => None, // unbounded, etc. — no spark transport
+        // The censored side of the WebRTC peer-proxy. Represented only when the client is actually
+        // gated on for it: `features.unbounded` off means the server assigned an outbound for a
+        // capability this account/region is not supposed to use, and an empty `discovery_srv` means
+        // there is nowhere to signal. Either way the honest answer is "can't represent it", which
+        // routes it into the existing skipped-by-kind tally rather than building a member whose every
+        // dial would fail.
+        "unbounded" => {
+            if !unbounded.enabled || unbounded.signaling_url.is_empty() {
+                return None;
+            }
+            Some(ServerSpec::Unbounded(super::UnboundedConsumerConfig {
+                signaling_url: unbounded.signaling_url.clone(),
+                // Not carried by the live config today; ICE still gathers host/srflx candidates.
+                stun_urls: Vec::new(),
+                concurrent_paths: unbounded.concurrent_sessions,
+            }))
+        }
+        _ => None, // a transport type this build has no spark equivalent for
     }
 }
 
@@ -1169,9 +1193,86 @@ mod tests {
     #[test]
     fn skips_unsupported_transport_types() {
         let cfg = parse();
-        // unbounded has no ServerSpec variant; the pool is exactly the 3 supported entries
-        // (samizdat + hysteria2 + ss-2022). unbounded + legacy-ss are dropped.
+        // The pool is exactly the 3 supported entries (samizdat + hysteria2 + ss-2022). legacy-ss is
+        // dropped for its method; the `unbounded` entry is dropped because this fixture has no
+        // `features.unbounded` gate — see the gate tests below for the mapped case.
         assert_eq!(cfg.transport.servers.len(), 3);
+    }
+
+    /// The `unbounded` outbound + the top-level block together produce a consumer member. Named
+    /// separately from the block-parsing tests because those cover the *sharing* side's view of the
+    /// same block (`UnboundedConfig`); this covers the pool member the censored side dials through.
+    #[test]
+    fn maps_unbounded_outbound_when_gated_on() {
+        let raw = r#"{
+          "features": { "unbounded": true },
+          "unbounded": { "discovery_srv": "https://freddie.example/v1/signal",
+                         "egress_addr": "wss://egress.example/ws", "ctable_size": 5 },
+          "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub-1", "server": "", "server_port": 0 }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        assert_eq!(cfg.transport.servers.len(), 1);
+        let ServerSpec::Unbounded(u) = &cfg.transport.servers[0].spec else {
+            panic!("expected an unbounded pool entry");
+        };
+        // The signaling endpoint comes from the block, NOT the outbound — the outbound has no
+        // dialable field at all, which is the whole reason the block is threaded into the mapper.
+        assert_eq!(u.signaling_url, "https://freddie.example/v1/signal");
+        assert_eq!(u.concurrent_paths, 5);
+        // `egress_addr` is the volunteer's field and must never leak into the consumer spec: the
+        // consumer does not dial the egress, the volunteer does.
+        assert!(
+            u.stun_urls.is_empty(),
+            "the live config carries no STUN servers today"
+        );
+    }
+
+    #[test]
+    fn skips_unbounded_outbound_when_the_gate_is_off() {
+        // Endpoints present, gate absent. A server that assigns the outbound anyway must not turn
+        // into a member: the gate is the regional/account control, and honoring the outbound over it
+        // would run the feature for a client that was never enabled for it.
+        let raw = r#"{
+          "unbounded": { "discovery_srv": "https://freddie.example/v1/signal", "ctable_size": 5 },
+          "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub-1", "server": "", "server_port": 0 },
+            { "type": "samizdat", "tag": "sz-1", "server": "198.51.100.10", "server_port": 8443,
+              "public_key": "aa11bb22", "short_id": "0011" }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        assert_eq!(
+            cfg.transport.servers.len(),
+            1,
+            "only the samizdat member should survive"
+        );
+        assert!(matches!(
+            cfg.transport.servers[0].spec,
+            ServerSpec::Samizdat(_)
+        ));
+    }
+
+    #[test]
+    fn skips_unbounded_outbound_without_a_signaling_endpoint() {
+        // Gate on, but no `discovery_srv`. There is nowhere to find a volunteer, so the member could
+        // never carry a flow — skip it rather than build one whose every dial fails.
+        let raw = r#"{
+          "features": { "unbounded": true },
+          "unbounded": { "egress_addr": "wss://egress.example/ws", "ctable_size": 5 },
+          "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub-1", "server": "", "server_port": 0 },
+            { "type": "samizdat", "tag": "sz-1", "server": "198.51.100.10", "server_port": 8443,
+              "public_key": "aa11bb22", "short_id": "0011" }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        assert_eq!(cfg.transport.servers.len(), 1);
+        assert!(matches!(
+            cfg.transport.servers[0].spec,
+            ServerSpec::Samizdat(_)
+        ));
     }
 
     #[test]

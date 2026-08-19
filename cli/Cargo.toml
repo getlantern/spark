@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 spark-core = { path = "../core" }
+# The Unbounded consumer implementation (behind the `unbounded` feature); see the feature comment.
+spark-sharing = { path = "../spark-sharing", features = ["spark-transport"], optional = true }
 spark-ipc = { path = "../ipc", features = ["stream"] }
 tokio.workspace = true
 clap.workspace = true
@@ -48,6 +50,10 @@ config-fetch = ["spark-core/config-fetch"]
 # Fake-IP DNS + per-flow Direct/Proxy/Reject routing and ad-block rule-sets. Inert unless the fetched
 # config carries rules.
 smart-routing = ["spark-core/smart-routing"]
+# Unbounded consumer (the censored side of the WebRTC peer-proxy), same wiring as spark-service's.
+# Here it is the practical harness for exercising it: `spark run --features unbounded` owns a tun and
+# a transport in one process. Needs core's `multi-server` — the only shape the spec ever arrives in.
+unbounded = ["dep:spark-sharing", "spark-core/multi-server"]
 
 # Everything a production desktop build ships — the single source of truth for "what a real binary
 # can do", so the release workflow cannot drift from the transports the Apple and Android slices
@@ -59,6 +65,9 @@ smart-routing = ["spark-core/smart-routing"]
 #     workflow adds it only when SPARK_MODULE_PUBKEY_HEX is configured.
 #   - `module-signer`: offline tooling that signs modules with a private key. It has no place in a
 #     shipped binary.
+#   - `unbounded`: the CLI is a dev/test binary, so the webrtc graph would inflate the *measured*
+#     `spark` release (size-budget.sh gates this binary) for no shipped benefit. spark-service is the
+#     product path and does carry it. Enable by hand to exercise the consumer.
 prod = [
     # The shared set (spark-core/prod), plus the kernel-TCP stack: desktop owns the tun fd, so
     # `stack = system` is a real option here. Everything else lives in core/Cargo.toml so this list
