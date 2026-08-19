@@ -93,6 +93,11 @@ async fn relay_udp<S>(mut buf: BytesMut, wrapped: S) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // `tokio::io::split`, not `into_split` (CLAUDE.md prefers the owned halves). `into_split` is
+    // inherent to `TcpStream`, and this function is generic over the stream precisely so both exits
+    // reach it — the splitting egress hands in a `PrefixedStream`, not a `TcpStream`. The reason the
+    // rule exists does not apply either: the halves stay on this task as two concurrent futures, so
+    // the internal lock is never contended, and nothing here needs `Send + 'static`.
     let (mut read, mut write) = tokio::io::split(wrapped);
 
     // The real target follows the sentinel and may not have arrived yet: `accept` returns whatever
