@@ -17,3 +17,9 @@ config_raw.json
 
 # Production module-signing private keys — never commit (lives in Vault: secret/lantern_cloud/spark)
 *.pkcs8
+
+# Android demo harness: a scratch app for on-device checks, not part of the build.
+# Its Gradle outputs (an APK, the jniLibs .so pair, build caches) and `local.properties`
+# (a machine-local `sdk.dir`) were committed once by a too-broad `git add`; ~18 MB of
+# binaries and one developer's filesystem layout. Ignored so it cannot happen again.
+platforms/android/demo/
