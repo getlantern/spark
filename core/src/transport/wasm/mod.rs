@@ -208,6 +208,10 @@ const EXPORT_COMPUTE_GAMBIT: &str = "compute_gambit";
 /// handshake (ADR 0013 §7 step 3). The output region is framed `[status: u8][outbound_wire …]`: status
 /// 0 = continue, 1 = done. Called with empty input at connect (emit-at-connect), then per inbound chunk.
 const EXPORT_HANDSHAKE_STEP: &str = "handshake_step";
+/// How many leading `init` config bytes to name in an error. Covers a role byte, a 4-byte network
+/// magic and a 2-byte length — the fields a module validates — and stops before any key material.
+const INIT_CONFIG_HEADER_LOG_LEN: usize = 7;
+
 /// Chunk size for reading inbound handshake bytes; the module buffers partial reads internally.
 const HANDSHAKE_READ_CHUNK: usize = 4096;
 
@@ -290,6 +294,17 @@ pub enum WasmError {
     /// A guest-memory read or write was out of bounds.
     #[error("guest memory fault: {0}")]
     Memory(String),
+    /// `init` rejected its configuration. Carries what the guest was actually handed, because the
+    /// abort itself cannot say which of the module's checks failed.
+    #[error("guest `init` rejected its config (len {len}, header {head}): {cause}")]
+    InitRejected {
+        /// Length of the config handed to `init`. `0` means none was delivered at all.
+        len: usize,
+        /// The first bytes, hex — the header a module validates. Never the key material after it.
+        head: String,
+        /// The underlying trap or host fault.
+        cause: Box<WasmError>,
+    },
     /// A host function recorded a fault during the guest call (CSPRNG failure, bad length, …).
     #[error("host function fault: {0}")]
     HostFault(String),
@@ -604,7 +619,22 @@ impl Transform {
                     .map_err(|e| WasmError::Memory(e.to_string()))?;
                 if let Err(source) = init.call(&mut store, (ptr, config.len() as i32)) {
                     let fault = store.data_mut().fault.take();
-                    return Err(call_error(fault, EXPORT_INIT, source));
+                    // A module that validates its config aborts on a bad one, and the abort alone
+                    // cannot say which check rejected it. Report the config's LENGTH and HEADER —
+                    // enough to tell "no config was delivered" (len 0) from "the length prefix
+                    // disagrees with the body", which are the two shapes that actually occur. The
+                    // header is a role byte, a network magic and a length; the key material that
+                    // follows is never logged.
+                    let head: Vec<String> = config
+                        .iter()
+                        .take(INIT_CONFIG_HEADER_LOG_LEN)
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    return Err(WasmError::InitRejected {
+                        len: config.len(),
+                        head: head.join(""),
+                        cause: Box::new(call_error(fault, EXPORT_INIT, source)),
+                    });
                 }
                 if let Some(msg) = store.data_mut().fault.take() {
                     return Err(WasmError::HostFault(msg));
@@ -2705,6 +2735,47 @@ mod tests {
         for _ in 0..5000 {
             assert_eq!(t.transform_out(&input).expect("transform_out").len(), 64);
         }
+    }
+
+    /// The commonest way a config-validating module aborts is being handed no config at all — the
+    /// host calls `init` whenever the module exports it, including with an empty body. The abort
+    /// alone cannot say that, so the error has to carry the length; without it, "nothing was
+    /// delivered" and "the bytes were wrong" are the same log line.
+    #[test]
+    fn init_rejecting_its_config_reports_what_it_was_handed() {
+        // A module that validates a 7-byte header and aborts otherwise — like the bip324 engine.
+        const WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "init") (param $ptr i32) (param $len i32)
+    (if (i32.lt_u (local.get $len) (i32.const 7)) (then (unreachable))))
+  (func (export "transform_out") (param i32) (param i32) (result i64) (i64.const 0))
+  (func (export "transform_in") (param i32) (param i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+
+        // Too short: the header is reported so the cause is readable without a rebuild.
+        let err = match module.instantiate_with_config(&[0x00, 0xf9, 0xbe]) {
+            Err(e) => e,
+            Ok(_) => panic!("expected the guest to reject a short config"),
+        };
+        match &err {
+            WasmError::InitRejected { len, head, .. } => {
+                assert_eq!(*len, 3);
+                assert_eq!(head, "00f9be");
+            }
+            other => panic!("expected InitRejected, got {other}"),
+        }
+
+        // A well-formed header is accepted, so the error is specific to a rejected config rather
+        // than to calling `init` at all.
+        assert!(
+            module
+                .instantiate_with_config(&[0x00, 0xf9, 0xbe, 0xb4, 0xd9, 0x00, 0x00])
+                .is_ok(),
+            "a valid header must still instantiate"
+        );
     }
 
     /// A trapping guest is the symptom; the host fault is the cause. Every host import is
