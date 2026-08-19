@@ -5000,6 +5000,7 @@ dependencies = [
  "lantern-unbounded",
  "quinn",
  "rcgen",
+ "ring",
  "rustls",
  "serde_json",
  "thiserror 2.0.18",
