@@ -3435,6 +3435,7 @@ name = "spark-apple"
 version = "0.1.5"
 dependencies = [
  "spark-core",
+ "spark-sharing",
  "tracing",
 ]
 

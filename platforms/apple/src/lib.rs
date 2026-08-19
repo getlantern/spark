@@ -158,6 +158,14 @@ mod ffi {
         // desktop service is a documented follow-up): direct / plain relay / full config / daemon
         // self-fetch, decided in core. The NE always owns a *userspace* utun (the kernel `system`
         // stack is Android-only), so the tun base is the userspace default.
+        // Register the Unbounded consumer before the pool is built; a member skipped at build time is
+        // not revisited. Safe from here even though this is a synchronous C-ABI entry point with no
+        // runtime yet — `install` captures a handle only if one is in scope, and the consumer resolves
+        // the runtime when the pool is actually built, which is inside `run_fd_dispatch`'s `block_on`.
+        // That is also the runtime we want: the consumer's tasks then die with the tunnel.
+        #[cfg(feature = "unbounded")]
+        spark_sharing::install();
+
         spark_core::fd_tunnel::run_fd_dispatch(
             fd,
             mtu as u16,

@@ -44,22 +44,41 @@ pub struct SparkUnboundedConsumer {
     /// core's synchronous pool-build path; the guard is never held across an `.await` (nothing in
     /// `build` awaits — `start_consumer` spawns and returns).
     running: Mutex<Option<Running>>,
-    /// The runtime the consumer's tasks are spawned onto, captured at [`install`].
+    /// A runtime handle captured at [`install`], if there was one in scope. Used only as the
+    /// fallback when `build` cannot find an ambient runtime of its own.
     ///
-    /// Captured rather than read from `Handle::try_current()` because core rebuilds the pool from a
-    /// live config push, and that path is synchronous — there is no ambient runtime to find. Without
-    /// this, a config refresh would fail to restart the consumer with a confusing "no reactor
-    /// running" panic from deep inside `tokio::spawn`.
-    runtime: tokio::runtime::Handle,
+    /// Both halves are needed because the two hosts install from opposite contexts. `spark-service`
+    /// installs from inside its runtime, so a handle is available. The Apple/Android FFI installs
+    /// from a **synchronous** C-ABI/JNI entry point — `fd_tunnel::run_fd_dispatch` builds its own
+    /// runtime and `block_on`s it *after* that — so there is nothing to capture there, and
+    /// `Handle::current()` would panic. Resolving at `build` instead picks up whichever runtime the
+    /// pool is actually being built on, which is also the right one: the consumer's tasks then die
+    /// with the tunnel rather than outliving it on a runtime nobody owns.
+    installed_runtime: Option<tokio::runtime::Handle>,
 }
 
 impl SparkUnboundedConsumer {
-    /// Build a consumer bound to `runtime`. Prefer [`install`], which also registers it.
-    pub fn new(runtime: tokio::runtime::Handle) -> Self {
+    /// Build a consumer, optionally pinned to `runtime`. Prefer [`install`], which also registers it.
+    pub fn new(runtime: Option<tokio::runtime::Handle>) -> Self {
         Self {
             running: Mutex::new(None),
-            runtime,
+            installed_runtime: runtime,
         }
+    }
+
+    /// The runtime to spawn the consumer's tasks onto: whichever one this build is happening on,
+    /// else the one captured at install. An error rather than a panic, because a missing runtime
+    /// makes exactly one pool member unbuildable and the pool skips it like any other.
+    fn runtime(&self) -> std::io::Result<tokio::runtime::Handle> {
+        tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.installed_runtime.clone())
+            .ok_or_else(|| {
+                std::io::Error::other(
+                    "unbounded: no tokio runtime to spawn the consumer on (install from inside one, \
+                     or build on one)",
+                )
+            })
     }
 
     /// A fresh, unguessable consumer session id as lowercase hex.
@@ -109,8 +128,9 @@ impl UnboundedConsumer for SparkUnboundedConsumer {
 
         // `start_consumer` spawns its broker and session tasks, so it needs a runtime in scope. The
         // enter guard is dropped immediately after; the spawned tasks keep running on `self.runtime`.
+        let runtime = self.runtime()?;
         let handle = {
-            let _enter = self.runtime.enter();
+            let _enter = runtime.enter();
             start_consumer(runtime_config, Arc::new(signaler), None).map_err(|e| {
                 std::io::Error::other(format!("unbounded: starting the consumer failed: {e}"))
             })?
@@ -134,13 +154,12 @@ impl UnboundedConsumer for SparkUnboundedConsumer {
 /// Register spark's Unbounded consumer with `spark-core`, so a config-delivered `unbounded` pool
 /// member can be built.
 ///
-/// **Call from inside the Tokio runtime that should own the consumer's tasks** — the handle is
-/// captured here, and a later config-driven restart runs on a synchronous path with no ambient
-/// runtime of its own. Call before the first transport build; a member built earlier has already
-/// been skipped.
+/// Safe to call from inside a runtime or outside one: a handle in scope is captured as a fallback,
+/// and otherwise the runtime is resolved when the pool is built. Call before the first transport
+/// build — a member built earlier has already been skipped and is not revisited.
 pub fn install() {
     set_unbounded_consumer(Some(Arc::new(SparkUnboundedConsumer::new(
-        tokio::runtime::Handle::current(),
+        tokio::runtime::Handle::try_current().ok(),
     ))));
 }
 
@@ -177,7 +196,7 @@ mod tests {
     /// live Freddie.
     #[tokio::test]
     async fn an_unchanged_config_reuses_the_running_transport() {
-        let consumer = SparkUnboundedConsumer::new(tokio::runtime::Handle::current());
+        let consumer = SparkUnboundedConsumer::new(Some(tokio::runtime::Handle::current()));
         let cfg = config("https://freddie.example/s", 5);
 
         // Seed the cache with a stand-in transport, then assert `build` hands back that same one
@@ -207,11 +226,29 @@ mod tests {
         );
     }
 
+    /// `install()` is called from a **synchronous** C-ABI entry point on Apple and Android
+    /// (`fd_tunnel::run_fd_dispatch` builds its runtime and `block_on`s it only afterwards), so it
+    /// must not require an ambient runtime. `Handle::current()` here would panic and take the tunnel
+    /// start with it.
+    #[test]
+    fn install_outside_a_runtime_does_not_panic() {
+        install();
+        // And the resulting consumer reports a missing runtime as an error, not a panic, so the pool
+        // skips the member instead of unwinding through FFI.
+        let c = SparkUnboundedConsumer::new(None);
+        // The Ok variant holds trait objects that aren't Debug, so match rather than expect_err.
+        match c.build(&config("https://freddie.example/s", 5)) {
+            Ok(_) => panic!("with no runtime anywhere, build must fail"),
+            Err(e) => assert!(e.to_string().contains("no tokio runtime"), "{e}"),
+        }
+        spark_core::transport::external::set_unbounded_consumer(None);
+    }
+
     /// A changed config must NOT reuse — otherwise a server moving the signaling endpoint would
     /// leave the client talking to the old one forever.
     #[tokio::test]
     async fn a_changed_config_does_not_reuse() {
-        let consumer = SparkUnboundedConsumer::new(tokio::runtime::Handle::current());
+        let consumer = SparkUnboundedConsumer::new(Some(tokio::runtime::Handle::current()));
         let direct = Arc::new(spark_core::transport::DirectTransport::new(None));
         let handle = {
             let quic = ephemeral_quic_server_config().expect("ephemeral QUIC config");
