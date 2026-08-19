@@ -198,6 +198,21 @@ fn address_to_target(target: Address) -> socks5::Target {
     }
 }
 
+/// The refusal returned by both [`UdpTransport`] methods.
+///
+/// `ErrorKind::Unsupported` is load-bearing, not cosmetic. `select.rs`'s UDP dial reads `Unsupported`
+/// as a statement about what a member *can carry* and moves to the next member; any other kind is
+/// read as ill health and **demotes** this one. A capability never comes back, so that demotion is
+/// permanent — and the ranking it feeds is shared with TCP, so a generic error here ranks a member
+/// last for the TCP it serves perfectly well. That exact conflation was already observed in the field
+/// with the shadowsocks members (see the comment on `select.rs`'s `dial_udp`).
+fn unsupported_udp() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "fronted-meek: UDP is not supported (meek is a TCP polling tunnel)",
+    )
+}
+
 #[async_trait]
 impl UdpTransport for FrontedMeekTransport {
     /// The same refusal as [`dial_udp`](Self::dial_udp): this transport has no UDP at all, so a
@@ -207,18 +222,14 @@ impl UdpTransport for FrontedMeekTransport {
         &self,
         _target: Address,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        Err(io::Error::other(
-            "fronted-meek: UDP is not supported (meek is a TCP polling tunnel)",
-        ))
+        Err(unsupported_udp())
     }
 
     async fn dial_udp(
         &self,
         _target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        Err(io::Error::other(
-            "fronted-meek: UDP is not supported (meek is a TCP polling tunnel)",
-        ))
+        Err(unsupported_udp())
     }
 }
 
@@ -339,9 +350,24 @@ mod tests {
         let t = FrontedMeekTransport::new(&cfg(None)).unwrap();
         // The Ok variant (BoxedPacketSink, BoxedPacketSource) isn't Debug, so match
         // rather than expect_err.
+        //
+        // The *kind* is asserted, not just the message. This test previously checked only that the
+        // text mentioned UDP, which is why it passed for as long as both methods returned
+        // `Error::other` — see `unsupported_udp`'s doc comment for what that costs. Both methods are
+        // covered because `select.rs` has a separate dial path for each.
         match t.dial_udp("1.2.3.4:53".parse().unwrap()).await {
             Ok(_) => panic!("UDP must be unsupported"),
-            Err(e) => assert!(e.to_string().contains("UDP")),
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{e}");
+                assert!(e.to_string().contains("UDP"));
+            }
+        }
+        match t
+            .dial_udp_addr(Address::domain("example.com", 53).unwrap())
+            .await
+        {
+            Ok(_) => panic!("UDP must be unsupported for a domain target too"),
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{e}"),
         }
     }
 }
