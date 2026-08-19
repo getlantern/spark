@@ -3599,12 +3599,36 @@ crates; no existing crate changed version (the 34 removed lines are dep-list dis
 majors of `syn`/`socket2`/`memoffset`/`webpki-roots`/`r-efi` entered — `syn` now compiles twice, so
 expect slower cold builds).
 
-**Deliberately desktop-only.** The mobile slices go through `platforms/{apple,android}`, which do not
-carry the dep. That is a real gap, not an oversight — censored users are disproportionately on phones,
-so the consumer arguably belongs there most — but webrtc-rs has never been built for an iOS or Android
-target here, and the iOS NE runs on roughly a tenth of desktop's memory budget with a second sing-box
-already in it (the same reason radiance's `peer_share.go` excludes iOS). Doing it needs its own chunk
-with a real cross-build.
+**Correction worth remembering: "in `prod`" is per-binary, and macOS is not `spark-service`.** The
+first pass put `unbounded` in `spark-service`'s `prod` set and called that desktop. It is not —
+`spark-service` is the **Linux/Windows** daemon. On macOS the tunnel runs in the **system extension**,
+built from `platforms/apple`, which depends only on `spark-core`. So the first two commits would have
+produced a DMG with no consumer at all, on the one desktop platform this project builds and tests on
+daily. Caught only because the next request was "build a dmg". **Whenever a transport has to be in the
+data path, the checklist is three binaries, not one: `service` (Linux/Windows), `platforms/apple`
+(macOS + the iOS NE), `platforms/android` (JNI) — plus `cli` if it should be exercisable by hand.**
+
+Fixing it surfaced a second latent defect: `install()` captured `Handle::current()`, which is fine from
+`serve_daemon` but **panics from the Apple C ABI**, because `fd_tunnel::run_fd_dispatch` builds its own
+runtime and `block_on`s it *after* the FFI entry point. That panic would have unwound through FFI and
+taken tunnel start down with it. The consumer now resolves a runtime at pool-build time, preferring
+whichever one the build is happening on — also more correct than the original, since its tasks then die
+with the tunnel instead of outliving it on a runtime nobody owns. A missing runtime is an error, not a
+panic. Covered by a test that calls `install()` outside any runtime, which is exactly how FFI calls it.
+
+**macOS carries it; iOS deliberately does not.** `build-xcframework.sh` builds ONE feature list for all
+three Apple slices on purpose (spelling it out per-slice is how the platforms drifted apart before), so
+the `*-apple-darwin`-only append is a deliberate divergence following the precedent already there for
+`system-stack`. Two independent reasons: webrtc-rs has never been cross-built for `aarch64-apple-ios`
+here and no CI job would catch a break, and the iOS NE runs on ~a tenth of desktop's memory budget with
+the netstack already resident (the same constraint radiance's `peer_share.go` cites for excluding iOS
+from peer serving). **Verified this session:** `spark-apple` checks clean for `aarch64-apple-darwin`
+with `prod,unbounded` — so webrtc-rs *does* build for that target — and for `aarch64-apple-ios` with
+`prod`, unchanged.
+
+**Android remains uncovered.** `platforms/android` runs the same `fd_tunnel` path and does not carry the
+dep. A real gap — censored users skew mobile, so the consumer arguably belongs there most — needing its
+own chunk with a real cross-build.
 
 **NEXT CHUNK / open.**
 1. **CI confirmation.** The Linux size figure is PROJECTED (12.73 × 1.30 ≈ 16.6 MiB); the ubuntu-latest
