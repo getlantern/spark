@@ -12,7 +12,7 @@ dependencies = [
 
 [[package]]
 name = "bip324-core"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "cfg-if"
