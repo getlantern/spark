@@ -74,6 +74,112 @@ fn current_pool() -> Option<Arc<dyn transport::PoolControl>> {
     pool().lock().unwrap().clone()
 }
 
+/// How a newly-obtained config is applied to the *running* tunnel.
+///
+/// Registered at bringup ([`run_tunnel_data_path`]) so it covers every entry point, and shared by
+/// the two producers of a new config: the daemon's own background refresh, and a config the app
+/// fetched and pushed in ([`apply_config_str`]). Sharing one closure is the point — a pushed config
+/// must land exactly as a refreshed one does, and a second implementation would drift from this one
+/// the first time bringup's completion steps changed.
+type ConfigApplier = Arc<dyn Fn(Config) + Send + Sync>;
+
+fn config_applier() -> &'static Mutex<Option<ConfigApplier>> {
+    static A: OnceLock<Mutex<Option<ConfigApplier>>> = OnceLock::new();
+    A.get_or_init(|| Mutex::new(None))
+}
+
+fn set_config_applier(f: Option<ConfigApplier>) {
+    // Poison-tolerant for the same reason as `set_active_router`: reached from FFI teardown, where
+    // panicking would take the NE down. The inner Option is trivially consistent.
+    *config_applier().lock().unwrap_or_else(|e| e.into_inner()) = f;
+}
+
+fn current_config_applier() -> Option<ConfigApplier> {
+    config_applier()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Build the applier for a tunnel brought up with `config`, caching what completion needs.
+///
+/// A config that arrives later — fetched or pushed — is not self-sufficient: it carries no
+/// `protect_interface` (that is discovered at bringup, and a rebuilt pool must pin its sockets
+/// identically or a UDP/QUIC tunnel loses its bypass), and on a module-capable build its bundle
+/// dirs have to be defaulted the same way bringup defaults them, or a transport delivered by a
+/// *later* config cannot be installed.
+fn make_config_applier(config: &Config, data_dir: Option<&std::path::Path>) -> ConfigApplier {
+    let iface = config.transport.protect_interface.clone();
+    #[cfg(feature = "wasm-transport")]
+    let bundle_dir = data_dir.map(|d| d.to_path_buf());
+    #[cfg(not(feature = "wasm-transport"))]
+    let _ = data_dir;
+    Arc::new(move |mut cfg: Config| {
+        cfg.transport.protect_interface = iface.clone();
+        #[cfg(feature = "wasm-transport")]
+        if let Some(dir) = &bundle_dir {
+            crate::transport::default_bundle_dirs(&mut cfg, dir);
+        }
+        // No live pool (direct/tunnel/single-transport) → nothing to reload; a refresh has still
+        // warmed the on-disk cache for the next connect, as before.
+        if let Some(pool) = current_pool() {
+            match pool.reload_from_config(&cfg) {
+                Ok(()) => info!(
+                    servers = cfg.transport.servers.len(),
+                    "config: live-reloaded the server pool"
+                ),
+                Err(e) => warn!(
+                    error = %e,
+                    "config: pool reload failed; keeping the current pool"
+                ),
+            }
+        }
+    })
+}
+
+/// Drop every per-session global, so nothing from a finished tunnel leaks into the next one.
+///
+/// Both entry points tear down their own way (`run_with_handle` and `run_fd_lantern_api`), and the
+/// resets were duplicated across them — so the lantern-api path, which is the one the Apple NE and
+/// the Android `:vpn` process actually use, silently kept both. That left `apply_config_str`
+/// reporting success with no tunnel running, and `APP_DRIVES_CONFIG` latched on for the life of the
+/// process: the NE outlives a session, so the *next* connect's refresh loop would stop immediately
+/// and an on-demand tunnel started with no app driving it would never refresh at all.
+fn clear_session_state() {
+    set_pool(None);
+    set_config_applier(None);
+    #[cfg(feature = "smart-routing")]
+    set_active_router(None);
+}
+
+/// Apply a config the **app** fetched to the running tunnel, with no reconnect.
+///
+/// `raw` is a config-new response body — the same bytes the daemon's own fetch caches. The app hands
+/// over what it already has at **connect**, so a session starts on a known-good pool (and any module
+/// bundle it carries) without waiting for the daemon's first fetch. The daemon still owns refresh
+/// once it is up: its sockets are pinned to the physical interface, and the app's are not, so only
+/// the daemon's fetch is guaranteed to bypass the tunnel it would otherwise be routed through.
+///
+/// Returns `false` if no tunnel is up to receive it or `raw` does not adapt.
+///
+/// Called across the platform boundary (Apple C-ABI / desktop control IPC), so it must not panic.
+pub fn apply_config_str(raw: &str) -> bool {
+    let Some(apply) = current_config_applier() else {
+        warn!("config: push ignored — no tunnel running");
+        return false;
+    };
+    match Config::from_config_str(raw) {
+        Ok(cfg) => {
+            apply(cfg);
+            true
+        }
+        Err(e) => {
+            warn!(error = %e, "config: push rejected — does not adapt");
+            false
+        }
+    }
+}
+
 /// The running tunnel's router, registered at connect so the live split-tunnel update
 /// ([`set_split_tunnel`]) can reach it, and cleared on teardown. One tunnel per process (like the
 /// pool handle), so a single global suffices.
@@ -538,10 +644,7 @@ fn run_with_handle(
         &waiter,
     ));
     deregister(&stop);
-    // Drop the pool control handle for this (now torn-down) tunnel so the FFI reports no active pool.
-    set_pool(None);
-    #[cfg(feature = "smart-routing")]
-    set_active_router(None);
+    clear_session_state();
     set_ready(Readiness::Down);
     result
 }
@@ -569,6 +672,10 @@ async fn run_tunnel_data_path(
     );
     let (tcp_transport, udp_transport, control) = transport::from_config_with_control(&config)?;
     set_pool(control);
+    // Registered here rather than in the lantern-api entry so EVERY bringup can take a live config
+    // update — including a tunnel started from a config the app supplied, which is the path that has
+    // no self-refresh of its own to fall back on.
+    set_config_applier(Some(make_config_applier(&config, data_dir)));
     // A direct transport for the router's `Direct` action, pinned to the physical interface
     // (`transport.protect_interface`) so those flows bypass our own tunnel. On Android the app's own
     // sockets already bypass via `addDisallowedApplication` (interface usually unset); the lantern-api
@@ -960,13 +1067,6 @@ pub fn run_fd_lantern_api(
         // warm the cache for the next connect. Ends when stop fires.
         let loop_dir = data_dir.clone();
         let loop_stop = Arc::clone(&waiter);
-        // A fetched config carries no `protect_interface`; reuse the one discovered at bringup so a
-        // rebuilt pool pins its sockets identically (UDP/QUIC tunnel bypass, above).
-        let reload_iface = config.transport.protect_interface.clone();
-        // The reload closure outlives `data_dir`'s other uses, so it needs its own handle to complete
-        // a refreshed config the same way bringup completes the boot one.
-        #[cfg(feature = "wasm-transport")]
-        let reload_bundle_dir = data_dir.clone();
         // Same identity as the connect fetch — a refresh that re-derived it would reintroduce exactly
         // the second account this is removing.
         let loop_identity = identity.clone();
@@ -975,26 +1075,12 @@ pub fn run_fd_lantern_api(
                 Some(id) => FetchEnv::from_env().with_identity(id),
                 None => FetchEnv::from_env(),
             };
-            let on_config = move |mut cfg: Config| {
-                cfg.transport.protect_interface = reload_iface.clone();
-                // Same completion as at bringup: a refreshed config is just as adapter-produced, so a
-                // module delivered by a *later* config must be installable too — that is what makes
-                // this the path a new transport arrives on without a reconnect.
-                #[cfg(feature = "wasm-transport")]
-                crate::transport::default_bundle_dirs(&mut cfg, &reload_bundle_dir);
-                // No live pool (direct/tunnel/single-transport) → the refresh still warmed the
-                // on-disk cache for the next connect, as before.
-                if let Some(pool) = current_pool() {
-                    match pool.reload_from_config(&cfg) {
-                        Ok(()) => info!(
-                            servers = cfg.transport.servers.len(),
-                            "config-fetch: live-reloaded the server pool"
-                        ),
-                        Err(e) => warn!(
-                            error = %e,
-                            "config-fetch: pool reload failed; keeping the current pool"
-                        ),
-                    }
+            // Defer to the applier registered at bringup — the same one a pushed config goes
+            // through, so a refreshed and a pushed config are applied by identical code (completion
+            // steps included) rather than by two implementations that would drift.
+            let on_config = move |cfg: Config| {
+                if let Some(apply) = current_config_applier() {
+                    apply(cfg);
                 }
             };
             tokio::select! {
@@ -1029,9 +1115,7 @@ pub fn run_fd_lantern_api(
         run_tunnel_data_path(fd, mtu, config, Some(data_dir.as_path()), split_tunnel, routing_mode, &waiter).await
     });
     deregister(&stop);
-    set_pool(None);
-    #[cfg(feature = "smart-routing")]
-    set_active_router(None);
+    clear_session_state();
     set_ready(Readiness::Down);
     // Controlled exit of the tunnel loop (Ok or Err — either way the teardown path
     // ran and any error was already logged/captured above): disarm the unclean-exit
@@ -1113,6 +1197,80 @@ pub fn spawn_tunnel(fd: i32, mtu: u16, config: Config) -> TunnelHandle {
 
 #[cfg(test)]
 mod tests {
+
+    /// A pushed config is the app handing over what it already fetched, so the tunnel does not have
+    /// to fetch a second, independent assignment for the same account. Two things must hold: it is
+    /// refused when there is no tunnel to receive it, and when accepted it goes through the SAME
+    /// applier the background refresh uses — that shared path is what keeps a pushed config from
+    /// being applied differently than a refreshed one.
+    /// The applier is a process global, so the two tests that drive it must not overlap. `cargo
+    /// test` runs them as threads in one binary (nextest's process-per-test hides this, which is
+    /// exactly why it is worth pinning here rather than relying on the runner).
+    static APPLIER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Teardown must drop every per-session global. The NE process outlives a session, so a stale
+    /// applier left here makes `apply_config_str` report success with no tunnel running, and the app
+    /// then believes the live pool changed. Both entry points route through `clear_session_state` so
+    /// they cannot drift apart again — the lantern-api path, the one the Apple NE and Android `:vpn`
+    /// process actually use, was missing these resets exactly because they were duplicated.
+    #[test]
+    fn teardown_leaves_nothing_for_the_next_session() {
+        let _serialized = APPLIER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        set_config_applier(Some(Arc::new(|_cfg| {})));
+
+        clear_session_state();
+
+        assert!(
+            current_config_applier().is_none(),
+            "a torn-down tunnel must not still accept a pushed config"
+        );
+    }
+
+    // Needs one adaptable outbound type to build a config from, so it is gated on having one.
+    #[cfg(feature = "samizdat")]
+    #[test]
+    fn a_pushed_config_goes_through_the_registered_applier() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _serialized = APPLIER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+
+        // A config-new body is what the app caches and forwards. One outbound is enough — this
+        // test is about the plumbing; the mapping itself is covered by the adapter's own tests.
+        const RAW: &str = r#"{"options":{"outbounds":[
+            {"type":"samizdat","tag":"sz-1","server":"198.51.100.10","server_port":8443,
+             "public_key":"aa11bb22","short_id":"00ff00ff","server_name":"cover.example.com"}]}}"#;
+
+        // No tunnel up: nothing is registered, so there is nothing to apply to.
+        set_config_applier(None);
+        assert!(
+            !apply_config_str(RAW),
+            "a push with no tunnel running must be refused, not silently dropped"
+        );
+
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        SEEN.store(0, Ordering::SeqCst);
+        set_config_applier(Some(Arc::new(|_cfg| {
+            SEEN.fetch_add(1, Ordering::SeqCst);
+        })));
+
+        assert!(apply_config_str(RAW), "a valid push must be accepted");
+        assert_eq!(
+            SEEN.load(Ordering::SeqCst),
+            1,
+            "the push must reach the registered applier exactly once"
+        );
+
+        // Garbage must not reach the applier at all — a tunnel keeps its working pool rather than
+        // being handed a half-parsed one.
+        assert!(!apply_config_str("not a config"));
+        assert_eq!(
+            SEEN.load(Ordering::SeqCst),
+            1,
+            "an unparseable push must never reach the applier"
+        );
+
+        set_config_applier(None);
+    }
     use super::*;
 
     #[test]

@@ -8,6 +8,17 @@ pub trait TunnelControl: Send + Sync {
     fn status(&self) -> crate::Result<Status>;
     fn servers(&self) -> crate::Result<Vec<ServerInfo>>;
     fn select_server(&self, index: i32) -> crate::Result<()>;
+    /// Hand a freshly fetched config to the running tunnel, to apply live.
+    ///
+    /// The app is the only process that fetches — `/config-new` *assigns*, so a second fetcher
+    /// produces a second, independent assignment for the same account and the two disagree about
+    /// which servers exist. Forwarding what the app already has keeps the tunnel on that one
+    /// assignment without a reconnect.
+    ///
+    /// Best-effort by contract: a tunnel that is down has nothing to apply to and the config is
+    /// already cached for its next start, so implementations return `Ok(())` rather than an error
+    /// in that case. A failure here must never fail the fetch that produced the config.
+    fn push_config(&self, raw: &str) -> crate::Result<()>;
     fn get_split_tunnel(&self) -> crate::Result<String>;
     fn set_split_tunnel(&self, json: &str) -> crate::Result<()>;
     fn get_routing_mode(&self) -> crate::Result<String>;

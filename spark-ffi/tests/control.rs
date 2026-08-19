@@ -84,6 +84,9 @@ mod harness {
                     negotiated: PROTOCOL_VERSION,
                 },
                 RequestPayload::Connect | RequestPayload::Disconnect => ResponsePayload::Ack,
+                // This fake service has no tunnel to apply a config to; acking keeps the frame
+                // exercised without pretending a pool changed.
+                RequestPayload::ApplyConfig { .. } => ResponsePayload::Ack,
                 RequestPayload::GetStatus => ResponsePayload::Status(IpcStatus {
                     state: spark_ipc::TunnelState::Connected,
                     direct_fallback: false,

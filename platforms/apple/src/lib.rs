@@ -332,6 +332,29 @@ mod ffi {
         }
     }
 
+    /// Apply a config the **app** fetched to the running tunnel, live — no reconnect.
+    ///
+    /// `raw` is a NUL-terminated config-new response body (the same bytes the app caches as
+    /// `config_raw.json`). This is how the app hands over what it already has instead of the NE
+    /// fetching a second, independent assignment for the same account — two assignments disagree
+    /// about which servers exist, and the UI ends up offering a location the tunnel cannot use.
+    ///
+    /// Returns 0 if applied; -1 if `raw` is null, not valid UTF-8, does not adapt, or there is no
+    /// tunnel running to receive it. A rejected push leaves the current pool untouched.
+    ///
+    /// # Safety
+    /// `raw` must be null or a valid NUL-terminated C string.
+    #[no_mangle]
+    pub unsafe extern "C" fn spark_apply_config(raw: *const c_char) -> c_int {
+        if raw.is_null() {
+            return -1;
+        }
+        match unsafe { CStr::from_ptr(raw) }.to_str() {
+            Ok(s) if spark_core::fd_tunnel::apply_config_str(s) => 0,
+            _ => -1,
+        }
+    }
+
     /// Pin which pool member new flows dial first: `index >= 0` pins that member; `index < 0` selects
     /// auto (latency-ranked). Returns 0 on success, -1 if no server pool is active.
     #[no_mangle]

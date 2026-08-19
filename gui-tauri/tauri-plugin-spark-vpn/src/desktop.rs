@@ -958,6 +958,24 @@ impl TunnelControl for AppleControl {
         }
     }
 
+    fn push_config(&self, raw: &str) -> crate::Result<()> {
+        // Only when the tunnel is up: a down tunnel has nothing to apply to, and it will read this
+        // same config from the shared cache when it next starts.
+        let (_, st) = ne_spike::load_first_status(std::time::Duration::from_secs(2));
+        if ne_spike::ui_state(st) != "connected" {
+            return Ok(());
+        }
+        let msg = serde_json::json!({"cmd": "config", "raw": raw}).to_string();
+        if let Err(e) = ne_spike::send_provider_message(msg) {
+            // Never fails the fetch that produced this config — the cache is already updated, so the
+            // worst case is the running session keeping its current pool until the next connect.
+            ne_spike::ne_debug(&format!(
+                "config live push failed (cached; applies next connect): {e}"
+            ));
+        }
+        Ok(())
+    }
+
     fn get_split_tunnel(&self) -> crate::Result<String> {
         Ok(crate::persist::load_split_tunnel(&self.base))
     }
@@ -1135,6 +1153,23 @@ impl TunnelControl for ServiceControl {
         Err(crate::Error::Platform(
             "server selection is not supported by the desktop service yet".into(),
         ))
+    }
+
+    fn push_config(&self, raw: &str) -> crate::Result<()> {
+        // Best-effort, like the Apple path: the service answers with an error when no tunnel is up
+        // to receive the config, which is the ordinary case while disconnected — it will read the
+        // same config from the app's cache at its next start, so that is not a failure to report.
+        if let Err(e) = self.ack(
+            "apply_config",
+            spark_ipc::message::RequestPayload::ApplyConfig {
+                raw: raw.to_owned(),
+            },
+        ) {
+            eprintln!(
+                "[spark-vpn] config live push not applied (cached; applies next connect): {e}"
+            );
+        }
+        Ok(())
     }
 
     fn get_split_tunnel(&self) -> crate::Result<String> {

@@ -11,9 +11,9 @@ pub type ProtocolVersion = u32;
 
 /// The version this build speaks. v2 (ADR 0004) adds the read-only backend-contract requests
 /// [`RequestPayload::GetCapabilities`]/[`RequestPayload::GetDetails`] and their responses; v3 adds
-/// [`RequestPayload::SetTelemetry`]. All additive (appended enum variants), so older peers still
-/// decode the frames of their own version.
-pub const PROTOCOL_VERSION: ProtocolVersion = 3;
+/// [`RequestPayload::SetTelemetry`]; v4 adds [`RequestPayload::ApplyConfig`]. All additive
+/// (appended enum variants), so older peers still decode the frames of their own version.
+pub const PROTOCOL_VERSION: ProtocolVersion = 4;
 
 /// The oldest version this build can still interoperate with.
 pub const MIN_SUPPORTED_VERSION: ProtocolVersion = 1;
@@ -31,7 +31,7 @@ pub struct Request {
 }
 
 /// The body of a [`Request`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestPayload {
     /// Version handshake — must be the first request on a connection.
     Hello {
@@ -93,6 +93,21 @@ pub enum RequestPayload {
     /// [`TelemetryConfig`]. Write-only: nothing here is ever readable back over the control plane.
     /// → `Ack`.
     SetTelemetry(TelemetryConfig),
+    /// (v4) Apply a config the **app** fetched to the running tunnel, live — no reconnect. → `Ack`.
+    ///
+    /// The connect-time handover: the app gives a starting session a pool it already holds (and any
+    /// transport module delivered with it), so the tunnel serves traffic without waiting for its own
+    /// first fetch. The tunnel still owns refresh once it is up — only its sockets are pinned to the
+    /// physical interface, so only its fetch is guaranteed to bypass the tunnel itself.
+    ///
+    /// `raw` carries transport credentials, so it is redacted from `Debug` (see the impl below).
+    ///
+    /// Appended last, and the enum is only ever extended at the end, so an older peer's encodings
+    /// keep their discriminants (postcard indexes variants by position).
+    ApplyConfig {
+        /// A config-new response body — the same bytes the app caches as `config_raw.json`.
+        raw: String,
+    },
 }
 
 /// A service→client response. `req_id` echoes the request it answers.
@@ -376,6 +391,60 @@ impl TelemetryConfig {
     }
 }
 
+// Manual Debug: a config-new body carries transport credentials — Shadowsocks passwords, Samizdat
+// keys, the bip324 `init_config` — and `Request` derives Debug, so any `{:?}` of a request frame (a
+// trace line, a failing assertion, a panic message) would print the lot. Every other variant is
+// spelled out rather than delegated — the set is small and stable, and an explicit match means a new
+// variant carrying a secret cannot be added without this function failing to compile.
+//
+// The body LENGTH stays visible: it is the field that actually gets diagnosed (a stripped module
+// bundle shows up as ~9 KB against ~56 KB with one), and a byte count reveals nothing.
+impl std::fmt::Debug for RequestPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApplyConfig { raw } => f
+                .debug_struct("ApplyConfig")
+                .field("raw", &format_args!("[redacted {} bytes]", raw.len()))
+                .finish(),
+            Self::Hello { client_version } => f
+                .debug_struct("Hello")
+                .field("client_version", client_version)
+                .finish(),
+            Self::Connect => f.write_str("Connect"),
+            Self::Disconnect => f.write_str("Disconnect"),
+            Self::GetStatus => f.write_str("GetStatus"),
+            Self::Subscribe { events, logs } => f
+                .debug_struct("Subscribe")
+                .field("events", events)
+                .field("logs", logs)
+                .finish(),
+            Self::GetCapabilities => f.write_str("GetCapabilities"),
+            Self::GetDetails => f.write_str("GetDetails"),
+            Self::GetMetrics => f.write_str("GetMetrics"),
+            Self::ListProfiles => f.write_str("ListProfiles"),
+            Self::GetProfile { name } => f.debug_struct("GetProfile").field("name", name).finish(),
+            // `toml` may carry a password on the way in; same treatment as `raw`.
+            Self::SetProfile { name, toml } => f
+                .debug_struct("SetProfile")
+                .field("name", name)
+                .field("toml", &format_args!("[redacted {} bytes]", toml.len()))
+                .finish(),
+            Self::DeleteProfile { name } => {
+                f.debug_struct("DeleteProfile").field("name", name).finish()
+            }
+            Self::SetActiveProfile { name } => f
+                .debug_struct("SetActiveProfile")
+                .field("name", name)
+                .finish(),
+            Self::ValidateProfile { toml } => f
+                .debug_struct("ValidateProfile")
+                .field("toml", &format_args!("[redacted {} bytes]", toml.len()))
+                .finish(),
+            Self::SetTelemetry(cfg) => f.debug_tuple("SetTelemetry").field(cfg).finish(),
+        }
+    }
+}
+
 // Manual Debug: header values are ingestion keys, and `Request` derives Debug — so without this any
 // `{:?}` of a request frame (a trace line, a test failure, a panic message) would print the key.
 // Header NAMES stay visible: which headers are set is diagnostic signal, and none of it is secret.
@@ -490,6 +559,49 @@ mod tests {
     /// The ingestion key must never appear in a formatted request frame. `Request` derives
     /// `Debug`, so without the manual impl on `TelemetryConfig` any `{:?}` — a trace line, a
     /// failing `assert_eq!`, a panic message — would print the key verbatim.
+    /// A config-new body carries transport credentials — Shadowsocks passwords, Samizdat keys, the
+    /// bip324 `init_config`. `Request` derives `Debug`, so without the manual impl any `{:?}` of a
+    /// request frame would print all of them. The byte count is kept deliberately: it is the field
+    /// actually used in diagnosis (a stripped module bundle shows as ~9 KB against ~56 KB with one).
+    #[test]
+    fn debug_never_prints_a_config_body() {
+        let raw = r#"{"options":{"outbounds":[{"password":"s3cr3t-proxy-password"}]}}"#.to_owned();
+        let len = raw.len();
+        let req = Request {
+            req_id: 1,
+            payload: RequestPayload::ApplyConfig { raw },
+        };
+        let rendered = format!("{req:?}");
+        assert!(
+            !rendered.contains("s3cr3t-proxy-password"),
+            "config body leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("[redacted"), "{rendered}");
+        assert!(
+            rendered.contains(&format!("{len} bytes")),
+            "the length must survive: {rendered}"
+        );
+    }
+
+    /// Same reasoning for a profile document, which carries a password on the way in.
+    #[test]
+    fn debug_never_prints_a_profile_document() {
+        let req = Request {
+            req_id: 2,
+            payload: RequestPayload::SetProfile {
+                name: "home".to_owned(),
+                toml: "[transport.anytls]\npassword = \"s3cr3t-profile-pw\"\n".to_owned(),
+            },
+        };
+        let rendered = format!("{req:?}");
+        assert!(
+            !rendered.contains("s3cr3t-profile-pw"),
+            "profile secret leaked into Debug: {rendered}"
+        );
+        // The profile NAME stays: which profile is being written is diagnostic, not secret.
+        assert!(rendered.contains("home"), "{rendered}");
+    }
+
     #[test]
     fn debug_never_prints_a_header_value() {
         let req = Request {

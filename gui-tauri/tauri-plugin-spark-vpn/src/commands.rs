@@ -11,14 +11,101 @@ use crate::models::{ServerInfo, Status};
 #[derive(Default)]
 pub(crate) struct SelectedServer(pub Mutex<Option<usize>>);
 
-type Ctl = Box<dyn TunnelControl>;
+pub(crate) type Ctl = Box<dyn TunnelControl>;
+
+/// The tunnel's state string, or `None` if it cannot be read.
+///
+/// `TunnelControl::status` reports the same vocabulary on every platform (`AppleControl` maps
+/// `NEVPNStatus`, `ServiceControl` maps `TunnelState` over IPC), which is what lets the
+/// fetch-ownership rule be one rule rather than a per-platform one. `None` means no reachable
+/// tunnel — not running, not yet configured, or a status read that timed out.
+pub(crate) fn tunnel_state<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    app.try_state::<Ctl>()
+        .and_then(|ctl| ctl.status().ok())
+        .map(|s| s.state)
+}
+
+/// [`tunnel_state`] off the async runtime.
+///
+/// Every `TunnelControl` method is synchronous and slow: `AppleControl::status` waits on a
+/// `recv_timeout` for the NE to answer, and `ServiceControl` does a blocking IPC round trip. Awaiting
+/// those directly inside a spawned task parks a Tokio worker thread for seconds, so they run on the
+/// blocking pool instead.
+pub(crate) async fn tunnel_state_async<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let handle = app.clone();
+    tokio::task::spawn_blocking(move || tunnel_state(&handle))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Hand `raw` to the running tunnel, off the async runtime (see [`tunnel_state_async`] — the push is
+/// the slowest of these calls, waiting up to 5s for the extension to acknowledge).
+async fn push_config_async<R: Runtime>(app: &AppHandle<R>, raw: String) -> Result<(), String> {
+    let handle = app.clone();
+    tokio::task::spawn_blocking(move || match handle.try_state::<Ctl>() {
+        Some(ctl) => ctl.push_config(&raw).map_err(|e| e.to_string()),
+        None => Err("no tunnel control registered".to_owned()),
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("push task failed: {e}")))
+}
 
 #[tauri::command]
 pub(crate) async fn connect<R: Runtime>(app: AppHandle<R>) -> crate::Result<()> {
     app.state::<Ctl>().connect()?;
     #[cfg(desktop)]
     crate::tray::refresh(&app);
+    hand_config_to_new_session(&app);
     Ok(())
+}
+
+/// Push the app's cached config to a session that is coming up.
+///
+/// A tunnel started with no config of its own fetches one to boot from, which is a second,
+/// independent assignment for the same account — the exact divergence the app-side fetch exists to
+/// avoid. It cannot simply be removed: a tunnel started without the app (on-demand) has nothing else
+/// to boot from. So the app hands over its own config as soon as the session can take it, which both
+/// converges this session onto the app's assignment and retires the daemon's refresh loop
+/// (`app_drives_config`), leaving the app the only fetcher from here on.
+///
+/// Spawned, because `connect()` returns as soon as the bring-up is *requested* — there is no session
+/// to push to yet. Best-effort throughout: the tunnel is already running on a working config, so a
+/// failed push costs a refresh, not a connection.
+fn hand_config_to_new_session<R: Runtime>(app: &AppHandle<R>) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(base) = handle.path().app_config_dir() else {
+            return;
+        };
+        let dir = crate::desktop::app_config_cache_dir(&base);
+        let Some(raw) = crate::config_fetch::cached_config(&dir) else {
+            return; // nothing cached yet — the tunnel's own boot fetch is the fallback
+        };
+        // Wait for a session that can accept it, bounding the WHOLE wait rather than counting
+        // iterations: each status read can itself block for seconds, so a loop of N sleeps is not an
+        // N-sleep wait. A bring-up that has not reached `connected` inside this has bigger problems
+        // than a stale pool, and the tunnel's own fetch is the fallback.
+        let deadline = std::time::Duration::from_secs(20);
+        let handed = tokio::time::timeout(deadline, async {
+            loop {
+                if crate::commands::tunnel_state_async(&handle)
+                    .await
+                    .as_deref()
+                    == Some("connected")
+                {
+                    return push_config_async(&handle, raw.clone()).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        })
+        .await;
+        // A timeout is not worth reporting — the tunnel simply never came up, which it already
+        // logs. Only a push that was attempted and failed says something new.
+        if let Ok(Err(e)) = handed {
+            eprintln!("[spark-vpn] handing config to the new session failed: {e}");
+        }
+    });
 }
 
 #[tauri::command]
@@ -26,7 +113,37 @@ pub(crate) async fn disconnect<R: Runtime>(app: AppHandle<R>) -> crate::Result<(
     app.state::<Ctl>().disconnect()?;
     #[cfg(desktop)]
     crate::tray::refresh(&app);
+    refresh_after_disconnect(&app);
     Ok(())
+}
+
+/// Refresh the config once the tunnel is down and fetching comes back to the app.
+///
+/// This is the first fetch since the tunnel took over that can reach the API *directly* rather than
+/// through the exit, so it is also the one that re-anchors the assignment to the user's own location.
+/// Detached so `disconnect()` returns at once, and best-effort — a failure leaves the cached list
+/// intact, exactly as at startup.
+fn refresh_after_disconnect<R: Runtime>(app: &AppHandle<R>) {
+    use tauri::Emitter;
+
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(base) = handle.path().app_config_dir() else {
+            return;
+        };
+        let dir = crate::desktop::app_config_cache_dir(&base);
+        let _ = std::fs::create_dir_all(&dir);
+        if !crate::config_fetch::app_owns_fetching(&handle).await {
+            return; // still tearing down; the next launch or disconnect refreshes
+        }
+        match crate::config_fetch::fetch_into_cache(&dir).await {
+            Ok(true) => {
+                let _ = handle.emit("spark://servers", ());
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("[spark-vpn] post-disconnect config fetch failed: {e}"),
+        }
+    });
 }
 
 #[tauri::command]

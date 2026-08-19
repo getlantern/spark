@@ -292,6 +292,21 @@ pub enum WasmError {
     /// A guest-memory read or write was out of bounds.
     #[error("guest memory fault: {0}")]
     Memory(String),
+    /// `init` rejected its configuration. Carries the config's LENGTH, because the abort itself
+    /// cannot say which of the module's checks failed — and length alone separates the case that
+    /// actually recurs, "nothing was delivered", from "the bytes were wrong".
+    ///
+    /// Deliberately not the bytes. A config is opaque to the core (ADR 0013): it is whatever the
+    /// module defined, so any prefix of it may be key material, and this error propagates out
+    /// through service and FFI boundaries. Naming a byte layout here would also be naming one
+    /// engine's, which the core does not know.
+    #[error("guest `init` rejected its config ({len} bytes): {cause}")]
+    InitRejected {
+        /// Length of the config handed to `init`. `0` means none was delivered at all.
+        len: usize,
+        /// The underlying trap or host fault.
+        cause: Box<WasmError>,
+    },
     /// A host function recorded a fault during the guest call (CSPRNG failure, bad length, …).
     #[error("host function fault: {0}")]
     HostFault(String),
@@ -604,11 +619,18 @@ impl Transform {
                 memory
                     .write(&mut store, ptr as usize, config)
                     .map_err(|e| WasmError::Memory(e.to_string()))?;
-                init.call(&mut store, (ptr, config.len() as i32))
-                    .map_err(|source| WasmError::Call {
-                        func: EXPORT_INIT,
-                        source,
-                    })?;
+                if let Err(source) = init.call(&mut store, (ptr, config.len() as i32)) {
+                    let fault = store.data_mut().fault.take();
+                    // A module that validates its config aborts on a bad one, and the abort alone
+                    // cannot say which check rejected it. The LENGTH is the part the core can
+                    // honestly report: it separates "no config was delivered" (0) from "the bytes
+                    // were wrong", which is the distinction that actually recurs. The bytes stay
+                    // out of it — they are opaque to the core, so any prefix may be key material.
+                    return Err(WasmError::InitRejected {
+                        len: config.len(),
+                        cause: Box::new(call_error(fault, EXPORT_INIT, source)),
+                    });
+                }
                 if let Some(msg) = store.data_mut().fault.take() {
                     return Err(WasmError::HostFault(msg));
                 }
@@ -775,9 +797,13 @@ impl Transform {
             .write(&mut self.store, ptr as usize, input)
             .map_err(|e| WasmError::Memory(e.to_string()))?;
 
-        let packed = func
-            .call(&mut self.store, (ptr, len))
-            .map_err(|source| classify_call(name, source))? as u64;
+        let packed = match func.call(&mut self.store, (ptr, len)) {
+            Ok(v) => v as u64,
+            Err(source) => {
+                let fault = self.store.data_mut().fault.take();
+                return Err(call_error(fault, name, source));
+            }
+        };
         self.take_fault()?;
 
         let out_ptr = (packed >> 32) as usize;
@@ -827,6 +853,21 @@ fn set_fuel(store: &mut Store<HostState>, fuel: u64) -> Result<(), WasmError> {
 
 /// Map a failed guest call to an error, distinguishing fuel exhaustion (a runaway module) from other
 /// traps — wasmi reports an out-of-fuel trap whose message mentions fuel.
+/// The most informative error available for a guest call that failed.
+///
+/// A trapping guest is usually the **symptom**, not the cause. Every host import here is infallible
+/// at the wasmi boundary by design: on failure it records why in [`HostState::fault`], returns a
+/// sentinel, and the guest — finding a sentinel it cannot proceed from — unwinds into `unreachable`.
+/// Reporting the trap alone therefore throws away the only description of what actually went wrong,
+/// which is how a CSPRNG failure or a bad length reaches the logs as the uninformative
+/// "wasm `unreachable` instruction executed". Prefer the recorded fault whenever there is one.
+fn call_error(fault: Option<String>, func: &'static str, source: wasmi::Error) -> WasmError {
+    match fault {
+        Some(msg) => WasmError::HostFault(msg),
+        None => classify_call(func, source),
+    }
+}
+
 fn classify_call(func: &'static str, source: wasmi::Error) -> WasmError {
     if source.to_string().contains("fuel") {
         WasmError::Fuel(format!(
@@ -2689,6 +2730,97 @@ mod tests {
         for _ in 0..5000 {
             assert_eq!(t.transform_out(&input).expect("transform_out").len(), 64);
         }
+    }
+
+    /// The commonest way a config-validating module aborts is being handed no config at all — the
+    /// host calls `init` whenever the module exports it, including with an empty body. The abort
+    /// alone cannot say that, so the error has to carry the length; without it, "nothing was
+    /// delivered" and "the bytes were wrong" are the same log line.
+    ///
+    /// The length, and not the bytes: a config is opaque to the core, so any prefix of it may be
+    /// key material, and this error crosses service and FFI boundaries.
+    #[test]
+    fn init_rejecting_its_config_reports_what_it_was_handed() {
+        // A module that validates a 7-byte header and aborts otherwise — like the bip324 engine.
+        const WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "init") (param $ptr i32) (param $len i32)
+    (if (i32.lt_u (local.get $len) (i32.const 7)) (then (unreachable))))
+  (func (export "transform_out") (param i32) (param i32) (result i64) (i64.const 0))
+  (func (export "transform_in") (param i32) (param i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+
+        // Too short: the header is reported so the cause is readable without a rebuild.
+        let err = match module.instantiate_with_config(&[0x00, 0xf9, 0xbe]) {
+            Err(e) => e,
+            Ok(_) => panic!("expected the guest to reject a short config"),
+        };
+        match &err {
+            WasmError::InitRejected { len, .. } => assert_eq!(*len, 3),
+            other => panic!("expected InitRejected, got {other}"),
+        }
+        // The bytes themselves must not appear — they may be a key on a real module.
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("00f9be"),
+            "config bytes leaked into the error: {rendered}"
+        );
+
+        // A well-formed header is accepted, so the error is specific to a rejected config rather
+        // than to calling `init` at all.
+        assert!(
+            module
+                .instantiate_with_config(&[0x00, 0xf9, 0xbe, 0xb4, 0xd9, 0x00, 0x00])
+                .is_ok(),
+            "a valid header must still instantiate"
+        );
+    }
+
+    /// A trapping guest is the symptom; the host fault is the cause. Every host import is
+    /// infallible at the wasmi boundary — on failure it records why and returns a sentinel, and the
+    /// guest then unwinds into `unreachable`. Reporting only the trap is what made a real bip324
+    /// failure read as "wasm `unreachable` instruction executed", with no way to tell a CSPRNG
+    /// failure from a bad length without rebuilding the host.
+    #[test]
+    fn a_trap_reports_the_host_fault_that_caused_it() {
+        // `init` asks `host_rand` to fill a wildly out-of-bounds region. The host refuses, records
+        // the reason, and returns; the guest then traps exactly as a real module would.
+        const WAT: &str = r#"
+(module
+  (import "env" "host_rand" (func $rand (param i32 i32)))
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "init") (param $ptr i32) (param $len i32)
+    (call $rand (i32.const 0x7fff0000) (i32.const 0x10000))
+    (unreachable))
+  (func (export "transform_out") (param i32) (param i32) (result i64) (i64.const 0))
+  (func (export "transform_in") (param i32) (param i32) (result i64) (i64.const 0)))
+"#;
+        let module = TransformModule::load(&wat::parse_str(WAT).expect("assemble")).expect("load");
+        // `Transform` is not `Debug`, so match rather than `expect_err`.
+        let err = match module.instantiate_with_config(&[0x01]) {
+            Err(e) => e,
+            Ok(_) => panic!("the guest was expected to trap"),
+        };
+
+        // `init` failures are wrapped with what the guest was handed, so the cause is one level in.
+        let cause = match &err {
+            WasmError::InitRejected { cause, .. } => cause.as_ref(),
+            other => other,
+        };
+        assert!(
+            matches!(cause, WasmError::HostFault(_)),
+            "expected the recorded host fault, got the bare trap: {err}"
+        );
+        // And the message must name the cause, not just that something failed.
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("unreachable"),
+            "the trap masked the cause: {rendered}"
+        );
     }
 
     #[test]

@@ -210,12 +210,16 @@ pub async fn probe(
         // Log *why* a member is unhealthy — otherwise the reason (a protocol handshake failure, no
         // response, a timeout) is invisible and only the `healthy=N` count survives. `label`
         // identifies the pool member so a mixed-protocol pool's failures are attributable.
+        // INFO, not debug: an unhealthy member is why a server the user can see never carries
+        // traffic, and it is the one question the logs could not answer. Bounded in volume — it
+        // fires only for members that actually fail, and a healthy pool prints none of it. The
+        // healthy case stays at debug; it is per-member every interval and says nothing new.
         Ok(Err(e)) => {
-            tracing::debug!(server = label, error = %e, "probe: dial/handshake/no-response (unhealthy)");
+            tracing::info!(server = label, error = %e, "probe: dial/handshake/no-response (unhealthy)");
             ProbeOutcome::unhealthy()
         }
         Err(_) => {
-            tracing::debug!(server = label, ?deadline, "probe: timed out (unhealthy)");
+            tracing::info!(server = label, ?deadline, "probe: timed out (unhealthy)");
             ProbeOutcome::unhealthy()
         }
     }

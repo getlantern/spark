@@ -198,6 +198,13 @@ pub async fn run_service<E: TunnelEngine>(
                             message: "request requires protocol version 3".into(),
                         }
                     }
+                    // v4-only, same discipline as v3 above.
+                    RequestPayload::ApplyConfig { .. } if negotiated < Some(4) => {
+                        ResponsePayload::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: "request requires protocol version 4".into(),
+                        }
+                    }
                     RequestPayload::GetCapabilities => {
                         ResponsePayload::Capabilities(info.capabilities.clone())
                     }
@@ -261,6 +268,24 @@ pub async fn run_service<E: TunnelEngine>(
                     // (#165). Nothing is stored beyond the uploader's own channel and nothing is
                     // ever read back out: the ingestion key must not reach an IPC peer, so there
                     // is deliberately no `GetTelemetry`, and `Details` carries none of it.
+                    RequestPayload::ApplyConfig { raw } => {
+                        // The app fetched this; apply it to the RUNNING tunnel so a refresh reaches
+                        // the session that is up, not just the next one. Nothing is stored here: the
+                        // app owns the config, and a `Connect` still uses the active profile or the
+                        // launch config as before.
+                        match Config::from_config_str(&raw)
+                            .map_err(|e| e.to_string())
+                            .and_then(|cfg| engine.apply_config(&cfg).map_err(|e| e.0))
+                        {
+                            Ok(()) => ResponsePayload::Ack,
+                            // No tunnel up to receive it, or it did not adapt. Answer honestly so
+                            // the app can log it rather than believe the running pool changed.
+                            Err(message) => ResponsePayload::Error {
+                                code: ErrorCode::InvalidRequest,
+                                message,
+                            },
+                        }
+                    }
                     RequestPayload::SetTelemetry(cfg) => {
                         match crate::diag_wire::set_telemetry(&cfg) {
                             Ok(()) => ResponsePayload::Ack,
@@ -835,6 +860,85 @@ mod tests {
             .anytls
             .expect("Connect must use the active profile's anytls config");
         assert_eq!(anytls.server.to_string(), "9.9.9.9:443");
+
+        drop(cmd);
+        let _ = handle.await;
+    }
+
+    /// The app is the only process that fetches config, so a running session can only learn about
+    /// new servers by being handed them. Two things matter: a config pushed while connected reaches
+    /// the running tunnel, and one pushed while disconnected is refused rather than acked — an app
+    /// told "Ack" would believe the live pool changed when nothing had.
+    #[tokio::test]
+    async fn a_pushed_config_reaches_the_running_tunnel() {
+        let engine = FakeEngine::default();
+        let probe = engine.clone();
+        let (cmd, cmd_rx) = channel();
+        let handle = tokio::spawn(run_service(
+            engine,
+            cmd_rx,
+            false,
+            BackendInfo::default(),
+            None,
+        ));
+        let (push_tx, _rx) = mpsc::channel::<Push>(4);
+        request(
+            &cmd,
+            &push_tx,
+            RequestPayload::Hello {
+                client_version: PROTOCOL_VERSION,
+            },
+        )
+        .await;
+
+        // A config-new response body — the same bytes the app caches and forwards.
+        let raw = r#"{"options":{"outbounds":[
+            {"type":"samizdat","tag":"sz-1","server":"198.51.100.10","server_port":8443,
+             "public_key":"aa11bb22","short_id":"00ff00ff","server_name":"cover.example.com"}]}}"#
+            .to_owned();
+
+        // Nothing is up yet: refusing is the honest answer.
+        assert!(
+            matches!(
+                request(
+                    &cmd,
+                    &push_tx,
+                    RequestPayload::ApplyConfig { raw: raw.clone() }
+                )
+                .await,
+                ResponsePayload::Error { .. }
+            ),
+            "a push with no tunnel running must be refused, not acked"
+        );
+
+        assert!(matches!(
+            request(&cmd, &push_tx, RequestPayload::Connect).await,
+            ResponsePayload::Ack
+        ));
+        assert!(matches!(
+            request(&cmd, &push_tx, RequestPayload::ApplyConfig { raw }).await,
+            ResponsePayload::Ack
+        ));
+
+        let applied = probe.last_config().expect("the engine was handed a config");
+        assert_eq!(
+            applied.transport.servers.len(),
+            1,
+            "the pushed pool must reach the running engine"
+        );
+
+        // Garbage must not reach the engine — a running tunnel keeps its working pool.
+        assert!(matches!(
+            request(
+                &cmd,
+                &push_tx,
+                RequestPayload::ApplyConfig {
+                    raw: "not a config".to_owned()
+                }
+            )
+            .await,
+            ResponsePayload::Error { .. }
+        ));
 
         drop(cmd);
         let _ = handle.await;

@@ -566,7 +566,7 @@ fn map_outbound(ob: &RawOutbound) -> Option<ServerSpec> {
                 bundle_dir: None,
                 min_version: ob.min_version,
                 init_config: ob.init_config.clone(),
-                genome: None,
+                genome: ob.genome.clone(),
                 floor_path: None,
                 source: ob.module.clone(),
             }))
@@ -953,6 +953,15 @@ struct RawOutbound {
     /// them belongs to whoever configured the track; forwarding them belongs here.
     #[serde(default)]
     init_config: Option<String>,
+    /// Hex bytes of a postcard `Genome` — the opening plan this deployment should run.
+    ///
+    /// Carried because a delivered bundle ships its own genome, and on the client a genome
+    /// outranks a bare `init_config`. The bundle is signed once for every deployment, so its
+    /// genome cannot contain a per-server secret; without a server-sent genome to outrank it,
+    /// the bundle's generic plan silently replaces this track's key and the module is handed a
+    /// config it rejects. Opaque here, exactly like `init_config`.
+    #[serde(default)]
+    genome: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1762,6 +1771,38 @@ mod tests {
     /// cannot compute its opening tag, so the egress classifies it as an ordinary Bitcoin peer and
     /// proxies it to the real node — the transport fails completely, and looks like a working
     /// Bitcoin server while doing so. Nothing errors, which is why this is worth pinning.
+    /// A server-sent genome must reach the transport, because it is the ONLY thing that can
+    /// outrank the genome baked into a delivered bundle. The bundle is signed once for every
+    /// deployment, so its plan carries no per-server key — dropping the server's genome here is
+    /// indistinguishable, at dial time, from the server never having sent one, and the module is
+    /// handed the bundle's secret-less five bytes and rejects them.
+    #[test]
+    fn a_wasm_outbound_forwards_the_servers_genome() {
+        // A real envelope prefix: genome_version, version, id "bip324-mainnet", engine "bip324".
+        const GENOME: &str = "01010e6269703332342d6d61696e6e657406626970333234";
+        let raw = format!(
+            r#"{{"options":{{"outbounds":[{{
+            "type":"wasm","tag":"w","server":"1.2.3.4","server_port":8333,
+            "engine":"bip324",
+            "init_config":"00f9beb4d900050badc0ffee",
+            "genome":"{GENOME}"
+        }}]}}}}"#
+        );
+        let cfg = from_config_raw_json(&raw).expect("adapts");
+        let ServerSpec::Wasm(w) = &cfg.transport.servers[0].spec else {
+            panic!("expected a wasm entry")
+        };
+        assert_eq!(
+            w.genome.as_deref(),
+            Some(GENOME),
+            "the server's opening plan must survive the adapter"
+        );
+        // The two travel together: a genome does not displace the fallback on the wire.
+        assert_eq!(w.init_config.as_deref(), Some("00f9beb4d900050badc0ffee"));
+    }
+
+    /// For bip324 `init_config` carries the per-server side-door key. A client that does not get it
+    /// cannot be told apart from any other Bitcoin peer, so the exit proxies it and never tunnels.
     #[test]
     fn a_wasm_outbound_forwards_the_modules_init_config() {
         let raw = r#"{"options":{"outbounds":[{
