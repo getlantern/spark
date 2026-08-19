@@ -830,7 +830,7 @@ fn servers_from_pool(cfg: &spark_core::config::Config) -> Vec<ServerInfo> {
             country: e.country.clone(),
             country_code: e.country_code.clone(),
             city: e.city.clone(),
-            protocol: Some(spark_core::transport::spec_kind(&e.spec).to_string()),
+            protocol: Some(spark_core::transport::spec_protocol_label(&e.spec)),
             latency_ms: None,
             healthy: false,
             is_current: false,

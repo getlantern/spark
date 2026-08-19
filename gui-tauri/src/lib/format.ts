@@ -29,6 +29,10 @@ export function protocolLabel(protocol?: string | null): string {
     samizdat: "Samizdat",
     shadowsocks: "Shadowsocks",
     hysteria2: "Hysteria2",
+    // A delivered module reports the engine it was signed as, so this maps the engines rather than
+    // the mechanism. "WASM" stays only as the fallback for a locally provisioned artifact, which
+    // has a file rather than an engine to name.
+    bip324: "BIP324",
     wasm: "WASM",
     tunnel: "Tunnel",
   };
