@@ -1203,6 +1203,11 @@ mod tests {
     /// refused when there is no tunnel to receive it, and when accepted it goes through the SAME
     /// applier the background refresh uses — that shared path is what keeps a pushed config from
     /// being applied differently than a refreshed one.
+    /// The applier is a process global, so the two tests that drive it must not overlap. `cargo
+    /// test` runs them as threads in one binary (nextest's process-per-test hides this, which is
+    /// exactly why it is worth pinning here rather than relying on the runner).
+    static APPLIER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Teardown must drop every per-session global. The NE process outlives a session, so a stale
     /// applier left here makes `apply_config_str` report success with no tunnel running, and the app
     /// then believes the live pool changed. Both entry points route through `clear_session_state` so
@@ -1210,6 +1215,7 @@ mod tests {
     /// process actually use, was missing these resets exactly because they were duplicated.
     #[test]
     fn teardown_leaves_nothing_for_the_next_session() {
+        let _serialized = APPLIER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         set_config_applier(Some(Arc::new(|_cfg| {})));
 
         clear_session_state();
@@ -1225,6 +1231,8 @@ mod tests {
     #[test]
     fn a_pushed_config_goes_through_the_registered_applier() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _serialized = APPLIER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
 
         // A config-new body is what the app caches and forwards. One outbound is enough — this
         // test is about the plumbing; the mapping itself is covered by the adapter's own tests.

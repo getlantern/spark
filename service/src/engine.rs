@@ -125,7 +125,6 @@ impl TunnelEngine for CoreEngine {
         // app fetched be applied to this session without a reconnect (see `apply_config`).
         let (tcp_transport, udp_transport, control) = transport::from_config_with_control(&config)
             .map_err(|e| EngineError(format!("building transport: {e}")))?;
-        self.pool = control;
 
         let (stack, udp_surface) = netstack::build(Arc::clone(&tun), &config)
             .map_err(|e| EngineError(format!("starting the netstack: {e}")))?;
@@ -155,6 +154,12 @@ impl TunnelEngine for CoreEngine {
 
         self.supervisor = Some(supervisor);
         self.tun = Some(tun);
+        // Published only now, with the data path running. `apply_config` gates on this handle
+        // alone, so storing it beside the transport that produced it would let a `start` that
+        // failed afterwards (the netstack, the TUN) leave a pool nothing is dialing through —
+        // and the service would then answer `Ack` to an `ApplyConfig`, telling the app a live
+        // pool changed when there is no live pool.
+        self.pool = control;
 
         // Take over the routing table only when asked (full-tunnel); otherwise the operator
         // routes traffic in. Keep the manager even if install fails so `stop` can clear any

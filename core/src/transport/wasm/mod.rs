@@ -208,10 +208,6 @@ const EXPORT_COMPUTE_GAMBIT: &str = "compute_gambit";
 /// handshake (ADR 0013 §7 step 3). The output region is framed `[status: u8][outbound_wire …]`: status
 /// 0 = continue, 1 = done. Called with empty input at connect (emit-at-connect), then per inbound chunk.
 const EXPORT_HANDSHAKE_STEP: &str = "handshake_step";
-/// How many leading `init` config bytes to name in an error. Covers a role byte, a 4-byte network
-/// magic and a 2-byte length — the fields a module validates — and stops before any key material.
-const INIT_CONFIG_HEADER_LOG_LEN: usize = 7;
-
 /// Chunk size for reading inbound handshake bytes; the module buffers partial reads internally.
 const HANDSHAKE_READ_CHUNK: usize = 4096;
 
@@ -294,14 +290,18 @@ pub enum WasmError {
     /// A guest-memory read or write was out of bounds.
     #[error("guest memory fault: {0}")]
     Memory(String),
-    /// `init` rejected its configuration. Carries what the guest was actually handed, because the
-    /// abort itself cannot say which of the module's checks failed.
-    #[error("guest `init` rejected its config (len {len}, header {head}): {cause}")]
+    /// `init` rejected its configuration. Carries the config's LENGTH, because the abort itself
+    /// cannot say which of the module's checks failed — and length alone separates the case that
+    /// actually recurs, "nothing was delivered", from "the bytes were wrong".
+    ///
+    /// Deliberately not the bytes. A config is opaque to the core (ADR 0013): it is whatever the
+    /// module defined, so any prefix of it may be key material, and this error propagates out
+    /// through service and FFI boundaries. Naming a byte layout here would also be naming one
+    /// engine's, which the core does not know.
+    #[error("guest `init` rejected its config ({len} bytes): {cause}")]
     InitRejected {
         /// Length of the config handed to `init`. `0` means none was delivered at all.
         len: usize,
-        /// The first bytes, hex — the header a module validates. Never the key material after it.
-        head: String,
         /// The underlying trap or host fault.
         cause: Box<WasmError>,
     },
@@ -620,19 +620,12 @@ impl Transform {
                 if let Err(source) = init.call(&mut store, (ptr, config.len() as i32)) {
                     let fault = store.data_mut().fault.take();
                     // A module that validates its config aborts on a bad one, and the abort alone
-                    // cannot say which check rejected it. Report the config's LENGTH and HEADER —
-                    // enough to tell "no config was delivered" (len 0) from "the length prefix
-                    // disagrees with the body", which are the two shapes that actually occur. The
-                    // header is a role byte, a network magic and a length; the key material that
-                    // follows is never logged.
-                    let head: Vec<String> = config
-                        .iter()
-                        .take(INIT_CONFIG_HEADER_LOG_LEN)
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
+                    // cannot say which check rejected it. The LENGTH is the part the core can
+                    // honestly report: it separates "no config was delivered" (0) from "the bytes
+                    // were wrong", which is the distinction that actually recurs. The bytes stay
+                    // out of it — they are opaque to the core, so any prefix may be key material.
                     return Err(WasmError::InitRejected {
                         len: config.len(),
-                        head: head.join(""),
                         cause: Box::new(call_error(fault, EXPORT_INIT, source)),
                     });
                 }
@@ -2741,6 +2734,9 @@ mod tests {
     /// host calls `init` whenever the module exports it, including with an empty body. The abort
     /// alone cannot say that, so the error has to carry the length; without it, "nothing was
     /// delivered" and "the bytes were wrong" are the same log line.
+    ///
+    /// The length, and not the bytes: a config is opaque to the core, so any prefix of it may be
+    /// key material, and this error crosses service and FFI boundaries.
     #[test]
     fn init_rejecting_its_config_reports_what_it_was_handed() {
         // A module that validates a 7-byte header and aborts otherwise — like the bip324 engine.
@@ -2761,12 +2757,15 @@ mod tests {
             Ok(_) => panic!("expected the guest to reject a short config"),
         };
         match &err {
-            WasmError::InitRejected { len, head, .. } => {
-                assert_eq!(*len, 3);
-                assert_eq!(head, "00f9be");
-            }
+            WasmError::InitRejected { len, .. } => assert_eq!(*len, 3),
             other => panic!("expected InitRejected, got {other}"),
         }
+        // The bytes themselves must not appear — they may be a key on a real module.
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("00f9be"),
+            "config bytes leaked into the error: {rendered}"
+        );
 
         // A well-formed header is accepted, so the error is specific to a rejected config rather
         // than to calling `init` at all.
