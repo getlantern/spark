@@ -225,6 +225,21 @@ impl Transport for DnsTunnelTransport {
     }
 }
 
+/// The refusal returned by both [`UdpTransport`] methods.
+///
+/// `ErrorKind::Unsupported` is load-bearing, not cosmetic. `select.rs`'s UDP dial reads `Unsupported`
+/// as a statement about what a member *can carry* and moves to the next member; any other kind is
+/// read as ill health and **demotes** this one. A capability never comes back, so that demotion is
+/// permanent — and the ranking it feeds is shared with TCP, so a generic error here ranks a member
+/// last for the TCP it serves perfectly well. That exact conflation was already observed in the field
+/// with the shadowsocks members (see the comment on `select.rs`'s `dial_udp`).
+fn unsupported_udp() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "dns-tunnel: UDP-over-tunnel is unsupported in this build (TCP only, ADR 0011 v1)",
+    )
+}
+
 #[async_trait]
 impl UdpTransport for DnsTunnelTransport {
     /// The same refusal as [`dial_udp`](Self::dial_udp): this transport has no UDP at all, so a
@@ -234,18 +249,14 @@ impl UdpTransport for DnsTunnelTransport {
         &self,
         _target: Address,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        Err(io::Error::other(
-            "dns-tunnel: UDP-over-tunnel is unsupported in this build (TCP only, ADR 0011 v1)",
-        ))
+        Err(unsupported_udp())
     }
 
     async fn dial_udp(
         &self,
         _target: SocketAddr,
     ) -> io::Result<(BoxedPacketSink, BoxedPacketSource)> {
-        Err(io::Error::other(
-            "dns-tunnel: UDP-over-tunnel is unsupported in this build (TCP only, ADR 0011 v1)",
-        ))
+        Err(unsupported_udp())
     }
 }
 
@@ -1159,5 +1170,15 @@ mod tests {
             status_line,
         );
         assert!(!resp.is_empty(), "received a response through the tunnel");
+    }
+
+    /// Same reason as the meek transport's equivalent: `Unsupported` is what stops `select.rs` from
+    /// demoting this member for TCP because it cannot carry UDP. See `unsupported_udp`.
+    #[test]
+    fn the_udp_refusal_is_unsupported_not_a_generic_error() {
+        assert_eq!(
+            super::unsupported_udp().kind(),
+            std::io::ErrorKind::Unsupported
+        );
     }
 }
