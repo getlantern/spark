@@ -23,13 +23,15 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use ring::hmac;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+// Used only by the tests below (the relay itself moved to `relay.rs`), so gated to keep the
+// shipping build free of an unused import.
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
 
 use super::telemetry::{EgressTelemetry, Opening, Outcome, UntaggedSession};
 use super::upstream::UpstreamPool;
 use super::WasmServer;
-use crate::transport::tcp_tunnel::header::Address;
 
 use bip324_core::{ELLSWIFT_LEN, SIDE_DOOR_TAG_LEN};
 
@@ -183,16 +185,8 @@ impl SplittingServer {
         &self,
         conn: PrefixedStream<S>,
     ) -> io::Result<()> {
-        let (target, leftover, mut wrapped) = self.wasm.accept(conn).await?;
-        let mut up = match target {
-            Address::Ip(sa) => TcpStream::connect(sa).await?,
-            Address::Domain { host, port } => TcpStream::connect((host.as_str(), port)).await?,
-        };
-        if !leftover.is_empty() {
-            up.write_all(&leftover).await?;
-        }
-        tokio::io::copy_bidirectional(&mut wrapped, &mut up).await?;
-        Ok(())
+        let (target, leftover, wrapped) = self.wasm.accept(conn).await?;
+        super::relay::relay_to_target(target, leftover, wrapped).await
     }
 
     /// Proxy branch: forward the (replayed) bytes untouched to the real Bitcoin node this peer maps to.
@@ -258,6 +252,7 @@ async fn peek_up_to<S: AsyncRead + Unpin>(
 mod tests {
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
+    use tokio::net::TcpStream;
 
     use super::*;
 
