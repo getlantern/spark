@@ -112,7 +112,7 @@
           <span class="flag">{flagEmoji(current.countryCode)}</span>
           <div class="meta">
             <div class="name">{serverLabel(current)}</div>
-            {#if current.protocol}<div class="sub">{protocolLabel(current.protocol)}</div>{/if}
+            {#if protocolLabel(current.protocol)}<div class="sub">{protocolLabel(current.protocol)}</div>{/if}
           </div>
           {#if current.latencyMs != null}
             <span class="pill {latencyClass(current.latencyMs)}">{current.latencyMs} ms</span>
@@ -139,7 +139,7 @@
               <span class="flag">{flagEmoji(s.countryCode)}</span>
               <div class="meta">
                 <div class="name">{serverLabel(s)}</div>
-                {#if s.protocol}<div class="sub">{protocolLabel(s.protocol)}</div>{/if}
+                {#if protocolLabel(s.protocol)}<div class="sub">{protocolLabel(s.protocol)}</div>{/if}
               </div>
               {#if s.latencyMs != null}
                 <span class="pill {latencyClass(s.latencyMs)}">{s.latencyMs} ms</span>
@@ -161,7 +161,7 @@
                 <button class="row city" class:sel={$selectedIndex === s.index} onclick={() => choose(s.index, s)}>
                   <div class="meta">
                     <div class="name">{s.city || serverLabel(s)}</div>
-                    {#if s.protocol}<div class="sub">{protocolLabel(s.protocol)}</div>{/if}
+                    {#if protocolLabel(s.protocol)}<div class="sub">{protocolLabel(s.protocol)}</div>{/if}
                   </div>
                   {#if s.latencyMs != null}
                     <span class="pill {latencyClass(s.latencyMs)}">{s.latencyMs} ms</span>

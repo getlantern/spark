@@ -402,6 +402,7 @@ fn build_member(
 ///
 /// Falls back to the kind when there is no engine — a locally provisioned artifact names a file, not
 /// an engine, and "wasm" is then the most specific true thing to say.
+#[cfg(feature = "multi-server")]
 pub fn spec_protocol_label(spec: &crate::config::ServerSpec) -> String {
     match spec {
         crate::config::ServerSpec::Wasm(c) => c
@@ -2169,6 +2170,7 @@ mod wasm_config_tests {
     /// Both label paths must agree: the pre-connect list (parsed from `config_raw.json` before a
     /// pool exists) and the live pool both go through this function. When they disagreed, the UI
     /// offered a server whose subtitle did not match the one carrying traffic.
+    #[cfg(feature = "multi-server")]
     #[test]
     fn a_delivered_module_is_labelled_by_its_engine() {
         use crate::config::{ServerSpec, WasmConfig};

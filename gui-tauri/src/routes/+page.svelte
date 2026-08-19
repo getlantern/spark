@@ -224,13 +224,18 @@
         <!-- Protocol beside the latency, because which transport is carrying you is the thing
              this row cannot otherwise tell you — two servers in the same city differ only by it.
              Rendered whenever either half is known: a member with no latency yet still has a
-             protocol, and showing it beats an empty row that reads as "nothing here". -->
-        {#if current?.protocol || current?.latencyMs != null}
-          <div class="locsub">
-            {#if current?.protocol}<span class="proto">{protocolLabel(current.protocol)}</span>{/if}
-            {#if current?.protocol && current?.latencyMs != null}<span class="sep">·</span>{/if}
-            {#if current?.latencyMs != null}<span>{current.latencyMs} ms</span>{/if}
-          </div>
+             protocol, and showing it beats an empty row that reads as "nothing here".
+             Gated on the LABEL, not the raw field — a whitespace-only protocol is truthy but
+             renders as nothing, which would leave an empty span and a dangling separator. -->
+        {#if current}
+          {@const proto = protocolLabel(current.protocol)}
+          {#if proto || current.latencyMs != null}
+            <div class="locsub">
+              {#if proto}<span class="proto">{proto}</span>{/if}
+              {#if proto && current.latencyMs != null}<span class="sep">·</span>{/if}
+              {#if current.latencyMs != null}<span>{current.latencyMs} ms</span>{/if}
+            </div>
+          {/if}
         {/if}
       </button>
       <div class="divider"></div>
