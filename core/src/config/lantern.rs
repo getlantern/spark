@@ -694,8 +694,11 @@ impl RawRoot {
     fn unbounded_config(&self) -> UnboundedConfig {
         UnboundedConfig {
             enabled: self.features.unbounded,
-            egress_url: self.unbounded.egress_addr.clone(),
-            signaling_url: self.unbounded.discovery_srv.clone(),
+            egress_url: join_url(&self.unbounded.egress_addr, &self.unbounded.egress_endpoint),
+            signaling_url: join_url(
+                &self.unbounded.discovery_srv,
+                &self.unbounded.discovery_endpoint,
+            ),
             concurrent_sessions: self.unbounded.ctable_size,
         }
     }
@@ -749,20 +752,50 @@ struct RawFeatures {
     otel_traces: bool,
 }
 
-/// The top-level `unbounded` block. spark consumes the egress WS URL, the Freddie signaling endpoint,
-/// and the session-count hint; the other fields (`discovery_endpoint`, `egress_endpoint`,
-/// `ptable_size`) are lantern-box wiring spark doesn't act on and are ignored.
+/// The top-level `unbounded` block.
+///
+/// **The server splits each URL across two fields**: `discovery_srv` + `discovery_endpoint`, and
+/// `egress_addr` + `egress_endpoint` (lantern-cloud `cmd/api/config.go` `unboundedWidgetConfig`,
+/// whose live prod defaults are `https://freddie.iantem.io` + `/v1/signal` and
+/// `wss://unbounded.iantem.io` + `/ws`). Both halves are required: the base carries no path, so
+/// using it alone requests `/` — signaling never reaches Freddie's handler and every peer session
+/// fails before it starts. This was previously documented here as "lantern-box wiring spark doesn't
+/// act on", which was wrong, and cost a live debugging session: the pool built its Unbounded member,
+/// never completed a health probe, and silently ranked last behind the working members.
+///
+/// `ptable_size` genuinely is unused — it bounds the *donor* side's peer table, and spark's donor
+/// pool is sized from `ctable_size`.
 #[derive(Deserialize, Default)]
 struct RawUnbounded {
-    /// Sharing egress WebSocket URL (`wss://…`) → [`UnboundedConfig::egress_url`].
+    /// Sharing egress WebSocket base (`wss://…`) → joined with [`Self::egress_endpoint`] into
+    /// [`UnboundedConfig::egress_url`].
     #[serde(default)]
     egress_addr: String,
-    /// Freddie signaling endpoint (`https://…`) → [`UnboundedConfig::signaling_url`].
+    /// Path on the egress host (e.g. `/ws`). Joined onto [`Self::egress_addr`].
+    #[serde(default)]
+    egress_endpoint: String,
+    /// Freddie signaling base (`https://…`) → joined with [`Self::discovery_endpoint`] into
+    /// [`UnboundedConfig::signaling_url`].
     #[serde(default)]
     discovery_srv: String,
+    /// Path on the signaling host (e.g. `/v1/signal`). Joined onto [`Self::discovery_srv`].
+    #[serde(default)]
+    discovery_endpoint: String,
     /// Concurrent-session hint → [`UnboundedConfig::concurrent_sessions`].
     #[serde(default)]
     ctable_size: usize,
+}
+
+/// Join a URL base with a path the server delivered separately, tolerating either side supplying the
+/// separating `/` or neither. An empty base yields `""` (absent stays absent, so the caller's
+/// is-empty checks still work); an empty path yields the base unchanged.
+fn join_url(base: &str, path: &str) -> String {
+    if base.is_empty() || path.is_empty() {
+        return base.to_string();
+    }
+    let base = base.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    format!("{base}/{path}")
 }
 
 /// The top-level `otel` block (getlantern/common `OTEL`). spark consumes the endpoint, headers, and
@@ -1206,8 +1239,10 @@ mod tests {
     fn maps_unbounded_outbound_when_gated_on() {
         let raw = r#"{
           "features": { "unbounded": true },
-          "unbounded": { "discovery_srv": "https://freddie.example/v1/signal",
-                         "egress_addr": "wss://egress.example/ws", "ctable_size": 5 },
+          "unbounded": { "discovery_srv": "https://freddie.iantem.io",
+                         "discovery_endpoint": "/v1/signal",
+                         "egress_addr": "wss://unbounded.iantem.io",
+                         "egress_endpoint": "/ws", "ctable_size": 5 },
           "options": { "outbounds": [
             { "type": "unbounded", "tag": "ub-1", "server": "", "server_port": 0 }
           ]}
@@ -1219,7 +1254,9 @@ mod tests {
         };
         // The signaling endpoint comes from the block, NOT the outbound — the outbound has no
         // dialable field at all, which is the whole reason the block is threaded into the mapper.
-        assert_eq!(u.signaling_url, "https://freddie.example/v1/signal");
+        // Joined from the block's two halves, the way prod sends them — the member is useless
+        // without the path, since the base alone requests `/`.
+        assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
         assert_eq!(u.concurrent_paths, 5);
         // `egress_addr` is the volunteer's field and must never leak into the consumer spec: the
         // consumer does not dial the egress, the volunteer does.
@@ -1438,17 +1475,19 @@ mod tests {
         assert_eq!(c.transport.stall_trial_flows, 2);
     }
 
+    /// The block **as prod actually sends it** — copied from a live `config_raw.json`, not invented.
+    /// The previous version of this test was hand-written from a guess about the schema, asserted that
+    /// the `*_endpoint` fields were ignored, and therefore agreed with the bug instead of catching it:
+    /// spark requested `/` on both hosts, so signaling never reached Freddie's handler.
     #[test]
-    fn parses_unbounded_block_with_features_gate() {
-        // A hand-written fixture (never the real config_raw.json): features.unbounded=true plus an
-        // unbounded block with egress (wss), signaling (https), and a session-count hint.
+    fn parses_unbounded_block_joining_the_endpoint_paths() {
         let raw = r#"{
           "features": { "unbounded": true, "otel.metrics": true },
           "unbounded": {
-            "discovery_srv": "https://freddie.example/signal",
-            "discovery_endpoint": "peers",
-            "egress_addr": "wss://egress.example/ws",
-            "egress_endpoint": "eg",
+            "discovery_srv": "https://freddie.iantem.io",
+            "discovery_endpoint": "/v1/signal",
+            "egress_addr": "wss://unbounded.iantem.io",
+            "egress_endpoint": "/ws",
             "ctable_size": 5,
             "ptable_size": 5
           },
@@ -1456,10 +1495,38 @@ mod tests {
         }"#;
         let u = unbounded_from_config_raw_json(raw).expect("unbounded parses");
         assert!(u.enabled);
-        assert_eq!(u.egress_url, "wss://egress.example/ws");
-        assert_eq!(u.signaling_url, "https://freddie.example/signal");
+        // The path is not optional decoration: the base carries none, so dropping it requests `/`.
+        assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
+        assert_eq!(u.egress_url, "wss://unbounded.iantem.io/ws");
         assert_eq!(u.concurrent_sessions, 5);
         assert!(u.is_available());
+    }
+
+    /// The join tolerates whichever side supplies the separator, and leaves an absent half alone —
+    /// the server is free to put the `/` on either field, or to send a base that already ends in one.
+    #[test]
+    fn endpoint_join_is_slash_agnostic_and_keeps_absent_absent() {
+        let case = |srv: &str, ep: &str| {
+            let raw = format!(
+                r#"{{ "features": {{ "unbounded": true }},
+                      "unbounded": {{ "discovery_srv": "{srv}", "discovery_endpoint": "{ep}" }},
+                      "options": {{ "outbounds": [] }} }}"#
+            );
+            unbounded_from_config_raw_json(&raw)
+                .expect("parses")
+                .signaling_url
+        };
+        assert_eq!(case("https://f.example", "/v1/s"), "https://f.example/v1/s");
+        assert_eq!(case("https://f.example", "v1/s"), "https://f.example/v1/s");
+        assert_eq!(
+            case("https://f.example/", "/v1/s"),
+            "https://f.example/v1/s"
+        );
+        assert_eq!(case("https://f.example/", "v1/s"), "https://f.example/v1/s");
+        // No path: the base stands alone rather than gaining a stray trailing slash.
+        assert_eq!(case("https://f.example", ""), "https://f.example");
+        // No base: stays empty, so `is_available()` still reports unavailable.
+        assert_eq!(case("", "/v1/s"), "");
     }
 
     #[test]
