@@ -582,12 +582,16 @@ fn map_outbound(ob: &RawOutbound, unbounded: &UnboundedConfig) -> Option<ServerS
                 source: ob.module.clone(),
             }))
         }
-        // The censored side of the WebRTC peer-proxy. Represented only when the client is actually
-        // gated on for it: `features.unbounded` off means the server assigned an outbound for a
-        // capability this account/region is not supposed to use, and an empty `discovery_srv` means
-        // there is nowhere to signal. Either way the honest answer is "can't represent it", which
-        // routes it into the existing skipped-by-kind tally rather than building a member whose every
-        // dial would fail.
+        // The censored side of the WebRTC peer-proxy — the mode that exits at Lantern's **egress**,
+        // not the UPnP-mapped `route_source = "peer"` mode that exits directly (spark implements only
+        // this one). See `super::UnboundedConsumerConfig` for the distinction and why it matters to
+        // the location shown in the UI.
+        //
+        // Represented only when the client is actually gated on for it: `features.unbounded` off means
+        // the server assigned an outbound for a capability this account/region is not supposed to use,
+        // and no signaling endpoint means there is nowhere to signal. Either way the honest answer is
+        // "can't represent it", which routes it into the existing skipped-by-kind tally rather than
+        // building a member whose every dial would fail.
         "unbounded" => {
             // The gate is still the top-level feature flag, but the DIALING parameters come from the
             // outbound, because that is where the server puts a *consumer's*. The top-level block is

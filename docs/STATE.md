@@ -3703,3 +3703,34 @@ ingredient on this host (ULA + Tailscale only, no v6 egress).
 4. **The location is synthetic.** `assign.go` builds unbounded routes from `vps_routes` with synthetic
    region assignments — there is no Sydney server, the peer is whichever volunteer answers, and the
    exit is Lantern's egress. "Australia – Sydney" promises a location it cannot deliver.
+
+**2026-08-20 (addendum) — the two Unbounded modes exit in DIFFERENT places. Confirmed empirically.**
+This tripped me twice in one session, in both directions, so it is written down rather than left to be
+re-derived:
+
+| mode | lantern-cloud `route_source` | who dials the destination |
+|---|---|---|
+| WebRTC / broflake — **what spark implements** | `"unbounded"` | **Lantern's egress** |
+| UPnP-mapped peer proxy — **spark has none of this** | `"peer"` | **the volunteer, directly** |
+
+Measured on the shipped build: connected through the Unbounded member, the exit IP was
+`129.80.60.210` (OCI Ashburn, AS31898). `unbounded.iantem.io` — the WSS ingress donors connect to —
+resolves to `172.104.215.22` (Linode), so **the ingress endpoint and the exiting host are different
+machines**; do not expect the egress's exit IP to match its DNS. The IP appears nowhere in
+lantern-cloud, so it is not discoverable from that repo's inventory.
+
+**What made this easy to get wrong, twice.** `cmd/api/track/track.go` says of the unbounded source
+that "the actual traffic flows through browser widget peers wherever they happen to be" — that
+describes the **path**, not the exit; traffic flows *through* peers *to* the egress. And
+`IsNonGeographic` groups `peer` and `unbounded` together, which reads as "these behave the same" when
+the only shared property is that their nominal region is meaningless. I first read the architecture
+right (from `relay(peer, egress)` in unbounded-rs), then talked myself out of it on the strength of
+that comment. The wire evidence settles it and is cheap to repeat: check the exit IP.
+
+**Consequence for the UI, sharper than previously recorded.** The advertised location is not
+*approximate*, it is **unrelated**: the exit is the egress, the peer is whoever answered, and the
+`vps_routes` region is synthetic. "Australia – Sydney" yielded a Virginia exit. Anyone deciding what
+to show for this member should start from that, not from the location field.
+
+Also observed: first connect took **~10s**. That is the pairing sequence (advertise → answer → ICE →
+QUIC), not the probe stall — that is fixed in #224. Do not read a slow first connect as a regression.
