@@ -190,8 +190,11 @@ impl SessionTrace {
     pub fn finish(mut self, error: Option<&str>) -> Vec<DiagSpan> {
         let end_nano = now_nanos();
 
-        // Close lingering children with no error, respecting the cap.
-        let lingering: Vec<OpenChild> = self.open_children.drain(..).collect();
+        // Close lingering children with no error, respecting the cap. `mem::take` rather than
+        // `drain(..).collect()`: same result without a second allocation, and it is what
+        // `clippy::drain_collect` asks for (the lint landed in a newer stable than this line).
+        // The vec must be moved out either way — the loop below borrows `self` mutably.
+        let lingering: Vec<OpenChild> = std::mem::take(&mut self.open_children);
         for child in lingering {
             if self.finished_children.len() >= MAX_FINISHED_CHILDREN {
                 tracing::debug!(
