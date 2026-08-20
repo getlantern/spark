@@ -3642,3 +3642,62 @@ own chunk with a real cross-build.
    many NATs, not all. Adding them is config-only on both sides now.
 4. The consumer is latency-probed and ranked like any other pool member, which gives the desired
    "last resort" behavior with no special-casing — but it has never been observed doing so.
+
+**2026-08-20 — Unbounded consumer VERIFIED CARRYING A FLOW (first time), after three real bugs.**
+`afisk` enabled Unbounded sharing locally and the Sydney member immediately reported a latency and
+carried a connection. That closes the chain end to end: `config_raw` → `ServerSpec::Unbounded` →
+`transport::external` seam → `spark-sharing` `install.rs` → `start_consumer` → Freddie signaling →
+donor pairing → WebRTC DataChannel → QUIC to the egress → the pool's health probe dialing its callback
+*through* the consumer. Nothing in that path had ever been exercised before.
+
+**Three bugs stood between the merge and that result, all found only against real data.**
+1. **Endpoint paths dropped.** The server splits every URL: `discovery_srv` + `discovery_endpoint`,
+   `egress_addr` + `egress_endpoint`. Spark read the first half of each, and `Endpoint::parse` defaults
+   a pathless URL to `/`. Proven load-bearing by curl: `freddie.iantem.io/v1/signal` → **418** (its
+   protocol response) vs `/` → **404**; `unbounded.iantem.io/ws` → **200** vs `/` → **404**. The old
+   doc comment called these fields "lantern-box wiring spark doesn't act on". Fixes the **volunteer**
+   path too, which had dialed a 404 egress since #90.
+2. **STUN servers thrown away.** The outbound carries `stun_servers` (prod sends **16**); #223
+   hardcoded `Vec::new()` under the comment "Not carried by the live config today".
+3. **Parameters read off the wrong object.** The consumer's `discovery_srv`/`stun_servers` ride on the
+   **outbound**; the top-level `unbounded` block is the *donor* widget config (lantern-cloud
+   `unboundedWidgetConfig`: "Donors are uncensored volunteers — not assigned a consumer track").
+
+**Why tests, CI and two reviewers all missed them:** every fixture was hand-written from the same
+assumption as the code, so it could only agree with it. One of them said so in its own comment ("A
+hand-written fixture (never the real config_raw.json)"). **For a config contract we don't own, a
+fixture is evidence only if it came from the producer.** Tests are now built from a captured payload,
+tag and all.
+
+**`spark-sharing/examples/consumer_probe.rs` is the tool that broke the loop.** The consumer runs in a
+root-owned system extension: its diagnostics land in root's group container, os_log carries nothing
+from `subsystem == "org.getlantern.spark"`, and the only user-visible symptom is a blank latency cell.
+Three wrong diagnoses came out of inferring from that cell. The harness runs the same consumer in a
+normal process against a live `config_raw.json` and prints `ConsumerEvent`s. Reach for it first next
+time. `SLOTS` / `RUN_SECS` / `PATIENCE_MS` / `NAT_SECS` parameterize it.
+
+**Measured mesh conditions (88 attempts, 2 runs, before the local donor): 0 successes.** 50% no answer
+(nobody advertising), 25% "recipient no longer available" (advertisement expired mid-handshake), 25% a
+donor answered and pairing failed. That last quarter is NOT scarcity — 11/11 then 8/8 is a second,
+independent failure. At the shipped 5s deadline it reads as a timeout; at 30s it becomes "peer WebRTC
+connection became failed", i.e. **ICE running to exhaustion**. So raising the deadline fixes nothing,
+and `candidate_patience` 500ms→3s makes it strictly *worse* (the advertisement expires while gathering
+candidates — every attempt then fails with "recipient is no longer available"). Broflake has no TURN
+by design: the egress relays the donor→internet leg, but donor↔consumer still needs a direct path, so
+two restrictive NATs cannot pair. Donors come from the getlantern/unbounded web widget
+(`https://unbounded.lantern.io`, live) and the Lantern VPN app — **not** spark. IPv6 is not the missing
+ingredient on this host (ULA + Tailscale only, no v6 egress).
+
+**Open, and deliberately not guessed at.**
+1. **The probe stall afisk spotted:** latencies take ~10s to appear even though all are sub-1s.
+   `prober_loop` sets `per_probe = interval.min(10s)` and `flint_dial::probe_windowed` returns
+   `Vec<(usize, T)>` — it collects *every* outcome before any are applied. So one member that never
+   answers holds six finished sub-1s measurements hostage for its full 10s timeout. A real UX
+   regression for every client now assigned an unbounded outbound. Fix by applying outcomes as they
+   land, or shortening `per_probe` for a member that has never once succeeded.
+2. `concurrent_paths` is still fed from `ctable_size` — a **donor-side** count of consumers to serve.
+3. `insecure_do_not_verify_client_cert: true` is on the outbound and ignored; it presumably governs the
+   consumer→egress QUIC verification that `ephemeral_quic_server_config` currently decides alone.
+4. **The location is synthetic.** `assign.go` builds unbounded routes from `vps_routes` with synthetic
+   region assignments — there is no Sydney server, the peer is whichever volunteer answers, and the
+   exit is Lantern's egress. "Australia – Sydney" promises a location it cannot deliver.
