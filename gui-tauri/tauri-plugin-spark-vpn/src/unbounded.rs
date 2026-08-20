@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use spark_sharing::{
     start_sharing, Aggregator, FreddieSignaler, GeoResolver, PoolEvent, SharingConfig,
-    SharingDelta, SharingHandle, SharingStatus,
+    SharingDelta, SharingHandle, SharingStatus, STUN_BATCH_SIZE,
 };
 
 use crate::unbounded_diag;
@@ -94,8 +94,10 @@ fn build_sharing_config<R: Runtime>(
     }
     let cfg = SharingConfig {
         egress_url: uc.egress_url,
-        // The config doesn't carry STUN servers today; an empty list lets the consumer gather
-        // host/srflx candidates without an explicit STUN server.
+        // Filled in by the caller — it needs an `.await` and this fn is sync. An empty list here is
+        // NOT benign: without STUN, ICE gathers host candidates only and cannot traverse most NATs,
+        // so the donor advertises, a censored client answers, and the DataChannel never opens. That
+        // is exactly why sharing carried no traffic while Lantern's donor carried it quickly.
         stun_urls: Vec::new(),
         // `ctable_size` from the wire, clamped to a sane floor (SharingConfig::supervisor_config
         // also clamps 0 → 1, but be explicit so a missing/zero value still yields a usable pool).
@@ -214,7 +216,32 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
 
     // Refuses with a typed "unbounded not available" error when the feature is gated off or the
     // resolved config lacks the endpoints to dial (see build_sharing_config).
-    let (cfg, signaler) = build_sharing_config(&app)?;
+    let (mut cfg, signaler) = build_sharing_config(&app)?;
+
+    // ICE STUN servers. Mirrors Lantern's donor, which takes broflake's `DefaultSTUNBatchFunc`
+    // (`clientcore.NewDefaultWebRTCOptions()`, never overridden in radiance): fetch a public list and
+    // pick 5 at random. Spark adds an embedded fallback broflake has no equivalent of, because the
+    // remote list lives on `raw.githubusercontent.com` — a plausible casualty of the same blocking
+    // this tool exists to route around, and a third-party repo besides.
+    //
+    // Awaited here rather than in `build_sharing_config` because that is sync and shared with the
+    // availability check, which must not make a network call.
+    let (stun_urls, from_remote, why) =
+        spark_sharing::stun_batch_or_embedded(STUN_BATCH_SIZE).await;
+    if let Some(why) = why {
+        tracing::info!(
+            error = %why,
+            count = stun_urls.len(),
+            "unbounded: STUN list unavailable; using the embedded fallback"
+        );
+    } else {
+        tracing::debug!(
+            count = stun_urls.len(),
+            from_remote,
+            "unbounded: STUN servers selected"
+        );
+    }
+    cfg.stun_urls = stun_urls;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PoolEvent>();
     // `Arc<FreddieSignaler>` coerces to the `Arc<dyn Signaler>` that `start_sharing` expects.
