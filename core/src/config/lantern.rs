@@ -1401,7 +1401,11 @@ mod tests {
           ]}
         }"#;
         let cfg = from_config_raw_json(raw).expect("config_raw adapts");
-        assert_eq!(cfg.transport.servers.len(), 1, "only samizdat should survive");
+        assert_eq!(
+            cfg.transport.servers.len(),
+            1,
+            "only samizdat should survive"
+        );
         assert!(matches!(
             cfg.transport.servers[0].spec,
             ServerSpec::Samizdat(_)
