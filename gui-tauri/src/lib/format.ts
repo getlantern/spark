@@ -32,9 +32,19 @@ export function serverLabel(s: ServerInfo): string {
 /// So the name the config gives is the name shown. Whoever names a transport server-side chooses
 /// how it reads, and can change it without shipping anything.
 ///
-/// Trimmed only — whitespace is not a name — and empty/null yields "" so callers can test it.
+/// Trimmed, and the first letter upper-cased — whitespace is not a name, and a lone lowercase word
+/// reads as unfinished next to the Title Case around it. Deliberately *only* the first letter: it is
+/// a generic transform, so it works on a name this build has never seen, which is the property a
+/// lookup table would cost. A name the server already capitalized ("AnyTLS") is unchanged, since
+/// upper-casing an upper-case letter is a no-op — the rest of the string is never touched.
+///
+/// Empty/null yields "" so callers can test it.
 export function protocolLabel(protocol?: string | null): string {
-  return protocol?.trim() ?? "";
+  const name = protocol?.trim() ?? "";
+  if (!name) return "";
+  // Code points, not `charAt` — indexing by UTF-16 unit would split an astral first character.
+  const [first, ...rest] = [...name];
+  return first.toUpperCase() + rest.join("");
 }
 
 /// Latency band for the pill color. `null`/unhealthy → "slow" (worst, so it never looks fast).
