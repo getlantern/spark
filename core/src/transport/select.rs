@@ -1217,10 +1217,26 @@ async fn prober_loop(
             let guard = members.lock().unwrap_or_else(|e| e.into_inner());
             (guard.clone(), epoch.load(Ordering::Relaxed))
         };
+        // Publish each measurement AS IT LANDS, then rank once below on the complete set.
+        //
+        // `probe_windowed` returns only when every probe has finished, and `per_probe` is up to 10s,
+        // so a single member that never answers used to hold every other member's finished result
+        // hostage for its full timeout: six sub-second latencies sat unpublished for ten seconds
+        // because a seventh was dead. Observed as soon as an `unbounded` member was assigned — its
+        // peer-proxy dial cannot complete without a reachable donor, so it always runs to the cap.
+        //
+        // Only `latest` is written here (the latency/health columns), never `ranked`: re-ranking on a
+        // partial round would let the selected member flap while the round is still in flight, which
+        // is a worse trade than a slow display. The epoch is re-checked per outcome for the same
+        // reason the batch apply checks it — a mid-round `reload` renumbers members, so writing a
+        // stale generation's index would attribute a latency to the wrong server.
         let outcomes = flint_dial::probe_windowed(members.len(), window, |i| {
             // Clone the (cheap) Arc + CallbackUrl into the future so it borrows nothing from `members`.
             let transport = Arc::clone(&members[i].transport);
             let callback = members[i].callback.clone();
+            let publish_to = Arc::clone(&selection);
+            let publish_epoch = Arc::clone(&epoch);
+            let pool_len = members.len();
             // Identify the member in probe logs by protocol + server addr (e.g.
             // `samizdat 161.33.223.26:31464`), falling back to the index, so a mixed-protocol pool's
             // failures are attributable to a specific server.
@@ -1229,7 +1245,27 @@ async fn prober_loop(
             } else {
                 members[i].label.clone()
             };
-            async move { probe(&transport, &callback, per_probe, &label).await }
+            async move {
+                let outcome = probe(&transport, &callback, per_probe, &label).await;
+                // Take `selection` FIRST, then check the epoch under it. Checking before locking is a
+                // TOCTOU: `reload` holds `selection` for its whole duration and bumps the epoch inside
+                // it, so a check made outside the lock can be invalidated before the write lands —
+                // and the write would then attribute this generation's latency to a *different*
+                // server at the same index, invisibly when both pools are the same length. Short
+                // critical section; never held across an `.await`.
+                {
+                    let mut sel = publish_to.lock().unwrap_or_else(|e| e.into_inner());
+                    if publish_epoch.load(Ordering::Relaxed) == gen {
+                        if sel.latest.len() != pool_len {
+                            sel.latest = vec![None; pool_len];
+                        }
+                        if let Some(slot) = sel.latest.get_mut(i) {
+                            *slot = Some(outcome);
+                        }
+                    }
+                }
+                outcome
+            }
         })
         .await;
         // Real flow outcomes, read BEFORE the selection lock (the two are never held together). The
@@ -1565,6 +1601,116 @@ mod tests {
             }
         }
     }
+    /// A transport whose dial never returns in the life of a test — so its probe runs to the full
+    /// per-probe deadline, which is exactly what a pool member with no reachable peer does (an
+    /// `unbounded` member with no donor available is the real case).
+    struct HangingT;
+    #[async_trait]
+    impl Transport for HangingT {
+        async fn dial(&self, _t: SocketAddr) -> io::Result<BoxedStream> {
+            std::future::pending::<()>().await;
+            unreachable!("pending never resolves")
+        }
+        async fn dial_addr(&self, _t: Address) -> io::Result<BoxedStream> {
+            std::future::pending::<()>().await;
+            unreachable!("pending never resolves")
+        }
+    }
+
+    fn member_that_hangs() -> Member {
+        Member {
+            transport: Arc::new(HangingT),
+            ..member_serving_204()
+        }
+    }
+
+    /// A fast member's latency must reach `snapshot()` while a slow member is still being probed.
+    ///
+    /// `probe_windowed` only returns once every probe has finished, and `per_probe` is up to 10s, so
+    /// batching the apply meant one dead member withheld every other member's finished measurement
+    /// for its full timeout — six sub-second latencies invisible for ten seconds because a seventh
+    /// never answered. Reported from the field as "latencies take ~10s to appear even though they're
+    /// all under 1s", once an `unbounded` member started being assigned.
+    #[tokio::test]
+    async fn a_fast_member_publishes_its_latency_while_a_slow_member_is_still_probing() {
+        // interval 10s ⇒ per_probe = min(10s, 10s) = 10s, so the round cannot finish before 10s. The
+        // assertions below use a 4s budget: comfortably longer than an in-memory probe, comfortably
+        // shorter than the round.
+        let st = SelectingTransport::new(
+            vec![member_serving_204(), member_that_hangs()],
+            std::time::Duration::from_secs(10),
+            8,
+            Arc::new(FakeT { ok: true }),
+            Arc::new(NoUdp),
+            test_stall_cfg(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        loop {
+            let snap = st.snapshot();
+            if snap.first().and_then(|m| m.latency_ms).is_some() {
+                // The point of the test: member 1 is STILL unmeasured, proving the round has not
+                // completed and member 0 was published mid-round rather than in the batch apply.
+                assert!(
+                    snap.get(1).and_then(|m| m.latency_ms).is_none(),
+                    "the hanging member cannot have a measurement yet; the round would be over"
+                );
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fast member's latency was withheld until the round finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A reload drops the previous generation's measurements rather than showing them against the
+    /// members that replaced it. Both pools are the SAME LENGTH on purpose — the case no length check
+    /// can catch, and the one where a stale latency is silently plausible.
+    ///
+    /// **This does NOT test the epoch-check-inside-the-lock ordering**, though that ordering is what
+    /// makes the guard sound. The unsound window is only between reading the epoch and acquiring
+    /// `selection` — nanoseconds unless the lock is contended — so no timing-based test can open it;
+    /// this test passes under either ordering. Reaching it would need a test-only hook between the
+    /// two, which is not worth carrying in the prober for a window closed by taking the lock first.
+    /// The ordering rests on `reload` holding `selection` for its whole duration and bumping the epoch
+    /// inside it (see `reload`'s comment), not on this test.
+    #[tokio::test]
+    async fn a_reload_drops_the_previous_generations_measurements() {
+        // A hanging member keeps round 1 in flight for the whole test, so the reload is guaranteed to
+        // land while a probe is outstanding.
+        let st = SelectingTransport::new(
+            vec![member_serving_204(), member_that_hangs()],
+            std::time::Duration::from_secs(10),
+            8,
+            Arc::new(FakeT { ok: true }),
+            Arc::new(NoUdp),
+            test_stall_cfg(),
+        );
+
+        // Wait for the fast member to publish, so a measurement definitely exists to be invalidated.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while st.snapshot().first().and_then(|m| m.latency_ms).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fast member never published"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Same-length replacement pool, both members hanging so nothing new can be measured. Any
+        // latency visible afterwards therefore came from the OLD generation.
+        st.reload(vec![member_that_hangs(), member_that_hangs()]);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let snap = st.snapshot();
+        assert!(
+            snap.iter().all(|m| m.latency_ms.is_none()),
+            "a pre-reload measurement leaked into the new pool: {:?}",
+            snap.iter().map(|m| m.latency_ms).collect::<Vec<_>>()
+        );
+    }
+
     fn member_serving_204() -> Member {
         Member {
             transport: Arc::new(Serve204),

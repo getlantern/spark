@@ -62,6 +62,10 @@ pub struct UnboundedConfig {
     /// Number of concurrent censored-user sessions to advertise (`unbounded.ctable_size`). `0` when
     /// absent — the plugin clamps to a sensible floor.
     pub concurrent_sessions: usize,
+    /// The signaling *path* on its own (`unbounded.discovery_endpoint`, e.g. `/v1/signal`), already
+    /// joined into [`Self::signaling_url`]. Kept separately because a *consumer* outbound carries its
+    /// own bare `discovery_srv` origin with no path, and has to join this onto that instead.
+    pub signaling_path: String,
 }
 
 impl UnboundedConfig {
@@ -585,14 +589,41 @@ fn map_outbound(ob: &RawOutbound, unbounded: &UnboundedConfig) -> Option<ServerS
         // routes it into the existing skipped-by-kind tally rather than building a member whose every
         // dial would fail.
         "unbounded" => {
-            if !unbounded.enabled || unbounded.signaling_url.is_empty() {
+            // The gate is still the top-level feature flag, but the DIALING parameters come from the
+            // outbound, because that is where the server puts a *consumer's*. The top-level block is
+            // the donor widget config; the two are different roles against the same mesh.
+            if !unbounded.enabled {
+                return None;
+            }
+            // Per-outbound `discovery_srv` wins; fall back to the block so a server that only sends
+            // the block still yields a usable member. The outbound's value is a bare origin, so the
+            // block's `discovery_endpoint` path is joined onto whichever base we end up using —
+            // without it the POST goes to `/` and never reaches Freddie's handler.
+            let base = if ob.discovery_srv.is_empty() {
+                unbounded.signaling_url.clone()
+            } else {
+                join_url(&ob.discovery_srv, &unbounded.signaling_path)
+            };
+            // A URL with no path requests `/`, which the deployed Freddie answers 404 — so such a
+            // member can never signal, never pair, and never probe healthy. It would sit in server
+            // selection with a blank latency AND hold every other member's finished measurement for
+            // the full probe deadline, so skipping beats building it.
+            //
+            // Tested on the joined result, not on "was an endpoint supplied": a base that already
+            // carries its own path is perfectly usable, and requiring a separate `discovery_endpoint`
+            // would reject it. A Freddie serving at the root is not a shape that exists today; if one
+            // appears, this is the check to revisit.
+            if base.is_empty() || !has_url_path(&base) {
                 return None;
             }
             Some(ServerSpec::Unbounded(super::UnboundedConsumerConfig {
-                signaling_url: unbounded.signaling_url.clone(),
-                // Not carried by the live config today; ICE still gathers host/srflx candidates.
-                stun_urls: Vec::new(),
-                concurrent_paths: unbounded.concurrent_sessions,
+                signaling_url: base,
+                stun_urls: ob.stun_servers.clone(),
+                // Deliberately 0 = "let the consumer runtime choose". `ctable_size` is the *donor's*
+                // count of consumers to serve, and the outbound carries no consumer-side equivalent,
+                // so there is nothing here to honour — propagating the donor's number would just be
+                // a plausible-looking coincidence. `install.rs` reads 0 as unset.
+                concurrent_paths: 0,
             }))
         }
         _ => None, // a transport type this build has no spark equivalent for
@@ -694,9 +725,13 @@ impl RawRoot {
     fn unbounded_config(&self) -> UnboundedConfig {
         UnboundedConfig {
             enabled: self.features.unbounded,
-            egress_url: self.unbounded.egress_addr.clone(),
-            signaling_url: self.unbounded.discovery_srv.clone(),
+            egress_url: join_url(&self.unbounded.egress_addr, &self.unbounded.egress_endpoint),
+            signaling_url: join_url(
+                &self.unbounded.discovery_srv,
+                &self.unbounded.discovery_endpoint,
+            ),
             concurrent_sessions: self.unbounded.ctable_size,
+            signaling_path: self.unbounded.discovery_endpoint.clone(),
         }
     }
 
@@ -749,20 +784,63 @@ struct RawFeatures {
     otel_traces: bool,
 }
 
-/// The top-level `unbounded` block. spark consumes the egress WS URL, the Freddie signaling endpoint,
-/// and the session-count hint; the other fields (`discovery_endpoint`, `egress_endpoint`,
-/// `ptable_size`) are lantern-box wiring spark doesn't act on and are ignored.
+/// The top-level `unbounded` block.
+///
+/// **The server splits each URL across two fields**: `discovery_srv` + `discovery_endpoint`, and
+/// `egress_addr` + `egress_endpoint` (lantern-cloud `cmd/api/config.go` `unboundedWidgetConfig`,
+/// whose live prod defaults are `https://freddie.iantem.io` + `/v1/signal` and
+/// `wss://unbounded.iantem.io` + `/ws`). What matters is the **joined** result carrying a path, not
+/// that both halves are present: prod splits them, but a base that already includes its own path is
+/// equally usable and [`join_url`] leaves it alone. A result with no path requests `/`, which the
+/// deployed Freddie answers 404 — signaling never reaches its handler and every peer session fails
+/// before it starts. This was previously documented here as "lantern-box wiring spark doesn't
+/// act on", which was wrong, and cost a live debugging session: the pool built its Unbounded member,
+/// never completed a health probe, and silently ranked last behind the working members.
+///
+/// `ptable_size` genuinely is unused — it bounds the *donor* side's peer table, and spark's donor
+/// pool is sized from `ctable_size`.
 #[derive(Deserialize, Default)]
 struct RawUnbounded {
-    /// Sharing egress WebSocket URL (`wss://…`) → [`UnboundedConfig::egress_url`].
+    /// Sharing egress WebSocket base (`wss://…`) → joined with [`Self::egress_endpoint`] into
+    /// [`UnboundedConfig::egress_url`].
     #[serde(default)]
     egress_addr: String,
-    /// Freddie signaling endpoint (`https://…`) → [`UnboundedConfig::signaling_url`].
+    /// Path on the egress host (e.g. `/ws`). Joined onto [`Self::egress_addr`].
+    #[serde(default)]
+    egress_endpoint: String,
+    /// Freddie signaling base (`https://…`) → joined with [`Self::discovery_endpoint`] into
+    /// [`UnboundedConfig::signaling_url`].
     #[serde(default)]
     discovery_srv: String,
+    /// Path on the signaling host (e.g. `/v1/signal`). Joined onto [`Self::discovery_srv`].
+    #[serde(default)]
+    discovery_endpoint: String,
     /// Concurrent-session hint → [`UnboundedConfig::concurrent_sessions`].
     #[serde(default)]
     ctable_size: usize,
+}
+
+/// True when `url` carries a path beyond `/` — i.e. requesting it would not just hit the origin root.
+/// Deliberately a string check rather than a URL parse: `core` has no URL crate, and the only question
+/// is whether anything follows the authority.
+fn has_url_path(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    match after_scheme.split_once('/') {
+        Some((_, path)) => !path.trim_start_matches('/').is_empty(),
+        None => false,
+    }
+}
+
+/// Join a URL base with a path the server delivered separately, tolerating either side supplying the
+/// separating `/` or neither. An empty base yields `""` (absent stays absent, so the caller's
+/// is-empty checks still work); an empty path yields the base unchanged.
+fn join_url(base: &str, path: &str) -> String {
+    if base.is_empty() || path.is_empty() {
+        return base.to_string();
+    }
+    let base = base.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    format!("{base}/{path}")
 }
 
 /// The top-level `otel` block (getlantern/common `OTEL`). spark consumes the endpoint, headers, and
@@ -938,6 +1016,18 @@ struct RawOutbound {
     #[serde(rename = "type")]
     kind: String,
     tag: String,
+    /// `unbounded` only: the Freddie signaling base for THIS route. The per-outbound value wins over
+    /// the top-level `unbounded` block, which is the *donor* widget config (lantern-cloud
+    /// `unboundedWidgetConfig`: "Donors are uncensored volunteers — not assigned a consumer track").
+    /// A consumer is assigned a track, so its parameters ride on the outbound.
+    #[serde(default)]
+    discovery_srv: String,
+    /// `unbounded` only: ICE STUN servers for THIS route, as `stun:host:port`. Prod sends 16. Without
+    /// them ICE gathers host/srflx candidates only, which is not enough to traverse most NATs — so
+    /// dropping this field yields a member that builds, never pairs, never completes a health probe,
+    /// and sits in the server list with a blank latency.
+    #[serde(default)]
+    stun_servers: Vec<String>,
     #[serde(default)]
     server: String,
     #[serde(default)]
@@ -1206,8 +1296,10 @@ mod tests {
     fn maps_unbounded_outbound_when_gated_on() {
         let raw = r#"{
           "features": { "unbounded": true },
-          "unbounded": { "discovery_srv": "https://freddie.example/v1/signal",
-                         "egress_addr": "wss://egress.example/ws", "ctable_size": 5 },
+          "unbounded": { "discovery_srv": "https://freddie.iantem.io",
+                         "discovery_endpoint": "/v1/signal",
+                         "egress_addr": "wss://unbounded.iantem.io",
+                         "egress_endpoint": "/ws", "ctable_size": 5 },
           "options": { "outbounds": [
             { "type": "unbounded", "tag": "ub-1", "server": "", "server_port": 0 }
           ]}
@@ -1219,14 +1311,134 @@ mod tests {
         };
         // The signaling endpoint comes from the block, NOT the outbound — the outbound has no
         // dialable field at all, which is the whole reason the block is threaded into the mapper.
-        assert_eq!(u.signaling_url, "https://freddie.example/v1/signal");
-        assert_eq!(u.concurrent_paths, 5);
+        // Joined from the block's two halves, the way prod sends them — the member is useless
+        // without the path, since the base alone requests `/`.
+        assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
+        assert_eq!(
+            u.concurrent_paths, 0,
+            "donor capacity is not a consumer path count"
+        );
         // `egress_addr` is the volunteer's field and must never leak into the consumer spec: the
         // consumer does not dial the egress, the volunteer does.
         assert!(
             u.stun_urls.is_empty(),
             "the live config carries no STUN servers today"
         );
+    }
+
+    /// The outbound **exactly as prod sends it** — copied from a live `config_raw.json`, tag and all.
+    /// This is the shape the first implementation guessed wrong: it read the top-level *donor* block
+    /// and hardcoded an empty STUN list, so the member built, never paired, and showed a blank
+    /// latency in server selection while every other member probed fine.
+    #[test]
+    fn maps_the_real_prod_unbounded_outbound_including_its_stun_servers() {
+        let raw = r#"{
+          "features": { "unbounded": true },
+          "unbounded": { "discovery_srv": "https://freddie.iantem.io",
+                         "discovery_endpoint": "/v1/signal",
+                         "egress_addr": "wss://unbounded.iantem.io",
+                         "egress_endpoint": "/ws", "ctable_size": 5, "ptable_size": 5 },
+          "options": { "outbounds": [
+            { "type": "unbounded",
+              "tag": "unbounded-out-unbounded-linode-free-ef4d0b69-bbb9-4991-b9a5-828ca2da65ad",
+              "server": "", "server_port": 0,
+              "insecure_do_not_verify_client_cert": true,
+              "discovery_srv": "https://freddie.iantem.io",
+              "stun_servers": ["stun:5.39.72.109:3478", "stun:176.9.24.184:3478"],
+              "egress_addr": "wss://unbounded.iantem.io:443" }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        assert_eq!(cfg.transport.servers.len(), 1);
+        let ServerSpec::Unbounded(u) = &cfg.transport.servers[0].spec else {
+            panic!("expected an unbounded pool entry");
+        };
+        // The STUN servers the server actually sent — NOT an empty list. Without these ICE gathers
+        // host/srflx only and cannot traverse most NATs.
+        assert_eq!(
+            u.stun_urls,
+            vec!["stun:5.39.72.109:3478", "stun:176.9.24.184:3478"]
+        );
+        // The outbound's bare origin, with the block's path joined on — the outbound carries no path
+        // of its own, and the bare origin would request `/`.
+        assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
+        // 0 = unset: the donor's `ctable_size` is not a consumer path count, so nothing is carried.
+        assert_eq!(u.concurrent_paths, 0);
+    }
+
+    /// A server that sends only the block (no per-outbound `discovery_srv`) still yields a usable
+    /// member — the block is the fallback, not the primary.
+    #[test]
+    fn unbounded_outbound_without_its_own_discovery_falls_back_to_the_block() {
+        let raw = r#"{
+          "features": { "unbounded": true },
+          "unbounded": { "discovery_srv": "https://freddie.iantem.io",
+                         "discovery_endpoint": "/v1/signal", "ctable_size": 3 },
+          "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub", "server": "", "server_port": 0 }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        let ServerSpec::Unbounded(u) = &cfg.transport.servers[0].spec else {
+            panic!("expected an unbounded pool entry");
+        };
+        assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
+        assert!(u.stun_urls.is_empty(), "none were offered");
+    }
+
+    /// A signaling URL with no path is a provable dead end — the deployed Freddie answers 404 at the
+    /// root — so the member is skipped rather than built to sit blank and stall the probe round.
+    #[test]
+    fn skips_unbounded_outbound_whose_signaling_url_has_no_path() {
+        let raw = r#"{
+          "features": { "unbounded": true },
+          "unbounded": { "discovery_srv": "https://freddie.iantem.io", "ctable_size": 5 },
+          "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub", "server": "", "server_port": 0,
+              "discovery_srv": "https://freddie.iantem.io" },
+            { "type": "samizdat", "tag": "sz-1", "server": "198.51.100.10", "server_port": 8443,
+              "public_key": "aa11bb22", "short_id": "0011" }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        assert_eq!(
+            cfg.transport.servers.len(),
+            1,
+            "only samizdat should survive"
+        );
+        assert!(matches!(
+            cfg.transport.servers[0].spec,
+            ServerSpec::Samizdat(_)
+        ));
+    }
+
+    /// ...but a base that already carries its own path is usable, and must NOT be skipped just
+    /// because no separate `discovery_endpoint` came with it.
+    #[test]
+    fn keeps_unbounded_outbound_whose_base_already_carries_the_path() {
+        let raw = r#"{
+          "features": { "unbounded": true },
+          "unbounded": { "discovery_srv": "https://freddie.iantem.io", "ctable_size": 5 },
+          "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub", "server": "", "server_port": 0,
+              "discovery_srv": "https://freddie.iantem.io/v1/signal" }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        let ServerSpec::Unbounded(u) = &cfg.transport.servers[0].spec else {
+            panic!("expected an unbounded pool entry");
+        };
+        assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
+    }
+
+    #[test]
+    fn has_url_path_distinguishes_an_origin_from_a_path() {
+        assert!(!has_url_path("https://f.example"));
+        assert!(!has_url_path("https://f.example/"));
+        assert!(!has_url_path("https://f.example///"));
+        assert!(has_url_path("https://f.example/v1/signal"));
+        assert!(has_url_path("wss://f.example:443/ws"));
+        assert!(!has_url_path("wss://f.example:443"));
     }
 
     #[test]
@@ -1438,17 +1650,19 @@ mod tests {
         assert_eq!(c.transport.stall_trial_flows, 2);
     }
 
+    /// The block **as prod actually sends it** — copied from a live `config_raw.json`, not invented.
+    /// The previous version of this test was hand-written from a guess about the schema, asserted that
+    /// the `*_endpoint` fields were ignored, and therefore agreed with the bug instead of catching it:
+    /// spark requested `/` on both hosts, so signaling never reached Freddie's handler.
     #[test]
-    fn parses_unbounded_block_with_features_gate() {
-        // A hand-written fixture (never the real config_raw.json): features.unbounded=true plus an
-        // unbounded block with egress (wss), signaling (https), and a session-count hint.
+    fn parses_unbounded_block_joining_the_endpoint_paths() {
         let raw = r#"{
           "features": { "unbounded": true, "otel.metrics": true },
           "unbounded": {
-            "discovery_srv": "https://freddie.example/signal",
-            "discovery_endpoint": "peers",
-            "egress_addr": "wss://egress.example/ws",
-            "egress_endpoint": "eg",
+            "discovery_srv": "https://freddie.iantem.io",
+            "discovery_endpoint": "/v1/signal",
+            "egress_addr": "wss://unbounded.iantem.io",
+            "egress_endpoint": "/ws",
             "ctable_size": 5,
             "ptable_size": 5
           },
@@ -1456,10 +1670,38 @@ mod tests {
         }"#;
         let u = unbounded_from_config_raw_json(raw).expect("unbounded parses");
         assert!(u.enabled);
-        assert_eq!(u.egress_url, "wss://egress.example/ws");
-        assert_eq!(u.signaling_url, "https://freddie.example/signal");
+        // The path is not optional decoration: the base carries none, so dropping it requests `/`.
+        assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
+        assert_eq!(u.egress_url, "wss://unbounded.iantem.io/ws");
         assert_eq!(u.concurrent_sessions, 5);
         assert!(u.is_available());
+    }
+
+    /// The join tolerates whichever side supplies the separator, and leaves an absent half alone —
+    /// the server is free to put the `/` on either field, or to send a base that already ends in one.
+    #[test]
+    fn endpoint_join_is_slash_agnostic_and_keeps_absent_absent() {
+        let case = |srv: &str, ep: &str| {
+            let raw = format!(
+                r#"{{ "features": {{ "unbounded": true }},
+                      "unbounded": {{ "discovery_srv": "{srv}", "discovery_endpoint": "{ep}" }},
+                      "options": {{ "outbounds": [] }} }}"#
+            );
+            unbounded_from_config_raw_json(&raw)
+                .expect("parses")
+                .signaling_url
+        };
+        assert_eq!(case("https://f.example", "/v1/s"), "https://f.example/v1/s");
+        assert_eq!(case("https://f.example", "v1/s"), "https://f.example/v1/s");
+        assert_eq!(
+            case("https://f.example/", "/v1/s"),
+            "https://f.example/v1/s"
+        );
+        assert_eq!(case("https://f.example/", "v1/s"), "https://f.example/v1/s");
+        // No path: the base stands alone rather than gaining a stray trailing slash.
+        assert_eq!(case("https://f.example", ""), "https://f.example");
+        // No base: stays empty, so `is_available()` still reports unavailable.
+        assert_eq!(case("", "/v1/s"), "");
     }
 
     #[test]
