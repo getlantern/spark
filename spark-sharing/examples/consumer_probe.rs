@@ -74,10 +74,15 @@ fn main() {
         let quic = ephemeral_quic_server_config().expect("ephemeral QUIC config");
         let mut cfg = ConsumerRuntimeConfig::new(quic, "consumer-probe-harness".to_string());
         cfg.stun_urls = stun;
-        cfg.concurrent_sessions = 1; // one slot, so the log reads as one story
-                                     // Tunables under test. The shipped defaults are 500ms / 5s; the hypothesis is that 500ms is
-                                     // too little to gather server-reflexive candidates from 16 STUN servers, so the offer carries
-                                     // host candidates only and a NATed donor can never pair.
+        // Slots default to 1 so the log reads as one story; raise it to sample availability faster.
+        let slots: usize = std::env::var("SLOTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        cfg.concurrent_sessions = slots;
+        // Tunables under test. The shipped defaults are 500ms / 5s; the hypothesis is that 500ms is
+        // too little to gather server-reflexive candidates from 16 STUN servers, so the offer carries
+        // host candidates only and a NATed donor can never pair.
         let patience_ms: u64 = std::env::var("PATIENCE_MS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -100,7 +105,11 @@ fn main() {
         };
 
         println!("consumer started; watching events for 45s\n");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let secs: u64 = std::env::var("RUN_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(45);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
         loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => break,
