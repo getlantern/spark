@@ -54,6 +54,15 @@ fn main() {
         })
         .unwrap_or_default();
 
+    // Detect a missing base here rather than letting a bare path like `/v1/signal` reach
+    // `FreddieSignaler::new` and fail with a scheme error that reads as a code bug.
+    if !signaling.starts_with("http://") && !signaling.starts_with("https://") {
+        eprintln!(
+            "no signaling base: neither the unbounded outbound nor the top-level block carried a \
+             usable `discovery_srv` (got {signaling:?})"
+        );
+        std::process::exit(1);
+    }
     println!("signaling : {signaling}");
     println!("stun      : {} servers", stun.len());
     println!("egress    : {}", outbound["egress_addr"]);

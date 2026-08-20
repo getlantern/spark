@@ -604,7 +604,16 @@ fn map_outbound(ob: &RawOutbound, unbounded: &UnboundedConfig) -> Option<ServerS
             } else {
                 join_url(&ob.discovery_srv, &unbounded.signaling_path)
             };
-            if base.is_empty() {
+            // A URL with no path requests `/`, which the deployed Freddie answers 404 — so such a
+            // member can never signal, never pair, and never probe healthy. It would sit in server
+            // selection with a blank latency AND hold every other member's finished measurement for
+            // the full probe deadline, so skipping beats building it.
+            //
+            // Tested on the joined result, not on "was an endpoint supplied": a base that already
+            // carries its own path is perfectly usable, and requiring a separate `discovery_endpoint`
+            // would reject it. A Freddie serving at the root is not a shape that exists today; if one
+            // appears, this is the check to revisit.
+            if base.is_empty() || !has_url_path(&base) {
                 return None;
             }
             Some(ServerSpec::Unbounded(super::UnboundedConsumerConfig {
@@ -780,9 +789,11 @@ struct RawFeatures {
 /// **The server splits each URL across two fields**: `discovery_srv` + `discovery_endpoint`, and
 /// `egress_addr` + `egress_endpoint` (lantern-cloud `cmd/api/config.go` `unboundedWidgetConfig`,
 /// whose live prod defaults are `https://freddie.iantem.io` + `/v1/signal` and
-/// `wss://unbounded.iantem.io` + `/ws`). Both halves are required: the base carries no path, so
-/// using it alone requests `/` — signaling never reaches Freddie's handler and every peer session
-/// fails before it starts. This was previously documented here as "lantern-box wiring spark doesn't
+/// `wss://unbounded.iantem.io` + `/ws`). What matters is the **joined** result carrying a path, not
+/// that both halves are present: prod splits them, but a base that already includes its own path is
+/// equally usable and [`join_url`] leaves it alone. A result with no path requests `/`, which the
+/// deployed Freddie answers 404 — signaling never reaches its handler and every peer session fails
+/// before it starts. This was previously documented here as "lantern-box wiring spark doesn't
 /// act on", which was wrong, and cost a live debugging session: the pool built its Unbounded member,
 /// never completed a health probe, and silently ranked last behind the working members.
 ///
@@ -807,6 +818,17 @@ struct RawUnbounded {
     /// Concurrent-session hint → [`UnboundedConfig::concurrent_sessions`].
     #[serde(default)]
     ctable_size: usize,
+}
+
+/// True when `url` carries a path beyond `/` — i.e. requesting it would not just hit the origin root.
+/// Deliberately a string check rather than a URL parse: `core` has no URL crate, and the only question
+/// is whether anything follows the authority.
+fn has_url_path(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    match after_scheme.split_once('/') {
+        Some((_, path)) => !path.trim_start_matches('/').is_empty(),
+        None => false,
+    }
 }
 
 /// Join a URL base with a path the server delivered separately, tolerating either side supplying the
@@ -1362,6 +1384,57 @@ mod tests {
         };
         assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
         assert!(u.stun_urls.is_empty(), "none were offered");
+    }
+
+    /// A signaling URL with no path is a provable dead end — the deployed Freddie answers 404 at the
+    /// root — so the member is skipped rather than built to sit blank and stall the probe round.
+    #[test]
+    fn skips_unbounded_outbound_whose_signaling_url_has_no_path() {
+        let raw = r#"{
+          "features": { "unbounded": true },
+          "unbounded": { "discovery_srv": "https://freddie.iantem.io", "ctable_size": 5 },
+          "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub", "server": "", "server_port": 0,
+              "discovery_srv": "https://freddie.iantem.io" },
+            { "type": "samizdat", "tag": "sz-1", "server": "198.51.100.10", "server_port": 8443,
+              "public_key": "aa11bb22", "short_id": "0011" }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        assert_eq!(cfg.transport.servers.len(), 1, "only samizdat should survive");
+        assert!(matches!(
+            cfg.transport.servers[0].spec,
+            ServerSpec::Samizdat(_)
+        ));
+    }
+
+    /// ...but a base that already carries its own path is usable, and must NOT be skipped just
+    /// because no separate `discovery_endpoint` came with it.
+    #[test]
+    fn keeps_unbounded_outbound_whose_base_already_carries_the_path() {
+        let raw = r#"{
+          "features": { "unbounded": true },
+          "unbounded": { "discovery_srv": "https://freddie.iantem.io", "ctable_size": 5 },
+          "options": { "outbounds": [
+            { "type": "unbounded", "tag": "ub", "server": "", "server_port": 0,
+              "discovery_srv": "https://freddie.iantem.io/v1/signal" }
+          ]}
+        }"#;
+        let cfg = from_config_raw_json(raw).expect("config_raw adapts");
+        let ServerSpec::Unbounded(u) = &cfg.transport.servers[0].spec else {
+            panic!("expected an unbounded pool entry");
+        };
+        assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
+    }
+
+    #[test]
+    fn has_url_path_distinguishes_an_origin_from_a_path() {
+        assert!(!has_url_path("https://f.example"));
+        assert!(!has_url_path("https://f.example/"));
+        assert!(!has_url_path("https://f.example///"));
+        assert!(has_url_path("https://f.example/v1/signal"));
+        assert!(has_url_path("wss://f.example:443/ws"));
+        assert!(!has_url_path("wss://f.example:443"));
     }
 
     #[test]

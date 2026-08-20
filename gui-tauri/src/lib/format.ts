@@ -42,9 +42,15 @@ export function serverLabel(s: ServerInfo): string {
 export function protocolLabel(protocol?: string | null): string {
   const name = protocol?.trim() ?? "";
   if (!name) return "";
-  // Code points, not `charAt` — indexing by UTF-16 unit would split an astral first character.
-  const [first, ...rest] = [...name];
-  return first.toUpperCase() + rest.join("");
+  // Read ONE code point rather than spreading the whole string: this runs per row in the
+  // server-selection list, and `[...name]` allocated an array of every character just to reach the
+  // first. `codePointAt` still handles an astral first character correctly — `fromCodePoint` gives
+  // back its full length (2 UTF-16 units for astral, 1 otherwise), which is where the rest resumes,
+  // so nothing is ever split mid-surrogate.
+  const cp = name.codePointAt(0);
+  if (cp === undefined) return name;
+  const first = String.fromCodePoint(cp);
+  return first.toUpperCase() + name.slice(first.length);
 }
 
 /// Latency band for the pill color. `null`/unhealthy → "slow" (worst, so it never looks fast).
