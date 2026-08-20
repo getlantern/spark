@@ -38,9 +38,12 @@ describe("protocolLabel", () => {
     expect(protocolLabel("   ")).toBe("");
   });
 
-  it("does not split an astral first character", () => {
-    // Indexing by UTF-16 unit would cut this in half and emit a lone surrogate. Not a name we
-    // expect, but the failure mode is mojibake rather than something merely ugly.
+  it("upper-cases a cased astral first character rather than splitting it", () => {
+    // Deseret, which HAS an uppercase mapping — so this proves the transform applies to an astral
+    // char, not merely that we avoid cutting one in half. Indexing by UTF-16 unit would emit a lone
+    // surrogate here: mojibake, not just something ugly.
+    expect(protocolLabel("𐐨bfs")).toBe("𐐀bfs");
+    // And one with NO uppercase mapping passes through unchanged, rather than being mangled.
     expect(protocolLabel("𝟶bfs")).toBe("𝟶bfs");
   });
 });

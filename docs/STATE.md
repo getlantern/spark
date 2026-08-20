@@ -3689,7 +3689,9 @@ two restrictive NATs cannot pair. Donors come from the getlantern/unbounded web 
 ingredient on this host (ULA + Tailscale only, no v6 egress).
 
 **Open, and deliberately not guessed at.**
-1. **The probe stall afisk spotted:** latencies take ~10s to appear even though all are sub-1s.
+1. ~~**The probe stall afisk spotted**~~ — **FIXED in this same branch** (`select.rs` now publishes
+   each outcome as it lands). Kept for the diagnosis, which is the reusable part: latencies took ~10s
+   to appear even though all were sub-1s.
    `prober_loop` sets `per_probe = interval.min(10s)` and `flint_dial::probe_windowed` returns
    `Vec<(usize, T)>` — it collects *every* outcome before any are applied. So one member that never
    answers holds six finished sub-1s measurements hostage for its full 10s timeout. A real UX

@@ -610,7 +610,11 @@ fn map_outbound(ob: &RawOutbound, unbounded: &UnboundedConfig) -> Option<ServerS
             Some(ServerSpec::Unbounded(super::UnboundedConsumerConfig {
                 signaling_url: base,
                 stun_urls: ob.stun_servers.clone(),
-                concurrent_paths: unbounded.concurrent_sessions,
+                // Deliberately 0 = "let the consumer runtime choose". `ctable_size` is the *donor's*
+                // count of consumers to serve, and the outbound carries no consumer-side equivalent,
+                // so there is nothing here to honour — propagating the donor's number would just be
+                // a plausible-looking coincidence. `install.rs` reads 0 as unset.
+                concurrent_paths: 0,
             }))
         }
         _ => None, // a transport type this build has no spark equivalent for
@@ -1288,7 +1292,10 @@ mod tests {
         // Joined from the block's two halves, the way prod sends them — the member is useless
         // without the path, since the base alone requests `/`.
         assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
-        assert_eq!(u.concurrent_paths, 5);
+        assert_eq!(
+            u.concurrent_paths, 0,
+            "donor capacity is not a consumer path count"
+        );
         // `egress_addr` is the volunteer's field and must never leak into the consumer spec: the
         // consumer does not dial the egress, the volunteer does.
         assert!(
@@ -1333,7 +1340,8 @@ mod tests {
         // The outbound's bare origin, with the block's path joined on — the outbound carries no path
         // of its own, and the bare origin would request `/`.
         assert_eq!(u.signaling_url, "https://freddie.iantem.io/v1/signal");
-        assert_eq!(u.concurrent_paths, 5);
+        // 0 = unset: the donor's `ctable_size` is not a consumer path count, so nothing is carried.
+        assert_eq!(u.concurrent_paths, 0);
     }
 
     /// A server that sends only the block (no per-outbound `discovery_srv`) still yields a usable

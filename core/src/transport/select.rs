@@ -1247,14 +1247,21 @@ async fn prober_loop(
             };
             async move {
                 let outcome = probe(&transport, &callback, per_probe, &label).await;
-                // Short critical section, never held across an `.await`.
-                if publish_epoch.load(Ordering::Relaxed) == gen {
+                // Take `selection` FIRST, then check the epoch under it. Checking before locking is a
+                // TOCTOU: `reload` holds `selection` for its whole duration and bumps the epoch inside
+                // it, so a check made outside the lock can be invalidated before the write lands —
+                // and the write would then attribute this generation's latency to a *different*
+                // server at the same index, invisibly when both pools are the same length. Short
+                // critical section; never held across an `.await`.
+                {
                     let mut sel = publish_to.lock().unwrap_or_else(|e| e.into_inner());
-                    if sel.latest.len() != pool_len {
-                        sel.latest = vec![None; pool_len];
-                    }
-                    if let Some(slot) = sel.latest.get_mut(i) {
-                        *slot = Some(outcome);
+                    if publish_epoch.load(Ordering::Relaxed) == gen {
+                        if sel.latest.len() != pool_len {
+                            sel.latest = vec![None; pool_len];
+                        }
+                        if let Some(slot) = sel.latest.get_mut(i) {
+                            *slot = Some(outcome);
+                        }
                     }
                 }
                 outcome
@@ -1655,6 +1662,53 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// A reload drops the previous generation's measurements rather than showing them against the
+    /// members that replaced it. Both pools are the SAME LENGTH on purpose — the case no length check
+    /// can catch, and the one where a stale latency is silently plausible.
+    ///
+    /// **This does NOT test the epoch-check-inside-the-lock ordering**, though that ordering is what
+    /// makes the guard sound. The unsound window is only between reading the epoch and acquiring
+    /// `selection` — nanoseconds unless the lock is contended — so no timing-based test can open it;
+    /// this test passes under either ordering. Reaching it would need a test-only hook between the
+    /// two, which is not worth carrying in the prober for a window closed by taking the lock first.
+    /// The ordering rests on `reload` holding `selection` for its whole duration and bumping the epoch
+    /// inside it (see `reload`'s comment), not on this test.
+    #[tokio::test]
+    async fn a_reload_drops_the_previous_generations_measurements() {
+        // A hanging member keeps round 1 in flight for the whole test, so the reload is guaranteed to
+        // land while a probe is outstanding.
+        let st = SelectingTransport::new(
+            vec![member_serving_204(), member_that_hangs()],
+            std::time::Duration::from_secs(10),
+            8,
+            Arc::new(FakeT { ok: true }),
+            Arc::new(NoUdp),
+            test_stall_cfg(),
+        );
+
+        // Wait for the fast member to publish, so a measurement definitely exists to be invalidated.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while st.snapshot().first().and_then(|m| m.latency_ms).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fast member never published"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Same-length replacement pool, both members hanging so nothing new can be measured. Any
+        // latency visible afterwards therefore came from the OLD generation.
+        st.reload(vec![member_that_hangs(), member_that_hangs()]);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let snap = st.snapshot();
+        assert!(
+            snap.iter().all(|m| m.latency_ms.is_none()),
+            "a pre-reload measurement leaked into the new pool: {:?}",
+            snap.iter().map(|m| m.latency_ms).collect::<Vec<_>>()
+        );
     }
 
     fn member_serving_204() -> Member {

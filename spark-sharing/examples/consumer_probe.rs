@@ -120,6 +120,16 @@ fn main() {
             }
         }
         println!("\nstopping");
-        let _ = handle.stop().await;
+        // Reported, not discarded: this is a diagnostic tool, and a shutdown that fails to wind the
+        // session pool down is exactly the kind of thing it exists to make visible.
+        match handle.stop().await {
+            Ok(summary) => println!(
+                "stopped cleanly: {} attempts, {} completed paths, {} failed",
+                summary.attempts(),
+                summary.completed_paths(),
+                summary.failed_attempts()
+            ),
+            Err(e) => println!("!! shutdown did not complete cleanly: {e}"),
+        }
     });
 }
