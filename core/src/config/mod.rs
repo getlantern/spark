@@ -935,33 +935,60 @@ pub struct DnsTunnelConfig {
     pub use_system_resolvers: Option<bool>,
 }
 
-/// Unbounded consumer configuration — the censored side of the WebRTC peer-proxy, relaying through a
-/// volunteer to Lantern's egress.
+/// Unbounded consumer configuration — the censored side of the WebRTC peer-proxy.
+///
+/// # Which Unbounded this is, and where traffic exits
+///
+/// Lantern's Unbounded has **two modes with different exits**, and conflating them is easy because
+/// lantern-cloud groups them under one `IsNonGeographic` predicate:
+///
+/// - **WebRTC / broflake** (`route_source = "unbounded"`) — **what this spec is.** The censored client
+///   pairs with a volunteer over a WebRTC DataChannel; the volunteer relays to Lantern's **egress**,
+///   and *the egress* is what dials the destination. So the site sees an egress IP, never the peer's.
+///   Measured 2026-08-20: exit `129.80.60.210` (OCI Ashburn) while the WSS ingress
+///   `unbounded.iantem.io` resolves to Linode — ingress and exiting host are not the same machine.
+/// - **UPnP-mapped peer proxy** (`route_source = "peer"`) — a volunteer maps a port on their router
+///   and serves as a direct proxy, **exiting straight to the destination**. Not this spec; spark has
+///   no implementation of it at all.
+///
+/// The consequence for the UI is sharper than "approximate": because the exit is the egress and the
+/// peer is whoever answered, the member's advertised location (`vps_routes` synthetic regions) has
+/// **no relationship** to where traffic leaves. lantern-cloud's `track.go` says the nominal region is
+/// "meaningless to the client experience" — read that as *unrelated*, not *imprecise*.
+///
+/// # Where the parameters come from
+///
+/// The **outbound**, not the top-level `unbounded` block. The block is the *donor* widget config
+/// (lantern-cloud `unboundedWidgetConfig`: "Donors are uncensored volunteers — not assigned a
+/// consumer track"), and reading it for a consumer was a real bug — it discarded the 16 STUN servers
+/// the outbound carries, so the member built, never paired, and sat blank in server selection. The
+/// block is kept only as a fallback, and for the signaling *path* the outbound omits.
 ///
 /// **This spec is not built by `core`.** The implementation lives in `spark-sharing` and is installed
 /// at startup via [`crate::transport::external::set_unbounded_consumer`]; a build with nothing
 /// installed skips the member with a reason. See that module for why the dependency is inverted.
-///
-/// Unlike every other spec, the parameters do not come from the outbound that carries them. A
-/// `type: "unbounded"` outbound has no dialable address at all — its `server`/`server_port` are
-/// empty/zero and its `egress_addr` is the *volunteer's* field, since the volunteer dials the egress
-/// and the consumer never does. What the consumer needs is the signaling endpoint, which the config
-/// delivers once in the top-level `unbounded` block. So the outbound's presence is the *assignment*
-/// and the block carries the *parameters*.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnboundedConsumerConfig {
-    /// Freddie signaling endpoint (`unbounded.discovery_srv`), an `https://…` URL. Required: with no
-    /// signaling there is no way to find a volunteer, so an empty value is not a usable member.
+    /// Freddie signaling endpoint, an `https://…` URL **including its path** — the outbound's own
+    /// `discovery_srv` (falling back to the block's) joined with the block's `discovery_endpoint`.
+    /// The path is not decoration: the base is a bare origin, and the deployed Freddie answers 404
+    /// at `/`. A member without a path is skipped rather than built (see `lantern.rs`).
     pub signaling_url: String,
-    /// ICE STUN URLs for candidate gathering. Empty is valid and is what the live config yields
-    /// today — it carries no STUN servers, and ICE still gathers host and server-reflexive
-    /// candidates without an explicit one. Kept on the surface so adding them later is config-only.
+    /// ICE STUN URLs, from the **outbound's** `stun_servers`. Prod sends 16.
+    ///
+    /// Empty is accepted but is close to useless in practice: with no STUN, ICE gathers host
+    /// candidates only and cannot traverse most NATs, which is exactly the bug that made this member
+    /// build and never pair. Measured against the live mesh, an offer that reaches a donor still
+    /// fails ICE outright when candidates are thin — the error is `PeerConnectionEnded`, not a
+    /// timeout, so raising deadlines does not help.
     #[serde(default)]
     pub stun_urls: Vec<String>,
-    /// How many peer paths to advertise concurrently (`unbounded.ctable_size`). Zero means "let the
-    /// consumer runtime pick its floor" rather than "no paths" — a zero from the wire must not
-    /// produce a member that can never carry a flow.
+    /// How many peer paths to advertise concurrently. **Currently always 0 = "runtime chooses".**
+    ///
+    /// Deliberately not wired to `unbounded.ctable_size`: that is the *donor's* count of consumers to
+    /// serve, and the outbound carries no consumer-side equivalent, so there is nothing here to
+    /// honour. Kept on the surface for when the wire grows one.
     #[serde(default)]
     pub concurrent_paths: usize,
 }

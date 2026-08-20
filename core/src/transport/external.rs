@@ -1,7 +1,15 @@
 //! Registration seam for a transport `core` cannot construct itself.
 //!
 //! Today that is exactly one thing: the **Unbounded consumer** — the censored side of the WebRTC
-//! peer-proxy, which relays through a volunteer to Lantern's egress.
+//! peer-proxy. The client pairs with a volunteer over a WebRTC DataChannel, the volunteer relays to
+//! Lantern's **egress**, and the egress dials the destination — so the peer lends unblocked
+//! reachability, not an exit IP.
+//!
+//! Not to be confused with Lantern's *other* Unbounded mode, the UPnP-mapped peer proxy
+//! (`route_source = "peer"`), where a volunteer maps a router port and exits **straight to the
+//! destination**. Spark has no implementation of that one. Both modes share the `unbounded` name and
+//! lantern-cloud's `IsNonGeographic` predicate, which makes them easy to conflate; they differ in
+//! where traffic leaves. See [`crate::config::UnboundedConsumerConfig`].
 //!
 //! It needs a seam because of a dependency cycle that cannot be broken any other way. The consumer
 //! is a *data-path* transport, so by the process model (CLAUDE.md §0) it must run in whichever
