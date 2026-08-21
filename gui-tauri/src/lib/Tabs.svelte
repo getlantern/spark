@@ -44,7 +44,13 @@
   >
     <Icon name={vpnSelected ? "vpnKeyFill" : "vpnKey"} size={22} />
     <span class="label">{$_("tab_vpn")}</span>
-    <Indicator on={vpnOn} />
+    <!-- Labelled, unlike the one in the VPN status panel. There the adjacent text already says
+         "Connected"/"Disconnected"; here the tab text names the DESTINATION and nothing carries the
+         state, and the strip is in fact the only place the OTHER tab's state is shown at all. -->
+    <Indicator
+      on={vpnOn}
+      label={$_(vpnOn ? "indicator_on" : "indicator_off", { values: { feature: $_("tab_vpn") } })}
+    />
   </button>
 
   <button
@@ -55,7 +61,12 @@
   >
     <Icon name={unboundedSelected ? "handshakeFill" : "handshake"} size={22} />
     <span class="label">{$_("tab_unbounded")}</span>
-    <Indicator on={unboundedOn} />
+    <Indicator
+      on={unboundedOn}
+      label={$_(unboundedOn ? "indicator_on" : "indicator_off", {
+        values: { feature: $_("tab_unbounded") },
+      })}
+    />
   </button>
 </nav>
 

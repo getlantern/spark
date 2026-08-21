@@ -15,6 +15,7 @@
   import Icon from "$lib/Icon.svelte";
   import Note from "$lib/Note.svelte";
   import HeartsBurst from "$lib/HeartsBurst.svelte";
+  import { arrivals, newArrivalTracker } from "$lib/unbounded";
   import { vpnState } from "$lib/vpn_state.svelte";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
@@ -51,30 +52,31 @@
   // Arrival detection, driving the hearts burst. A monotonic counter rather than a boolean so two
   // arrivals in quick succession produce two bursts instead of one; `seenPeers` is what makes it an
   // ARRIVAL rather than "the list changed", so a peer leaving does not celebrate.
-  let seenPeers = new Set<string>();
+  const tracker = newArrivalTracker();
+  /**
+   * Set once `status` holds a real snapshot rather than the placeholder above. Both writers set it:
+   * the poll and the event stream, either of which can be first.
+   */
+  let statusLoaded = false;
   let burstTrigger = $state(0);
   let burstCountry = $state<string | null>(null);
   $effect(() => {
-    // A fresh session id we have not celebrated yet. Reading `peers` here is what subscribes this
-    // effect to it.
-    const arrivals = peers.filter((p) => !seenPeers.has(p.sessionId));
-    if (arrivals.length === 0) {
-      // Forget peers that have gone, so a reconnecting session can burst again later. Done here
-      // rather than every tick so the common no-change case touches nothing.
-      const live = new Set(peers.map((p) => p.sessionId));
-      for (const id of seenPeers) if (!live.has(id)) seenPeers.delete(id);
-      return;
-    }
-    for (const p of arrivals) seenPeers.add(p.sessionId);
+    // Reading `peers` here is what subscribes this effect to it. The decision itself lives in
+    // `arrivals` — see there for why it is a pure function and not three flags inlined here.
+    const fresh = arrivals(tracker, peers, statusLoaded);
+    if (fresh.length === 0) return;
     // The newest arrival names the pill. Peers without geo still burst — we know someone arrived,
     // we just cannot say where from, and silence would under-report the thing the screen exists
     // to show.
-    burstCountry = arrivals[arrivals.length - 1].geo?.countryCode ?? null;
+    burstCountry = fresh[fresh.length - 1].geo?.countryCode ?? null;
     burstTrigger += 1;
   });
 
   async function refresh() {
-    try { status = await backend.unboundedStatus(); } catch { /* keep last-known */ }
+    try {
+      status = await backend.unboundedStatus();
+      statusLoaded = true;
+    } catch { /* keep last-known */ }
     // Switching tabs doesn't disconnect the VPN — keep the shared dot state live so the
     // tab bar's VPN dot stays green here while the tunnel is connected.
     try { vpnState.connected = (await backend.status()).state === "connected"; } catch { /* keep last-known */ }
@@ -145,10 +147,10 @@
     // shape on every peer/enable change. Tauri-only (`listen` rejects in a plain browser), matching
     // the home screen's guard.
     if (isTauri()) {
-      unlistenUnbounded = listen<UnboundedStatus>(
-        "spark://unbounded",
-        (e) => (status = e.payload),
-      );
+      unlistenUnbounded = listen<UnboundedStatus>("spark://unbounded", (e) => {
+        status = e.payload;
+        statusLoaded = true;
+      });
     }
   });
   onDestroy(() => {
