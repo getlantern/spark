@@ -56,7 +56,19 @@ export interface InstalledApp {
 
 export interface UnboundedGeo { countryCode: string; lat: number; lon: number; }
 export interface UnboundedPeer { sessionId: string; geo: UnboundedGeo | null; }
-export interface UnboundedStatus { enabled: boolean; helpingNow: number; totalHelped: number; peers: UnboundedPeer[]; }
+export interface UnboundedStatus {
+  enabled: boolean;
+  helpingNow: number;
+  totalHelped: number;
+  peers: UnboundedPeer[];
+  /**
+   * Where WE are — the far end of every arc on the globe.
+   *
+   * `null` until the self lookup lands (and while sharing is off, when it is never asked for), which
+   * the globe reads as "don't draw us yet" rather than pinning the volunteer at (0, 0).
+   */
+  origin: UnboundedGeo | null;
+}
 export interface UnboundedSettings { autoEnable: boolean; hidden: boolean; welcomeSeen: boolean; }
 
 export interface SparkBackend {
@@ -126,7 +138,7 @@ const mockState: {
   hidden: boolean;
   welcomeSeen: boolean;
   diagnosticsEnabled: boolean;
-} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [] }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false, diagnosticsEnabled: true };
+} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [], origin: null }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false, diagnosticsEnabled: true };
 
 export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
@@ -216,8 +228,13 @@ export class MockBackend implements SparkBackend {
     { countryCode: "MM", lat: 16.8, lon: 96.2 },
   ];
 
+  /** Our own position in the mock. Deliberately far from every peer above: a long chord is the
+   *  harder case for the globe's arc geometry, so dev should show it rather than hide it. */
+  private static readonly ownGeo: UnboundedGeo = { countryCode: "US", lat: 39.74, lon: -104.98 };
+
   async unboundedStart(): Promise<void> {
     mockState.unbounded.enabled = true;
+    mockState.unbounded.origin = MockBackend.ownGeo;
     // Only drive the simulated peer stream in a browser context; unit tests run under node
     // (no `window`) and just assert the enabled flag flips synchronously above.
     if (typeof window === "undefined" || mockState.unboundedTimer) return;
@@ -236,6 +253,7 @@ export class MockBackend implements SparkBackend {
   }
 
   async unboundedStop(): Promise<void> {
+    mockState.unbounded.origin = null;
     if (mockState.unboundedTimer) clearInterval(mockState.unboundedTimer);
     mockState.unboundedTimer = null;
     mockState.unbounded.enabled = false;

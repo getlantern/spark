@@ -13,6 +13,9 @@ describe("MockBackend unbounded", () => {
       helpingNow: 0,
       totalHelped: 0,
       peers: [],
+      // No self lookup while sharing is off — we only ask the geo service where we are because the
+      // user turned the feature on.
+      origin: null,
     });
   });
 

@@ -28,31 +28,30 @@
   // perpendicular to its own chord instead, which is well-conditioned for every pair and gives the
   // shape the recording actually shows. See `ARCH_RISE`.
   import { onMount, onDestroy } from "svelte";
-  import type { UnboundedPeer } from "$lib/spark_backend";
+  import type { UnboundedGeo, UnboundedPeer } from "$lib/spark_backend";
 
-  let { peers = [] }: { peers: UnboundedPeer[] } = $props();
+  let {
+    peers = [],
+    origin = null,
+  }: {
+    peers: UnboundedPeer[];
+    /**
+     * Where WE are. `null` until the self lookup lands, and while sharing is off.
+     *
+     * Arcs run peer -> here, which is what the reference does and what makes the screen legible:
+     * without it there is nothing on the globe representing the volunteer, so the camera parks on
+     * whoever they happen to be helping and the map reads as though it were showing THEM in a
+     * country they have never been to.
+     */
+    origin: UnboundedGeo | null;
+  } = $props();
 
   /**
    * Where the camera looks when there is nothing to frame. Neutral mid-Atlantic.
    */
   const HOME = { lat: 20, lng: 0 };
-  /**
-   * Angular distance between an arch's two feet, along the peer's own parallel.
-   *
-   * Each arch is anchored at ITS OWN PEER: one foot on the peer, the other the same latitude and
-   * this many degrees of longitude away. Both feet are therefore real points on the sphere — the
-   * green dots still occlude correctly behind the limb — and, being at the same latitude, they land
-   * at nearly the same height on screen, which is what makes the arch stand UPRIGHT and narrow
-   * instead of leaning.
-   *
-   * Running each arc to a single fixed origin instead is what the reference does, but it cannot look
-   * like the reference here: its origin is the volunteer's real location, a moderate hop from the
-   * peers it serves, whereas a fixed point in the Atlantic is a third of the globe from most peers.
-   * Those long chords draw wide leaning ribbons across the face rather than the recording's arches.
-   * 23 degrees is the separation measured in the recording: its arches share one foot and fan out to
-   * the peers, with ~41px between adjacent feet on a ~200px globe, i.e. about 0.41 radii.
-   */
-  const ARCH_SPAN_DEG = 23;
+  /** Colour of the dot marking US, distinct from a peer's. */
+  const OWN_DOT = "#00bdd6";
   const MAX_ARCS = 50;
   /**
    * How many arcs are DRAWN, regardless of how many peers there are.
@@ -97,28 +96,30 @@
    */
   const GLOBE_ALTITUDE = 2.05;
 
-  /** One connection, as the two feet of an arch. */
+  /** One connection: a peer at one end, us at the other. */
   interface Arc {
     id: string;
     lat: number;
     lng: number;
-    /** The far foot: same latitude, `ARCH_SPAN_DEG` away, leaning east or west by index. */
-    endLng: number;
     color: string;
   }
-  /** One arc, projected to screen space and ready to draw, with its two feet. */
+  /** One arc, projected to screen space and ready to draw. */
   interface ArcPath {
     id: string;
     d: string;
     color: string;
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
+  }
+  /** A dot on the sphere, already projected. */
+  interface Dot {
+    id: string;
+    x: number;
+    y: number;
   }
 
   let el = $state<HTMLDivElement>();
   let paths = $state<ArcPath[]>([]);
+  let peerDots = $state<Dot[]>([]);
+  let ownDot = $state<Dot | null>(null);
   // globe.gl's instance is untyped here to avoid pulling three's types into this module's surface.
   let globe: any = null;
   let arcs: Arc[] = [];
@@ -171,6 +172,8 @@
   function layoutArcs() {
     if (!globe || !el || arcs.length === 0) {
       paths = [];
+      peerDots = [];
+      ownDot = null;
       return;
     }
     const pov = globe.pointOfView();
@@ -184,20 +187,29 @@
     const R = Math.hypot(limb.x - c.x, limb.y - c.y);
     if (!(R > 0)) {
       paths = [];
+      peerDots = [];
+      ownDot = null;
       return;
     }
+    // Us: one end of every arc, so projected once. The self lookup is a network round trip that can
+    // be slow or fail, and when it has not landed there is nothing to connect a peer TO.
+    const ownVisible = origin != null && angleDeg(pov.lat, pov.lng, origin.lat, origin.lon) < FOOT_MAX_DEG;
+    const far = origin ? globe.getScreenCoords(origin.lat, origin.lon) : null;
+    ownDot = ownVisible && far ? { id: "own", x: far.x, y: far.y } : null;
+
+    // Peer dots are computed INDEPENDENTLY of the arcs, so a failed or pending self lookup leaves the
+    // people being helped on the map instead of a bare sphere. Losing the arcs to a geo failure is
+    // bad enough; losing the peers as well would make the screen look like nothing was happening.
+    const dots: Dot[] = [];
     const out: ArcPath[] = [];
     for (const a of arcs) {
-      // Round the back, or so close to the limb that the arch would project as a flat spike. BOTH
-      // feet have to pass: the far foot is `ARCH_SPAN_DEG` further round, so testing only the peer
-      // let an arch whose far foot had already crossed the limb draw as a hairpin off the edge.
-      if (
-        angleDeg(pov.lat, pov.lng, a.lat, a.lng) >= FOOT_MAX_DEG ||
-        angleDeg(pov.lat, pov.lng, a.lat, a.endLng) >= FOOT_MAX_DEG
-      )
-        continue;
+      // Round the back, or so close to the limb that a foot projects onto the disc while facing away.
+      if (angleDeg(pov.lat, pov.lng, a.lat, a.lng) >= FOOT_MAX_DEG) continue;
       const s = globe.getScreenCoords(a.lat, a.lng);
-      const far = globe.getScreenCoords(a.lat, a.endLng);
+      dots.push({ id: a.id, x: s.x, y: s.y });
+      // Both feet have to be on the face — an arc with one foot past the limb draws as a hairpin off
+      // the edge — so no origin, or an origin round the back, means dots without arcs.
+      if (!far || !ownVisible) continue;
       // Raise the arch PERPENDICULAR TO ITS OWN CHORD, not radially outward from the disc's centre.
       //
       // Radially outward is what the reference's formula computes, and it is wrong at our globe's
@@ -250,13 +262,10 @@
         id: a.id,
         color: a.color,
         d: `M ${s.x.toFixed(1)} ${s.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${far.x.toFixed(1)} ${far.y.toFixed(1)}`,
-        x1: s.x,
-        y1: s.y,
-        x2: far.x,
-        y2: far.y,
       });
     }
     paths = out;
+    peerDots = dots;
   }
 
   /**
@@ -291,8 +300,6 @@
         id: p.sessionId,
         lat: p.geo.lat,
         lng: p.geo.lon,
-        // Alternate the lean so two peers near each other do not draw the same arch twice.
-        endLng: p.geo.lon + (next.length % 2 === 0 ? ARCH_SPAN_DEG : -ARCH_SPAN_DEG),
         color: ARC_COLORS[next.length % ARC_COLORS.length],
       });
     }
@@ -310,24 +317,55 @@
    */
   function parkCamera(animateMs: number) {
     if (!globe || arcs.length === 0) return;
-    const sig = arcs.map((a) => a.id).join("|");
+    // The origin is part of the signature: it arrives AFTER the first peers (a network round trip),
+    // and the camera has to re-frame when it does or our end stays off the visible face.
+    const sig = [...arcs.map((a) => a.id), origin ? `${origin.lat},${origin.lon}` : "-"].join("|");
     if (sig === parkedOn) return;
     parkedOn = sig;
-    let x = 0;
-    let y = 0;
-    let lat = 0;
+    // Frame the peers AND us. Every arc has one foot on each, so aiming at the peers alone pushes our
+    // end — and therefore the end of every arc — past the cull, and the globe goes blank.
+    //
+    // Averaged as 3D UNIT VECTORS, not by averaging latitudes and longitudes separately. The
+    // separate form is what was here, and it fails exactly in this case: for points spread across
+    // half the globe (Denver plus peers from Turkey to China) a circular mean of longitudes can land
+    // nearly anywhere, and it put the aim far enough from our end to cull every arc. A vector mean is
+    // the true spherical centre.
+    //
+    // Our end is weighted by the number of peers, because it is one foot of every single arc while
+    // each peer is one foot of one. Unweighted, a cluster of peers drags the aim onto itself and
+    // leaves our end near the limb — the same blank globe, just less often.
+    const p = Math.PI / 180;
+    const unit = (lat: number, lng: number) => [
+      Math.cos(lat * p) * Math.cos(lng * p),
+      Math.cos(lat * p) * Math.sin(lng * p),
+      Math.sin(lat * p),
+    ];
+    let vx = 0;
+    let vy = 0;
+    let vz = 0;
     for (const a of arcs) {
-      // Aim at the middle of each arch, so both of its feet sit on the visible face.
-      const mLng = (a.lng + a.endLng) / 2;
-      lat += a.lat;
-      x += Math.cos((mLng * Math.PI) / 180);
-      y += Math.sin((mLng * Math.PI) / 180);
+      const [ux, uy, uz] = unit(a.lat, a.lng);
+      vx += ux;
+      vy += uy;
+      vz += uz;
     }
+    if (origin) {
+      const [ux, uy, uz] = unit(origin.lat, origin.lon);
+      vx += ux * arcs.length;
+      vy += uy * arcs.length;
+      vz += uz * arcs.length;
+    }
+    const norm = Math.hypot(vx, vy, vz);
+    // Antipodal anchors can cancel to nothing, leaving no meaningful centre. Keep the current aim
+    // rather than snapping to an arbitrary one.
+    if (norm < 1e-6) return;
+    const aimLat = Math.asin(Math.max(-1, Math.min(1, vz / norm))) / p;
+    const aimLng = (Math.atan2(vy, vx) * 180) / Math.PI;
     globe.pointOfView(
       {
         // Clamped so a peer set centred near a pole does not tip the camera into a polar projection.
-        lat: Math.max(-55, Math.min(55, lat / arcs.length)),
-        lng: (Math.atan2(y, x) * 180) / Math.PI,
+        lat: Math.max(-55, Math.min(55, aimLat)),
+        lng: aimLng,
         altitude: GLOBE_ALTITUDE,
       },
       animateMs,
@@ -520,14 +558,22 @@
   <svg class="arcs" aria-hidden="true">
     {#each paths as p (p.id)}
       <path d={p.d} stroke={p.color} stroke-width={ARC_WIDTH} fill="none" stroke-linecap="round" />
-      <!-- The feet, drawn here rather than through globe.gl's points layer. That layer renders a
-           point as a 3D cylinder, and at the size the design wants (a ~10px dot) its facets show as
-           a green blob with jagged edges. A circle in the overlay is exactly round, lands exactly on
-           the foot, and needs no depth handling — the arch is culled well before its feet reach the
-           limb, so there is nothing for the sphere to occlude. -->
-      <circle cx={p.x1} cy={p.y1} r={DOT_R} fill={PEER_DOT} />
-      <circle cx={p.x2} cy={p.y2} r={DOT_R} fill={PEER_DOT} />
     {/each}
+    <!-- The dots are drawn here rather than through globe.gl's points layer. That layer renders a
+         point as a 3D cylinder, and at the size the design wants (a ~10px dot) its facets show as a
+         green blob with jagged edges. A circle in the overlay is exactly round, lands exactly on the
+         foot, and needs no depth handling — a foot is culled well before it reaches the limb, so
+         there is nothing for the sphere to occlude. -->
+    {#each peerDots as d (d.id)}
+      <circle cx={d.x} cy={d.y} r={DOT_R} fill={PEER_DOT} />
+    {/each}
+    {#if ownDot}
+      <!-- Us, drawn last so it sits on top where several arcs converge, and a size up in the brand
+           cyan rather than the peers' green so the two ends of a connection are never confused. The
+           reference draws its own end almost transparent; ours is solid, because "where am I on this
+           map" is the question this screen kept failing to answer. -->
+      <circle cx={ownDot.x} cy={ownDot.y} r={DOT_R + 1} fill={OWN_DOT} />
+    {/if}
   </svg>
 </div>
 

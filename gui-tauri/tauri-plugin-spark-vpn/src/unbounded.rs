@@ -32,6 +32,12 @@ pub(crate) struct UnboundedState {
     handle: Mutex<Option<SharingHandle>>,
     loop_handle: Mutex<Option<JoinHandle<()>>>,
     latest_status: Mutex<Option<SharingStatus>>,
+    /// Where WE are — the far end of every arc on the globe.
+    ///
+    /// Resolved once per sharing session, and ONLY while sharing: asking the geo service where we
+    /// are is an outbound request that reveals our address to it, so it happens because the user
+    /// turned the feature on, never merely because they opened the tab.
+    origin: Mutex<Option<spark_sharing::Geo>>,
     /// Serializes `unbounded_start` AND `unbounded_stop`: held (async-safe) across each so two
     /// concurrent callers can't interleave. A `tokio` mutex (not `std`) because it is intentionally
     /// held across `.await` points. Stop must take it too: it mutates the same handles and the same
@@ -143,6 +149,8 @@ struct UnboundedSnapshot {
     helping_now: usize,
     total_helped: u64,
     peers: Vec<PeerPayload>,
+    /// Our own location, once resolved. `None` until then — the globe simply omits us.
+    origin: Option<GeoPayload>,
 }
 
 #[derive(Serialize, Clone)]
@@ -161,7 +169,12 @@ struct GeoPayload {
 }
 
 /// Build a snapshot payload from a [`SharingStatus`] and the persisted total.
-fn snapshot_payload(enabled: bool, status: &SharingStatus, total: u64) -> UnboundedSnapshot {
+fn snapshot_payload(
+    enabled: bool,
+    status: &SharingStatus,
+    total: u64,
+    origin: Option<&spark_sharing::Geo>,
+) -> UnboundedSnapshot {
     let peers = status
         .peers
         .iter()
@@ -179,6 +192,11 @@ fn snapshot_payload(enabled: bool, status: &SharingStatus, total: u64) -> Unboun
         helping_now: status.helping_now,
         total_helped: total,
         peers,
+        origin: origin.map(|g| GeoPayload {
+            country_code: g.country_code.clone(),
+            lat: g.lat,
+            lon: g.lon,
+        }),
     }
 }
 
@@ -190,9 +208,12 @@ fn emit_snapshot<R: Runtime>(
     status: &SharingStatus,
     total: u64,
 ) {
+    let origin = app
+        .try_state::<UnboundedState>()
+        .and_then(|s| lock_recover(&s.origin).clone());
     let _ = app.emit(
         "spark://unbounded",
-        snapshot_payload(enabled, status, total),
+        snapshot_payload(enabled, status, total, origin.as_ref()),
     );
     #[cfg(desktop)]
     crate::tray::refresh_unbounded_label(app, enabled, status.helping_now);
@@ -310,6 +331,21 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         // unbounded_diag::apply_actions) — no path can error out of or stall the loop.
         let mut pool_diag = unbounded_diag::PoolDiag::default();
         let mut last_snapshot = std::time::Instant::now();
+        // Place ourselves on the map. In its OWN task, because this is a network round trip and the
+        // loop below is what keeps peer accounting, the tray label and the UI moving — a slow or dead
+        // geo host must not delay the first peer join by its timeout. Nothing re-emits when it lands:
+        // the Unbounded screen polls `unbounded_status` every 2s, so the globe picks it up there,
+        // which costs less than duplicating the persisted-total bookkeeping out here.
+        {
+            let origin_app = loop_app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(geo) = GeoResolver::new().resolve_own().await {
+                    if let Some(st) = origin_app.try_state::<UnboundedState>() {
+                        *lock_recover(&st.origin) = Some(geo);
+                    }
+                }
+            });
+        }
         while let Some(ev) = rx.recv().await {
             // Copy the diag-relevant fields out before the aggregator consumes the event.
             let view = unbounded_diag::EventView::capture(&ev);
@@ -373,6 +409,9 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         }
         *lock_recover(&ustate.handle) = None;
         *lock_recover(&ustate.latest_status) = None;
+        // Dropped with the session: a later start re-resolves, so moving networks between sessions
+        // cannot leave us pinned where we used to be.
+        *lock_recover(&ustate.origin) = None;
         // Deliberately do NOT clear the persisted `unbounded_enabled` here. That flag carries the
         // user's opt-in, so writing `false` on a pool crash silently un-enrolled a volunteer for
         // good — one transient supervisor panic and the only way back was re-toggling. Reporting
@@ -392,6 +431,7 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
             loop_handle.abort();
         }
         *lock_recover(&state.latest_status) = None;
+        *lock_recover(&state.origin) = None;
         return Err(e);
     }
 
@@ -444,6 +484,7 @@ pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Resu
         q.retire_all_ctxs();
     }
     *lock_recover(&state.latest_status) = None;
+    *lock_recover(&state.origin) = None;
 
     // Emit the stopped snapshot BEFORE persisting the flag: the pool is already torn down, so the
     // UI/tray must reflect "off" even if the disk write fails (the error still propagates after).
@@ -475,8 +516,12 @@ pub(crate) async fn unbounded_status<R: Runtime>(
         empty_status()
     };
 
+    let origin = lock_recover(&state.origin).clone();
     Ok(serde_json::to_value(snapshot_payload(
-        running, &status, total,
+        running,
+        &status,
+        total,
+        origin.as_ref(),
     ))?)
 }
 
@@ -625,7 +670,13 @@ mod tests {
                 }),
             }],
         };
-        let value = serde_json::to_value(snapshot_payload(true, &status, 219)).unwrap();
+        let origin = spark_sharing::Geo {
+            country_code: "US".into(),
+            lat: 39.74,
+            lon: -104.98,
+        };
+        let value =
+            serde_json::to_value(snapshot_payload(true, &status, 219, Some(&origin))).unwrap();
         assert_eq!(value["enabled"], serde_json::json!(true));
         assert_eq!(value["helpingNow"], serde_json::json!(1));
         assert_eq!(value["totalHelped"], serde_json::json!(219));
@@ -634,6 +685,10 @@ mod tests {
             value["peers"][0]["geo"]["countryCode"],
             serde_json::json!("IR")
         );
+        // The volunteer's own position, which is the far end of every arc on the globe.
+        assert_eq!(value["origin"]["countryCode"], serde_json::json!("US"));
+        assert_eq!(value["origin"]["lat"], serde_json::json!(39.74));
+        assert_eq!(value["origin"]["lon"], serde_json::json!(-104.98));
     }
 
     #[test]
@@ -645,7 +700,10 @@ mod tests {
                 geo: None,
             }],
         };
-        let value = serde_json::to_value(snapshot_payload(true, &status, 0)).unwrap();
+        let value = serde_json::to_value(snapshot_payload(true, &status, 0, None)).unwrap();
         assert!(value["peers"][0]["geo"].is_null());
+        // Null until the self lookup lands, which the globe reads as "do not draw us yet" rather
+        // than pinning the volunteer at (0, 0) in the Gulf of Guinea.
+        assert!(value["origin"].is_null());
     }
 }
