@@ -197,7 +197,7 @@
       )
         continue;
       const s = globe.getScreenCoords(a.lat, a.lng);
-      const home = globe.getScreenCoords(a.lat, a.endLng);
+      const far = globe.getScreenCoords(a.lat, a.endLng);
       // Raise the arch PERPENDICULAR TO ITS OWN CHORD, not radially outward from the disc's centre.
       //
       // Radially outward is what the reference's formula computes, and it is wrong at our globe's
@@ -206,8 +206,8 @@
       // limb and returns — a lasso across the globe's face rather than an arch over it. Perpendicular
       // to the chord is well-conditioned for every pair and gives the recording's shape: a tall
       // narrow arch standing on two feet.
-      const chordX = home.x - s.x;
-      const chordY = home.y - s.y;
+      const chordX = far.x - s.x;
+      const chordY = far.y - s.y;
       const chord = Math.hypot(chordX, chordY) || 1;
       // Of the two perpendiculars, take the one pointing UP the screen. An arch that hangs below its
       // feet reads as a swag, and the design has no downward arcs.
@@ -217,8 +217,13 @@
         nx = -nx;
         ny = -ny;
       }
-      const midX = (s.x + home.x) / 2;
-      const midY = (s.y + home.y) / 2;
+      // A chord that is VERTICAL on screen has no upward perpendicular — `ny` collapses to 0 and the
+      // clamp below would divide by it, sending the control point to infinity. Reachable for a peer
+      // close to a pole, where both feet project to nearly the same x. There is no arch to draw
+      // across a vertical chord, so skip it.
+      if (!(Math.abs(ny) > 1e-3)) continue;
+      const midX = (s.x + far.x) / 2;
+      const midY = (s.y + far.y) / 2;
       // Height off the globe's RADIUS, not off the chord. The recording's arches crest about 1.1
       // radii above the disc's centre whether their feet are close together or far apart, so a
       // chord-proportional rise gets one case right and the other badly wrong: at our HOME-to-peer
@@ -244,11 +249,11 @@
       out.push({
         id: a.id,
         color: a.color,
-        d: `M ${s.x.toFixed(1)} ${s.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${home.x.toFixed(1)} ${home.y.toFixed(1)}`,
+        d: `M ${s.x.toFixed(1)} ${s.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${far.x.toFixed(1)} ${far.y.toFixed(1)}`,
         x1: s.x,
         y1: s.y,
-        x2: home.x,
-        y2: home.y,
+        x2: far.x,
+        y2: far.y,
       });
     }
     paths = out;
