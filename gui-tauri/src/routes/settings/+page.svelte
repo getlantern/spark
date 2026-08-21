@@ -6,6 +6,7 @@
   import { _, locale } from "$lib/i18n";
   import { SUPPORTED } from "$lib/i18n/locales";
   import { theme } from "$lib/theme";
+  import Icon from "$lib/Icon.svelte";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
@@ -98,7 +99,10 @@
       {#if showUnbounded}
         <div class="divider"></div>
         <button class="row nav" onclick={() => goto("/settings/unbounded")}>
-          <span class="ic">{@render bridge()}</span>
+          <!-- Same glyph as the Unbounded tab, per #3844 ("should be the same icon as shown on the
+               Unbounded tab on the main screen"). Using the shared component is what keeps that true
+               if the tab's icon ever changes. -->
+          <span class="ic"><Icon name="handshake" size={22} /></span>
           <div class="meta"><div class="name">{$_("unbounded_title")}</div></div>
           <span class="chev">{@render chevron()}</span>
         </button>
@@ -137,9 +141,6 @@
 {/snippet}
 {#snippet shield()}
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg>
-{/snippet}
-{#snippet bridge()}
-  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9v9"/><path d="M22 9v9"/><path d="M2 12a6 6 0 0 1 6-6h8a6 6 0 0 1 6 6"/><path d="M7 12v6"/><path d="M12 10v8"/><path d="M17 12v6"/></svg>
 {/snippet}
 {#snippet pulse()}
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>

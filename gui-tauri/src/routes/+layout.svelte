@@ -128,6 +128,21 @@
     --switch-off: #c8ccce;    /* small toggle track, off (split-tunnel screen) */
     --hover: rgba(0, 0, 0, 0.02);   /* row/tile hover tint */
     --pill-bg: rgba(0, 0, 0, 0.06); /* count-pill background */
+    /* Unbounded / tab bar semantics, taken from Figma variables rather than eyeballed. The values
+       below were read out of the design file (`Lantern-VPN` node 4734:5498), because the equivalent
+       code in Lantern had picked the *adjacent* palette entries — blue2/blue3 instead of blue1/blue2
+       — and the mistake is invisible without the source numbers (getlantern/engineering#3844). */
+    --tabbar-bg: #f0fdff;            /* action/tabbar/tabbar-bg — selected pill */
+    --tabbar-border: #d6f6fa;        /* action/tabbar/tabbar-border */
+    --tabbar-selected-text: #012d2d; /* action/tabbar/tabbar-selected-text */
+    --tabbar-text: #848484;          /* action/tabbar/tabbar-disabled-text — unselected */
+    --link: #004d57;                 /* text/link — stat values, checked checkbox */
+    --toggle-on: #3da360;            /* action/toggle/toggle-active-bg — GREEN, not the cyan brand */
+    /* Indicator lights are two-tone: a filled dot inside a lighter ring (see Indicator.svelte). */
+    --dot-neutral-bg: #a2a2a2;       /* status/neutral-bg-dot */
+    --dot-neutral-border: #dedfdf;   /* status/neutral-border-dot */
+    --dot-success-bg: #0a8638;       /* status/success-bg-dot */
+    --dot-success-border: #a2ddaf;   /* status/success-border-dot */
     --font: "Urbanist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   /* Dark palette applies when the resolved theme is dark (data-theme is set by +layout.svelte and
@@ -155,6 +170,21 @@
     /* Light-on-dark tints — a black overlay is invisible on the dark surface. */
     --hover: rgba(255, 255, 255, 0.04);
     --pill-bg: rgba(255, 255, 255, 0.08);
+    /* Dark counterparts. The design file is light-only, so these are derived rather than read: the
+       tab-bar pill becomes a low-alpha wash of the same cyan family (a literal #f0fdff pill would
+       glare on a dark surface), and the selected text flips to the light foreground. Deriving is
+       stated here so nobody later "corrects" them back to the light hexes — which is how the tab bar
+       ended up the wrong colour in dark mode in the Lantern implementation. */
+    --tabbar-bg: rgba(0, 189, 214, 0.14);
+    --tabbar-border: rgba(0, 189, 214, 0.24);
+    --tabbar-selected-text: #eaf7f9;
+    --tabbar-text: #9aa0a6;
+    --link: #4fd3e6;                 /* #004d57 is unreadable on dark; same hue, lifted */
+    --toggle-on: #34c759;
+    --dot-neutral-bg: #6b7075;
+    --dot-neutral-border: #3a3f45;
+    --dot-success-bg: #34c759;
+    --dot-success-border: rgba(52, 199, 89, 0.32);
   }
   /* border-box everywhere: rows use `width: 100%` + padding, and under the default content-box
      that overflows the card by the padding (32px), whose `overflow: hidden` then clips the

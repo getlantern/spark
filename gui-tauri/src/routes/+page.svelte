@@ -6,7 +6,7 @@
   import { selectedIndex, syncFromSnapshot, reapplyIfDropped } from "$lib/selection";
   import { flagEmoji, serverLabel, protocolLabel } from "$lib/format";
   import { unboundedVisible } from "$lib/unbounded";
-  import BottomTabs from "$lib/BottomTabs.svelte";
+  import Tabs from "$lib/Tabs.svelte";
   import { vpnState } from "$lib/vpn_state.svelte";
   import { _ } from "$lib/i18n";
   import { listen } from "@tauri-apps/api/event";
@@ -170,6 +170,13 @@
     <button class="iconbtn" aria-label={$_("account")}>{@render account()}</button>
   </header>
 
+  {#if showUnboundedTab}
+    <!-- Directly under the title, per the design. Reads the shared cache (kept in sync via the
+         $effect above) so the dot is correct on the first frame after an Unbounded→home switch,
+         before this screen's own status poll lands. -->
+    <Tabs current="vpn" vpnOn={vpnState.connected} unboundedOn={unboundedEnabled} />
+  {/if}
+
   <div class="body">
     <section class="hero">
       <!-- VPNSwitch: rounded track (brand when connected, grey otherwise), white knob that slides
@@ -265,11 +272,6 @@
     </div>
   </div>
 
-  {#if showUnboundedTab}
-    <!-- Read the shared cache (kept in sync via the $effect above) so the dot is correct on
-         first frame after an Unbounded→home switch, before this screen's own status poll lands. -->
-    <BottomTabs current="vpn" vpnOn={vpnState.connected} unboundedOn={unboundedEnabled} />
-  {/if}
 </main>
 
 {#snippet menu()}

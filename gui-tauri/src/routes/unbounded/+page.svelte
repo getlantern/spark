@@ -11,7 +11,10 @@
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
   import { listen } from "@tauri-apps/api/event";
   import Globe from "$lib/Globe.svelte";
-  import BottomTabs from "$lib/BottomTabs.svelte";
+  import Tabs from "$lib/Tabs.svelte";
+  import Icon from "$lib/Icon.svelte";
+  import Note from "$lib/Note.svelte";
+  import HeartsBurst from "$lib/HeartsBurst.svelte";
   import { vpnState } from "$lib/vpn_state.svelte";
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
@@ -44,6 +47,31 @@
 
   // The active peer list, kept live from status. Task 6.1 binds this into <Globe {peers} />.
   const peers = $derived<UnboundedPeer[]>(status.peers);
+
+  // Arrival detection, driving the hearts burst. A monotonic counter rather than a boolean so two
+  // arrivals in quick succession produce two bursts instead of one; `seenPeers` is what makes it an
+  // ARRIVAL rather than "the list changed", so a peer leaving does not celebrate.
+  let seenPeers = new Set<string>();
+  let burstTrigger = $state(0);
+  let burstCountry = $state<string | null>(null);
+  $effect(() => {
+    // A fresh session id we have not celebrated yet. Reading `peers` here is what subscribes this
+    // effect to it.
+    const arrivals = peers.filter((p) => !seenPeers.has(p.sessionId));
+    if (arrivals.length === 0) {
+      // Forget peers that have gone, so a reconnecting session can burst again later. Done here
+      // rather than every tick so the common no-change case touches nothing.
+      const live = new Set(peers.map((p) => p.sessionId));
+      for (const id of seenPeers) if (!live.has(id)) seenPeers.delete(id);
+      return;
+    }
+    for (const p of arrivals) seenPeers.add(p.sessionId);
+    // The newest arrival names the pill. Peers without geo still burst — we know someone arrived,
+    // we just cannot say where from, and silence would under-report the thing the screen exists
+    // to show.
+    burstCountry = arrivals[arrivals.length - 1].geo?.countryCode ?? null;
+    burstTrigger += 1;
+  });
 
   async function refresh() {
     try { status = await backend.unboundedStatus(); } catch { /* keep last-known */ }
@@ -139,19 +167,19 @@
     <span class="iconbtn spacer" aria-hidden="true"></span>
   </header>
 
+  <Tabs current="unbounded" vpnOn={vpnState.connected} unboundedOn={status.enabled} />
+
   <div class="scroll">
-    <div class="banner">
-      <span class="ic" aria-hidden="true">ⓘ</span>
-      <p>{$_("unbounded_help_banner")}</p>
-    </div>
+    <Note text={$_("unbounded_help_banner")} />
 
     <div class="globe-mount">
       <Globe {peers} />
+      <HeartsBurst trigger={burstTrigger} countryCode={burstCountry} />
     </div>
 
     <div class="card">
       <div class="row toggle-row">
-        <span class="ic">{@render globeIcon()}</span>
+        <span class="ic status-ic"><Icon name="language" /></span>
         <div class="meta">
           <div class="name">{$_("unbounded_status")}: <span class="state" class:on={status.enabled}>{status.enabled ? $_("unbounded_state_enabled") : $_("unbounded_state_disabled")}</span></div>
         </div>
@@ -159,13 +187,13 @@
       </div>
       <div class="divider"></div>
       <div class="row stat-row">
-        <span class="ic">{@render personIcon()}</span>
+        <span class="ic"><Icon name="person" /></span>
         <div class="meta"><div class="name">{$_("unbounded_helping_now")}</div></div>
         <span class="stat">{status.helpingNow}</span>
       </div>
       <div class="divider"></div>
       <div class="row stat-row">
-        <span class="ic">{@render peopleIcon()}</span>
+        <span class="ic"><Icon name="group" /></span>
         <div class="meta"><div class="name">{$_("unbounded_total_helped")}</div></div>
         <span class="stat">{status.totalHelped}</span>
       </div>
@@ -173,7 +201,7 @@
 
     <div class="card" style="margin-top:12px">
       <div class="row toggle-row">
-        <span class="ic">{@render autoIcon()}</span>
+        <span class="ic"><Icon name="autoMode" /></span>
         <div class="meta">
           <div class="name">{$_("unbounded_auto_enable")}</div>
           <div class="sub">{$_("unbounded_auto_enable_sub")}</div>
@@ -184,22 +212,8 @@
       </div>
     </div>
   </div>
-
-  <BottomTabs current="unbounded" vpnOn={vpnState.connected} unboundedOn={status.enabled} />
 </main>
 
-{#snippet globeIcon()}
-  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg>
-{/snippet}
-{#snippet personIcon()}
-  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg>
-{/snippet}
-{#snippet peopleIcon()}
-  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M2.5 19a6.5 6.5 0 0 1 13 0"/><path d="M16 5.5a3 3 0 0 1 0 5.8"/><path d="M18 19a6 6 0 0 0-3.2-5.3"/></svg>
-{/snippet}
-{#snippet autoIcon()}
-  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.4A8 8 0 1 0 18 17.5"/><polyline points="20 4 20 9.5 14.5 9.5"/><path fill="currentColor" stroke="none" d="M11 7.4 11.85 9.65 14.1 10.5 11.85 11.35 11 13.6 10.15 11.35 7.9 10.5 10.15 9.65Z"/></svg>
-{/snippet}
 
 {#if showWelcome}
   <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="unbounded-welcome-title">
@@ -237,17 +251,42 @@
 
   .scroll { flex: 1; overflow-y: auto; padding: 12px 16px 20px; }
 
-  .banner { display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px; }
-  .banner .ic { color: var(--text-tertiary); }
-  .banner p { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text-secondary); }
 
   /* The globe is the hero of the screen — it floats directly on the page background (no card),
-     centered, matching the design. Sized so the whole screen (banner → globe → both cards →
-     tab bar) fits the 760px window without scrolling. */
+     centered, matching the design.
+
+     `overflow: hidden` used to live here and was the cause of "the globe drop shadow is cut off at
+     the top" (getlantern/engineering#3844 round 2): a clipping box cannot show an effect that by
+     definition extends past the element. It is gone, and the glow is drawn behind the canvas where
+     it has room. `position: relative` makes this the containing block for the hearts overlay. */
   .globe-mount {
+    position: relative;
     margin-top: 2px;
     height: 268px;
-    overflow: hidden;
+    display: grid;
+    place-items: center;
+  }
+  /* A soft cyan halo hugging the sphere, which is what the Flutter build actually shows — not the
+     ground shadow this once had. Sampled at ~#e8f0f0 where the halo meets the page, which is this
+     colour at the falloff's outer edge; Figma's `Globe` effect is DROP_SHADOW #00616342 radius 64,
+     and round 2 asked to halve its intensity, so the core alpha here is half of that ~0.26. */
+  .globe-mount::before {
+    content: "";
+    grid-area: 1 / 1;
+    width: 250px;
+    height: 250px;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 50% 50%,
+      rgba(0, 97, 99, 0.13) 0%,
+      rgba(0, 150, 160, 0.10) 58%,
+      rgba(0, 170, 180, 0.05) 76%,
+      rgba(0, 170, 180, 0) 100%
+    );
+    pointer-events: none;
+  }
+  .globe-mount > :global(.globe) {
+    grid-area: 1 / 1;
   }
 
   .card {
@@ -260,11 +299,14 @@
   }
   .toggle-row, .stat-row { justify-content: space-between; }
   .row .ic { width: 24px; display: inline-flex; justify-content: center; color: var(--text-secondary); flex-shrink: 0; }
+  /* #3844 round 2: "the icon next to the toggle status is the incorrect color". It is the row that
+     names the feature's state, so it carries the link tone rather than the generic row grey. */
+  .row .ic.status-ic { color: var(--link); }
   .meta { flex: 1; min-width: 0; }
   .name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
   /* "Status: Enabled" — the state word turns green when sharing is on. */
   .state { font-weight: 700; color: var(--text-tertiary); }
-  .state.on { color: #2fa84f; }
+  .state.on { color: var(--dot-success-bg); }
   .sub {
     margin-top: 2px; font-size: 12px; font-weight: 500; color: var(--text-tertiary);
     letter-spacing: 0.01em;
@@ -272,14 +314,14 @@
   .divider { height: 1px; background: var(--border); margin: 0 16px; }
 
   /* Stat values: prominent teal numbers, right-aligned (no pill). */
-  .stat { font-size: 16px; font-weight: 800; color: #1a8a9c; white-space: nowrap; }
+  .stat { font-size: 16px; font-weight: 700; color: var(--link); white-space: nowrap; }
 
   .switch {
     width: 46px; height: 28px; border-radius: 999px; border: none; background: var(--switch-off);
     position: relative; cursor: pointer; transition: background 0.15s ease; flex-shrink: 0;
   }
   /* Enabled state is green per the design (not the app brand cyan). */
-  .switch.on { background: #34b759; }
+  .switch.on { background: var(--toggle-on); }
   .knob {
     position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
     border-radius: 50%; background: #fff; transition: transform 0.15s ease;
@@ -294,7 +336,7 @@
     background: transparent; border: 1.5px solid var(--border);
     transition: background 0.15s ease, border-color 0.15s ease;
   }
-  .checkbox.on { background: #0e5563; border-color: #0e5563; }
+  .checkbox.on { background: var(--link); border-color: var(--link); }
 
   /* One-time onboarding dialog, styled off the app's surface/card tokens. */
   .overlay {
