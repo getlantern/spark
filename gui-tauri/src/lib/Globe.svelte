@@ -24,7 +24,7 @@
   // projected — the reference's own construction. An earlier pass here raised each arch perpendicular
   // to its chord in screen space instead, which always bulges UP THE SCREEN and so leaned the wrong
   // way for most pairs: the arcs read as bridges over the globe rather than paths lying on it. See
-  // `ARC_LIFT`, whose value is matched against the recording's measured radial profile.
+  // `ARC_RIDE`, whose value is matched against the recording's measured radial profile.
   import { onMount, onDestroy } from "svelte";
   import type { UnboundedGeo, UnboundedPeer } from "$lib/spark_backend";
 
@@ -151,7 +151,7 @@
     d: string;
     color: string;
     /**
-     * Whether it is currently drawable — both feet on the visible face, with a usable perpendicular.
+     * Whether it is currently drawable, i.e. both feet are on the visible face.
      *
      * A culled arc stays in the list and is HIDDEN rather than removed, so its element survives and
      * its growth animation keeps running on time. Dropping it instead would restart the growth every
@@ -329,7 +329,8 @@
       // direction from the great-circle midpoint gets that for free, because that midpoint is where
       // the real path is furthest from the chord.
       //
-      // Lifted by `ARC_LIFT` radii. Perspective does most of the work: a point this far out is much
+      // Lifted by `ARC_RIDE` radii above the great circle. Perspective does most of the work: a point
+      // this far out is much
       // closer to the camera than the surface is, so a modest angular offset from the view axis
       // projects a long way from the disc's centre — which is how the reference's crest reaches ~1.15
       // radii while both feet sit inside half a radius of the middle.
