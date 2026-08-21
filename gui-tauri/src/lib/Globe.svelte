@@ -104,22 +104,31 @@
   /** Endpoint dot radius, px. The reference's size-6 point renders ~10px across. */
   const DOT_R = 5;
   /**
-   * How far the arc rides ABOVE the great circle, in globe radii, once it is on it.
+   * How high the arc rises above the surface at its midpoint, in globe radii.
    *
-   * The lift itself is not a constant, and treating it as one is what made the arcs' angle wrong. A
-   * quadratic Bézier only LIES ON a circular arc when its control point is at `R / cos(omega / 2)`,
-   * where omega is the central angle between the feet — so a single figure is correct at exactly one
-   * separation and wrong at every other, bowing inside the surface for wide pairs and ballooning over
-   * it for narrow ones. Solving per arc is what makes it track the surface at any separation, which
-   * is the whole complaint.
+   * A hard ceiling now, not a fitted control point: the altitude follows `sin(pi * t)` along the
+   * route, so the crest is exactly this far up and can never exceed it. 0.15 puts it at 1.15 radii,
+   * which is where the recording's crest sits (measured off its arc pixels: feet at 0.26-0.48 radii
+   * from the disc centre, median 0.90, crest 1.15).
    *
-   * This is the extra on top, and it is what lifts the arc clear of the silhouette instead of grazing
-   * the ground. Measured against the recording, whose arcs crest at ~1.15 radii with a median of 0.90:
-   * at 0.14 the arc tracked the surface exactly and read as drawn ON the globe, medians around 0.6-0.9
-   * but never rising past the edge; at 0.45 the crests land at 0.92-1.07 and the arcs lift over the
-   * limb the way the recording's do, while still leaning along their own great circle.
+   * The previous approach fitted one quadratic Bézier and tuned its lift, which could not work: the
+   * control point that puts a quadratic ON a circular arc is at `1 / cos(omega / 2)` radii and
+   * diverges as the feet separate — 3.9 radii at 150 degrees. Tuning it small enough for a wide pair
+   * flattened every narrow one, and large enough for a narrow pair sent wide ones towering over the
+   * globe.
    */
-  const ARC_RIDE = 0.45;
+  const ARC_RIDE = 0.15;
+  /**
+   * Samples per arc. 32 is smooth at this size; the cost is 32 projections per arc per frame, against
+   * a renderer already drawing the sphere every frame for the spin.
+   */
+  const ARC_STEPS = 32;
+  /**
+   * Where a sample counts as being behind the sphere, in degrees from the camera's aim.
+   *
+   * Just under 90 so a point grazing the limb is dropped rather than smeared along the edge.
+   */
+  const HORIZON_DEG = 88;
   /**
    * Margin inside `FOOT_MAX_DEG` that the camera keeps our end within.
    *
@@ -221,37 +230,14 @@
     layoutArcs();
   }
 
-  /**
-   * The point halfway along the great circle between two lat/lng pairs.
-   *
-   * Averaged as 3D unit vectors and renormalised, which is both the standard construction and what
-   * the reference does. Averaging latitude and longitude separately would not give a point on the
-   * great circle at all.
-   */
-  function greatCircleMid(
-    aLat: number,
-    aLng: number,
-    bLat: number,
-    bLng: number,
-  ): { lat: number; lng: number } {
+  /** A lat/lng as a unit vector on the sphere. */
+  function unitVec(lat: number, lng: number): [number, number, number] {
     const p = Math.PI / 180;
-    const ax = Math.cos(aLat * p) * Math.cos(aLng * p);
-    const ay = Math.cos(aLat * p) * Math.sin(aLng * p);
-    const az = Math.sin(aLat * p);
-    const bx = Math.cos(bLat * p) * Math.cos(bLng * p);
-    const by = Math.cos(bLat * p) * Math.sin(bLng * p);
-    const bz = Math.sin(bLat * p);
-    const x = ax + bx;
-    const y = ay + by;
-    const z = az + bz;
-    const n = Math.hypot(x, y, z);
-    // Antipodal feet have no unique midpoint; any great circle through them is as good, so pick the
-    // one through the first foot's meridian rather than dividing by zero.
-    if (n < 1e-9) return { lat: 0, lng: aLng + 90 };
-    return {
-      lat: Math.asin(Math.max(-1, Math.min(1, z / n))) / p,
-      lng: (Math.atan2(y, x) * 180) / Math.PI,
-    };
+    return [
+      Math.cos(lat * p) * Math.cos(lng * p),
+      Math.cos(lat * p) * Math.sin(lng * p),
+      Math.sin(lat * p),
+    ];
   }
 
   /** Great-circle separation between two lat/lng pairs, in degrees. */
@@ -318,36 +304,63 @@
       // still emitted, just not drawable: see `ArcPath.visible`.
       if (!far || !own) continue;
       const drawable = peerVisible && ownVisible;
-      // The control point is the GREAT-CIRCLE MIDPOINT of the two feet, lifted clear of the sphere
-      // and projected — which is what the reference computes (`line_helper.dart` normalises the mean
-      // of the two endpoint vectors, scales it past the surface, and projects that).
+      // SAMPLED ALONG THE GREAT CIRCLE, not fitted with one Bézier.
       //
-      // This is the part that was wrong. Raising the arch perpendicular to its own chord, in screen
-      // space, always bulges UP THE SCREEN, and for most pairs that is not the direction the
-      // connection actually runs: the bulge has to lean the way the great circle leans, or the arc
-      // stops looking like it lies on the earth and starts looking like a bridge over it. Taking the
-      // direction from the great-circle midpoint gets that for free, because that midpoint is where
-      // the real path is furthest from the chord.
+      // A single quadratic cannot represent a wide arc at all: it only lies on a circular arc when
+      // its control point is at `1 / cos(omega / 2)` radii, and that diverges as the feet separate —
+      // at 150 degrees it is already 3.9 radii, which is why a Denver-to-Asia arc towered over the
+      // globe however the lift was tuned. Walking the great circle instead is exact at every
+      // separation and needs no control point, no perpendicular and no clamp.
       //
-      // Lifted by `ARC_RIDE` radii above the great circle. Perspective does most of the work: a point
-      // this far out is much
-      // closer to the camera than the surface is, so a modest angular offset from the view axis
-      // projects a long way from the disc's centre — which is how the reference's crest reaches ~1.15
-      // radii while both feet sit inside half a radius of the middle.
-      const mid = greatCircleMid(a.lat, a.lng, own.lat, own.lon);
-      // Put the control point where a quadratic Bézier actually interpolates the great circle: at
-      // `1 / cos(omega / 2)` radii, omega being the separation of the feet. Then ride `ARC_RIDE`
-      // above that. Solved per arc, so a peer next door and a peer a third of the world away both get
-      // a curve that follows the ground rather than one of them bowing through it.
-      const omega = angleDeg(a.lat, a.lng, own.lat, own.lon) * (Math.PI / 180);
-      const onSurface = 1 / Math.max(0.2, Math.cos(omega / 2));
-      const ctrl = globe.getScreenCoords(mid.lat, mid.lng, onSurface - 1 + ARC_RIDE);
-      const cx = ctrl.x;
-      const cy = ctrl.y;
+      // The altitude follows a `sin(pi * t)` bell: on the ground at both feet, `ARC_RIDE` radii up at
+      // the middle. So the crest can never exceed that, and it foreshortens correctly — an arc whose
+      // midpoint faces the camera reads as flat against the surface, one whose midpoint is out near
+      // the limb lifts clear of it, which is exactly what a route on a globe does.
+      const av = unitVec(a.lat, a.lng);
+      const bv = unitVec(own.lat, own.lon);
+      const dot = Math.max(-1, Math.min(1, av[0] * bv[0] + av[1] * bv[1] + av[2] * bv[2]));
+      const omega = Math.acos(dot);
+      const sinOmega = Math.sin(omega);
+      const runs: string[][] = [];
+      let run: string[] = [];
+      for (let i = 0; i <= ARC_STEPS; i++) {
+        const t = i / ARC_STEPS;
+        let vx: number;
+        let vy: number;
+        let vz: number;
+        if (sinOmega < 1e-6) {
+          // Coincident feet: nothing to walk along.
+          vx = av[0];
+          vy = av[1];
+          vz = av[2];
+        } else {
+          const s0 = Math.sin((1 - t) * omega) / sinOmega;
+          const s1 = Math.sin(t * omega) / sinOmega;
+          vx = av[0] * s0 + bv[0] * s1;
+          vy = av[1] * s0 + bv[1] * s1;
+          vz = av[2] * s0 + bv[2] * s1;
+        }
+        const n = Math.hypot(vx, vy, vz) || 1;
+        const lat = (Math.asin(Math.max(-1, Math.min(1, vz / n))) * 180) / Math.PI;
+        const lng = (Math.atan2(vy, vx) * 180) / Math.PI;
+        // Break the line where the route passes behind the sphere, so it is occluded rather than
+        // drawn straight across the face. This is the same reason the reference clips its paths at
+        // the sphere intersection.
+        if (angleDeg(pov.lat, pov.lng, lat, lng) > HORIZON_DEG) {
+          if (run.length > 1) runs.push(run);
+          run = [];
+          continue;
+        }
+        const pt = globe.getScreenCoords(lat, lng, ARC_RIDE * Math.sin(Math.PI * t));
+        run.push(`${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`);
+      }
+      if (run.length > 1) runs.push(run);
+      const d = runs.map((r) => `M ${r.join(" L ")}`).join(" ");
+      if (!d) continue;
       out.push({
         id: a.id,
         color: a.color,
-        d: `M ${s.x.toFixed(1)} ${s.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${far.x.toFixed(1)} ${far.y.toFixed(1)}`,
+        d,
         visible: drawable,
       });
     }
