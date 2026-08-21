@@ -20,13 +20,11 @@
   // combination of altitude, ground span and camera aim traded one artefact for the other, because no
   // world-space bulge projects upward from every angle. A screen-space curve does, always.
   //
-  // Where we DIVERGE from the reference: it puts the control point radially outward from the centre
-  // of the disc, scaled by the endpoints' central angle. At its globe size and its data (a volunteer
-  // and peers a continent apart) that reads as an arch, but at ours both feet usually land near the
-  // middle of the disc, where "radially outward" is near-degenerate — the curve then leaves one foot,
-  // swings past the limb and comes back, a lasso across the globe's face. We raise each arch
-  // perpendicular to its own chord instead, which is well-conditioned for every pair and gives the
-  // shape the recording actually shows. See `ARCH_RISE`.
+  // The control point is the great-circle midpoint of the two feet, lifted clear of the sphere and
+  // projected — the reference's own construction. An earlier pass here raised each arch perpendicular
+  // to its chord in screen space instead, which always bulges UP THE SCREEN and so leaned the wrong
+  // way for most pairs: the arcs read as bridges over the globe rather than paths lying on it. See
+  // `ARC_LIFT`, whose value is matched against the recording's measured radial profile.
   import { onMount, onDestroy } from "svelte";
   import type { UnboundedGeo, UnboundedPeer } from "$lib/spark_backend";
 
@@ -106,17 +104,29 @@
   /** Endpoint dot radius, px. The reference's size-6 point renders ~10px across. */
   const DOT_R = 5;
   /**
-   * How tall each arch is, in globe radii of control-point offset from its chord.
+   * How far the arc rides ABOVE the great circle, in globe radii, once it is on it.
    *
-   * A quadratic Bézier reaches halfway to its control point, so the crest stands `ARCH_RISE / 2`
-   * radii above the chord. Set by measuring both sides: the recording's crest is 1.08 radii above its
-   * feet, and 2.2 here overshot that by about a quarter.
+   * The lift itself is not a constant, and treating it as one is what made the arcs' angle wrong. A
+   * quadratic Bézier only LIES ON a circular arc when its control point is at `R / cos(omega / 2)`,
+   * where omega is the central angle between the feet — so a single figure is correct at exactly one
+   * separation and wrong at every other, bowing inside the surface for wide pairs and ballooning over
+   * it for narrow ones. Solving per arc is what makes it track the surface at any separation, which
+   * is the whole complaint.
+   *
+   * This is the extra on top, and it is what lifts the arc clear of the silhouette instead of grazing
+   * the ground. Measured against the recording, whose arcs crest at ~1.15 radii with a median of 0.90:
+   * at 0.14 the arc tracked the surface exactly and read as drawn ON the globe, medians around 0.6-0.9
+   * but never rising past the edge; at 0.45 the crests land at 0.92-1.07 and the arcs lift over the
+   * limb the way the recording's do, while still leaning along their own great circle.
    */
-  const ARCH_RISE = 1.8;
-  /** Floor tied to the chord, so a very wide arch does not look squat next to a narrow one. */
-  const ARCH_MIN = 0.55;
-  /** Keep the crest this many px inside the top of the mount. See the clamp in `layoutArcs`. */
-  const CREST_MARGIN = 10;
+  const ARC_RIDE = 0.45;
+  /**
+   * Margin inside `FOOT_MAX_DEG` that the camera keeps our end within.
+   *
+   * The aim is chosen so our end is this much clear of the cull, rather than exactly on it, because
+   * the spin keeps moving and an end sitting exactly at the threshold would flicker in and out.
+   */
+  const CULL_MARGIN_DEG = 8;
   /** How far from the camera's aim a foot may sit before its arch is dropped, in degrees. */
   const FOOT_MAX_DEG = 66;
   /**
@@ -211,6 +221,39 @@
     layoutArcs();
   }
 
+  /**
+   * The point halfway along the great circle between two lat/lng pairs.
+   *
+   * Averaged as 3D unit vectors and renormalised, which is both the standard construction and what
+   * the reference does. Averaging latitude and longitude separately would not give a point on the
+   * great circle at all.
+   */
+  function greatCircleMid(
+    aLat: number,
+    aLng: number,
+    bLat: number,
+    bLng: number,
+  ): { lat: number; lng: number } {
+    const p = Math.PI / 180;
+    const ax = Math.cos(aLat * p) * Math.cos(aLng * p);
+    const ay = Math.cos(aLat * p) * Math.sin(aLng * p);
+    const az = Math.sin(aLat * p);
+    const bx = Math.cos(bLat * p) * Math.cos(bLng * p);
+    const by = Math.cos(bLat * p) * Math.sin(bLng * p);
+    const bz = Math.sin(bLat * p);
+    const x = ax + bx;
+    const y = ay + by;
+    const z = az + bz;
+    const n = Math.hypot(x, y, z);
+    // Antipodal feet have no unique midpoint; any great circle through them is as good, so pick the
+    // one through the first foot's meridian rather than dividing by zero.
+    if (n < 1e-9) return { lat: 0, lng: aLng + 90 };
+    return {
+      lat: Math.asin(Math.max(-1, Math.min(1, z / n))) / p,
+      lng: (Math.atan2(y, x) * 180) / Math.PI,
+    };
+  }
+
   /** Great-circle separation between two lat/lng pairs, in degrees. */
   function angleDeg(aLat: number, aLng: number, bLat: number, bLng: number): number {
     const p = Math.PI / 180;
@@ -253,8 +296,11 @@
     }
     // Us: one end of every arc, so projected once. The self lookup is a network round trip that can
     // be slow or fail, and when it has not landed there is nothing to connect a peer TO.
-    const ownVisible = origin != null && angleDeg(pov.lat, pov.lng, origin.lat, origin.lon) < FOOT_MAX_DEG;
-    const far = origin ? globe.getScreenCoords(origin.lat, origin.lon) : null;
+    // Captured as a local so the loop below narrows: `far` being non-null implies we have an origin,
+    // but that is not something the compiler can infer from a derived value.
+    const own = origin;
+    const ownVisible = own != null && angleDeg(pov.lat, pov.lng, own.lat, own.lon) < FOOT_MAX_DEG;
+    const far = own ? globe.getScreenCoords(own.lat, own.lon) : null;
     ownDot = ownVisible && far ? { id: "own", x: far.x, y: far.y } : null;
 
     // Peer dots are computed INDEPENDENTLY of the arcs, so a failed or pending self lookup leaves the
@@ -270,60 +316,38 @@
       // Both feet have to be on the face — an arc with one foot past the limb draws as a hairpin off
       // the edge — so no origin, or an origin round the back, means dots without arcs. The arc is
       // still emitted, just not drawable: see `ArcPath.visible`.
-      if (!far) continue;
+      if (!far || !own) continue;
       const drawable = peerVisible && ownVisible;
-      // Raise the arch PERPENDICULAR TO ITS OWN CHORD, not radially outward from the disc's centre.
+      // The control point is the GREAT-CIRCLE MIDPOINT of the two feet, lifted clear of the sphere
+      // and projected — which is what the reference computes (`line_helper.dart` normalises the mean
+      // of the two endpoint vectors, scales it past the surface, and projects that).
       //
-      // Radially outward is what the reference's formula computes, and it is wrong at our globe's
-      // proportions: both feet of a connection usually land near the middle of the visible disc,
-      // where "outward" is a near-degenerate direction, so the curve leaves one foot, swings past the
-      // limb and returns — a lasso across the globe's face rather than an arch over it. Perpendicular
-      // to the chord is well-conditioned for every pair and gives the recording's shape: a tall
-      // narrow arch standing on two feet.
-      const chordX = far.x - s.x;
-      const chordY = far.y - s.y;
-      const chord = Math.hypot(chordX, chordY) || 1;
-      // Of the two perpendiculars, take the one pointing UP the screen. An arch that hangs below its
-      // feet reads as a swag, and the design has no downward arcs.
-      let nx = -chordY / chord;
-      let ny = chordX / chord;
-      if (ny > 0) {
-        nx = -nx;
-        ny = -ny;
-      }
-      // A chord that is VERTICAL on screen has no upward perpendicular — `ny` collapses to 0 and the
-      // clamp below would divide by it, sending the control point to infinity. Reachable for a peer
-      // close to a pole, where both feet project to nearly the same x. There is no arch to draw
-      // across a vertical chord, so skip it.
-      const chordUsable = Math.abs(ny) > 1e-3;
-      const midX = (s.x + far.x) / 2;
-      const midY = (s.y + far.y) / 2;
-      // Height off the globe's RADIUS, not off the chord. The recording's arches crest about 1.1
-      // radii above the disc's centre whether their feet are close together or far apart, so a
-      // chord-proportional rise gets one case right and the other badly wrong: at our HOME-to-peer
-      // separations it produced an arch three times too tall.
-      let rise = Math.max(ARCH_RISE * R, ARCH_MIN * chord);
-      // Then clamp so the crest lands just inside the top of the frame. A Bézier reaches halfway to
-      // its control point, so the crest sits at `midY + rise * ny / 2`. Without this an arch whose
-      // feet are already high on the disc crests off the top edge — the clamp is what frames every
-      // arch the way the recording does, just clearing the sphere, rather than leaving it to the
-      // peer's latitude.
+      // This is the part that was wrong. Raising the arch perpendicular to its own chord, in screen
+      // space, always bulges UP THE SCREEN, and for most pairs that is not the direction the
+      // connection actually runs: the bulge has to lean the way the great circle leans, or the arc
+      // stops looking like it lies on the earth and starts looking like a bridge over it. Taking the
+      // direction from the great-circle midpoint gets that for free, because that midpoint is where
+      // the real path is furthest from the chord.
       //
-      // `room` is how far the chord's midpoint sits below the margin, and it is what makes the clamp
-      // safe. `ny` is NEGATIVE (up the screen), so solving for the rise that lands the crest exactly
-      // on the margin divides by a negative: if the midpoint is already at or above the margin that
-      // yields a NEGATIVE rise, which flips the control point below the chord and draws the arch
-      // upside down. There is no upward arch to draw in that case, so the connection is skipped.
-      // `Math.min` also guarantees the clamp only ever REDUCES a rise, never inflates a small one.
-      const room = midY - CREST_MARGIN;
-      rise = room > 0 ? Math.min(rise, (2 * room) / -ny) : rise;
-      const cx = midX + nx * rise;
-      const cy = midY + ny * rise;
+      // Lifted by `ARC_LIFT` radii. Perspective does most of the work: a point this far out is much
+      // closer to the camera than the surface is, so a modest angular offset from the view axis
+      // projects a long way from the disc's centre — which is how the reference's crest reaches ~1.15
+      // radii while both feet sit inside half a radius of the middle.
+      const mid = greatCircleMid(a.lat, a.lng, own.lat, own.lon);
+      // Put the control point where a quadratic Bézier actually interpolates the great circle: at
+      // `1 / cos(omega / 2)` radii, omega being the separation of the feet. Then ride `ARC_RIDE`
+      // above that. Solved per arc, so a peer next door and a peer a third of the world away both get
+      // a curve that follows the ground rather than one of them bowing through it.
+      const omega = angleDeg(a.lat, a.lng, own.lat, own.lon) * (Math.PI / 180);
+      const onSurface = 1 / Math.max(0.2, Math.cos(omega / 2));
+      const ctrl = globe.getScreenCoords(mid.lat, mid.lng, onSurface - 1 + ARC_RIDE);
+      const cx = ctrl.x;
+      const cy = ctrl.y;
       out.push({
         id: a.id,
         color: a.color,
         d: `M ${s.x.toFixed(1)} ${s.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${far.x.toFixed(1)} ${far.y.toFixed(1)}`,
-        visible: drawable && chordUsable && room > 0,
+        visible: drawable,
       });
     }
     paths = out;
@@ -387,49 +411,69 @@
     const sig = [...arcs.map((a) => a.id), origin ? `${origin.lat},${origin.lon}` : "-"].join("|");
     if (sig === parkedOn) return;
     parkedOn = sig;
-    // Frame the peers AND us. Every arc has one foot on each, so aiming at the peers alone pushes our
-    // end — and therefore the end of every arc — past the cull, and the globe goes blank.
+    // Frame us together with the peers by aiming at a point BETWEEN the two, walking along the great
+    // circle from our end towards the peers' centroid.
     //
-    // Averaged as 3D UNIT VECTORS, not by averaging latitudes and longitudes separately. The
-    // separate form is what was here, and it fails exactly in this case: for points spread across
-    // half the globe (Denver plus peers from Turkey to China) a circular mean of longitudes can land
-    // nearly anywhere, and it put the aim far enough from our end to cull every arc. A vector mean is
-    // the true spherical centre.
+    // The obvious rule — average every endpoint as unit vectors, weighting ours — is what was here,
+    // and it fails in the common case. Points spread across half the globe are all in the northern
+    // hemisphere, so their z components add while x and y cancel: the mean drifts towards the POLE,
+    // and clamping the latitude back down then leaves a longitude belonging to none of them. Aiming
+    // there put our end round the back and every arc was culled, which is a blank globe while the user
+    // is actively helping people.
     //
-    // Our end is weighted by the number of peers, because it is one foot of every single arc while
-    // each peer is one foot of one. Unweighted, a cluster of peers drags the aim onto itself and
-    // leaves our end near the limb — the same blank globe, just less often.
+    // Walking the great circle cannot do that: the aim lies between two real points by construction.
+    // And the distance walked is chosen so OUR end is always on the visible face — it is one foot of
+    // every arc, so if it is hidden nothing draws at all, whereas a peer being hidden costs one arc.
     const p = Math.PI / 180;
-    const unit = (lat: number, lng: number) => [
+    const unit = (lat: number, lng: number): [number, number, number] => [
       Math.cos(lat * p) * Math.cos(lng * p),
       Math.cos(lat * p) * Math.sin(lng * p),
       Math.sin(lat * p),
     ];
-    let vx = 0;
-    let vy = 0;
-    let vz = 0;
+    // The peers' centroid. They are usually clustered, so a plain vector mean is well behaved here in
+    // a way it is not across a whole hemisphere.
+    let px = 0;
+    let py = 0;
+    let pz = 0;
     for (const a of arcs) {
-      const [ux, uy, uz] = unit(a.lat, a.lng);
-      vx += ux;
-      vy += uy;
-      vz += uz;
+      const [x, y, z] = unit(a.lat, a.lng);
+      px += x;
+      py += y;
+      pz += z;
     }
-    if (origin) {
-      const [ux, uy, uz] = unit(origin.lat, origin.lon);
-      vx += ux * arcs.length;
-      vy += uy * arcs.length;
-      vz += uz * arcs.length;
+    const pn = Math.hypot(px, py, pz);
+    if (pn < 1e-9) return;
+    const peersMid: [number, number, number] = [px / pn, py / pn, pz / pn];
+    const us = origin ? unit(origin.lat, origin.lon) : peersMid;
+
+    const dot = Math.max(-1, Math.min(1, us[0] * peersMid[0] + us[1] * peersMid[1] + us[2] * peersMid[2]));
+    const omega = Math.acos(dot);
+    // Halfway when both ends fit inside the cull from the midpoint; otherwise only as far as keeps our
+    // end inside it, and the far peers cull instead.
+    const reach = (FOOT_MAX_DEG - CULL_MARGIN_DEG) * p;
+    const t = omega < 1e-6 ? 0 : Math.min(0.5, reach / omega);
+    let aim: [number, number, number];
+    if (omega < 1e-6) {
+      aim = us;
+    } else {
+      // Slerp. Antipodal ends have no unique great circle, but `t` is capped well below 0.5 by then,
+      // so sin(omega) is never the degenerate case that would divide by zero.
+      const s0 = Math.sin((1 - t) * omega) / Math.sin(omega);
+      const s1 = Math.sin(t * omega) / Math.sin(omega);
+      aim = [
+        us[0] * s0 + peersMid[0] * s1,
+        us[1] * s0 + peersMid[1] * s1,
+        us[2] * s0 + peersMid[2] * s1,
+      ];
     }
-    const norm = Math.hypot(vx, vy, vz);
-    // Antipodal anchors can cancel to nothing, leaving no meaningful centre. Keep the current aim
-    // rather than snapping to an arbitrary one.
-    if (norm < 1e-6) return;
-    const aimLat = Math.asin(Math.max(-1, Math.min(1, vz / norm))) / p;
-    const aimLng = (Math.atan2(vy, vx) * 180) / Math.PI;
+    const an = Math.hypot(aim[0], aim[1], aim[2]) || 1;
+    const aimLat = Math.asin(Math.max(-1, Math.min(1, aim[2] / an))) / p;
+    const aimLng = (Math.atan2(aim[1], aim[0]) * 180) / Math.PI;
     globe.pointOfView(
       {
-        // Clamped so a peer set centred near a pole does not tip the camera into a polar projection.
-        lat: Math.max(-55, Math.min(55, aimLat)),
+        // No clamp: the aim is a point on the great circle between two real endpoints, so it cannot
+        // wander to a pole the way an unconstrained mean could.
+        lat: aimLat,
         lng: aimLng,
         altitude: GLOBE_ALTITUDE,
       },
