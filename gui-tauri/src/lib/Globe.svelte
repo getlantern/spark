@@ -223,9 +223,11 @@
   /**
    * Project every arc to a screen-space path. See the header for why this is 2D.
    *
-   * Cheap enough to run per frame while the camera moves (a handful of arcs, no allocation beyond
-   * the path strings), but it is NOT on a render loop: it runs when the arc set changes, when the
-   * camera moves, and for the duration of a camera transition. At rest nothing recomputes.
+   * This DOES run every frame — see `startProjection`. It has to: the globe spins continuously, and
+   * an overlay that is not part of the scene has nothing else to move it. The cost is a handful of
+   * arcs and the path strings for them, alongside a renderer that is already drawing every frame for
+   * the spin. It stops with the renderer when the screen is off-tab or scrolled away, so an unwatched
+   * globe still costs nothing.
    */
   function layoutArcs() {
     if (!globe || !el || arcs.length === 0) {
@@ -373,11 +375,10 @@
   /** Signature of the arc set the camera is currently framed for. */
   let parkedOn: string | null = null;
   /**
-   * Frame HOME together with the peers, by aiming at the midpoint of the two.
+   * Frame the peers together with US, so both feet of every arc are on the visible face.
    *
-   * Aiming at the peers alone pushes HOME — and therefore the end of every arc — out to the limb.
-   * Longitude is averaged on the unit circle so a cluster straddling the ±180 meridian does not
-   * average to the middle of the Atlantic.
+   * See the body for how the aim is averaged and why our end is weighted; `HOME` is only the idle aim
+   * for a globe with nothing on it.
    */
   function parkCamera(animateMs: number) {
     if (!globe || arcs.length === 0) return;
