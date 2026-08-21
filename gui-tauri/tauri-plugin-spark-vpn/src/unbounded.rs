@@ -42,6 +42,19 @@ pub(crate) struct UnboundedState {
     /// end-of-stream teardown only while still current, so a loop belonging to a previous generation
     /// can never clear the handle or state of the pool that replaced it.
     generation: std::sync::atomic::AtomicU64,
+    /// Incremented by every `unbounded_stop`, under `start_gate`.
+    ///
+    /// `unbounded_start` awaits the network (the STUN fetch) *before* taking the gate, because holding
+    /// it across that await would make a stop wait out the fetch timeout. That opens a window: a stop
+    /// can run to completion while a start is still fetching, and the start would then take the gate,
+    /// see no handle, and spin up a pool the user had just cancelled — sharing on after pressing stop,
+    /// which for a consent-gated feature is the worst direction to fail in.
+    ///
+    /// So start snapshots this before the fetch and re-reads it under the gate: a change means a stop
+    /// intervened, and the start abandons instead of spawning. Separate from `generation` rather than
+    /// reusing it, because that one's meaning ("which pool a loop belongs to") is load-bearing for the
+    /// aggregation loop's teardown and should not also encode "a stop happened".
+    stop_epoch: std::sync::atomic::AtomicU64,
     /// Cached `features.unbounded` availability, refreshed whenever the config is actually read.
     ///
     /// The tray polls ~0.7 Hz and repaints on every peer event; resolving availability from disk each
@@ -220,6 +233,11 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // resolved config lacks the endpoints to dial (see build_sharing_config).
     let (mut cfg, signaler) = build_sharing_config(&app)?;
 
+    // Snapshot BEFORE the ungated network await below, and re-checked under the gate. See
+    // `UnboundedState::stop_epoch`: without this, a stop that completes while we are fetching would
+    // be undone by this start.
+    let stop_epoch_before = state.stop_epoch.load(std::sync::atomic::Ordering::Acquire);
+
     // ICE STUN servers. Mirrors Lantern's donor, which takes broflake's `DefaultSTUNBatchFunc`
     // (`clientcore.NewDefaultWebRTCOptions()`, never overridden in radiance): fetch a public list and
     // pick 5 at random. Spark adds an embedded fallback broflake has no equivalent of, because the
@@ -255,6 +273,14 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     let _gate = state.start_gate.lock().await;
     if lock_recover(&state.handle).is_some() {
         return Ok(());
+    }
+    // A stop landed while we were fetching, so the user's latest intent is "off". Abandon rather than
+    // spawn — and report it, because returning `Ok` here would claim a pool is running when the whole
+    // point is that we declined to start one.
+    if state.stop_epoch.load(std::sync::atomic::Ordering::Acquire) != stop_epoch_before {
+        return Err(crate::Error::Platform(
+            "unbounded start superseded by a stop while preparing".into(),
+        ));
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PoolEvent>();
@@ -391,6 +417,13 @@ pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Resu
     // could take the handle before the start stored it, cancelling nothing and leaving the pool
     // relaying while every observable said "off".
     let _gate = state.start_gate.lock().await;
+
+    // Announce the stop to any start currently between its snapshot and the gate (see `stop_epoch`).
+    // Under the gate, so a start either reads the old value and then observes this change when it
+    // acquires the gate, or reads the new one — never misses it.
+    state
+        .stop_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
 
     // Take the sharing handle out and drop it — its `Drop` does a cooperative cancel. Do NOT abort.
     // Recover from a poisoned lock (via `lock_recover`) rather than treating it as "no handle" —
