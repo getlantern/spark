@@ -127,7 +127,7 @@
     width: 46px; height: 28px; border-radius: 999px; border: none; background: var(--switch-off);
     position: relative; cursor: pointer; transition: background 0.15s ease; flex-shrink: 0;
   }
-  .switch.on { background: var(--brand, #1f9d55); }
+  .switch.on { background: var(--toggle-on); }
   .knob {
     position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
     border-radius: 50%; background: #fff; transition: transform 0.15s ease;

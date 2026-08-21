@@ -8,6 +8,7 @@
   "vpn_status": "VPN status",
   "tab_vpn": "VPN",
   "tab_unbounded": "Unbounded",
+  "tabs_primary": "Primary",
   "routing_mode": "Routing Mode",
   "routing_smart_desc": "Routes only blocked traffic through the VPN",
   "routing_full_desc": "Routes all traffic through VPN",
@@ -37,6 +38,7 @@
   "err_ad_block": "Couldn't update ad blocking",
   "unbounded_title": "Unbounded",
   "unbounded_help_banner": "Help others bypass censorship by securely sharing your connection.",
+  "unbounded_helping_new_person": "Helping a new person in {country}",
   "unbounded_globe_placeholder": "Connections appear here",
   "unbounded_status": "Status",
   "unbounded_state_enabled": "Enabled",
@@ -47,7 +49,7 @@
   "unbounded_auto_enable_sub": "Turn on automatically when Spark is open.",
   "unbounded_settings_title": "Unbounded Settings",
   "unbounded_hide": "Hide Unbounded",
-  "unbounded_hide_sub": "Removes the Unbounded tab. You can turn it back on here any time.",
+  "unbounded_hide_sub": "Removes the tab. Re-enable here any time.",
   "unbounded_welcome_title": "Welcome to Unbounded",
   "unbounded_welcome_body": "Unbounded lets your device act as a digital bridge for people living under censorship. When you turn it on, their traffic flows through your internet connection to the open internet.",
   "unbounded_welcome_dismiss": "I understand — get started",
@@ -55,5 +57,8 @@
   "settings_diagnostics_desc": "Helps us fix problems: Spark shares error and performance reports; IP addresses and web addresses are removed. Turning it off also deletes the reports stored on this device. Applies after restart.",
   "unbounded_welcome_risks": "Before you begin: the sites and services they reach will see your IP address as the source of that traffic, and the approximate location of each person you help is looked up through a Lantern service so it can be shown on your map. Please consider whether that is safe where you live. Unbounded is entirely optional, and you can turn it off at any time.",
   "unbounded_err_toggle": "Couldn't change Unbounded. Please try again.",
-  "unbounded_err_settings": "Couldn't load Unbounded settings"
+  "unbounded_err_settings": "Couldn't load Unbounded settings",
+  "unbounded_waiting_for_connections": "Waiting for connections...",
+  "indicator_on": "{feature} is on",
+  "indicator_off": "{feature} is off"
 }

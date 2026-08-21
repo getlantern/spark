@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { _ } from "$lib/i18n";
+  import Icon from "$lib/Icon.svelte";
   import { MockBackend, type SparkBackend } from "$lib/spark_backend";
   import { TauriBackend, isTauri } from "$lib/tauri_backend";
 
@@ -50,6 +51,10 @@
   <div class="scroll">
     <div class="card">
       <div class="row toggle-row">
+        <!-- Both rows were iconless. #3844 flags the Lantern equivalents as carrying the WRONG
+             Material icons, so these are the right ones and they come from the shared component: the
+             same auto glyph the Unbounded screen uses for auto-enable, and visibility_off for hiding. -->
+        <span class="ic"><Icon name="autoMode" /></span>
         <div class="meta">
           <div class="name">{$_("unbounded_auto_enable")}</div>
           <div class="sub">{$_("unbounded_auto_enable_sub")}</div>
@@ -58,6 +63,7 @@
       </div>
       <div class="divider"></div>
       <div class="row toggle-row">
+        <span class="ic"><Icon name="visibilityOff" /></span>
         <div class="meta">
           <div class="name">{$_("unbounded_hide")}</div>
           <div class="sub">{$_("unbounded_hide_sub")}</div>
@@ -93,6 +99,7 @@
     background: none; border: none; font-family: var(--font); text-align: start;
   }
   .toggle-row { justify-content: space-between; }
+  .row .ic { width: 24px; display: inline-flex; justify-content: center; color: var(--text-secondary); flex-shrink: 0; }
   .meta { flex: 1; min-width: 0; }
   .name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
   .sub {
@@ -105,7 +112,7 @@
     width: 46px; height: 28px; border-radius: 999px; border: none; background: var(--switch-off);
     position: relative; cursor: pointer; transition: background 0.15s ease; flex-shrink: 0;
   }
-  .switch.on { background: var(--brand, #1f9d55); }
+  .switch.on { background: var(--toggle-on); }
   .knob {
     position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
     border-radius: 50%; background: #fff; transition: transform 0.15s ease;
