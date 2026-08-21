@@ -52,6 +52,38 @@
   const HOME = { lat: 20, lng: 0 };
   /** Colour of the dot marking US, distinct from a peer's. */
   const OWN_DOT = "#00bdd6";
+  /**
+   * How an arc arrives: it GROWS along its own length, from the peer towards us, while fading in.
+   *
+   * Both numbers are `PointConnectionStyle`'s defaults in the reference, which is what Lantern gets
+   * by passing `animateOnAdd: true` and leaving the durations alone — 1000ms of growth and 500ms of
+   * fade, both linear (its painter is a plain `elapsed / duration` clamp, with no curve). The
+   * direction is not arbitrary either: the reference's path starts at the PEER and ends at the
+   * volunteer, and its growth extracts the path from 0 forward, so the connection reaches out from
+   * the person being helped towards whoever is helping them.
+   */
+  const GROW_MS = 1000;
+  const FADE_MS = 500;
+  /**
+   * Continuous spin, in three.js `OrbitControls.autoRotateSpeed` units (2.0 is one turn per 30s).
+   *
+   * The reference spins on desktop — `isRotating: PlatformUtils.isDesktop, rotationSpeed: 0.04` —
+   * and this globe was static, which is the most visible way it failed to look like the recording.
+   *
+   * Its figure does not transfer directly: the package subtracts a fixed angle PER FRAME, so its real
+   * speed depends on the display's refresh rate — about 15 deg/s at 60Hz and double that on a 120Hz
+   * panel. So the rate came from the recording instead, by cross-correlating a band of the sphere
+   * between frames a second apart: the windows where a `focusOnCoordinates` turn is not overriding the
+   * spin agree on ~21 deg/s, which sits between those two figures. At 2.0 OrbitControls turns once
+   * per 30s, i.e. 12 deg/s, so this is 21.
+   *
+   * Measuring the same way against `npm run dev` reads LOWER, about 13-16 deg/s, and that is a mock
+   * artifact rather than something to compensate for: the mock lands a peer every ~2s, every arrival
+   * suspends the spin for ~1s (see `parkCamera`), so the average comes out near half of nominal. Real
+   * arrivals are far rarer, so nominal is what a user sees. Do not raise this to make the dev numbers
+   * match.
+   */
+  const ROTATE_SPEED = 3.5;
   const MAX_ARCS = 50;
   /**
    * How many arcs are DRAWN, regardless of how many peers there are.
@@ -108,6 +140,17 @@
     id: string;
     d: string;
     color: string;
+    /**
+     * Whether it is currently drawable — both feet on the visible face, with a usable perpendicular.
+     *
+     * A culled arc stays in the list and is HIDDEN rather than removed, so its element survives and
+     * its growth animation keeps running on time. Dropping it instead would restart the growth every
+     * time the camera swung a peer past the cull threshold, and an arc added while off-face would
+     * animate from scratch when it came into view instead of already being drawn — where the
+     * reference, whose growth is a function of elapsed time since the connection was added, shows it
+     * finished.
+     */
+    visible: boolean;
   }
   /** A dot on the sphere, already projected. */
   interface Dot {
@@ -129,6 +172,7 @@
   let io: IntersectionObserver | undefined;
   let ro: ResizeObserver | undefined;
   let followRaf = 0;
+  let spinResume: ReturnType<typeof setTimeout> | undefined;
   let themeObserver: MutationObserver | undefined;
   /** Whether the TopoJSON continents have been handed to globe.gl yet. See `paintSphere`. */
   let continentsLoaded = false;
@@ -138,8 +182,22 @@
   // case (screen scrolled away, or app backgrounded).
   function syncAnimation() {
     if (!globe) return;
-    if (onScreen && tabVisible) globe.resumeAnimation();
-    else globe.pauseAnimation();
+    if (onScreen && tabVisible) {
+      globe.resumeAnimation();
+      startProjection();
+    } else {
+      globe.pauseAnimation();
+      stopProjection();
+    }
+  }
+
+  /** Turn the continuous spin on or off. Never on under `prefers-reduced-motion`. */
+  function setSpin(on: boolean) {
+    if (!globe) return;
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+    globe.controls().autoRotate = on && !reduced;
   }
 
   function onVisibility() {
@@ -204,12 +262,14 @@
     const out: ArcPath[] = [];
     for (const a of arcs) {
       // Round the back, or so close to the limb that a foot projects onto the disc while facing away.
-      if (angleDeg(pov.lat, pov.lng, a.lat, a.lng) >= FOOT_MAX_DEG) continue;
+      const peerVisible = angleDeg(pov.lat, pov.lng, a.lat, a.lng) < FOOT_MAX_DEG;
       const s = globe.getScreenCoords(a.lat, a.lng);
-      dots.push({ id: a.id, x: s.x, y: s.y });
+      if (peerVisible) dots.push({ id: a.id, x: s.x, y: s.y });
       // Both feet have to be on the face — an arc with one foot past the limb draws as a hairpin off
-      // the edge — so no origin, or an origin round the back, means dots without arcs.
-      if (!far || !ownVisible) continue;
+      // the edge — so no origin, or an origin round the back, means dots without arcs. The arc is
+      // still emitted, just not drawable: see `ArcPath.visible`.
+      if (!far) continue;
+      const drawable = peerVisible && ownVisible;
       // Raise the arch PERPENDICULAR TO ITS OWN CHORD, not radially outward from the disc's centre.
       //
       // Radially outward is what the reference's formula computes, and it is wrong at our globe's
@@ -233,7 +293,7 @@
       // clamp below would divide by it, sending the control point to infinity. Reachable for a peer
       // close to a pole, where both feet project to nearly the same x. There is no arch to draw
       // across a vertical chord, so skip it.
-      if (!(Math.abs(ny) > 1e-3)) continue;
+      const chordUsable = Math.abs(ny) > 1e-3;
       const midX = (s.x + far.x) / 2;
       const midY = (s.y + far.y) / 2;
       // Height off the globe's RADIUS, not off the chord. The recording's arches crest about 1.1
@@ -254,14 +314,14 @@
       // upside down. There is no upward arch to draw in that case, so the connection is skipped.
       // `Math.min` also guarantees the clamp only ever REDUCES a rise, never inflates a small one.
       const room = midY - CREST_MARGIN;
-      if (room <= 0) continue;
-      rise = Math.min(rise, (2 * room) / -ny);
+      rise = room > 0 ? Math.min(rise, (2 * room) / -ny) : rise;
       const cx = midX + nx * rise;
       const cy = midY + ny * rise;
       out.push({
         id: a.id,
         color: a.color,
         d: `M ${s.x.toFixed(1)} ${s.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${far.x.toFixed(1)} ${far.y.toFixed(1)}`,
+        visible: drawable && chordUsable && room > 0,
       });
     }
     paths = out;
@@ -269,25 +329,29 @@
   }
 
   /**
-   * Re-project the arcs for `ms` while a camera transition plays out.
+   * Re-project the arcs every frame for as long as the globe is on screen.
    *
-   * `onZoom` covers user drags, but `pointOfView`'s own tween moves the camera without firing it, so
-   * the arcs would sit frozen at their pre-transition positions until the next unrelated event. A
-   * bounded rAF loop is the cheapest way to follow it: it stops on its own, so there is still no
-   * standing per-frame cost.
+   * The arcs are an SVG overlay, not part of the scene, so nothing moves them when the camera does —
+   * and now that the globe spins continuously they would visibly detach from the sphere and float.
+   * A standing loop is therefore required rather than the bounded one that used to follow a
+   * transition, and it also subsumes the `onZoom` hook and drag handling: one place recomputes.
+   *
+   * Gated on exactly the same visibility signal as the WebGL renderer, so when the screen is off-tab
+   * or scrolled away this stops with it. While it runs the renderer is running anyway for the spin,
+   * and re-projecting a handful of arcs beside that is marginal.
    */
-  function followCamera(ms: number) {
-    cancelAnimationFrame(followRaf);
-    if (ms <= 0) {
-      layoutArcs();
-      return;
-    }
-    const until = performance.now() + ms;
+  function startProjection() {
+    if (followRaf) return;
     const step = () => {
       layoutArcs();
-      if (performance.now() < until) followRaf = requestAnimationFrame(step);
+      followRaf = requestAnimationFrame(step);
     };
     followRaf = requestAnimationFrame(step);
+  }
+
+  function stopProjection() {
+    if (followRaf) cancelAnimationFrame(followRaf);
+    followRaf = 0;
   }
 
   /** Recompute the arc set from the current peers, capped for both data and legibility. */
@@ -370,7 +434,12 @@
       },
       animateMs,
     );
-    followCamera(animateMs + 120);
+    // Suspend the spin for the duration of the turn. `pointOfView` animates the camera directly while
+    // autoRotate advances the azimuth every frame, so leaving both on has them fighting over the same
+    // camera and the turn arrives somewhere neither intended.
+    setSpin(false);
+    clearTimeout(spinResume);
+    spinResume = setTimeout(() => setSpin(true), animateMs + 120);
   }
 
 
@@ -442,20 +511,21 @@
         // The reference's atmosphere colour, not a sample of the halo's faded tail: globe.gl applies
         // its own outward falloff, so handing it the source cyan reproduces the gradient instead of
         // flattening it to the pale edge tone.
-        .atmosphereColor("#00bdd6")
-        // Tight: a rim glow hugging the sphere, not a wide cyan disc around it. The mount draws its own
-        // wider halo behind the canvas, so this only has to cover the last few pixels.
-        .atmosphereAltitude(0.09)
+        // A SOFT WIDE BLOOM, not a rim. The reference is explicit about this — `atmosphereOpacity:
+        // 0.18, atmosphereBlur: 22`, commented "Soft bloom, not a rim: a small blur reads as a hard
+        // teal ring" — and this had been narrowed to a rim, which is the thing that comment warns
+        // against. globe.gl gives no opacity control, so the faintness has to come from the colour:
+        // a pale cyan spread wide, rather than the saturated brand cyan held tight.
+        .atmosphereColor("#8fd9e6")
+        .atmosphereAltitude(0.22)
 ;
       globe.globeImageUrl(null as unknown as string);
       paintSphere();
 
-      // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
-      globe.controls().autoRotate = false;
+      // A slow continuous spin, as the reference has. Zoom stays disabled; users may still drag.
+      globe.controls().autoRotateSpeed = ROTATE_SPEED;
       globe.controls().enableZoom = false;
-      // Re-project the arcs whenever the user moves the camera. Programmatic transitions do not come
-      // through here — see `followCamera`.
-      globe.onZoom(() => layoutArcs());
+      setSpin(true);
       globe.pointOfView({ lat: HOME.lat, lng: HOME.lng, altitude: GLOBE_ALTITUDE });
 
       rendered = true;
@@ -538,7 +608,8 @@
   onDestroy(() => {
     document.removeEventListener("visibilitychange", onVisibility);
     themeObserver?.disconnect();
-    cancelAnimationFrame(followRaf);
+    clearTimeout(spinResume);
+    stopProjection();
     io?.disconnect();
     ro?.disconnect();
     globe?.pauseAnimation?.();
@@ -557,7 +628,21 @@
        the globe underneath. -->
   <svg class="arcs" aria-hidden="true">
     {#each paths as p (p.id)}
-      <path d={p.d} stroke={p.color} stroke-width={ARC_WIDTH} fill="none" stroke-linecap="round" />
+      <!-- `pathLength="1"` normalises the dash maths, so one dash of length 1 covers the whole arc
+           however long it is on screen and the growth is a straight 1 -> 0 on the offset. That also
+           makes the animation independent of `d`: the camera can move mid-growth, changing the path
+           entirely, and the same fraction stays drawn. -->
+      <path
+        class="arc"
+        class:hidden={!p.visible}
+        d={p.d}
+        stroke={p.color}
+        stroke-width={ARC_WIDTH}
+        fill="none"
+        stroke-linecap="round"
+        pathLength="1"
+        style="--grow: {GROW_MS}ms; --fade: {FADE_MS}ms"
+      />
     {/each}
     <!-- The dots are drawn here rather than through globe.gl's points layer. That layer renders a
          point as a 3D cylinder, and at the size the design wants (a ~10px dot) its facets show as a
@@ -598,6 +683,44 @@
   .host {
     position: absolute;
     inset: 0;
+  }
+  /* Arriving arcs grow from the peer towards us while fading in — see `GROW_MS`. The element is
+     keyed by arc id and survives both a camera move and a spell of being culled, so the growth runs
+     once, on time, from when the connection first appeared. */
+  .arc {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation:
+      grow var(--grow) linear forwards,
+      appear var(--fade) linear forwards;
+  }
+  /* Culled, not gone: hidden so the element (and its running animation) survive. */
+  .arc.hidden {
+    visibility: hidden;
+  }
+  @keyframes grow {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+  @keyframes appear {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  /* Motion is the point of this animation, so there is nothing to preserve at reduced motion beyond
+     the arc itself: draw it complete. */
+  @media (prefers-reduced-motion: reduce) {
+    .arc {
+      animation: none;
+      stroke-dashoffset: 0;
+    }
   }
   .arcs {
     position: absolute;
