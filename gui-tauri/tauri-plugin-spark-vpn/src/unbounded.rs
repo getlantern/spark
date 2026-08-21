@@ -338,10 +338,43 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         // which costs less than duplicating the persisted-total bookkeeping out here.
         {
             let origin_app = loop_app.clone();
+            // Scoped to THIS session by `stop_epoch`, the same signal `unbounded_start` uses across
+            // its own pre-gate fetch. Without it a lookup still in flight when the user presses stop
+            // writes the origin back AFTER stop cleared it, and `unbounded_status` then reports where
+            // we are while sharing is off — contradicting the one property this lookup's placement is
+            // supposed to guarantee. Re-read after every await, not just once, because there are
+            // several.
+            let epoch_at_start = origin_app
+                .try_state::<UnboundedState>()
+                .map(|st| st.stop_epoch.load(std::sync::atomic::Ordering::Acquire));
             tauri::async_runtime::spawn(async move {
-                if let Some(geo) = GeoResolver::new().resolve_own().await {
-                    if let Some(st) = origin_app.try_state::<UnboundedState>() {
-                        *lock_recover(&st.origin) = Some(geo);
+                let still_this_session =
+                    || match (epoch_at_start, origin_app.try_state::<UnboundedState>()) {
+                        (Some(before), Some(st)) => {
+                            st.stop_epoch.load(std::sync::atomic::Ordering::Acquire) == before
+                        }
+                        _ => false,
+                    };
+                let resolver = GeoResolver::new();
+                // RETRY, because `resolve_own` deliberately does not cache failures — one attempt
+                // would waste that and leave the volunteer off their own map for the whole session
+                // after a single blip. Backed off and bounded: this is decoration, and a geo host
+                // that is down should cost a handful of attempts, not a standing timer.
+                for delay_secs in [0_u64, 5, 20, 60, 180] {
+                    if delay_secs > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                    }
+                    if !still_this_session() {
+                        return;
+                    }
+                    if let Some(geo) = resolver.resolve_own().await {
+                        if !still_this_session() {
+                            return;
+                        }
+                        if let Some(st) = origin_app.try_state::<UnboundedState>() {
+                            *lock_recover(&st.origin) = Some(geo);
+                        }
+                        return;
                     }
                 }
             });
