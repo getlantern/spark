@@ -143,6 +143,14 @@
     --dot-neutral-border: #dedfdf;   /* status/neutral-border-dot */
     --dot-success-bg: #0a8638;       /* status/success-bg-dot */
     --dot-success-border: #a2ddaf;   /* status/success-border-dot */
+    /* The globe's sphere. Taken from the reference's own UV textures rather than sampled off a
+       screenshot: `assets/unbounded/uv-map.png` is #E9E9E9 over 66% of the map and #FFFFFF over 33%,
+       which is Earth's ocean/land split — so the LAND is the lighter of the two. Sampling a rendered
+       frame gets this backwards, because the view is land-heavy and the more common colour there is
+       land, not ocean. Tokens rather than constants in the component because the reference ships a
+       second, dark texture and swaps by theme. */
+    --globe-ocean: #e9e9e9;
+    --globe-land: #ffffff;
     --font: "Urbanist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   /* Dark palette applies when the resolved theme is dark (data-theme is set by +layout.svelte and
@@ -185,6 +193,9 @@
     --dot-neutral-border: #3a3f45;
     --dot-success-bg: #34c759;
     --dot-success-border: rgba(52, 199, 89, 0.32);
+    /* From `uv-map-dark.png`, the same 66/33 split: ocean #1E1F20, land #424B54. */
+    --globe-ocean: #1e1f20;
+    --globe-land: #424b54;
   }
   /* border-box everywhere: rows use `width: 100%` + padding, and under the default content-box
      that overflows the card by the padding (32px), whose `overflow: hidden` then clips the

@@ -56,8 +56,15 @@
   /**
    * Set once `status` holds a real snapshot rather than the placeholder above. Both writers set it:
    * the poll and the event stream, either of which can be first.
+   *
+   * `$state`, not a plain `let`, because the effect below has to re-run when it flips. Today it also
+   * would anyway — each snapshot is a fresh object, so `peers` changes identity and retriggers — but
+   * that makes correctness depend on the backend never handing back the same array instance. If it
+   * ever did, and the first real snapshot had the same peers as the placeholder (an empty list, the
+   * common case), the effect would not re-run, the baseline would never be taken, and the first real
+   * arrival would be silently absorbed as the baseline instead of celebrated.
    */
-  let statusLoaded = false;
+  let statusLoaded = $state(false);
   let burstTrigger = $state(0);
   let burstCountry = $state<string | null>(null);
   $effect(() => {

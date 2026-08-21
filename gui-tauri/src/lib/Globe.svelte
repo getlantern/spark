@@ -128,6 +128,9 @@
   let io: IntersectionObserver | undefined;
   let ro: ResizeObserver | undefined;
   let followRaf = 0;
+  let themeObserver: MutationObserver | undefined;
+  /** Whether the TopoJSON continents have been handed to globe.gl yet. See `paintSphere`. */
+  let continentsLoaded = false;
 
   // The render loop should run only while both visible on-screen and on an active tab. globe.gl
   // exposes pause/resume for exactly this; gating on both signals keeps the GPU idle in the common
@@ -222,12 +225,20 @@
       // separations it produced an arch three times too tall.
       let rise = Math.max(ARCH_RISE * R, ARCH_MIN * chord);
       // Then clamp so the crest lands just inside the top of the frame. A Bézier reaches halfway to
-      // its control point, so the crest sits at `midY + rise * ny / 2` (ny is negative, i.e. up).
-      // Without this an arch whose feet are already high on the disc crests off the top edge — and
-      // the clamp is what keeps every arch framed the way the recording frames them, just clearing
-      // the sphere, rather than leaving it to the peer's latitude.
-      const crestY = midY + (rise * ny) / 2;
-      if (crestY < CREST_MARGIN) rise = (2 * (CREST_MARGIN - midY)) / ny;
+      // its control point, so the crest sits at `midY + rise * ny / 2`. Without this an arch whose
+      // feet are already high on the disc crests off the top edge — the clamp is what frames every
+      // arch the way the recording does, just clearing the sphere, rather than leaving it to the
+      // peer's latitude.
+      //
+      // `room` is how far the chord's midpoint sits below the margin, and it is what makes the clamp
+      // safe. `ny` is NEGATIVE (up the screen), so solving for the rise that lands the crest exactly
+      // on the margin divides by a negative: if the midpoint is already at or above the margin that
+      // yields a NEGATIVE rise, which flips the control point below the chord and draws the arch
+      // upside down. There is no upward arch to draw in that case, so the connection is skipped.
+      // `Math.min` also guarantees the clamp only ever REDUCES a rise, never inflates a small one.
+      const room = midY - CREST_MARGIN;
+      if (room <= 0) continue;
+      rise = Math.min(rise, (2 * room) / -ny);
       const cx = midX + nx * rise;
       const cy = midY + ny * rise;
       out.push({
@@ -321,6 +332,37 @@
 
 
 
+  /** Resolve a CSS custom property off the host, so the palette stays in the layout's token block. */
+  function token(name: string): string {
+    if (!el) return "#000000";
+    return getComputedStyle(el).getPropertyValue(name).trim() || "#000000";
+  }
+
+  /**
+   * Paint the sphere from the theme's tokens.
+   *
+   * The reference ships TWO textures, `uv-map.png` and `uv-map-dark.png`, and swaps them by theme, so
+   * a single light sphere is wrong in dark mode — it reads as a bright disc on a dark screen. We draw
+   * the ocean as the material and the continents as polygons over it rather than loading either
+   * texture (a 2048x1024 PNG each, against a lazy chunk we keep lean), which means both colours have
+   * to be reapplied when the theme flips.
+   *
+   * Rendered effectively UNLIT: the scene lights ADD to the material's colour AND its emissive, so
+   * any lit nonzero colour washes the sphere toward white. Black colour with the tone on emissive
+   * gives a flat, light-independent sphere.
+   */
+  function paintSphere() {
+    if (!globe) return;
+    const mat = globe.globeMaterial();
+    mat?.color?.set?.("#000000");
+    mat?.emissive?.set?.(token("--globe-ocean"));
+    if (mat && "shininess" in mat) mat.shininess = 0;
+    // Re-run the polygon accessor so the land colour follows too. Gated on our OWN flag rather than
+    // on reading `polygonsData()` back: globe.gl's kapsule props do double as getters, but that is
+    // not in its type declarations, and this does not need to rely on it.
+    if (continentsLoaded) globe.polygonCapColor(() => token("--globe-land"));
+  }
+
   onMount(() => {
     if (typeof window === "undefined" || !el) return;
 
@@ -362,17 +404,8 @@
         // wider halo behind the canvas, so this only has to cover the last few pixels.
         .atmosphereAltitude(0.09)
 ;
-      // A NEAR-WHITE ocean with LIGHT-GREY continents on top (no texture — keeps the lazy chunk
-      // lean). Sampled off the recording: ocean #F5F5F5, land #DDDDDD. This is the inverse of what
-      // was here before, which had a grey ocean under white land and so read as a negative of the
-      // reference. Rendered effectively UNLIT: the scene lights ADD to the material's color AND its
-      // emissive, so any lit nonzero color washes the sphere toward white. Black color + emissive
-      // carrying the design tone gives a flat, light-independent sphere.
       globe.globeImageUrl(null as unknown as string);
-      const mat = globe.globeMaterial();
-      mat?.color?.set?.("#000000");
-      mat?.emissive?.set?.("#f5f5f5");
-      if (mat && "shininess" in mat) mat.shininess = 0;
+      paintSphere();
 
       // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
       globe.controls().autoRotate = false;
@@ -400,12 +433,13 @@
           const countries = (feature as any)(topo, topo.objects.countries).features;
           globe
             .polygonsData(countries)
-            // Continents: light-grey landmasses over the near-white ocean, with NO country outlines
-            // (transparent stroke) so they read as clean continent shapes, per the design.
-            .polygonCapColor(() => "#dddddd")
+            // Continents, with NO country outlines (transparent stroke) so they read as clean
+            // continent shapes, per the design. Colours come from `paintSphere`.
+            .polygonCapColor(() => token("--globe-land"))
             .polygonSideColor(() => "rgba(0,0,0,0)")
             .polygonStrokeColor(() => "rgba(0,0,0,0)")
             .polygonAltitude(0.004);
+          continentsLoaded = true;
         }
       } catch (e) {
         console.warn("globe: continents failed to load", e);
@@ -431,6 +465,13 @@
     })();
 
     document.addEventListener("visibilitychange", onVisibility);
+    // `+layout.svelte` writes the RESOLVED theme to <html data-theme>, so watching that one attribute
+    // covers all three settings and the OS changing underneath 'system'.
+    themeObserver = new MutationObserver(() => paintSphere());
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
     return () => {
       disposed = true;
     };
@@ -453,6 +494,7 @@
 
   onDestroy(() => {
     document.removeEventListener("visibilitychange", onVisibility);
+    themeObserver?.disconnect();
     cancelAnimationFrame(followRaf);
     io?.disconnect();
     ro?.disconnect();
