@@ -95,12 +95,49 @@ async fn batch(size: usize) -> Result<Vec<String>, String> {
 ///
 /// Sampled rather than returned whole so donors do not all present ICE the same servers in the same
 /// order — and so the set can grow past `size` without this becoming a different code path.
+///
+/// Makes no network call, so it is also the way to get a usable list offline.
+///
+/// # Examples
+///
+/// ```
+/// # use spark_sharing::{stun_embedded_batch, STUN_BATCH_SIZE};
+/// let servers = stun_embedded_batch(STUN_BATCH_SIZE);
+/// assert_eq!(servers.len(), STUN_BATCH_SIZE);
+/// // Each is an ICE-ready URL, e.g. "stun:stun.cloudflare.com:3478".
+/// assert!(servers.iter().all(|s| s.starts_with("stun:")));
+/// // Asking for fewer than the set holds returns exactly that many.
+/// assert_eq!(stun_embedded_batch(2).len(), 2);
+/// ```
 pub fn embedded_batch(size: usize) -> Vec<String> {
     select_from(EMBEDDED.to_vec(), size)
 }
 
-/// The batch to actually use: the remote list when it works, the embedded set otherwise. Returns the
-/// servers, whether they came from the remote list, and the reason if it was not used.
+/// The batch to actually use: the remote list when it works, the embedded set otherwise.
+///
+/// Returns `(servers, from_remote, why_not)` — the servers to hand ICE, whether they came from the
+/// remote list, and if not, the reason. The reason is returned rather than logged because this crate
+/// carries no logging dependency; the caller has the subscriber and decides how loudly to report a
+/// fallback.
+///
+/// Never fails: a donor with no STUN is degraded, not broken, so the embedded set is always available
+/// as the floor. `servers` is therefore non-empty whenever `size > 0`.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use spark_sharing::{stun_batch_or_embedded, STUN_BATCH_SIZE};
+/// # async fn run() {
+/// let (servers, from_remote, why_not) = stun_batch_or_embedded(STUN_BATCH_SIZE).await;
+/// if let Some(reason) = why_not {
+///     // The remote list was unreachable — expected in a censored region, and survivable.
+///     eprintln!("using {} embedded STUN servers: {reason}", servers.len());
+/// }
+/// assert!(!servers.is_empty());
+/// assert!(servers.iter().all(|s| s.starts_with("stun:")));
+/// let _ = from_remote;
+/// # }
+/// ```
 pub async fn batch_or_embedded(size: usize) -> (Vec<String>, bool, Option<String>) {
     match batch(size).await {
         Ok(servers) => (servers, true, None),
@@ -113,14 +150,60 @@ pub async fn batch_or_embedded(size: usize) -> (Vec<String>, bool, Option<String
 /// Selection is by swap-remove from a shrinking candidate pool (broflake's approach), which samples
 /// *without replacement* — handing ICE the same server five times would waste four of the five slots.
 fn select(body: &str, size: usize) -> Vec<String> {
-    let candidates: Vec<&str> = body
+    // Normalized, validated, de-duplicated — in that order — before sampling. A `BTreeSet` because
+    // the remote list is untrusted input: `swap_remove` sampling removes a *position*, not a value, so
+    // a list containing the same endpoint twice could otherwise be picked twice and waste an ICE slot.
+    let unique: std::collections::BTreeSet<String> = body
         .lines()
         .map(str::trim)
-        // A line must look like `host:port`. This rejects blanks, comments and anything the list's
-        // format grows later, rather than passing a malformed URL into ICE.
-        .filter(|l| !l.is_empty() && !l.starts_with('#') && l.contains(':'))
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(public_v4_endpoint)
         .collect();
+    let candidates: Vec<&str> = unique.iter().map(String::as_str).collect();
     select_from(candidates, size)
+}
+
+/// Normalize one untrusted list entry to `ip:port`, or reject it.
+///
+/// The remote list is `valid_ipv4s.txt` — literal IPv4 socket addresses — so this parses strictly
+/// rather than accepting anything containing a colon. That matters beyond tidiness: entries are
+/// attacker-influenceable (a third-party repo), and ICE will dutifully send STUN probes wherever it is
+/// pointed. An entry naming `127.0.0.1`, `10.x`, or `169.254.x` would aim that traffic at the
+/// volunteer's own host or LAN. Only globally-routable addresses with a non-zero port survive.
+///
+/// The **embedded** fallback deliberately does not go through here: those are hostnames, curated in
+/// this file, and resolving them to check would mean a DNS lookup per entry to validate a list we
+/// already trust.
+fn public_v4_endpoint(line: &str) -> Option<String> {
+    let addr: std::net::SocketAddrV4 = line.parse().ok()?;
+    if addr.port() == 0 || !is_public_v4(addr.ip()) {
+        return None;
+    }
+    Some(addr.to_string())
+}
+
+/// Whether `ip` is a globally-routable IPv4 address.
+///
+/// Hand-rolled because `Ipv4Addr::is_global` is still unstable. The listed ranges are the ones that
+/// would point ICE somewhere harmful or useless — loopback and private/link-local aim at the
+/// volunteer's own machine or LAN, and the rest cannot answer a STUN request at all.
+fn is_public_v4(ip: &std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        // 0.0.0.0/8 "this network", and 100.64.0.0/10 carrier-grade NAT — a CGNAT address is a
+        // provider's internal space, not somewhere a public STUN server lives.
+        || a == 0
+        || (a == 100 && (64..128).contains(&b))
+        // 192.0.0.0/24 IETF protocol assignments, 198.18.0.0/15 benchmarking, 240.0.0.0/4 reserved.
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 240)
 }
 
 /// Sample up to `size` of `candidates` without replacement, `stun:`-prefixed. Shared by the remote
@@ -265,6 +348,68 @@ mod tests {
         assert_eq!(picked.len(), 2);
         assert!(picked.contains(&"stun:1.1.1.1:3478".to_string()));
         assert!(picked.contains(&"stun:2.2.2.2:19302".to_string()));
+    }
+
+    /// The remote list is attacker-influenceable (a third-party repo), and ICE sends STUN probes
+    /// wherever it is pointed — so an entry naming the volunteer's own host or LAN must never reach it.
+    #[test]
+    fn rejects_non_public_and_malformed_endpoints_from_the_remote_list() {
+        let body = "\n             127.0.0.1:3478\n             10.0.0.5:3478\n             192.168.1.1:3478\n             172.16.0.1:3478\n             169.254.1.1:3478\n             100.64.0.1:3478\n             0.0.0.0:3478\n             224.0.0.1:3478\n             255.255.255.255:3478\n             203.0.113.5:3478\n             198.18.0.1:3478\n             240.0.0.1:3478\n             192.0.0.1:3478\n             1.1.1.1:0\n             1.1.1.1:notaport\n             1.1.1.1\n             [2001:db8::1]:3478\n             9.9.9.9:3478\n";
+        let picked = select(&body.replace("             ", ""), 50);
+        // Only the one globally-routable entry with a usable port survives.
+        assert_eq!(
+            picked,
+            vec!["stun:9.9.9.9:3478".to_string()],
+            "a non-public or malformed endpoint reached ICE"
+        );
+    }
+
+    /// Sampling removes a vector *position*, so a list repeating an endpoint could otherwise hand ICE
+    /// the same server twice and waste a slot. Deduplication happens before sampling, not during.
+    #[test]
+    fn duplicate_remote_entries_are_collapsed_before_sampling() {
+        let body = "1.1.1.1:3478\n1.1.1.1:3478\n1.1.1.1:3478\n2.2.2.2:3478\n";
+        let picked = select(body, 5);
+        assert_eq!(picked.len(), 2, "duplicates were not collapsed: {picked:?}");
+    }
+
+    #[test]
+    fn is_public_v4_classifies_the_edges() {
+        use std::net::Ipv4Addr;
+        for bad in [
+            "127.0.0.1",
+            "10.1.1.1",
+            "172.31.255.255",
+            "192.168.0.1",
+            "169.254.0.1",
+            "100.127.255.255",
+            "0.1.2.3",
+            "224.0.0.1",
+            "255.255.255.255",
+            "203.0.113.1",
+            "198.19.0.1",
+            "240.0.0.1",
+            "255.0.0.1",
+            "192.0.0.8",
+        ] {
+            assert!(
+                !is_public_v4(&bad.parse::<Ipv4Addr>().unwrap()),
+                "{bad} must be rejected"
+            );
+        }
+        for good in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "9.9.9.9",
+            "100.63.255.255",
+            "100.128.0.1",
+            "192.0.1.1",
+        ] {
+            assert!(
+                is_public_v4(&good.parse::<Ipv4Addr>().unwrap()),
+                "{good} must be accepted"
+            );
+        }
     }
 
     #[test]

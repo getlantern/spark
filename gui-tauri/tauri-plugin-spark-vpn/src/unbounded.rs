@@ -199,7 +199,8 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // check below, which sees the pool the winner stored and returns Ok — same idempotency, but the
     // return value is honest: `Ok` always means "a pool is running", never "someone else might be
     // starting one". Because the gate serializes start and stop, that check is race-free.
-    let _gate = state.start_gate.lock().await;
+    // Cheap, NON-authoritative early-out. Its only job is to avoid a pointless STUN fetch on a
+    // double-click; the authoritative check is the gated one below, and only that one is race-free.
     if lock_recover(&state.handle).is_some() {
         return Ok(());
     }
@@ -207,7 +208,8 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // Consent gate, enforced here rather than only in the window UI: the volunteer's connection must
     // never carry other people's traffic before they have been shown the disclosure. Checking it in
     // the command covers EVERY entry point — including the tray toggle and the startup resume, which
-    // have no dialog of their own.
+    // have no dialog of their own. Ahead of the STUN fetch below, so no network request is made on an
+    // unconsented volunteer's behalf either.
     if !crate::persist::load_unbounded_welcome_seen(&base) {
         return Err(crate::Error::Platform(
             "unbounded consent not given (disclosure not yet acknowledged)".into(),
@@ -224,8 +226,11 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // remote list lives on `raw.githubusercontent.com` — a plausible casualty of the same blocking
     // this tool exists to route around, and a third-party repo besides.
     //
-    // Awaited here rather than in `build_sharing_config` because that is sync and shared with the
-    // availability check, which must not make a network call.
+    // **Deliberately before `start_gate` is taken.** This awaits the network for up to the fetch
+    // timeout, and holding the gate across it would make `unbounded_stop` wait out that timeout
+    // before it could even begin stopping — the gate serializes start and stop. The cost is a
+    // redundant fetch if two callers race past the early-out above; the loser then finds the pool
+    // already running under the gate and returns Ok, so the waste is bounded and harmless.
     let (stun_urls, from_remote, why) =
         spark_sharing::stun_batch_or_embedded(STUN_BATCH_SIZE).await;
     if let Some(why) = why {
@@ -242,6 +247,15 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
         );
     }
     cfg.stun_urls = stun_urls;
+
+    // NOW take the gate, for the authoritative idempotency check plus spawn + store. A second
+    // concurrent caller WAITS here (`lock().await`, not `try_lock`) and then sees the pool the winner
+    // stored, returning Ok — so `Ok` always means "a pool is running", never "someone else might be
+    // starting one". Nothing below awaits the network, so the gate is held only over local work.
+    let _gate = state.start_gate.lock().await;
+    if lock_recover(&state.handle).is_some() {
+        return Ok(());
+    }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PoolEvent>();
     // `Arc<FreddieSignaler>` coerces to the `Arc<dyn Signaler>` that `start_sharing` expects.
