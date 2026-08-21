@@ -4,6 +4,8 @@ mod aggregate;
 mod consumer;
 mod freddie;
 mod geo;
+// ICE STUN servers for the donor side. Mirrors what broflake (and therefore Lantern) does.
+mod stun;
 // The `spark-core` edge: an `UnboundedConsumer` impl + `install`. Feature-gated so a volunteer-only
 // build (the Tauri plugin) never compiles it.
 #[cfg(feature = "spark-transport")]
@@ -34,6 +36,10 @@ pub use lantern_unbounded::supervisor::{
     PoolEvent, SupervisorEvent, SupervisorPoolSummary, SupervisorSummary,
 };
 pub use lantern_unbounded::Socks5Target;
+pub use stun::{
+    batch_or_embedded as stun_batch_or_embedded, embedded_batch as stun_embedded_batch,
+    DEFAULT_BATCH_SIZE as STUN_BATCH_SIZE,
+};
 
 /// Runtime settings for the peer-proxy sharing pool.
 #[derive(Debug, Clone)]

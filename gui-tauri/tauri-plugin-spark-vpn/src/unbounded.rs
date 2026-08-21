@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use spark_sharing::{
     start_sharing, Aggregator, FreddieSignaler, GeoResolver, PoolEvent, SharingConfig,
-    SharingDelta, SharingHandle, SharingStatus,
+    SharingDelta, SharingHandle, SharingStatus, STUN_BATCH_SIZE,
 };
 
 use crate::unbounded_diag;
@@ -42,6 +42,19 @@ pub(crate) struct UnboundedState {
     /// end-of-stream teardown only while still current, so a loop belonging to a previous generation
     /// can never clear the handle or state of the pool that replaced it.
     generation: std::sync::atomic::AtomicU64,
+    /// Incremented by every `unbounded_stop`, under `start_gate`.
+    ///
+    /// `unbounded_start` awaits the network (the STUN fetch) *before* taking the gate, because holding
+    /// it across that await would make a stop wait out the fetch timeout. That opens a window: a stop
+    /// can run to completion while a start is still fetching, and the start would then take the gate,
+    /// see no handle, and spin up a pool the user had just cancelled — sharing on after pressing stop,
+    /// which for a consent-gated feature is the worst direction to fail in.
+    ///
+    /// So start snapshots this before the fetch and re-reads it under the gate: a change means a stop
+    /// intervened, and the start abandons instead of spawning. Separate from `generation` rather than
+    /// reusing it, because that one's meaning ("which pool a loop belongs to") is load-bearing for the
+    /// aggregation loop's teardown and should not also encode "a stop happened".
+    stop_epoch: std::sync::atomic::AtomicU64,
     /// Cached `features.unbounded` availability, refreshed whenever the config is actually read.
     ///
     /// The tray polls ~0.7 Hz and repaints on every peer event; resolving availability from disk each
@@ -94,8 +107,10 @@ fn build_sharing_config<R: Runtime>(
     }
     let cfg = SharingConfig {
         egress_url: uc.egress_url,
-        // The config doesn't carry STUN servers today; an empty list lets the consumer gather
-        // host/srflx candidates without an explicit STUN server.
+        // Filled in by the caller — it needs an `.await` and this fn is sync. An empty list here is
+        // NOT benign: without STUN, ICE gathers host candidates only and cannot traverse most NATs,
+        // so the donor advertises, a censored client answers, and the DataChannel never opens. That
+        // is exactly why sharing carried no traffic while Lantern's donor carried it quickly.
         stun_urls: Vec::new(),
         // `ctable_size` from the wire, clamped to a sane floor (SharingConfig::supervisor_config
         // also clamps 0 → 1, but be explicit so a missing/zero value still yields a usable pool).
@@ -197,7 +212,8 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // check below, which sees the pool the winner stored and returns Ok — same idempotency, but the
     // return value is honest: `Ok` always means "a pool is running", never "someone else might be
     // starting one". Because the gate serializes start and stop, that check is race-free.
-    let _gate = state.start_gate.lock().await;
+    // Cheap, NON-authoritative early-out. Its only job is to avoid a pointless STUN fetch on a
+    // double-click; the authoritative check is the gated one below, and only that one is race-free.
     if lock_recover(&state.handle).is_some() {
         return Ok(());
     }
@@ -205,7 +221,8 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
     // Consent gate, enforced here rather than only in the window UI: the volunteer's connection must
     // never carry other people's traffic before they have been shown the disclosure. Checking it in
     // the command covers EVERY entry point — including the tray toggle and the startup resume, which
-    // have no dialog of their own.
+    // have no dialog of their own. Ahead of the STUN fetch below, so no network request is made on an
+    // unconsented volunteer's behalf either.
     if !crate::persist::load_unbounded_welcome_seen(&base) {
         return Err(crate::Error::Platform(
             "unbounded consent not given (disclosure not yet acknowledged)".into(),
@@ -214,7 +231,57 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
 
     // Refuses with a typed "unbounded not available" error when the feature is gated off or the
     // resolved config lacks the endpoints to dial (see build_sharing_config).
-    let (cfg, signaler) = build_sharing_config(&app)?;
+    let (mut cfg, signaler) = build_sharing_config(&app)?;
+
+    // Snapshot BEFORE the ungated network await below, and re-checked under the gate. See
+    // `UnboundedState::stop_epoch`: without this, a stop that completes while we are fetching would
+    // be undone by this start.
+    let stop_epoch_before = state.stop_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+    // ICE STUN servers. Mirrors Lantern's donor, which takes broflake's `DefaultSTUNBatchFunc`
+    // (`clientcore.NewDefaultWebRTCOptions()`, never overridden in radiance): fetch a public list and
+    // pick 5 at random. Spark adds an embedded fallback broflake has no equivalent of, because the
+    // remote list lives on `raw.githubusercontent.com` — a plausible casualty of the same blocking
+    // this tool exists to route around, and a third-party repo besides.
+    //
+    // **Deliberately before `start_gate` is taken.** This awaits the network for up to the fetch
+    // timeout, and holding the gate across it would make `unbounded_stop` wait out that timeout
+    // before it could even begin stopping — the gate serializes start and stop. The cost is a
+    // redundant fetch if two callers race past the early-out above; the loser then finds the pool
+    // already running under the gate and returns Ok, so the waste is bounded and harmless.
+    let (stun_urls, from_remote, why) =
+        spark_sharing::stun_batch_or_embedded(STUN_BATCH_SIZE).await;
+    if let Some(why) = why {
+        tracing::info!(
+            error = %why,
+            count = stun_urls.len(),
+            "unbounded: STUN list unavailable; using the embedded fallback"
+        );
+    } else {
+        tracing::debug!(
+            count = stun_urls.len(),
+            from_remote,
+            "unbounded: STUN servers selected"
+        );
+    }
+    cfg.stun_urls = stun_urls;
+
+    // NOW take the gate, for the authoritative idempotency check plus spawn + store. A second
+    // concurrent caller WAITS here (`lock().await`, not `try_lock`) and then sees the pool the winner
+    // stored, returning Ok — so `Ok` always means "a pool is running", never "someone else might be
+    // starting one". Nothing below awaits the network, so the gate is held only over local work.
+    let _gate = state.start_gate.lock().await;
+    if lock_recover(&state.handle).is_some() {
+        return Ok(());
+    }
+    // A stop landed while we were fetching, so the user's latest intent is "off". Abandon rather than
+    // spawn — and report it, because returning `Ok` here would claim a pool is running when the whole
+    // point is that we declined to start one.
+    if state.stop_epoch.load(std::sync::atomic::Ordering::Acquire) != stop_epoch_before {
+        return Err(crate::Error::Platform(
+            "unbounded start superseded by a stop while preparing".into(),
+        ));
+    }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PoolEvent>();
     // `Arc<FreddieSignaler>` coerces to the `Arc<dyn Signaler>` that `start_sharing` expects.
@@ -350,6 +417,13 @@ pub(crate) async fn unbounded_stop<R: Runtime>(app: AppHandle<R>) -> crate::Resu
     // could take the handle before the start stored it, cancelling nothing and leaving the pool
     // relaying while every observable said "off".
     let _gate = state.start_gate.lock().await;
+
+    // Announce the stop to any start currently between its snapshot and the gate (see `stop_epoch`).
+    // Under the gate, so a start either reads the old value and then observes this change when it
+    // acquires the gate, or reads the new one — never misses it.
+    state
+        .stop_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::Release);
 
     // Take the sharing handle out and drop it — its `Drop` does a cooperative cancel. Do NOT abort.
     // Recover from a poisoned lock (via `lock_recover`) rather than treating it as "no handle" —
