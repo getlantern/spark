@@ -174,7 +174,7 @@
 
     <div class="globe-mount">
       <Globe {peers} />
-      <HeartsBurst trigger={burstTrigger} countryCode={burstCountry} />
+      <HeartsBurst trigger={burstTrigger} countryCode={burstCountry} waiting={status.enabled && peers.length === 0} />
     </div>
 
     <div class="card">
@@ -273,8 +273,12 @@
   .globe-mount::before {
     content: "";
     grid-area: 1 / 1;
-    width: 250px;
-    height: 250px;
+    /* Tighter than the sphere plus a wide margin: sampled off the recording, the page tint is gone
+       by about a quarter of a radius past the rim (#E9F0F3 at 1.2 radii, page colour by 1.4). The
+       globe is ~188px across here, so a 224px halo is that ring and no more — at 250 it read as a
+       distinct disc sitting behind the globe. */
+    width: 224px;
+    height: 224px;
     border-radius: 50%;
     background: radial-gradient(
       circle at 50% 50%,

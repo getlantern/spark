@@ -57,5 +57,6 @@
   "settings_diagnostics_desc": "Helps us fix problems: Spark shares error and performance reports; IP addresses and web addresses are removed. Turning it off also deletes the reports stored on this device. Applies after restart.",
   "unbounded_welcome_risks": "Before you begin: the sites and services they reach will see your IP address as the source of that traffic, and the approximate location of each person you help is looked up through a Lantern service so it can be shown on your map. Please consider whether that is safe where you live. Unbounded is entirely optional, and you can turn it off at any time.",
   "unbounded_err_toggle": "Couldn't change Unbounded. Please try again.",
-  "unbounded_err_settings": "Couldn't load Unbounded settings"
+  "unbounded_err_settings": "Couldn't load Unbounded settings",
+  "unbounded_waiting_for_connections": "Waiting for connections..."
 }
