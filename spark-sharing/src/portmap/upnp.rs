@@ -16,6 +16,7 @@
 //! None of them contribute to getting one TCP port forwarded.
 
 use std::collections::HashMap;
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
@@ -23,6 +24,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
 use super::{MapGrant, Mapping, Method, PortMapError};
+
+/// Bounds on one HTTP exchange with the gateway. Short: this is a LAN device answering with a small
+/// document, and every second spent waiting on a broken one is a second not spent trying PCP.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SSDP_MULTICAST: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 255, 255, 250), 1900);
 
@@ -188,7 +194,11 @@ async fn http_request(
         .next()
         .ok_or_else(|| PortMapError::Malformed(format!("no address for {authority}")))?;
 
-    let mut stream = TcpStream::connect(addr).await?;
+    // A blackholed gateway address would otherwise stall discovery indefinitely and never fall
+    // through to PCP/NAT-PMP.
+    let mut stream = tokio::time::timeout(HTTP_CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connect to gateway timed out"))??;
     let mut req = format!("{method} {path} HTTP/1.1\r\nHOST: {authority}\r\n");
     for (k, v) in extra_headers {
         req.push_str(&format!("{k}: {v}\r\n"));
@@ -210,13 +220,22 @@ async fn http_request(
     let mut raw = Vec::with_capacity(4096);
     let mut chunk = [0_u8; 4096];
     loop {
-        let n = stream.read(&mut chunk).await?;
+        // Per-read, not whole-body: a gateway that accepts the connection and then sends nothing —
+        // or dribbles bytes forever without closing — would otherwise hang this task for good.
+        let n = tokio::time::timeout(HTTP_READ_TIMEOUT, stream.read(&mut chunk))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "gateway stopped responding"))??;
         if n == 0 {
             break;
         }
         raw.extend_from_slice(&chunk[..n]);
-        if raw.len() >= limit {
-            break;
+        // (2) An explicit error rather than truncation. A body cut mid-document parses as a
+        // document with missing fields, which surfaces as a confusing "no controlURL" far from the
+        // actual cause.
+        if raw.len() > limit {
+            return Err(PortMapError::Malformed(format!(
+                "reply from {authority} exceeded {limit} bytes"
+            )));
         }
     }
     let text = String::from_utf8_lossy(&raw).into_owned();
@@ -454,6 +473,28 @@ fn add_mapping_args(
     ]
 }
 
+/// How good a candidate service is, worst to best.
+///
+/// A gateway on a second internal network will happily map a port and report a private external
+/// address, which cannot host anything — so having a PUBLIC address is what separates a usable
+/// gateway from a merely responsive one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    Disconnected,
+    ConnectedPrivate,
+    ConnectedPublic,
+}
+
+async fn rank_service(service: &Service) -> Rank {
+    if !service.is_connected().await {
+        return Rank::Disconnected;
+    }
+    match service.external_ip().await {
+        Ok(ip) if is_public_v4(ip) => Rank::ConnectedPublic,
+        _ => Rank::ConnectedPrivate,
+    }
+}
+
 /// UPnP against one gateway.
 pub(super) struct UpnpMapper {
     service: Service,
@@ -474,7 +515,10 @@ impl UpnpMapper {
         client: Ipv4Addr,
     ) -> Result<Self, PortMapError> {
         let locations = discover_locations(gateway, Duration::from_millis(1200)).await?;
-        let mut fallback: Option<Service> = None;
+        // Ranked, not first-wins. Keeping the first candidate found and only replacing it on a
+        // perfect match means a disconnected service discovered early beats a connected one
+        // discovered later — the opposite of the stated preference.
+        let mut best: Option<(Rank, Service)> = None;
 
         for loc in locations {
             let loc = repoint_at_gateway(&loc, gateway);
@@ -500,21 +544,18 @@ impl UpnpMapper {
                     control_url,
                     service_type: wanted.to_string(),
                 };
-                if !service.is_connected().await {
-                    fallback = fallback.or(Some(service));
-                    continue;
+                let rank = rank_service(&service).await;
+                // Nothing outranks a connected gateway with a public address, so stop looking
+                // rather than pay for more SOAP round trips.
+                if rank == Rank::ConnectedPublic {
+                    return Ok(Self::new(service, client));
                 }
-                match service.external_ip().await {
-                    // A public address means this is the gateway that actually faces the internet.
-                    Ok(ip) if is_public_v4(ip) => {
-                        return Ok(Self::new(service, client));
-                    }
-                    _ => fallback = fallback.or(Some(service)),
+                if best.as_ref().is_none_or(|(r, _)| rank > *r) {
+                    best = Some((rank, service));
                 }
             }
         }
-        fallback
-            .map(|s| Self::new(s, client))
+        best.map(|(_, s)| Self::new(s, client))
             .ok_or(PortMapError::Unavailable)
     }
 

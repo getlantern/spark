@@ -330,11 +330,16 @@ pub struct ManualMapper {
 }
 
 impl ManualMapper {
-    /// `port` must be a real listening port; 0 is rejected so a misconfiguration cannot register a
-    /// port no peer will answer on.
+    /// `port` must be one this process can actually listen on: 1024..=65535.
+    ///
+    /// Below 1024 is privileged and this subsystem runs unprivileged, and 0 is the wildcard that
+    /// forwards every port — so rejecting the range here stops a misconfiguration registering a
+    /// port no peer will answer on, or one that would forward far more than intended.
     pub fn new(port: u16) -> Result<Self, PortMapError> {
-        if port == 0 {
-            return Err(PortMapError::Refused("manual port 0".into()));
+        if !(1024..=65535).contains(&port) {
+            return Err(PortMapError::Refused(format!(
+                "manual port {port} is outside 1024..=65535"
+            )));
         }
         Ok(Self { port })
     }
@@ -957,8 +962,14 @@ mod tests {
     }
 
     #[test]
-    fn manual_rejects_port_zero() {
+    fn manual_rejects_ports_this_process_cannot_bind() {
+        // 0 is the wildcard that forwards every port.
         assert!(ManualMapper::new(0).is_err());
+        // Privileged, and this subsystem runs unprivileged.
+        assert!(ManualMapper::new(80).is_err());
+        assert!(ManualMapper::new(1023).is_err());
+        assert!(ManualMapper::new(1024).is_ok());
+        assert!(ManualMapper::new(65535).is_ok());
     }
 
     #[test]
