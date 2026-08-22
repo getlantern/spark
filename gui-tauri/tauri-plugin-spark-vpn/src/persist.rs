@@ -248,15 +248,16 @@ pub fn save_unbounded_hidden(base: &Path, hidden: bool) -> crate::Result<()> {
 
 /// Read the persisted manual port from `<base>/unbounded_manual_port.txt`.
 ///
-/// Returns `None` when unset, unreadable, or out of range. A port outside 1..=65535 cannot be
-/// listened on, so treating it as unset is what lets the caller fall through to discovery rather
-/// than registering a port no peer will answer on.
+/// Returns `None` when unset, unreadable, or outside 1024..=65535. The low bound is not cosmetic:
+/// this port is bound by the unprivileged sharing process, which cannot take a privileged one, and
+/// gateways widely refuse to map them regardless. Treating an out-of-range value as unset is what
+/// lets the caller fall through to discovery rather than registering a port no peer will answer on.
 #[cfg_attr(not(desktop), allow(dead_code))]
 pub fn load_unbounded_manual_port(base: &Path) -> Option<u16> {
     std::fs::read_to_string(base.join("unbounded_manual_port.txt"))
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|p| (1..=65535).contains(p))
+        .filter(|p| (1024..=65535).contains(p))
         .map(|p| p as u16)
 }
 

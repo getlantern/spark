@@ -52,7 +52,9 @@
     let port = 0;
     if (raw !== "") {
       const parsed = Number(raw);
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+      // 1024, not 1: this port is bound locally by the unprivileged sharing process, and a
+      // privileged port needs root it does not have. Gateways widely refuse to map them anyway.
+      if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 65535) {
         portError = $_("unbounded_manual_port_range");
         return;
       }
