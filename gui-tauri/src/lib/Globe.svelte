@@ -259,7 +259,10 @@
    * globe still costs nothing.
    */
   function layoutArcs() {
-    if (!globe || !el || arcs.length === 0) {
+    // Not `arcs.length === 0`: sharing can be on with nobody connected yet, which the screen treats
+    // as a normal state, and in it we still know where WE are. Clearing everything there left the
+    // globe blank while the page was showing "waiting for connections".
+    if (!globe || !el || (arcs.length === 0 && !origin)) {
       paths = [];
       peerDots = [];
       ownDot = null;
@@ -302,7 +305,13 @@
       // Both feet have to be on the face — an arc with one foot past the limb draws as a hairpin off
       // the edge — so no origin, or an origin round the back, means dots without arcs. The arc is
       // still emitted, just not drawable: see `ArcPath.visible`.
-      if (!far || !own) continue;
+      if (!far || !own) {
+        // Kept, not dropped: the origin lands after the first peers, and removing the entry would
+        // destroy the element so every arc restarted its growth at that moment instead of appearing
+        // already drawn. See `ArcPath.visible`.
+        out.push({ id: a.id, color: a.color, d: "", visible: false });
+        continue;
+      }
       const drawable = peerVisible && ownVisible;
       // SAMPLED ALONG THE GREAT CIRCLE, not fitted with one Bézier.
       //
@@ -356,12 +365,14 @@
       }
       if (run.length > 1) runs.push(run);
       const d = runs.map((r) => `M ${r.join(" L ")}`).join(" ");
-      if (!d) continue;
       out.push({
         id: a.id,
         color: a.color,
         d,
-        visible: drawable,
+        // An arc whose every sample fell behind the sphere has nothing to draw, but it stays in the
+        // list for the same reason as above — dropping it restarts the growth when the route rotates
+        // back into view.
+        visible: drawable && d !== "",
       });
     }
     paths = out;

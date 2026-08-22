@@ -68,5 +68,6 @@
   "unbounded_manual_port_save": "Save",
   "unbounded_manual_port_range": "Enter a port between 1024 and 65535.",
   "unbounded_manual_port_set": "Currently using port {port}.",
-  "unbounded_manual_port_cleared": "Manual port cleared; Spark will set one up automatically."
+  "unbounded_manual_port_cleared": "Manual port cleared; Spark will set one up automatically.",
+  "unbounded_manual_port_save_failed": "Couldn't save the port. Please try again."
 }
