@@ -5,7 +5,7 @@
 //! the router forwarded to this host, so lantern-cloud can hand the address out to censored clients
 //! and they can connect straight to it.
 //!
-//! Three ways to get that port, tried in order by [`discover`]:
+//! Four ways to get that port, tried in order by [`discover`]:
 //!
 //! 1. A rule the user configured by hand. An explicit instruction outranks discovery.
 //! 2. UPnP/IGD, the widest-supported protocol, in [`upnp`].
@@ -567,9 +567,14 @@ fn default_gateway_blocking() -> Result<Ipv4Addr, PortMapError> {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // Without this a GUI process flashes a console window at the user, and this runs at the
+        // start of every sharing session.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let out = std::process::Command::new("route")
             .args(["print", "-4", "0.0.0.0"])
             .stdin(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(|e| PortMapError::Gateway(format!("run route: {e}")))?;
         parse_route_print(&String::from_utf8_lossy(&out.stdout))
@@ -649,8 +654,8 @@ pub async fn local_ip() -> Result<Ipv4Addr, PortMapError> {
     }
 }
 
-/// Pick how this host will accept inbound connections: a hand-configured rule, then PCP, then
-/// NAT-PMP.
+/// Pick how this host will accept inbound connections: a hand-configured rule, then UPnP, then PCP,
+/// then NAT-PMP.
 ///
 /// `manual_port` wins when set because it is an explicit instruction from the user, and finding a
 /// gateway that would map some other port is not a reason to override it.

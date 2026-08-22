@@ -66,7 +66,9 @@
       savedPort = port === 0 ? null : port;
       portNote = port === 0 ? $_("unbounded_manual_port_cleared") : "";
     } catch {
-      portError = $_("unbounded_manual_port_range");
+      // Its own message: the range error would tell the user to enter a port between 1024 and 65535
+      // immediately after they entered one that passed exactly that check.
+      portError = $_("unbounded_manual_port_save_failed");
     } finally {
       saving = false;
     }
