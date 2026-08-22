@@ -8,16 +8,17 @@
 //! Three ways to get that port, tried in order by [`discover`]:
 //!
 //! 1. A rule the user configured by hand. An explicit instruction outranks discovery.
-//! 2. PCP (RFC 6887), the current protocol.
-//! 3. NAT-PMP (RFC 6886), which PCP supersedes but which many routers still speak alone.
+//! 2. UPnP/IGD, the widest-supported protocol, in [`upnp`].
+//! 3. PCP (RFC 6887), the current one.
+//! 4. NAT-PMP (RFC 6886), which PCP supersedes but which many routers still speak alone.
 //!
-//! UPnP/IGD is the widest-supported protocol and is deliberately absent here: it needs SSDP
-//! multicast, HTTP and XML, so it is a dependency decision rather than a hundred lines of wire
-//! format, and it is tracked separately.
+//! UPnP is tried before PCP/NAT-PMP because it is the protocol most consumer routers actually
+//! implement. It is also much the fussiest, which is why it lives in its own module.
 //!
-//! Both protocols implemented here are small binary exchanges with the default gateway on UDP 5351,
-//! which is why they are hand-rolled: the whole wire format is below, and it costs nothing against
-//! the size budget.
+//! The two protocols in this file are small binary exchanges with the gateway on UDP 5351, so their
+//! whole wire format is below.
+
+mod upnp;
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -47,6 +48,7 @@ pub struct Mapping {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Manual,
+    Upnp,
     Pcp,
     NatPmp,
 }
@@ -55,6 +57,7 @@ impl Method {
     pub fn as_str(self) -> &'static str {
         match self {
             Method::Manual => "manual",
+            Method::Upnp => "upnp",
             Method::Pcp => "pcp",
             Method::NatPmp => "nat-pmp",
         }
@@ -132,10 +135,10 @@ fn natpmp_map_req(internal_port: u16, suggested_external: u16, lifetime_secs: u3
 
 /// What a MAP reply granted, before it is turned into a [`Mapping`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MapGrant {
-    external_port: u16,
-    lease: Duration,
-    external_ip: Option<Ipv4Addr>,
+pub(super) struct MapGrant {
+    pub(super) external_port: u16,
+    pub(super) lease: Duration,
+    pub(super) external_ip: Option<Ipv4Addr>,
 }
 
 fn parse_natpmp_map(b: &[u8]) -> Result<MapGrant, PortMapError> {
@@ -452,7 +455,9 @@ impl PmpMapper {
                 let reply = self.transport.round_trip(&req).await?;
                 parse_natpmp_map(&reply)
             }
-            Method::Manual => Err(PortMapError::Unavailable),
+            // A `PmpMapper` only ever holds Pcp or NatPmp; the other variants belong to the
+            // manual and UPnP mappers, which do not route through here.
+            Method::Manual | Method::Upnp => Err(PortMapError::Unavailable),
         }
     }
 
@@ -502,6 +507,25 @@ impl PortMapper for PmpMapper {
 
     fn method(&self) -> Method {
         self.method
+    }
+}
+
+#[async_trait::async_trait]
+impl PortMapper for upnp::UpnpMapper {
+    async fn map(&self, internal_port: u16) -> Result<Mapping, PortMapError> {
+        upnp::UpnpMapper::map(self, internal_port).await
+    }
+
+    async fn unmap(&self, mapping: &Mapping) -> Result<(), PortMapError> {
+        upnp::UpnpMapper::unmap(self, mapping).await
+    }
+
+    async fn renew(&self, mapping: &Mapping) -> Result<Mapping, PortMapError> {
+        upnp::UpnpMapper::renew(self, mapping).await
+    }
+
+    fn method(&self) -> Method {
+        Method::Upnp
     }
 }
 
@@ -631,7 +655,22 @@ pub async fn discover(manual_port: Option<u16>) -> Result<Box<dyn PortMapper>, P
     }
     let gateway = default_gateway().await?;
     let client = local_ip().await?;
-    Ok(Box::new(PmpMapper::discover(gateway, client).await?))
+
+    // UPnP first: it is the protocol most consumer routers actually implement, so trying it first
+    // is what makes the common case work. PCP/NAT-PMP is the cheaper exchange but the rarer
+    // capability, and it is exactly what answers on the gateways UPnP is switched off on.
+    let upnp_err = match upnp::UpnpMapper::discover(gateway, client).await {
+        Ok(m) => return Ok(Box::new(m)),
+        Err(e) => e,
+    };
+    match PmpMapper::discover(gateway, client).await {
+        Ok(m) => Ok(Box::new(m)),
+        // Report the UPnP failure when PCP/NAT-PMP simply was not there: UPnP is the path most
+        // networks are expected to take, so it is the more useful of the two to anyone reading why
+        // hosting is unavailable. A more specific PMP failure is worth more than either.
+        Err(PortMapError::Unavailable) => Err(upnp_err),
+        Err(pmp_err) => Err(pmp_err),
+    }
 }
 
 #[cfg(test)]
