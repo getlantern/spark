@@ -269,29 +269,40 @@ const PMP_RETRIES: [Duration; 3] = [
     Duration::from_millis(1000),
 ];
 
+/// A fresh socket per exchange, deliberately.
+///
+/// A single long-lived socket would be a correctness bug rather than an optimisation: the trait is
+/// `Send + Sync`, so two tasks may exchange at once, and this is send-then-receive with no
+/// request/reply demultiplexing — replies would be delivered to whichever caller happened to be
+/// reading. PCP would catch it, because its nonce is checked, but a NAT-PMP reply carries nothing to
+/// match against and the wrong caller would accept the wrong mapping.
+///
+/// Binding per exchange gives each one its own ephemeral port, so a reply can only ever arrive at
+/// the request that provoked it. That removes the hazard without a lock, and the cost is one socket
+/// per map/renew/unmap — operations that happen once an hour, not on a data path.
 struct UdpPmp {
-    sock: UdpSocket,
+    gateway: Ipv4Addr,
 }
 
 impl UdpPmp {
-    async fn connect(gateway: Ipv4Addr) -> Result<Self, PortMapError> {
-        let sock = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).await?;
-        sock.connect(SocketAddr::V4(SocketAddrV4::new(gateway, PMP_PORT)))
-            .await?;
-        Ok(Self { sock })
+    fn new(gateway: Ipv4Addr) -> Self {
+        Self { gateway }
     }
 }
 
 #[async_trait::async_trait]
 impl PmpTransport for UdpPmp {
     async fn round_trip(&self, req: &[u8]) -> Result<Vec<u8>, PortMapError> {
+        let sock = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).await?;
+        sock.connect(SocketAddr::V4(SocketAddrV4::new(self.gateway, PMP_PORT)))
+            .await?;
         let mut buf = [0_u8; 1500];
         for wait in PMP_RETRIES {
-            self.sock.send(req).await?;
-            match tokio::time::timeout(wait, self.sock.recv(&mut buf)).await {
+            sock.send(req).await?;
+            match tokio::time::timeout(wait, sock.recv(&mut buf)).await {
                 Ok(Ok(n)) => return Ok(buf[..n].to_vec()),
-                // A read error is as retryable as a timeout here: an ICMP port-unreachable from a
-                // gateway that is not listening surfaces as one on some platforms.
+                // A read error is as retryable as a timeout: an ICMP port-unreachable from a gateway
+                // that is not listening surfaces as one on some platforms.
                 Ok(Err(_)) | Err(_) => continue,
             }
         }
@@ -392,8 +403,7 @@ impl PmpMapper {
     /// external-address request. A NAT-PMP-only gateway usually ignores the PCP request rather than
     /// refusing it, so silence has to fall through as well as an explicit version refusal.
     pub async fn discover(gateway: Ipv4Addr, client: Ipv4Addr) -> Result<Self, PortMapError> {
-        let transport = UdpPmp::connect(gateway).await?;
-        Self::negotiate(Box::new(transport), client).await
+        Self::negotiate(Box::new(UdpPmp::new(gateway)), client).await
     }
 
     async fn negotiate(
