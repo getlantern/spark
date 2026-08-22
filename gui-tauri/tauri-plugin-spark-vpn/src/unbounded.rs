@@ -620,6 +620,9 @@ pub(crate) async fn unbounded_get_settings<R: Runtime>(
         "autoEnable": crate::persist::load_unbounded_auto_enable(&base),
         "hidden": crate::persist::load_unbounded_hidden(&base),
         "welcomeSeen": crate::persist::load_unbounded_welcome_seen(&base),
+        // `null` when unset. The UI shows an empty field for that rather than a 0, which would read
+        // as a configured port.
+        "manualPort": crate::persist::load_unbounded_manual_port(&base),
     }))
 }
 
@@ -634,6 +637,9 @@ pub(crate) struct UnboundedSettingsPatch {
     auto_enable: Option<bool>,
     hidden: Option<bool>,
     welcome_seen: Option<bool>,
+    /// The router port the user forwarded by hand. `Some(0)` clears it, which is how an emptied
+    /// field arrives — the UI cannot send `undefined` for "clear" without it meaning "leave alone".
+    manual_port: Option<u16>,
 }
 
 #[tauri::command]
@@ -650,6 +656,9 @@ pub(crate) async fn unbounded_set_settings<R: Runtime>(
     }
     if let Some(v) = settings.welcome_seen {
         crate::persist::save_unbounded_welcome_seen(&base, v)?;
+    }
+    if let Some(v) = settings.manual_port {
+        crate::persist::save_unbounded_manual_port(&base, (v != 0).then_some(v))?;
     }
     Ok(())
 }

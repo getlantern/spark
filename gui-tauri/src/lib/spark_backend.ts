@@ -69,7 +69,18 @@ export interface UnboundedStatus {
    */
   origin: UnboundedGeo | null;
 }
-export interface UnboundedSettings { autoEnable: boolean; hidden: boolean; welcomeSeen: boolean; }
+export interface UnboundedSettings {
+  autoEnable: boolean;
+  hidden: boolean;
+  welcomeSeen: boolean;
+  /**
+   * A router port the user forwarded by hand, or `null` when unset.
+   *
+   * `null` rather than 0 for unset: 0 is a real value in the port-mapping protocols (a wildcard that
+   * forwards every port), so it must never be able to reach one by way of "empty".
+   */
+  manualPort: number | null;
+}
 
 export interface SparkBackend {
   status(): Promise<SparkStatus>;
@@ -103,7 +114,7 @@ export interface SparkBackend {
   unboundedStatus(): Promise<UnboundedStatus>;
   /** Durable Unbounded settings (auto-enable / hidden / welcome-seen). */
   unboundedGetSettings(): Promise<UnboundedSettings>;
-  /** Persist any subset of the Unbounded settings (auto-enable / hidden / welcome-seen). */
+  /** Persist any subset of the Unbounded settings. `manualPort: 0` clears the manual port. */
   unboundedSetSettings(settings: Partial<UnboundedSettings>): Promise<void>;
   /** Whether Unbounded is available for this client (server `features.unbounded` gate + a config
    * block with the endpoints to dial). Gates whether the UI surfaces the feature at all. */
@@ -137,8 +148,9 @@ const mockState: {
   autoEnable: boolean;
   hidden: boolean;
   welcomeSeen: boolean;
+  manualPort: number | null;
   diagnosticsEnabled: boolean;
-} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [], origin: null }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false, diagnosticsEnabled: true };
+} = { state: "disconnected", timer: null, pinned: null, split: { enabled: false, domains: [], ips: [] }, routingMode: "smart", adBlockEnabled: true, excludedApps: [], unbounded: { enabled: false, helpingNow: 0, totalHelped: 0, peers: [], origin: null }, unboundedTimer: null, autoEnable: false, hidden: false, welcomeSeen: false, manualPort: null, diagnosticsEnabled: true };
 
 export class MockBackend implements SparkBackend {
   // A stand-in pool (the 6 DO relays used for multi-server bring-up) so the selection screen is
@@ -265,12 +277,21 @@ export class MockBackend implements SparkBackend {
   async unboundedStatus(): Promise<UnboundedStatus> { return structuredClone(mockState.unbounded); }
 
   async unboundedGetSettings(): Promise<UnboundedSettings> {
-    return { autoEnable: mockState.autoEnable, hidden: mockState.hidden, welcomeSeen: mockState.welcomeSeen };
+    return {
+      autoEnable: mockState.autoEnable,
+      hidden: mockState.hidden,
+      welcomeSeen: mockState.welcomeSeen,
+      manualPort: mockState.manualPort,
+    };
   }
   async unboundedSetSettings(settings: Partial<UnboundedSettings>): Promise<void> {
     if (settings.autoEnable !== undefined) mockState.autoEnable = settings.autoEnable;
     if (settings.hidden !== undefined) mockState.hidden = settings.hidden;
     if (settings.welcomeSeen !== undefined) mockState.welcomeSeen = settings.welcomeSeen;
+    // 0 is the wire's "clear it", matching what the plugin expects; see UnboundedSettings.manualPort.
+    if (settings.manualPort !== undefined) {
+      mockState.manualPort = settings.manualPort === 0 ? null : settings.manualPort;
+    }
   }
   // Dev-visible: the mock always reports Unbounded available so the tab/row shows at `npm run dev`.
   async unboundedAvailable(): Promise<boolean> { return true; }

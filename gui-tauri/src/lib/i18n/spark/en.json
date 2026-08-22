@@ -60,5 +60,13 @@
   "unbounded_err_settings": "Couldn't load Unbounded settings",
   "unbounded_waiting_for_connections": "Waiting for connections...",
   "indicator_on": "{feature} is on",
-  "indicator_off": "{feature} is off"
+  "indicator_off": "{feature} is off",
+  "unbounded_advanced": "Advanced",
+  "unbounded_advanced_sub": "For networks where automatic setup doesn't work.",
+  "unbounded_manual_port": "Manual port",
+  "unbounded_manual_port_help": "If your router won't forward a port automatically, forward one yourself and enter it here.",
+  "unbounded_manual_port_save": "Save",
+  "unbounded_manual_port_range": "Enter a port between 1 and 65535.",
+  "unbounded_manual_port_set": "Currently using port {port}.",
+  "unbounded_manual_port_cleared": "Manual port cleared; Spark will set one up automatically."
 }

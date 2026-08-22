@@ -31,12 +31,22 @@ describe("MockBackend unbounded", () => {
     expect((await mock.unboundedStatus()).enabled).toBe(false);
   });
 
-  it("defaults settings to all false", async () => {
+  it("defaults settings to all false, with no manual port override", async () => {
     expect(await mock.unboundedGetSettings()).toEqual({
       autoEnable: false,
       hidden: false,
       welcomeSeen: false,
+      // null, not 0: zero is a real value in the port-mapping protocols (a wildcard forwarding every
+      // port), so "unset" must not be spelled the same way.
+      manualPort: null,
     });
+  });
+
+  it("clears the manual port when sent zero", async () => {
+    await mock.unboundedSetSettings({ manualPort: 51820 });
+    expect((await mock.unboundedGetSettings()).manualPort).toBe(51820);
+    await mock.unboundedSetSettings({ manualPort: 0 });
+    expect((await mock.unboundedGetSettings()).manualPort).toBeNull();
   });
 
   it("persists a partial settings update", async () => {

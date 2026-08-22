@@ -246,6 +246,42 @@ pub fn save_unbounded_hidden(base: &Path, hidden: bool) -> crate::Result<()> {
     save_unbounded_bool(base, "unbounded_hidden.txt", hidden)
 }
 
+/// Read the persisted manual port from `<base>/unbounded_manual_port.txt`.
+///
+/// Returns `None` when unset, unreadable, or out of range. A port outside 1..=65535 cannot be
+/// listened on, so treating it as unset is what lets the caller fall through to discovery rather
+/// than registering a port no peer will answer on.
+#[cfg_attr(not(desktop), allow(dead_code))]
+pub fn load_unbounded_manual_port(base: &Path) -> Option<u16> {
+    std::fs::read_to_string(base.join("unbounded_manual_port.txt"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|p| (1..=65535).contains(p))
+        .map(|p| p as u16)
+}
+
+/// Persist the manual port. `None` clears it, which is how the user turns the override back off.
+///
+/// Creates `base` (and any parents) if they don't exist.
+#[cfg_attr(not(desktop), allow(dead_code))]
+pub fn save_unbounded_manual_port(base: &Path, port: Option<u16>) -> crate::Result<()> {
+    let path = base.join("unbounded_manual_port.txt");
+    match port {
+        // Removing the file rather than writing 0 keeps "unset" a single state; a 0 on disk would
+        // also read as unset, and two spellings of it invite a reader that only handles one.
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        },
+        Some(p) => {
+            std::fs::create_dir_all(base)?;
+            std::fs::write(&path, p.to_string())?;
+            Ok(())
+        }
+    }
+}
+
 /// Read the persisted `unbounded_welcome_seen` toggle from `<base>/unbounded_welcome_seen.txt`.
 ///
 /// Returns `false` (welcome not yet seen) unless the file holds exactly `"true"` (trimmed,
