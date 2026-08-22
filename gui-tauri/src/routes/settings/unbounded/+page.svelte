@@ -11,11 +11,26 @@
   let autoEnable = $state(false);
   let hidden = $state(false);
 
+  // The manual port override, for networks where no mapping protocol works. Kept as the raw string
+  // the user typed rather than a number so an in-progress or invalid entry is not silently coerced
+  // into a port we would then save.
+  let advancedOpen = $state(false);
+  let portInput = $state("");
+  let savedPort = $state<number | null>(null);
+  let portError = $state("");
+  let portNote = $state("");
+  let saving = $state(false);
+
   onMount(async () => {
     try {
       const settings = await backend.unboundedGetSettings();
       autoEnable = settings.autoEnable;
       hidden = settings.hidden;
+      savedPort = settings.manualPort;
+      portInput = settings.manualPort === null ? "" : String(settings.manualPort);
+      // Open the section when an override is already in force, so it is not hidden behind a
+      // collapsed header the user has to remember to check.
+      advancedOpen = settings.manualPort !== null;
     } catch { /* keep defaults */ }
   });
 
@@ -26,6 +41,32 @@
       await backend.unboundedSetSettings({ autoEnable });
     } catch {
       autoEnable = prev;
+    }
+  }
+
+  async function savePort() {
+    portError = "";
+    portNote = "";
+    const raw = portInput.trim();
+    // An emptied field means "stop overriding", which the wire spells as 0.
+    let port = 0;
+    if (raw !== "") {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+        portError = $_("unbounded_manual_port_range");
+        return;
+      }
+      port = parsed;
+    }
+    saving = true;
+    try {
+      await backend.unboundedSetSettings({ manualPort: port });
+      savedPort = port === 0 ? null : port;
+      portNote = port === 0 ? $_("unbounded_manual_port_cleared") : "";
+    } catch {
+      portError = $_("unbounded_manual_port_range");
+    } finally {
+      saving = false;
     }
   }
 
@@ -70,6 +111,56 @@
         </div>
         <button class="switch" class:on={hidden} role="switch" aria-checked={hidden} aria-label={$_("unbounded_hide")} onclick={toggleHidden}><span class="knob"></span></button>
       </div>
+    </div>
+
+    <!-- Collapsed by default: this is an escape hatch for networks where UPnP and PCP/NAT-PMP all
+         fail, not something a typical volunteer should have to read past. -->
+    <div class="card advanced">
+      <button
+        class="row disclosure"
+        aria-expanded={advancedOpen}
+        onclick={() => (advancedOpen = !advancedOpen)}
+      >
+        <div class="meta">
+          <div class="name">{$_("unbounded_advanced")}</div>
+          <div class="sub">{$_("unbounded_advanced_sub")}</div>
+        </div>
+        <span class="chev" class:open={advancedOpen} aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </span>
+      </button>
+
+      {#if advancedOpen}
+        <div class="divider"></div>
+        <div class="port">
+          <label class="name" for="manual-port">{$_("unbounded_manual_port")}</label>
+          <p class="sub">{$_("unbounded_manual_port_help")}</p>
+          <div class="port-row">
+            <input
+              id="manual-port"
+              type="text"
+              inputmode="numeric"
+              autocomplete="off"
+              placeholder="1024-65535"
+              bind:value={portInput}
+              aria-invalid={portError !== ""}
+              aria-describedby={portError ? "manual-port-error" : undefined}
+            />
+            <button class="save" onclick={savePort} disabled={saving}>
+              {$_("unbounded_manual_port_save")}
+            </button>
+          </div>
+          {#if portError}
+            <p class="err" id="manual-port-error" role="alert">{portError}</p>
+          {:else if portNote}
+            <p class="note" role="status">{portNote}</p>
+          {:else if savedPort !== null}
+            <p class="note">
+              {$_("unbounded_manual_port_set", { values: { port: savedPort } })}
+            </p>
+          {/if}
+        </div>
+      {/if}
     </div>
   </div>
 </main>
@@ -118,4 +209,27 @@
     border-radius: 50%; background: #fff; transition: transform 0.15s ease;
   }
   .switch.on .knob { transform: translateX(18px); }
+
+  .advanced { margin-top: 12px; }
+  .disclosure { cursor: pointer; justify-content: space-between; }
+  .chev { display: inline-flex; color: var(--text-tertiary); transition: transform 0.15s ease; }
+  .chev.open { transform: rotate(180deg); }
+  .port { padding: 4px 16px 16px; }
+  .port .sub { margin: 2px 0 10px; }
+  .port-row { display: flex; gap: 8px; align-items: center; }
+  .port-row input {
+    flex: 1; min-width: 0; height: 36px; padding: 0 10px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--text-primary);
+    font-family: var(--font); font-size: 14px;
+  }
+  .port-row input[aria-invalid="true"] { border-color: #c0392b; }
+  .save {
+    height: 36px; padding: 0 16px; border: none; border-radius: 8px;
+    background: var(--brand); color: #fff;
+    font-family: var(--font); font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .save:disabled { opacity: 0.6; cursor: default; }
+  .err { margin: 8px 0 0; font-size: 12px; font-weight: 500; color: #c0392b; }
+  .note { margin: 8px 0 0; font-size: 12px; font-weight: 500; color: var(--text-tertiary); }
 </style>
