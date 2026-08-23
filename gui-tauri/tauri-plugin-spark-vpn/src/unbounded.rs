@@ -347,11 +347,19 @@ pub(crate) async fn unbounded_start<R: Runtime>(app: AppHandle<R>) -> crate::Res
             let epoch_at_start = origin_app
                 .try_state::<UnboundedState>()
                 .map(|st| st.stop_epoch.load(std::sync::atomic::Ordering::Acquire));
+            // `stop_epoch` alone is not enough: it is bumped by `unbounded_stop`, but NOT by the
+            // loop tail that runs when the supervisor pool ends on its own. That path clears the
+            // origin, so a retry still sleeping could write it back and leave `unbounded_status`
+            // reporting where we are with `running: false` — the exact state this scoping exists to
+            // prevent. The generation moves on any start, which covers it.
+            let generation_at_start = generation;
             tauri::async_runtime::spawn(async move {
                 let still_this_session =
                     || match (epoch_at_start, origin_app.try_state::<UnboundedState>()) {
                         (Some(before), Some(st)) => {
                             st.stop_epoch.load(std::sync::atomic::Ordering::Acquire) == before
+                                && st.generation.load(std::sync::atomic::Ordering::SeqCst)
+                                    == generation_at_start
                         }
                         _ => false,
                     };
@@ -620,6 +628,9 @@ pub(crate) async fn unbounded_get_settings<R: Runtime>(
         "autoEnable": crate::persist::load_unbounded_auto_enable(&base),
         "hidden": crate::persist::load_unbounded_hidden(&base),
         "welcomeSeen": crate::persist::load_unbounded_welcome_seen(&base),
+        // `null` when unset. The UI shows an empty field for that rather than a 0, which would read
+        // as a configured port.
+        "manualPort": crate::persist::load_unbounded_manual_port(&base),
     }))
 }
 
@@ -634,6 +645,9 @@ pub(crate) struct UnboundedSettingsPatch {
     auto_enable: Option<bool>,
     hidden: Option<bool>,
     welcome_seen: Option<bool>,
+    /// The router port the user forwarded by hand. `Some(0)` clears it, which is how an emptied
+    /// field arrives — the UI cannot send `undefined` for "clear" without it meaning "leave alone".
+    manual_port: Option<u16>,
 }
 
 #[tauri::command]
@@ -650,6 +664,9 @@ pub(crate) async fn unbounded_set_settings<R: Runtime>(
     }
     if let Some(v) = settings.welcome_seen {
         crate::persist::save_unbounded_welcome_seen(&base, v)?;
+    }
+    if let Some(v) = settings.manual_port {
+        crate::persist::save_unbounded_manual_port(&base, (v != 0).then_some(v))?;
     }
     Ok(())
 }
