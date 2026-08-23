@@ -20,39 +20,68 @@
   // combination of altitude, ground span and camera aim traded one artefact for the other, because no
   // world-space bulge projects upward from every angle. A screen-space curve does, always.
   //
-  // Where we DIVERGE from the reference: it puts the control point radially outward from the centre
-  // of the disc, scaled by the endpoints' central angle. At its globe size and its data (a volunteer
-  // and peers a continent apart) that reads as an arch, but at ours both feet usually land near the
-  // middle of the disc, where "radially outward" is near-degenerate — the curve then leaves one foot,
-  // swings past the limb and comes back, a lasso across the globe's face. We raise each arch
-  // perpendicular to its own chord instead, which is well-conditioned for every pair and gives the
-  // shape the recording actually shows. See `ARCH_RISE`.
+  // The control point is the great-circle midpoint of the two feet, lifted clear of the sphere and
+  // projected — the reference's own construction. An earlier pass here raised each arch perpendicular
+  // to its chord in screen space instead, which always bulges UP THE SCREEN and so leaned the wrong
+  // way for most pairs: the arcs read as bridges over the globe rather than paths lying on it. See
+  // `ARC_RIDE`, whose value is matched against the recording's measured radial profile.
   import { onMount, onDestroy } from "svelte";
-  import type { UnboundedPeer } from "$lib/spark_backend";
+  import type { UnboundedGeo, UnboundedPeer } from "$lib/spark_backend";
 
-  let { peers = [] }: { peers: UnboundedPeer[] } = $props();
+  let {
+    peers = [],
+    origin = null,
+  }: {
+    peers: UnboundedPeer[];
+    /**
+     * Where WE are. `null` until the self lookup lands, and while sharing is off.
+     *
+     * Arcs run peer -> here, which is what the reference does and what makes the screen legible:
+     * without it there is nothing on the globe representing the volunteer, so the camera parks on
+     * whoever they happen to be helping and the map reads as though it were showing THEM in a
+     * country they have never been to.
+     */
+    origin: UnboundedGeo | null;
+  } = $props();
 
   /**
    * Where the camera looks when there is nothing to frame. Neutral mid-Atlantic.
    */
   const HOME = { lat: 20, lng: 0 };
+  /** Colour of the dot marking US, distinct from a peer's. */
+  const OWN_DOT = "#00bdd6";
   /**
-   * Angular distance between an arch's two feet, along the peer's own parallel.
+   * How an arc arrives: it GROWS along its own length, from the peer towards us, while fading in.
    *
-   * Each arch is anchored at ITS OWN PEER: one foot on the peer, the other the same latitude and
-   * this many degrees of longitude away. Both feet are therefore real points on the sphere — the
-   * green dots still occlude correctly behind the limb — and, being at the same latitude, they land
-   * at nearly the same height on screen, which is what makes the arch stand UPRIGHT and narrow
-   * instead of leaning.
-   *
-   * Running each arc to a single fixed origin instead is what the reference does, but it cannot look
-   * like the reference here: its origin is the volunteer's real location, a moderate hop from the
-   * peers it serves, whereas a fixed point in the Atlantic is a third of the globe from most peers.
-   * Those long chords draw wide leaning ribbons across the face rather than the recording's arches.
-   * 23 degrees is the separation measured in the recording: its arches share one foot and fan out to
-   * the peers, with ~41px between adjacent feet on a ~200px globe, i.e. about 0.41 radii.
+   * Both numbers are `PointConnectionStyle`'s defaults in the reference, which is what Lantern gets
+   * by passing `animateOnAdd: true` and leaving the durations alone — 1000ms of growth and 500ms of
+   * fade, both linear (its painter is a plain `elapsed / duration` clamp, with no curve). The
+   * direction is not arbitrary either: the reference's path starts at the PEER and ends at the
+   * volunteer, and its growth extracts the path from 0 forward, so the connection reaches out from
+   * the person being helped towards whoever is helping them.
    */
-  const ARCH_SPAN_DEG = 23;
+  const GROW_MS = 1000;
+  const FADE_MS = 500;
+  /**
+   * Continuous spin, in three.js `OrbitControls.autoRotateSpeed` units (2.0 is one turn per 30s).
+   *
+   * The reference spins on desktop — `isRotating: PlatformUtils.isDesktop, rotationSpeed: 0.04` —
+   * and this globe was static, which is the most visible way it failed to look like the recording.
+   *
+   * Its figure does not transfer directly: the package subtracts a fixed angle PER FRAME, so its real
+   * speed depends on the display's refresh rate — about 15 deg/s at 60Hz and double that on a 120Hz
+   * panel. So the rate came from the recording instead, by cross-correlating a band of the sphere
+   * between frames a second apart: the windows where a `focusOnCoordinates` turn is not overriding the
+   * spin agree on ~21 deg/s, which sits between those two figures. At 2.0 OrbitControls turns once
+   * per 30s, i.e. 12 deg/s, so this is 21.
+   *
+   * Measuring the same way against `npm run dev` reads LOWER, about 13-16 deg/s, and that is a mock
+   * artifact rather than something to compensate for: the mock lands a peer every ~2s, every arrival
+   * suspends the spin for ~1s (see `parkCamera`), so the average comes out near half of nominal. Real
+   * arrivals are far rarer, so nominal is what a user sees. Do not raise this to make the dev numbers
+   * match.
+   */
+  const ROTATE_SPEED = 3.5;
   const MAX_ARCS = 50;
   /**
    * How many arcs are DRAWN, regardless of how many peers there are.
@@ -75,17 +104,38 @@
   /** Endpoint dot radius, px. The reference's size-6 point renders ~10px across. */
   const DOT_R = 5;
   /**
-   * How tall each arch is, in globe radii of control-point offset from its chord.
+   * How high the arc rises above the surface at its midpoint, in globe radii.
    *
-   * A quadratic Bézier reaches halfway to its control point, so the crest stands `ARCH_RISE / 2`
-   * radii above the chord. Set by measuring both sides: the recording's crest is 1.08 radii above its
-   * feet, and 2.2 here overshot that by about a quarter.
+   * A hard ceiling now, not a fitted control point: the altitude follows `sin(pi * t)` along the
+   * route, so the crest is exactly this far up and can never exceed it. 0.15 puts it at 1.15 radii,
+   * which is where the recording's crest sits (measured off its arc pixels: feet at 0.26-0.48 radii
+   * from the disc centre, median 0.90, crest 1.15).
+   *
+   * The previous approach fitted one quadratic Bézier and tuned its lift, which could not work: the
+   * control point that puts a quadratic ON a circular arc is at `1 / cos(omega / 2)` radii and
+   * diverges as the feet separate — 3.9 radii at 150 degrees. Tuning it small enough for a wide pair
+   * flattened every narrow one, and large enough for a narrow pair sent wide ones towering over the
+   * globe.
    */
-  const ARCH_RISE = 1.8;
-  /** Floor tied to the chord, so a very wide arch does not look squat next to a narrow one. */
-  const ARCH_MIN = 0.55;
-  /** Keep the crest this many px inside the top of the mount. See the clamp in `layoutArcs`. */
-  const CREST_MARGIN = 10;
+  const ARC_RIDE = 0.15;
+  /**
+   * Samples per arc. 32 is smooth at this size; the cost is 32 projections per arc per frame, against
+   * a renderer already drawing the sphere every frame for the spin.
+   */
+  const ARC_STEPS = 32;
+  /**
+   * Where a sample counts as being behind the sphere, in degrees from the camera's aim.
+   *
+   * Just under 90 so a point grazing the limb is dropped rather than smeared along the edge.
+   */
+  const HORIZON_DEG = 88;
+  /**
+   * Margin inside `FOOT_MAX_DEG` that the camera keeps our end within.
+   *
+   * The aim is chosen so our end is this much clear of the cull, rather than exactly on it, because
+   * the spin keeps moving and an end sitting exactly at the threshold would flicker in and out.
+   */
+  const CULL_MARGIN_DEG = 8;
   /** How far from the camera's aim a foot may sit before its arch is dropped, in degrees. */
   const FOOT_MAX_DEG = 66;
   /**
@@ -97,28 +147,41 @@
    */
   const GLOBE_ALTITUDE = 2.05;
 
-  /** One connection, as the two feet of an arch. */
+  /** One connection: a peer at one end, us at the other. */
   interface Arc {
     id: string;
     lat: number;
     lng: number;
-    /** The far foot: same latitude, `ARCH_SPAN_DEG` away, leaning east or west by index. */
-    endLng: number;
     color: string;
   }
-  /** One arc, projected to screen space and ready to draw, with its two feet. */
+  /** One arc, projected to screen space and ready to draw. */
   interface ArcPath {
     id: string;
     d: string;
     color: string;
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
+    /**
+     * Whether it is currently drawable, i.e. both feet are on the visible face.
+     *
+     * A culled arc stays in the list and is HIDDEN rather than removed, so its element survives and
+     * its growth animation keeps running on time. Dropping it instead would restart the growth every
+     * time the camera swung a peer past the cull threshold, and an arc added while off-face would
+     * animate from scratch when it came into view instead of already being drawn — where the
+     * reference, whose growth is a function of elapsed time since the connection was added, shows it
+     * finished.
+     */
+    visible: boolean;
+  }
+  /** A dot on the sphere, already projected. */
+  interface Dot {
+    id: string;
+    x: number;
+    y: number;
   }
 
   let el = $state<HTMLDivElement>();
   let paths = $state<ArcPath[]>([]);
+  let peerDots = $state<Dot[]>([]);
+  let ownDot = $state<Dot | null>(null);
   // globe.gl's instance is untyped here to avoid pulling three's types into this module's surface.
   let globe: any = null;
   let arcs: Arc[] = [];
@@ -128,6 +191,7 @@
   let io: IntersectionObserver | undefined;
   let ro: ResizeObserver | undefined;
   let followRaf = 0;
+  let spinResume: ReturnType<typeof setTimeout> | undefined;
   let themeObserver: MutationObserver | undefined;
   /** Whether the TopoJSON continents have been handed to globe.gl yet. See `paintSphere`. */
   let continentsLoaded = false;
@@ -137,8 +201,22 @@
   // case (screen scrolled away, or app backgrounded).
   function syncAnimation() {
     if (!globe) return;
-    if (onScreen && tabVisible) globe.resumeAnimation();
-    else globe.pauseAnimation();
+    if (onScreen && tabVisible) {
+      globe.resumeAnimation();
+      startProjection();
+    } else {
+      globe.pauseAnimation();
+      stopProjection();
+    }
+  }
+
+  /** Turn the continuous spin on or off. Never on under `prefers-reduced-motion`. */
+  function setSpin(on: boolean) {
+    if (!globe) return;
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+    globe.controls().autoRotate = on && !reduced;
   }
 
   function onVisibility() {
@@ -150,6 +228,16 @@
     if (!globe || !el) return;
     globe.width(el.clientWidth).height(el.clientHeight);
     layoutArcs();
+  }
+
+  /** A lat/lng as a unit vector on the sphere. */
+  function unitVec(lat: number, lng: number): [number, number, number] {
+    const p = Math.PI / 180;
+    return [
+      Math.cos(lat * p) * Math.cos(lng * p),
+      Math.cos(lat * p) * Math.sin(lng * p),
+      Math.sin(lat * p),
+    ];
   }
 
   /** Great-circle separation between two lat/lng pairs, in degrees. */
@@ -164,13 +252,17 @@
   /**
    * Project every arc to a screen-space path. See the header for why this is 2D.
    *
-   * Cheap enough to run per frame while the camera moves (a handful of arcs, no allocation beyond
-   * the path strings), but it is NOT on a render loop: it runs when the arc set changes, when the
-   * camera moves, and for the duration of a camera transition. At rest nothing recomputes.
+   * This DOES run every frame — see `startProjection`. It has to: the globe spins continuously, and
+   * an overlay that is not part of the scene has nothing else to move it. The cost is a handful of
+   * arcs and the path strings for them, alongside a renderer that is already drawing every frame for
+   * the spin. It stops with the renderer when the screen is off-tab or scrolled away, so an unwatched
+   * globe still costs nothing.
    */
   function layoutArcs() {
     if (!globe || !el || arcs.length === 0) {
       paths = [];
+      peerDots = [];
+      ownDot = null;
       return;
     }
     const pov = globe.pointOfView();
@@ -184,101 +276,122 @@
     const R = Math.hypot(limb.x - c.x, limb.y - c.y);
     if (!(R > 0)) {
       paths = [];
+      peerDots = [];
+      ownDot = null;
       return;
     }
+    // Us: one end of every arc, so projected once. The self lookup is a network round trip that can
+    // be slow or fail, and when it has not landed there is nothing to connect a peer TO.
+    // Captured as a local so the loop below narrows: `far` being non-null implies we have an origin,
+    // but that is not something the compiler can infer from a derived value.
+    const own = origin;
+    const ownVisible = own != null && angleDeg(pov.lat, pov.lng, own.lat, own.lon) < FOOT_MAX_DEG;
+    const far = own ? globe.getScreenCoords(own.lat, own.lon) : null;
+    ownDot = ownVisible && far ? { id: "own", x: far.x, y: far.y } : null;
+
+    // Peer dots are computed INDEPENDENTLY of the arcs, so a failed or pending self lookup leaves the
+    // people being helped on the map instead of a bare sphere. Losing the arcs to a geo failure is
+    // bad enough; losing the peers as well would make the screen look like nothing was happening.
+    const dots: Dot[] = [];
     const out: ArcPath[] = [];
     for (const a of arcs) {
-      // Round the back, or so close to the limb that the arch would project as a flat spike. BOTH
-      // feet have to pass: the far foot is `ARCH_SPAN_DEG` further round, so testing only the peer
-      // let an arch whose far foot had already crossed the limb draw as a hairpin off the edge.
-      if (
-        angleDeg(pov.lat, pov.lng, a.lat, a.lng) >= FOOT_MAX_DEG ||
-        angleDeg(pov.lat, pov.lng, a.lat, a.endLng) >= FOOT_MAX_DEG
-      )
-        continue;
+      // Round the back, or so close to the limb that a foot projects onto the disc while facing away.
+      const peerVisible = angleDeg(pov.lat, pov.lng, a.lat, a.lng) < FOOT_MAX_DEG;
       const s = globe.getScreenCoords(a.lat, a.lng);
-      const far = globe.getScreenCoords(a.lat, a.endLng);
-      // Raise the arch PERPENDICULAR TO ITS OWN CHORD, not radially outward from the disc's centre.
+      if (peerVisible) dots.push({ id: a.id, x: s.x, y: s.y });
+      // Both feet have to be on the face — an arc with one foot past the limb draws as a hairpin off
+      // the edge — so no origin, or an origin round the back, means dots without arcs. The arc is
+      // still emitted, just not drawable: see `ArcPath.visible`.
+      if (!far || !own) continue;
+      const drawable = peerVisible && ownVisible;
+      // SAMPLED ALONG THE GREAT CIRCLE, not fitted with one Bézier.
       //
-      // Radially outward is what the reference's formula computes, and it is wrong at our globe's
-      // proportions: both feet of a connection usually land near the middle of the visible disc,
-      // where "outward" is a near-degenerate direction, so the curve leaves one foot, swings past the
-      // limb and returns — a lasso across the globe's face rather than an arch over it. Perpendicular
-      // to the chord is well-conditioned for every pair and gives the recording's shape: a tall
-      // narrow arch standing on two feet.
-      const chordX = far.x - s.x;
-      const chordY = far.y - s.y;
-      const chord = Math.hypot(chordX, chordY) || 1;
-      // Of the two perpendiculars, take the one pointing UP the screen. An arch that hangs below its
-      // feet reads as a swag, and the design has no downward arcs.
-      let nx = -chordY / chord;
-      let ny = chordX / chord;
-      if (ny > 0) {
-        nx = -nx;
-        ny = -ny;
+      // A single quadratic cannot represent a wide arc at all: it only lies on a circular arc when
+      // its control point is at `1 / cos(omega / 2)` radii, and that diverges as the feet separate —
+      // at 150 degrees it is already 3.9 radii, which is why a Denver-to-Asia arc towered over the
+      // globe however the lift was tuned. Walking the great circle instead is exact at every
+      // separation and needs no control point, no perpendicular and no clamp.
+      //
+      // The altitude follows a `sin(pi * t)` bell: on the ground at both feet, `ARC_RIDE` radii up at
+      // the middle. So the crest can never exceed that, and it foreshortens correctly — an arc whose
+      // midpoint faces the camera reads as flat against the surface, one whose midpoint is out near
+      // the limb lifts clear of it, which is exactly what a route on a globe does.
+      const av = unitVec(a.lat, a.lng);
+      const bv = unitVec(own.lat, own.lon);
+      const dot = Math.max(-1, Math.min(1, av[0] * bv[0] + av[1] * bv[1] + av[2] * bv[2]));
+      const omega = Math.acos(dot);
+      const sinOmega = Math.sin(omega);
+      const runs: string[][] = [];
+      let run: string[] = [];
+      for (let i = 0; i <= ARC_STEPS; i++) {
+        const t = i / ARC_STEPS;
+        let vx: number;
+        let vy: number;
+        let vz: number;
+        if (sinOmega < 1e-6) {
+          // Coincident feet: nothing to walk along.
+          vx = av[0];
+          vy = av[1];
+          vz = av[2];
+        } else {
+          const s0 = Math.sin((1 - t) * omega) / sinOmega;
+          const s1 = Math.sin(t * omega) / sinOmega;
+          vx = av[0] * s0 + bv[0] * s1;
+          vy = av[1] * s0 + bv[1] * s1;
+          vz = av[2] * s0 + bv[2] * s1;
+        }
+        const n = Math.hypot(vx, vy, vz) || 1;
+        const lat = (Math.asin(Math.max(-1, Math.min(1, vz / n))) * 180) / Math.PI;
+        const lng = (Math.atan2(vy, vx) * 180) / Math.PI;
+        // Break the line where the route passes behind the sphere, so it is occluded rather than
+        // drawn straight across the face. This is the same reason the reference clips its paths at
+        // the sphere intersection.
+        if (angleDeg(pov.lat, pov.lng, lat, lng) > HORIZON_DEG) {
+          if (run.length > 1) runs.push(run);
+          run = [];
+          continue;
+        }
+        const pt = globe.getScreenCoords(lat, lng, ARC_RIDE * Math.sin(Math.PI * t));
+        run.push(`${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`);
       }
-      // A chord that is VERTICAL on screen has no upward perpendicular — `ny` collapses to 0 and the
-      // clamp below would divide by it, sending the control point to infinity. Reachable for a peer
-      // close to a pole, where both feet project to nearly the same x. There is no arch to draw
-      // across a vertical chord, so skip it.
-      if (!(Math.abs(ny) > 1e-3)) continue;
-      const midX = (s.x + far.x) / 2;
-      const midY = (s.y + far.y) / 2;
-      // Height off the globe's RADIUS, not off the chord. The recording's arches crest about 1.1
-      // radii above the disc's centre whether their feet are close together or far apart, so a
-      // chord-proportional rise gets one case right and the other badly wrong: at our HOME-to-peer
-      // separations it produced an arch three times too tall.
-      let rise = Math.max(ARCH_RISE * R, ARCH_MIN * chord);
-      // Then clamp so the crest lands just inside the top of the frame. A Bézier reaches halfway to
-      // its control point, so the crest sits at `midY + rise * ny / 2`. Without this an arch whose
-      // feet are already high on the disc crests off the top edge — the clamp is what frames every
-      // arch the way the recording does, just clearing the sphere, rather than leaving it to the
-      // peer's latitude.
-      //
-      // `room` is how far the chord's midpoint sits below the margin, and it is what makes the clamp
-      // safe. `ny` is NEGATIVE (up the screen), so solving for the rise that lands the crest exactly
-      // on the margin divides by a negative: if the midpoint is already at or above the margin that
-      // yields a NEGATIVE rise, which flips the control point below the chord and draws the arch
-      // upside down. There is no upward arch to draw in that case, so the connection is skipped.
-      // `Math.min` also guarantees the clamp only ever REDUCES a rise, never inflates a small one.
-      const room = midY - CREST_MARGIN;
-      if (room <= 0) continue;
-      rise = Math.min(rise, (2 * room) / -ny);
-      const cx = midX + nx * rise;
-      const cy = midY + ny * rise;
+      if (run.length > 1) runs.push(run);
+      const d = runs.map((r) => `M ${r.join(" L ")}`).join(" ");
+      if (!d) continue;
       out.push({
         id: a.id,
         color: a.color,
-        d: `M ${s.x.toFixed(1)} ${s.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${far.x.toFixed(1)} ${far.y.toFixed(1)}`,
-        x1: s.x,
-        y1: s.y,
-        x2: far.x,
-        y2: far.y,
+        d,
+        visible: drawable,
       });
     }
     paths = out;
+    peerDots = dots;
   }
 
   /**
-   * Re-project the arcs for `ms` while a camera transition plays out.
+   * Re-project the arcs every frame for as long as the globe is on screen.
    *
-   * `onZoom` covers user drags, but `pointOfView`'s own tween moves the camera without firing it, so
-   * the arcs would sit frozen at their pre-transition positions until the next unrelated event. A
-   * bounded rAF loop is the cheapest way to follow it: it stops on its own, so there is still no
-   * standing per-frame cost.
+   * The arcs are an SVG overlay, not part of the scene, so nothing moves them when the camera does —
+   * and now that the globe spins continuously they would visibly detach from the sphere and float.
+   * A standing loop is therefore required rather than the bounded one that used to follow a
+   * transition, and it also subsumes the `onZoom` hook and drag handling: one place recomputes.
+   *
+   * Gated on exactly the same visibility signal as the WebGL renderer, so when the screen is off-tab
+   * or scrolled away this stops with it. While it runs the renderer is running anyway for the spin,
+   * and re-projecting a handful of arcs beside that is marginal.
    */
-  function followCamera(ms: number) {
-    cancelAnimationFrame(followRaf);
-    if (ms <= 0) {
-      layoutArcs();
-      return;
-    }
-    const until = performance.now() + ms;
+  function startProjection() {
+    if (followRaf) return;
     const step = () => {
       layoutArcs();
-      if (performance.now() < until) followRaf = requestAnimationFrame(step);
+      followRaf = requestAnimationFrame(step);
     };
     followRaf = requestAnimationFrame(step);
+  }
+
+  function stopProjection() {
+    if (followRaf) cancelAnimationFrame(followRaf);
+    followRaf = 0;
   }
 
   /** Recompute the arc set from the current peers, capped for both data and legibility. */
@@ -291,8 +404,6 @@
         id: p.sessionId,
         lat: p.geo.lat,
         lng: p.geo.lon,
-        // Alternate the lean so two peers near each other do not draw the same arch twice.
-        endLng: p.geo.lon + (next.length % 2 === 0 ? ARCH_SPAN_DEG : -ARCH_SPAN_DEG),
         color: ARC_COLORS[next.length % ARC_COLORS.length],
       });
     }
@@ -302,37 +413,92 @@
   /** Signature of the arc set the camera is currently framed for. */
   let parkedOn: string | null = null;
   /**
-   * Frame HOME together with the peers, by aiming at the midpoint of the two.
+   * Frame the peers together with US, so both feet of every arc are on the visible face.
    *
-   * Aiming at the peers alone pushes HOME — and therefore the end of every arc — out to the limb.
-   * Longitude is averaged on the unit circle so a cluster straddling the ±180 meridian does not
-   * average to the middle of the Atlantic.
+   * See the body for how the aim is averaged and why our end is weighted; `HOME` is only the idle aim
+   * for a globe with nothing on it.
    */
   function parkCamera(animateMs: number) {
     if (!globe || arcs.length === 0) return;
-    const sig = arcs.map((a) => a.id).join("|");
+    // The origin is part of the signature: it arrives AFTER the first peers (a network round trip),
+    // and the camera has to re-frame when it does or our end stays off the visible face.
+    const sig = [...arcs.map((a) => a.id), origin ? `${origin.lat},${origin.lon}` : "-"].join("|");
     if (sig === parkedOn) return;
     parkedOn = sig;
-    let x = 0;
-    let y = 0;
-    let lat = 0;
+    // Frame us together with the peers by aiming at a point BETWEEN the two, walking along the great
+    // circle from our end towards the peers' centroid.
+    //
+    // The obvious rule — average every endpoint as unit vectors, weighting ours — is what was here,
+    // and it fails in the common case. Points spread across half the globe are all in the northern
+    // hemisphere, so their z components add while x and y cancel: the mean drifts towards the POLE,
+    // and clamping the latitude back down then leaves a longitude belonging to none of them. Aiming
+    // there put our end round the back and every arc was culled, which is a blank globe while the user
+    // is actively helping people.
+    //
+    // Walking the great circle cannot do that: the aim lies between two real points by construction.
+    // And the distance walked is chosen so OUR end is always on the visible face — it is one foot of
+    // every arc, so if it is hidden nothing draws at all, whereas a peer being hidden costs one arc.
+    const p = Math.PI / 180;
+    const unit = (lat: number, lng: number): [number, number, number] => [
+      Math.cos(lat * p) * Math.cos(lng * p),
+      Math.cos(lat * p) * Math.sin(lng * p),
+      Math.sin(lat * p),
+    ];
+    // The peers' centroid. They are usually clustered, so a plain vector mean is well behaved here in
+    // a way it is not across a whole hemisphere.
+    let px = 0;
+    let py = 0;
+    let pz = 0;
     for (const a of arcs) {
-      // Aim at the middle of each arch, so both of its feet sit on the visible face.
-      const mLng = (a.lng + a.endLng) / 2;
-      lat += a.lat;
-      x += Math.cos((mLng * Math.PI) / 180);
-      y += Math.sin((mLng * Math.PI) / 180);
+      const [x, y, z] = unit(a.lat, a.lng);
+      px += x;
+      py += y;
+      pz += z;
     }
+    const pn = Math.hypot(px, py, pz);
+    if (pn < 1e-9) return;
+    const peersMid: [number, number, number] = [px / pn, py / pn, pz / pn];
+    const us = origin ? unit(origin.lat, origin.lon) : peersMid;
+
+    const dot = Math.max(-1, Math.min(1, us[0] * peersMid[0] + us[1] * peersMid[1] + us[2] * peersMid[2]));
+    const omega = Math.acos(dot);
+    // Halfway when both ends fit inside the cull from the midpoint; otherwise only as far as keeps our
+    // end inside it, and the far peers cull instead.
+    const reach = (FOOT_MAX_DEG - CULL_MARGIN_DEG) * p;
+    const t = omega < 1e-6 ? 0 : Math.min(0.5, reach / omega);
+    let aim: [number, number, number];
+    if (omega < 1e-6) {
+      aim = us;
+    } else {
+      // Slerp. Antipodal ends have no unique great circle, but `t` is capped well below 0.5 by then,
+      // so sin(omega) is never the degenerate case that would divide by zero.
+      const s0 = Math.sin((1 - t) * omega) / Math.sin(omega);
+      const s1 = Math.sin(t * omega) / Math.sin(omega);
+      aim = [
+        us[0] * s0 + peersMid[0] * s1,
+        us[1] * s0 + peersMid[1] * s1,
+        us[2] * s0 + peersMid[2] * s1,
+      ];
+    }
+    const an = Math.hypot(aim[0], aim[1], aim[2]) || 1;
+    const aimLat = Math.asin(Math.max(-1, Math.min(1, aim[2] / an))) / p;
+    const aimLng = (Math.atan2(aim[1], aim[0]) * 180) / Math.PI;
     globe.pointOfView(
       {
-        // Clamped so a peer set centred near a pole does not tip the camera into a polar projection.
-        lat: Math.max(-55, Math.min(55, lat / arcs.length)),
-        lng: (Math.atan2(y, x) * 180) / Math.PI,
+        // No clamp: the aim is a point on the great circle between two real endpoints, so it cannot
+        // wander to a pole the way an unconstrained mean could.
+        lat: aimLat,
+        lng: aimLng,
         altitude: GLOBE_ALTITUDE,
       },
       animateMs,
     );
-    followCamera(animateMs + 120);
+    // Suspend the spin for the duration of the turn. `pointOfView` animates the camera directly while
+    // autoRotate advances the azimuth every frame, so leaving both on has them fighting over the same
+    // camera and the turn arrives somewhere neither intended.
+    setSpin(false);
+    clearTimeout(spinResume);
+    spinResume = setTimeout(() => setSpin(true), animateMs + 120);
   }
 
 
@@ -404,20 +570,21 @@
         // The reference's atmosphere colour, not a sample of the halo's faded tail: globe.gl applies
         // its own outward falloff, so handing it the source cyan reproduces the gradient instead of
         // flattening it to the pale edge tone.
-        .atmosphereColor("#00bdd6")
-        // Tight: a rim glow hugging the sphere, not a wide cyan disc around it. The mount draws its own
-        // wider halo behind the canvas, so this only has to cover the last few pixels.
-        .atmosphereAltitude(0.09)
+        // A SOFT WIDE BLOOM, not a rim. The reference is explicit about this — `atmosphereOpacity:
+        // 0.18, atmosphereBlur: 22`, commented "Soft bloom, not a rim: a small blur reads as a hard
+        // teal ring" — and this had been narrowed to a rim, which is the thing that comment warns
+        // against. globe.gl gives no opacity control, so the faintness has to come from the colour:
+        // a pale cyan spread wide, rather than the saturated brand cyan held tight.
+        .atmosphereColor("#8fd9e6")
+        .atmosphereAltitude(0.22)
 ;
       globe.globeImageUrl(null as unknown as string);
       paintSphere();
 
-      // Static at rest: no auto-rotation, and zoom disabled. Users may still drag to rotate.
-      globe.controls().autoRotate = false;
+      // A slow continuous spin, as the reference has. Zoom stays disabled; users may still drag.
+      globe.controls().autoRotateSpeed = ROTATE_SPEED;
       globe.controls().enableZoom = false;
-      // Re-project the arcs whenever the user moves the camera. Programmatic transitions do not come
-      // through here — see `followCamera`.
-      globe.onZoom(() => layoutArcs());
+      setSpin(true);
       globe.pointOfView({ lat: HOME.lat, lng: HOME.lng, altitude: GLOBE_ALTITUDE });
 
       rendered = true;
@@ -500,7 +667,8 @@
   onDestroy(() => {
     document.removeEventListener("visibilitychange", onVisibility);
     themeObserver?.disconnect();
-    cancelAnimationFrame(followRaf);
+    clearTimeout(spinResume);
+    stopProjection();
     io?.disconnect();
     ro?.disconnect();
     globe?.pauseAnimation?.();
@@ -519,15 +687,37 @@
        the globe underneath. -->
   <svg class="arcs" aria-hidden="true">
     {#each paths as p (p.id)}
-      <path d={p.d} stroke={p.color} stroke-width={ARC_WIDTH} fill="none" stroke-linecap="round" />
-      <!-- The feet, drawn here rather than through globe.gl's points layer. That layer renders a
-           point as a 3D cylinder, and at the size the design wants (a ~10px dot) its facets show as
-           a green blob with jagged edges. A circle in the overlay is exactly round, lands exactly on
-           the foot, and needs no depth handling — the arch is culled well before its feet reach the
-           limb, so there is nothing for the sphere to occlude. -->
-      <circle cx={p.x1} cy={p.y1} r={DOT_R} fill={PEER_DOT} />
-      <circle cx={p.x2} cy={p.y2} r={DOT_R} fill={PEER_DOT} />
+      <!-- `pathLength="1"` normalises the dash maths, so one dash of length 1 covers the whole arc
+           however long it is on screen and the growth is a straight 1 -> 0 on the offset. That also
+           makes the animation independent of `d`: the camera can move mid-growth, changing the path
+           entirely, and the same fraction stays drawn. -->
+      <path
+        class="arc"
+        class:hidden={!p.visible}
+        d={p.d}
+        stroke={p.color}
+        stroke-width={ARC_WIDTH}
+        fill="none"
+        stroke-linecap="round"
+        pathLength="1"
+        style="--grow: {GROW_MS}ms; --fade: {FADE_MS}ms"
+      />
     {/each}
+    <!-- The dots are drawn here rather than through globe.gl's points layer. That layer renders a
+         point as a 3D cylinder, and at the size the design wants (a ~10px dot) its facets show as a
+         green blob with jagged edges. A circle in the overlay is exactly round, lands exactly on the
+         foot, and needs no depth handling — a foot is culled well before it reaches the limb, so
+         there is nothing for the sphere to occlude. -->
+    {#each peerDots as d (d.id)}
+      <circle cx={d.x} cy={d.y} r={DOT_R} fill={PEER_DOT} />
+    {/each}
+    {#if ownDot}
+      <!-- Us, drawn last so it sits on top where several arcs converge, and a size up in the brand
+           cyan rather than the peers' green so the two ends of a connection are never confused. The
+           reference draws its own end almost transparent; ours is solid, because "where am I on this
+           map" is the question this screen kept failing to answer. -->
+      <circle cx={ownDot.x} cy={ownDot.y} r={DOT_R + 1} fill={OWN_DOT} />
+    {/if}
   </svg>
 </div>
 
@@ -552,6 +742,44 @@
   .host {
     position: absolute;
     inset: 0;
+  }
+  /* Arriving arcs grow from the peer towards us while fading in — see `GROW_MS`. The element is
+     keyed by arc id and survives both a camera move and a spell of being culled, so the growth runs
+     once, on time, from when the connection first appeared. */
+  .arc {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation:
+      grow var(--grow) linear forwards,
+      appear var(--fade) linear forwards;
+  }
+  /* Culled, not gone: hidden so the element (and its running animation) survive. */
+  .arc.hidden {
+    visibility: hidden;
+  }
+  @keyframes grow {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+  @keyframes appear {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  /* Motion is the point of this animation, so there is nothing to preserve at reduced motion beyond
+     the arc itself: draw it complete. */
+  @media (prefers-reduced-motion: reduce) {
+    .arc {
+      animation: none;
+      stroke-dashoffset: 0;
+    }
   }
   .arcs {
     position: absolute;

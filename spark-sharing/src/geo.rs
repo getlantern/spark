@@ -44,8 +44,11 @@ pub enum GeoError {
     Parse(String),
 }
 
+/// `None` addresses the caller's own IP — see [`GeoResolver::resolve_own`].
 type Fetcher = Box<
-    dyn Fn(IpAddr) -> Pin<Box<dyn Future<Output = Result<String, GeoError>> + Send>> + Send + Sync,
+    dyn Fn(Option<IpAddr>) -> Pin<Box<dyn Future<Output = Result<String, GeoError>> + Send>>
+        + Send
+        + Sync,
 >;
 
 /// Resolves peer IPs to approximate locations, memoizing successes AND failures.
@@ -56,6 +59,8 @@ type Fetcher = Box<
 /// costs a full DNS+TCP+TLS round trip on *every* peer join rather than one per address.
 pub struct GeoResolver {
     cache: Mutex<HashMap<IpAddr, Option<Geo>>>,
+    /// Our OWN location, cached on success only. See [`GeoResolver::resolve_own`].
+    own: Mutex<Option<Geo>>,
     fetch: Fetcher,
 }
 
@@ -68,13 +73,14 @@ impl GeoResolver {
     /// Creates a resolver backed by a caller-supplied fetcher, for tests.
     pub fn with_fetcher<F>(fetch: F) -> Self
     where
-        F: Fn(IpAddr) -> Pin<Box<dyn Future<Output = Result<String, GeoError>> + Send>>
+        F: Fn(Option<IpAddr>) -> Pin<Box<dyn Future<Output = Result<String, GeoError>> + Send>>
             + Send
             + Sync
             + 'static,
     {
         Self {
             cache: Mutex::new(HashMap::new()),
+            own: Mutex::new(None),
             fetch: Box::new(fetch),
         }
     }
@@ -104,7 +110,7 @@ impl GeoResolver {
             }
         }
 
-        let geo = match tokio::time::timeout(GEO_TIMEOUT, (self.fetch)(ip)).await {
+        let geo = match tokio::time::timeout(GEO_TIMEOUT, (self.fetch)(Some(ip))).await {
             Ok(Ok(body)) => parse_geo(&body).ok(),
             // Fetch error, or the timeout elapsed: remember the failure either way.
             Ok(Err(_)) | Err(_) => None,
@@ -120,6 +126,35 @@ impl GeoResolver {
             cache.clear();
         }
         cache.insert(ip, geo.clone());
+        geo
+    }
+
+    /// Resolves OUR OWN location — where this volunteer is on the map.
+    ///
+    /// The geo service geolocates the caller when no address is given (`/lookup` rather than
+    /// `/lookup/<ip>`), so this needs no knowledge of our external address and no STUN round trip.
+    ///
+    /// Unlike [`resolve`], this caches ONLY success. A remembered failure is right for peer lookups —
+    /// it stops a dead geo host costing a round trip per peer join — but there is exactly one of these
+    /// per process, and a transient failure at startup would otherwise leave the volunteer missing
+    /// from their own map for the rest of the session.
+    ///
+    /// Note the corollary of asking the service where *we* are: the answer is wherever our traffic
+    /// appears to come from. With a tunnel up, that is the exit, not the desk.
+    pub async fn resolve_own(&self) -> Option<Geo> {
+        {
+            let cached = self.own.lock().unwrap_or_else(|poison| poison.into_inner());
+            if let Some(geo) = cached.as_ref() {
+                return Some(geo.clone());
+            }
+        }
+        let geo = match tokio::time::timeout(GEO_TIMEOUT, (self.fetch)(None)).await {
+            Ok(Ok(body)) => parse_geo(&body).ok(),
+            Ok(Err(_)) | Err(_) => None,
+        };
+        if let Some(geo) = geo.as_ref() {
+            *self.own.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(geo.clone());
+        }
         geo
     }
 }
@@ -234,7 +269,7 @@ fn geo_connector() -> Result<TlsConnector, GeoError> {
 /// This mirrors the raw rustls + tokio HTTP/1.1 path in [`crate::freddie`] rather than
 /// pulling in a heavyweight HTTP client. It is deliberately best-effort: any failure
 /// surfaces as [`GeoError::Fetch`], which [`GeoResolver::resolve`] maps to `None`.
-async fn get_geo_json(ip: IpAddr) -> Result<String, GeoError> {
+async fn get_geo_json(ip: Option<IpAddr>) -> Result<String, GeoError> {
     let connector = geo_connector()?;
     let server_name =
         ServerName::try_from(GEO_HOST).map_err(|error| GeoError::Fetch(error.to_string()))?;
@@ -247,8 +282,13 @@ async fn get_geo_json(ip: IpAddr) -> Result<String, GeoError> {
         .await
         .map_err(|error| GeoError::Fetch(error.to_string()))?;
 
+    // No address geolocates the CALLER, which is how we place ourselves on the map.
+    let path = match ip {
+        Some(ip) => format!("/lookup/{ip}"),
+        None => "/lookup".to_string(),
+    };
     let request = format!(
-        "GET /lookup/{ip} HTTP/1.1\r\nHost: {GEO_HOST}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {GEO_HOST}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
@@ -355,6 +395,55 @@ mod tests {
     fn parse_geo_rejects_the_unknown_address_record() {
         // 200-with-empty-record must be an error (→ `None`), not a phantom pin at (0,0).
         assert!(parse_geo(UNKNOWN_GEO_BODY).is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_own_asks_the_service_without_an_address() {
+        // The whole point of the self lookup: no address means "where is the caller", so we never
+        // need to discover our own external IP to put ourselves on the map.
+        let saw = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let seen = saw.clone();
+        let resolver = GeoResolver::with_fetcher(move |ip| {
+            seen.lock().expect("test lock").push(ip);
+            Box::pin(async { Ok::<_, GeoError>(REAL_GEO_BODY.to_string()) })
+        });
+        let geo = resolver.resolve_own().await.expect("parses the real body");
+        assert_eq!(geo.country_code, "IR");
+        assert_eq!(
+            *saw.lock().expect("test lock"),
+            vec![None],
+            "the self lookup must pass no address"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_own_caches_success_but_retries_failure() {
+        // Deliberately unlike `resolve`, which remembers failures. There is one of these per
+        // process, so a transient failure at startup must not leave the volunteer off their own map
+        // for the rest of the session.
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let resolver = GeoResolver::with_fetcher(move |_ip| {
+            // Fail the first two, then succeed.
+            let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if n < 2 {
+                    Err(GeoError::Fetch("boom".into()))
+                } else {
+                    Ok(REAL_GEO_BODY.to_string())
+                }
+            })
+        });
+        assert_eq!(resolver.resolve_own().await, None);
+        assert_eq!(resolver.resolve_own().await, None);
+        assert!(resolver.resolve_own().await.is_some());
+        // And once it has an answer it stops asking.
+        assert!(resolver.resolve_own().await.is_some());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "two retries then a success, and no lookup after the success"
+        );
     }
 
     #[tokio::test]

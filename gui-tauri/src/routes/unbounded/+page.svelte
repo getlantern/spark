@@ -20,7 +20,7 @@
 
   const backend: SparkBackend = isTauri() ? new TauriBackend() : new MockBackend();
 
-  let status = $state<UnboundedStatus>({ enabled: false, helpingNow: 0, totalHelped: 0, peers: [] });
+  let status = $state<UnboundedStatus>({ enabled: false, helpingNow: 0, totalHelped: 0, peers: [], origin: null });
   let autoEnable = $state(false);
   // Consent state. `settingsLoaded` is a safety concern, not just UX: whether the disclosure has been
   // acknowledged is only known after an async round trip, and until it lands the user must not be able
@@ -182,7 +182,7 @@
     <Note text={$_("unbounded_help_banner")} />
 
     <div class="globe-mount">
-      <Globe {peers} />
+      <Globe {peers} origin={status.origin} />
       <HeartsBurst trigger={burstTrigger} countryCode={burstCountry} waiting={status.enabled && peers.length === 0} />
     </div>
 
